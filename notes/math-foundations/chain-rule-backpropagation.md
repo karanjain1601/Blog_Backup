@@ -1,51 +1,223 @@
----
+﻿---
 title: "Chain Rule and Backpropagation"
 slug: "chain-rule-backpropagation"
-description: "Rigorous derivation of backpropagation as the multivariate chain rule on computation graphs, with gradient formulas for linear layers, ReLU, softmax+CE, and analysis of vanishing/exploding gradients."
+description: "Derives backpropagation from the multivariate chain rule over computation graphs, with manual step-by-step backprop, custom PyTorch autograd, gradient flow monitoring, and numerical gradient checking."
 tags: ["calculus", "optimization", "math", "foundations"]
 topic: "math-foundations"
 status: "published"
 updated: "2026-07-10"
-blocks_json: "W3sidHlwZSI6InRleHQiLCJjb250ZW50IjoiQmFja3Byb3BhZ2F0aW9uIGlzIHRoZSBjaGFpbiBydWxlIGFwcGxpZWQgc3lzdGVtYXRpY2FsbHkgdG8gYSBjb21wdXRhdGlvbiBncmFwaC4gRXZlcnkgZ3JhZGllbnQgY29tcHV0ZWQgZHVyaW5nIG5ldXJhbCBuZXR3b3JrIHRyYWluaW5nIGlzIGFuIGluc3RhbmNlIG9mIHRoZSBjaGFpbiBydWxlIHByb3BhZ2F0ZWQgYmFja3dhcmRzIHRocm91Z2ggYSBkaXJlY3RlZCBhY3ljbGljIGdyYXBoIChEQUcpIG9mIG9wZXJhdGlvbnMuIFVuZGVyc3RhbmRpbmcgdGhpcyBkZWVwbHkg4oCUIG5vdCBqdXN0IGFzIGFuIGFsZ29yaXRobSBidXQgYXMgYSBtYXRoZW1hdGljYWwgaWRlbnRpdHkg4oCUIGlzIGVzc2VudGlhbCBmb3IgZGVidWdnaW5nIGdyYWRpZW50cywgZGVzaWduaW5nIGN1c3RvbSBsYXllcnMsIGFuZCB1bmRlcnN0YW5kaW5nIHZhbmlzaGluZy9leHBsb2RpbmcgZ3JhZGllbnQgcGF0aG9sb2dpZXMuIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiQ2hhaW4gUnVsZTogU2luZ2xlIFZhcmlhYmxlIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJJZiB5ID0gZyh4KSBhbmQgeiA9IGYoeSkgPSBmKGcoeCkpLCB0aGVuIGR6L2R4ID0gKGR6L2R5KShkeS9keCkgPSBmJyhnKHgpKcK3ZycoeCkuIEV4YW1wbGU6IHogPSBzaW4oeMKyKS4gTGV0IHkgPSB4wrIsIHogPSBzaW4oeSkuIGR6L2R4ID0gY29zKHkpwrcyeCA9IDJ4wrdjb3MoeMKyKS4gVGhlIGNoYWluIHJ1bGUgdGVsZXNjb3BlczogZm9yIGEgY29tcG9zaXRpb24gZuKCgSDiiJggZuKCgiDiiJgg4oCmIOKImCBm4oKZLCB0aGUgZGVyaXZhdGl2ZSBpcyB0aGUgcHJvZHVjdCBvZiBpbmRpdmlkdWFsIGRlcml2YXRpdmVzIGV2YWx1YXRlZCBhdCB0aGUgYXBwcm9wcmlhdGUgaW50ZXJtZWRpYXRlIHZhbHVlcy4gSW4gYSBkZWVwIG5ldHdvcmsgd2l0aCBMIGxheWVycywgdGhlIGdyYWRpZW50IG9mIHRoZSBsb3NzIHdpdGggcmVzcGVjdCB0byB0aGUgZmlyc3QgbGF5ZXIgd2VpZ2h0cyBpbnZvbHZlcyBhIHByb2R1Y3Qgb2YgTCBKYWNvYmlhbnMg4oCUIHRoZSBzb3VyY2Ugb2YgdmFuaXNoaW5nIGFuZCBleHBsb2RpbmcgZ3JhZGllbnRzLiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6Ik11bHRpdmFyaWF0ZSBDaGFpbiBSdWxlOiBTdW0gT3ZlciBQYXRocyJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiRm9yIGYoZ+KCgSh4KSwgZ+KCgih4KSwg4oCmLCBn4oKWKHgpKSB3aGVyZSBn4bWiOiDihJ3igb8g4oaSIOKEnTog4oiCZi/iiIJ44rG8ID0gzqPhtaIgKOKIgmYv4oiCZ+G1oiko4oiCZ+G1oi/iiIJ44rG8KS4gSW4gbWF0cml4IGZvcm0gZm9yIHZlY3Rvci12YWx1ZWQgZzogaWYgeiA9IGYoeSkgYW5kIHkgPSBnKHgpLCB0aGVuIOKIgnov4oiCeCA9ICjiiIJ6L+KIgnkpKOKIgnkv4oiCeCkgPSBKZiDCtyBKZy4gVGhlIGNoYWluIHJ1bGUgZm9yIGNvbXB1dGF0aW9uIGdyYXBocyBzYXlzOiB0aGUgdG90YWwgZGVyaXZhdGl2ZSBvZiB6IHdpdGggcmVzcGVjdCB0byB4IGlzIHRoZSBzdW0gb3ZlciBhbGwgcGF0aHMgZnJvbSB4IHRvIHogaW4gdGhlIGdyYXBoLCB3aXRoIGVhY2ggcGF0aCBjb250cmlidXRpbmcgdGhlIHByb2R1Y3Qgb2YgZWRnZSBkZXJpdmF0aXZlcy4gVGhpcyBzdW0tb3Zlci1wYXRocyBmb3JtdWxhdGlvbiBpcyBleGFjdGx5IHdoYXQgYmFja3Byb3BhZ2F0aW9uIGNvbXB1dGVzIOKAlCBpdCBhY2N1bXVsYXRlcyBjb250cmlidXRpb25zIGZyb20gYWxsIHBhdGhzIGJ5IHRyYXZlcnNpbmcgdGhlIGdyYXBoIG9uY2UgYmFja3dhcmQuIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiQ29tcHV0YXRpb24gR3JhcGhzOiBGb3JtYWxpc2luZyB0aGUgRm9yd2FyZCBQYXNzIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJBIGNvbXB1dGF0aW9uIGdyYXBoIGlzIGEgREFHIHdoZXJlOiBub2RlcyBhcmUgaW50ZXJtZWRpYXRlIHZhbHVlcyAodGVuc29ycyk7IGVkZ2VzIGFyZSBvcGVyYXRpb25zOyBpbnB1dHMgYXJlIGxlYWYgbm9kZXM7IHRoZSBsb3NzIEwgaXMgdGhlIHJvb3QuIEZvciBhIHR3by1sYXllciBuZXR3b3JrOiB4IOKGkiAoV+KCgXgrYuKCgSkg4oaSIFJlTFUg4oaSIChX4oKCaCti4oKCKSDihpIgc29mdG1heCDihpIgQ0VfbG9zcyA9IEwuIEVhY2ggaW50ZXJtZWRpYXRlIHZhbHVlIGlzIGNvbXB1dGVkIGluIHRoZSBmb3J3YXJkIHBhc3MgYW5kIGNhY2hlZCAoaW4gcHJhY3RpY2UsIG9ubHkgbmVlZGVkIHZhbHVlcyBhcmUgcmV0YWluZWQg4oCUIGdyYWRpZW50IGNoZWNrcG9pbnRpbmcgdHJhZGVzIHJlY29tcHV0YXRpb24gZm9yIG1lbW9yeSkuIER1cmluZyB0aGUgYmFja3dhcmQgcGFzcywgd2UgcHJvcGFnYXRlIGRlbHRhcyAoZXJyb3Igc2lnbmFscykgZnJvbSB0aGUgcm9vdCB0byBsZWF2ZXMgdXNpbmcgdGhlIGNoYWluIHJ1bGUgYXQgZWFjaCBub2RlLiJ9LHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiJpbXBvcnQgbnVtcHkgYXMgbnBcblxuZGVmIGZvcndhcmQoVzEsIGIxLCBXMiwgYjIsIHgsIHlfdHJ1ZSk6XG4gICAgIyBGb3J3YXJkIHBhc3Mg4oCUIGNhY2hlIGludGVybWVkaWF0ZXMgZm9yIGJhY2t3YXJkXG4gICAgejEgPSBXMSBAIHggKyBiMSAgICAgICAgICAjIHByZS1hY3RpdmF0aW9uIGxheWVyIDFcbiAgICBhMSA9IG5wLm1heGltdW0oMCwgejEpICAgICMgUmVMVVxuICAgIHoyID0gVzIgQCBhMSArIGIyICAgICAgICAgIyBsb2dpdHNcbiAgICAjIFN0YWJsZSBzb2Z0bWF4ICsgY3Jvc3MtZW50cm9weVxuICAgIHoyIC09IHoyLm1heCgpXG4gICAgcHJvYnMgPSBucC5leHAoejIpIC8gbnAuZXhwKHoyKS5zdW0oKVxuICAgIGxvc3MgPSAtbnAubG9nKHByb2JzW3lfdHJ1ZV0gKyAxZS0xNSlcbiAgICBjYWNoZSA9ICh4LCB6MSwgYTEsIHoyLCBwcm9icywgeV90cnVlKVxuICAgIHJldHVybiBsb3NzLCBjYWNoZVxuXG5kZWYgYmFja3dhcmQoVzEsIFcyLCBjYWNoZSk6XG4gICAgeCwgejEsIGExLCB6MiwgcHJvYnMsIHlfdHJ1ZSA9IGNhY2hlXG4gICAgIyBTb2Z0bWF4ICsgQ0UgY29tYmluZWQgZ3JhZGllbnQ6IGRML2R6MiA9IHByb2JzIC0gb25lX2hvdFxuICAgIGR6MiA9IHByb2JzLmNvcHkoKTsgZHoyW3lfdHJ1ZV0gLT0gMS4wXG4gICAgZFcyID0gbnAub3V0ZXIoZHoyLCBhMSkgICAjIGRML2RXMiA9IGR6MiBAIGExXlRcbiAgICBkYjIgPSBkejJcbiAgICBkYTEgPSBXMi5UIEAgZHoyICAgICAgICAgICMgZEwvZGExXG4gICAgZHoxID0gZGExICogKHoxID4gMCkgICAgICAjIFJlTFUgYmFja3dhcmRcbiAgICBkVzEgPSBucC5vdXRlcihkejEsIHgpXG4gICAgZGIxID0gZHoxXG4gICAgcmV0dXJuIGRXMSwgZGIxLCBkVzIsIGRiMiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IkRlcml2aW5nIEdyYWRpZW50cyBmb3IgQ29yZSBPcGVyYXRpb25zIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJMaW5lYXIgbGF5ZXIgeiA9IFd4ICsgYiwgbG9zcyBMLiBMZXQgzrQgPSDiiIJML+KIgnogKHVwc3RyZWFtIGdyYWRpZW50KS4gVGhlbjog4oiCTC/iiIJXID0gzrTCt3jhtYAgKG91dGVyIHByb2R1Y3QsIHNoYXBlIG1hdGNoZXMgVyk7IOKIgkwv4oiCYiA9IM60OyDiiIJML+KIgnggPSBX4bWAwrfOtC4gRm9yIGEgYmF0Y2g6IOKIgkwv4oiCVyA9ICgxL0IpIM6j4bWiIM604bWiwrd44bWi4bWAID0gKDEvQikgzrThtYBYLiBUaGVzZSBmb2xsb3cgZGlyZWN0bHkgZnJvbSB0aGUgY2hhaW4gcnVsZSBhbmQgdGhlIGlkZW50aXR5IGQoQXgpL2RBID0geOG1gCAoaW4gdGhlIHNlbnNlIHRoYXQgdmVjKGRMKSA9ICh4IOKKlyBJKcK3dmVjKM60KSkuIFRoZSBncmFkaWVudCB3aXRoIHJlc3BlY3QgdG8geCBwcm9wYWdhdGVzIHRoZSBlcnJvciBzaWduYWwgYmFja3dhcmQgdGhyb3VnaCB0aGUgbGF5ZXIg4oCUIHRoaXMgaXMgd2h5IFcgYXBwZWFycyB0cmFuc3Bvc2VkLiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IlJlTFUgR3JhZGllbnQifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IlJlTFU6IM+DKHopID0gbWF4KDAsIHopLiBGb3J3YXJkOiBhID0gz4MoeikuIEdyYWRpZW50OiDiiIJhL+KIgnogPSAxIGlmIHogPiAwLCBlbHNlIDAuIEJhY2t3YXJkOiDiiIJML+KIgnogPSDiiIJML+KIgmEgwrcgKHogPiAwKS4gSW4gY29kZTogZHogPSBkYSAqICh6ID4gMCkuIFJlTFUgY3JlYXRlcyBhIGJpbmFyeSBtYXNrIHRoYXQgZWl0aGVyIHBhc3NlcyB0aGUgZ3JhZGllbnQgdGhyb3VnaCB1bmNoYW5nZWQgb3Iga2lsbHMgaXQuIE5ldXJvbnMgd2l0aCB6IOKJpCAwIGNvbnRyaWJ1dGUgemVybyBncmFkaWVudCDigJQgdGhlIGR5aW5nIFJlTFUgcHJvYmxlbSBvY2N1cnMgd2hlbiBtb3N0IG5ldXJvbnMgYXJlIHBlcnBldHVhbGx5IGluIHRoZSB6ZXJvIHJlZ2lvbi4gTGVha3kgUmVMVSwgR0VMVSwgYW5kIFN3aXNoICh4wrfPgyjOsngpKSB3ZXJlIGludHJvZHVjZWQgdG8gYWRkcmVzcyB0aGlzOyBHRUxVJ3Mgc21vb3RoIGdyYWRpZW50IGhlbHBzIHN0YWJpbGlzZSB0cmFpbmluZyBvZiB0cmFuc2Zvcm1lcnMuIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiU29mdG1heCArIENyb3NzLUVudHJvcHk6IE51bWVyaWNhbCBTdGFiaWxpdHkgYW5kIENsZWFuIEdyYWRpZW50In0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJTb2Z0bWF4OiBwX2sgPSBleHAoel9rKSAvIM6j4rG8IGV4cCh6X2opLiBDRSBsb3NzOiBMID0g4oiSbG9nIHBfeSAod2hlcmUgeSBpcyB0aGUgdHJ1ZSBjbGFzcykuIElmIHdlIGNvbXB1dGUgdGhlc2Ugc2VwYXJhdGVseSwgd2UgZW5jb3VudGVyIG51bWVyaWNhbCBpc3N1ZXM6IGV4cCh6X2spIG92ZXJmbG93cyBmb3IgbGFyZ2Ugel9rLiBUaGUgbG9nLXN1bS1leHAgdHJpY2sgYXZvaWRzIHRoaXM6IGxvZyDOoyBleHAoeuKxvCkgPSBjICsgbG9nIM6jIGV4cCh64rG84oiSYykgd2hlcmUgYyA9IG1heCh6KS4gQ29tYmluZWQgZ3JhZGllbnQ6IOKIgkwv4oiCeuKCliA9IHDigpYg4oiSIPCdn5lbaz15XS4gRGVyaXZhdGlvbjog4oiCTC/iiIJ64oKWID0g4oiS4oiCL+KIgnrigpYgbG9nKHBfeSkgPSDiiJIoMS9wX3kpwrfiiIJwX3kv4oiCeuKCliA9IOKIkigxL3BfeSnCt3BfeSjwnZ+ZW2s9eV3iiJJw4oKWKSA9IHDigpYg4oiSIPCdn5lbaz15XS4gVGhpcyBjb21iaW5lZCBncmFkaWVudCBpcyBudW1lcmljYWxseSBzdGFibGUgYW5kIGF2b2lkcyB0aGUgZGl2aXNpb24gYnkgcF95IHRoYXQgd291bGQgYmxvdyB1cCBpZiBwX3kg4omIIDAuIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiVmFuaXNoaW5nIGFuZCBFeHBsb2RpbmcgR3JhZGllbnRzIHZpYSB0aGUgQ2hhaW4gUnVsZSJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiRm9yIGEgZGVwdGgtTCBuZXR3b3JrIHdpdGggcmVjdXJyZW50IHN0cnVjdHVyZSAoZS5nLiwgUk5OKSwgdGhlIGdyYWRpZW50IOKIgkwv4oiCaOKCgCA9ICjiiI/igpwgV+G1gMK3ZGlhZyjPgycoaOKCnCkpKSDCtyDiiIJML+KIgmjigpcuIElmIHRoZSBzcGVjdHJhbCByYWRpdXMgz4EoV+G1gMK3ZGlhZyjPgycpKSA8IDEsIGdyYWRpZW50cyBzaHJpbmsgZ2VvbWV0cmljYWxseSDigJQgdmFuaXNoaW5nLiBJZiDPgSA+IDEsIGdyYWRpZW50cyBncm93IGdlb21ldHJpY2FsbHkg4oCUIGV4cGxvZGluZy4gU2lnbW9pZCBoYXMgbWF4IGRlcml2YXRpdmUgMC4yNSBhbmQgVyB0eXBpY2FsbHkgaGFzIHNwZWN0cmFsIHJhZGl1cyB+MSwgc28gz4MnIGZhY3RvcnMgY29tcG91bmQgdG8gbWFrZSBncmFkaWVudHMgdmFuaXNoIGFmdGVyIH4xMCBsYXllcnMuIFNvbHV0aW9uczogKGkpIFJlTFUgKM+DJyDiiIggezAsMX0pOyAoaWkpIHJlc2lkdWFsIGNvbm5lY3Rpb25zIChncmFkaWVudCBoaWdod2F5OiDiiIJML+KIgnjigpcgPSDiiIJML+KIgnjigpfigorigoEgwrcgKDEgKyDiiIJmL+KIgnjigpcpKTsgKGlpaSkgZ3JhZGllbnQgY2xpcHBpbmc7IChpdikgY2FyZWZ1bCBpbml0aWFsaXNhdGlvbiAoWGF2aWVyL0hlKS4ifSx7InR5cGUiOiJjYWxsb3V0IiwidmFyaWFudCI6ImluZm8iLCJ0aXRsZSI6IlJlc2lkdWFsIENvbm5lY3Rpb25zIGFzIEdyYWRpZW50IEhpZ2h3YXlzIiwiY29udGVudCI6IkEgcmVzaWR1YWwgYmxvY2s6IHjigpfigorigoEgPSB44oKXICsgRih44oKXKS4gR3JhZGllbnQ6IOKIgkwv4oiCeOKClyA9IOKIgkwv4oiCeOKCl+KCiuKCgSDCtyAoSSArIOKIgkYv4oiCeOKClykuIFRoZSBpZGVudGl0eSB0ZXJtIEkgZW5zdXJlcyB0aGUgZ3JhZGllbnQgaXMgYXQgbGVhc3Qg4oiCTC/iiIJ44oKX4oKK4oKBIHJlZ2FyZGxlc3Mgb2YgdGhlIHJlc2lkdWFsIGJyYW5jaCdzIGdyYWRpZW50LiBUaGlzIGd1YXJhbnRlZXMgZ3JhZGllbnQgZmxvdyBldmVuIGlmIOKIgkYv4oiCeOKClyBpcyBzbWFsbC4gUHJlLW5vcm0gdHJhbnNmb3JtZXJzIChMYXllck5vcm0gYmVmb3JlIHRoZSBhdHRlbnRpb24vRkZOIGJsb2NrKSBmdXJ0aGVyIHN0YWJpbGlzZSBncmFkaWVudCBmbG93IGJ5IGVuc3VyaW5nIG5vcm1hbGlzZWQgaW5wdXQgdG8gZWFjaCBzdWItbGF5ZXIuIFRoaXMgaXMgd2h5IG1vZGVybiBhcmNoaXRlY3R1cmVzIChHUFQsIExMYU1BKSBhbGwgdXNlIHJlc2lkdWFsIGNvbm5lY3Rpb25zIGFuZCBwcmUtbm9ybS4ifSx7InR5cGUiOiJjYWxsb3V0IiwidmFyaWFudCI6Indhcm5pbmciLCJ0aXRsZSI6IkNvbW1vbiBCYWNrcHJvcCBCdWdzIiwiY29udGVudCI6IigxKSBXcm9uZyB0cmFuc3Bvc2U6IOKIgkwv4oiCVyBzaG91bGQgYmUgzrTCt3jhtYAsIG5vdCB44bWAwrfOtC4gKDIpIE1pc3NpbmcgZGl2aXNpb24gYnkgYmF0Y2ggc2l6ZTogZ3JhZGllbnRzIG11c3QgYmUgYXZlcmFnZWQgb3ZlciB0aGUgYmF0Y2guICgzKSBJbi1wbGFjZSBvcGVyYXRpb25zOiBtb2RpZnlpbmcgdGVuc29ycyB1c2VkIGluIHRoZSBmb3J3YXJkIHBhc3MgY29ycnVwdHMgdGhlIGJhY2t3YXJkIHBhc3Mg4oCUIFB5VG9yY2ggd2lsbCByYWlzZSBhbiBlcnJvciBpZiBpbi1wbGFjZSBvcHMgaW52YWxpZGF0ZSB0aGUgY29tcHV0YXRpb24gZ3JhcGguICg0KSBHcmFkaWVudCBhY2N1bXVsYXRpb24gd2l0aG91dCB6ZXJvaW5nOiBncmFkaWVudHMgYWNjdW11bGF0ZSBieSBkZWZhdWx0IGluIFB5VG9yY2g7IGNhbGwgb3B0aW1pemVyLnplcm9fZ3JhZCgpIGJlZm9yZSBlYWNoIGJhdGNoLiAoNSkgRGV0YWNoL3N0b3BfZ3JhZGllbnQgbWlzdXNlOiBmb3JnZXR0aW5nIHRvIGRldGFjaCB0YXJnZXQgbmV0d29ya3MgaW4gUkwgY2F1c2VzIGdyYWRpZW50IGZsb3cgdGhyb3VnaCBmaXhlZCBuZXR3b3Jrcywgc2lsZW50bHkgcHJvZHVjaW5nIHdyb25nIGdyYWRpZW50cy4ifSx7InR5cGUiOiJjYWxsb3V0IiwidmFyaWFudCI6InRpcCIsInRpdGxlIjoiWGF2aWVyIGFuZCBIZSBJbml0aWFsaXNhdGlvbiIsImNvbnRlbnQiOiJWYW5pc2hpbmcvZXhwbG9kaW5nIGdyYWRpZW50cyBhdCBpbml0aWFsaXNhdGlvbiBhcmUgY29udHJvbGxlZCBieSB3ZWlnaHQgc2NhbGUuIFhhdmllciAoR2xvcm90KSBpbml0aWFsaXNhdGlvbjogVmFyKFcpID0gMi8obl9pbiArIG5fb3V0KSDigJQgZGVyaXZlZCBieSByZXF1aXJpbmcgVmFyKG91dHB1dCkgPSBWYXIoaW5wdXQpIGZvciBsaW5lYXIvdGFuaCBsYXllcnMuIEhlIGluaXRpYWxpc2F0aW9uOiBWYXIoVykgPSAyL25faW4g4oCUIGRlcml2ZWQgZm9yIFJlTFUgKHdoaWNoIGhhbHZlcyB2YXJpYW5jZSBkdWUgdG8gdGhlIHplcm8gbWFzaykuIEthaW1pbmcgSGUgaXMgbm93IHN0YW5kYXJkIGZvciBSZUxVL0dFTFUgbmV0d29ya3MuIFRyYW5zZm9ybWVycyBvZnRlbiB1c2UgbW9kaWZpZWQgaW5pdCAoZS5nLiwgc2NhbGluZyByZXNpZHVhbCBicmFuY2ggd2VpZ2h0cyBieSAxL+KImmRlcHRoKSB0byBrZWVwIGdyYWRpZW50cyBzdGFibGUgYXQgbGFyZ2UgZGVwdGguIn1d"
+blocks_json: "W3sidHlwZSI6InRleHQiLCJjb250ZW50IjoiQmFja3Byb3BhZ2F0aW9uIGlzIHRoZSBjaGFpbiBydWxlIGFwcGxpZWQgc3lzdGVtYXRpY2FsbHkgdG8gYSBjb21wdXRhdGlvbiBncmFwaC4gRXZlcnkgbW9kZXJuIGRlZXAgbGVhcm5pbmcgZnJhbWV3b3JrIGltcGxlbWVudHMgaXQgYXV0b21hdGljYWxseSwgYnV0IHVuZGVyc3RhbmRpbmcgdGhlIG1lY2hhbmljcyDigJQgd2hhdCBlYWNoIGxheWVyXHUwMDI3cyBiYWNrd2FyZCBjb21wdXRlcyBhbmQgd2h5IOKAlCBpcyBlc3NlbnRpYWwgZm9yIGRlYnVnZ2luZywgZGVzaWduaW5nIGN1c3RvbSBsYXllcnMsIGFuZCBkaWFnbm9zaW5nIGdyYWRpZW50IHBhdGhvbG9naWVzLiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IlRoZSBTaW5nbGUtVmFyaWFibGUgQ2hhaW4gUnVsZSJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiSWYgeSA9IGYoZyh4KSksIHRoZW4gZHkvZHggPSBmXHUwMDI3KGcoeCkpIMK3IGdcdTAwMjcoeCkuIFRoZSBkZXJpdmF0aXZlIG9mIHRoZSBvdXRlciBmdW5jdGlvbiAoZXZhbHVhdGVkIGF0IHRoZSBpbm5lciBmdW5jdGlvblx1MDAyN3Mgb3V0cHV0KSB0aW1lcyB0aGUgZGVyaXZhdGl2ZSBvZiB0aGUgaW5uZXIgZnVuY3Rpb24uIFRoaXMgZXh0ZW5kcyB0byBjaGFpbnMgb2YgYXJiaXRyYXJ5IGRlcHRoOiBkeS9keCA9ICjiiIJ5L+KIgnXigpkpKOKIgnXigpkv4oiCdeKCmeKCi+KCgSnCt8K3wrco4oiCdeKCgi/iiIJ14oKBKSjiiIJ14oKBL+KIgngpLiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6Ik11bHRpdmFyaWF0ZSBDaGFpbiBSdWxlIG92ZXIgQ29tcHV0YXRpb24gR3JhcGhzIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJJbiBhIGNvbXB1dGF0aW9uIGdyYXBoIChEQUcpLCBpZiBhIHZhcmlhYmxlIHggaW5mbHVlbmNlcyB0aGUgb3V0cHV0IEwgdGhyb3VnaCBtdWx0aXBsZSBwYXRocywgdGhlIHRvdGFsIGdyYWRpZW50IGlzIHRoZSBzdW0gb3ZlciBhbGwgcGF0aHM6IOKIgkwv4oiCeCA9IM6jX3twYXRocyBwIGZyb20geCB0byBMfSBwcm9kdWN0IG9mIGxvY2FsIEphY29iaWFucyBhbG9uZyBwLiBCYWNrcHJvcCBhdXRvbWF0ZXMgdGhpcyBieSBwcm9jZXNzaW5nIG5vZGVzIGluIHJldmVyc2UgdG9wb2xvZ2ljYWwgb3JkZXIsIGFjY3VtdWxhdGluZyBncmFkaWVudHMuIn0seyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6ImltcG9ydCBudW1weSBhcyBucFxuXG4jIFR3by1sYXllciBuZXR3b3JrOiB4IC1cdTAwM2UgejE9VzEqeCtiMSAtXHUwMDNlIGg9UmVMVSh6MSkgLVx1MDAzZSB6Mj1XMipoK2IyIC1cdTAwM2UgTVNFIGxvc3Ncbm5wLnJhbmRvbS5zZWVkKDQyKVxubl9pbiwgbl9oLCBuX291dCA9IDQsIDgsIDJcblxuVzEgPSBucC5yYW5kb20ucmFuZG4obl9oLCBuX2luKSAqIDAuMVxuYjEgPSBucC56ZXJvcyhuX2gpXG5XMiA9IG5wLnJhbmRvbS5yYW5kbihuX291dCwgbl9oKSAqIDAuMVxuYjIgPSBucC56ZXJvcyhuX291dClcblxueCAgICAgID0gbnAucmFuZG9tLnJhbmRuKG5faW4pXG55X3RydWUgPSBucC5hcnJheShbMS4wLCAwLjBdKVxuXG4jIC0tLSBGb3J3YXJkIHBhc3MgLS0tXG56MSAgICA9IFcxIEAgeCArIGIxICAgICAgICAgICAgICAgICAgICAgICAgICAjIChuX2gsKVxuaCAgICAgPSBucC5tYXhpbXVtKDAsIHoxKSAgICAgICAgICAgICAgICAgICAgIyBSZUxVIChuX2gsKVxuejIgICAgPSBXMiBAIGggKyBiMiAgICAgICAgICAgICAgICAgICAgICAgICAgIyAobl9vdXQsKVxueV9oYXQgPSB6MiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIyBpZGVudGl0eSBvdXRwdXRcbmxvc3MgID0gMC41ICogbnAuc3VtKCh5X2hhdCAtIHlfdHJ1ZSkqKjIpICAgIyBNU0VcblxuIyAtLS0gQmFja3dhcmQgcGFzcyAoY2hhaW4gcnVsZSwgcmV2ZXJzZSBvcmRlcikgLS0tXG5kTF9kejIgPSB5X2hhdCAtIHlfdHJ1ZSAgICAgICAgICAgICAgICAgICAgICAgICAgICMgKG5fb3V0LClcbmRMX2RXMiA9IG5wLm91dGVyKGRMX2R6MiwgaCkgICAgICAgICAgICAgICAgICAgICAjIChuX291dCwgbl9oKVxuZExfZGIyID0gZExfZHoyICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAjIChuX291dCwpXG5kTF9kaCAgPSBXMi5UIEAgZExfZHoyICAgICAgICAgICAgICAgICAgICAgICAgICAgIyAobl9oLClcbmRMX2R6MSA9IGRMX2RoICogKHoxIFx1MDAzZSAwKS5hc3R5cGUoZmxvYXQpICAgICAgICAgIyBSZUxVIGJhY2t3YXJkXG5kTF9kVzEgPSBucC5vdXRlcihkTF9kejEsIHgpICAgICAgICAgICAgICAgICAgICAjIChuX2gsIG5faW4pXG5kTF9kYjEgPSBkTF9kejEgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICMgKG5faCwpXG5cbnByaW50KFx1MDAyN0xvc3M6ICUuNmZcdTAwMjcgJSBsb3NzKVxucHJpbnQoXHUwMDI3ZEwvZFcyIHNoYXBlOiAlcyAgbm9ybTogJS40Zlx1MDAyNyAlIChkTF9kVzIuc2hhcGUsIG5wLmxpbmFsZy5ub3JtKGRMX2RXMikpKVxucHJpbnQoXHUwMDI3ZEwvZFcxIHNoYXBlOiAlcyAgbm9ybTogJS40Zlx1MDAyNyAlIChkTF9kVzEuc2hhcGUsIG5wLmxpbmFsZy5ub3JtKGRMX2RXMSkpKVxucHJpbnQoXHUwMDI3ZEwvZGIyOlx1MDAyNywgZExfZGIyLnJvdW5kKDQpKVxucHJpbnQoXHUwMDI3ZEwvZGIxIG5vcm06ICUuNGZcdTAwMjcgJSBucC5saW5hbGcubm9ybShkTF9kYjEpKSJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IkJhY2twcm9wIEZvcm11bGFzIGZvciBDb21tb24gTGF5ZXJzIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJFYWNoIGxheWVyIGhhcyBhIGxvY2FsIEphY29iaWFuLiBEdXJpbmcgYmFja3dhcmQsIGl0IHJlY2VpdmVzIHRoZSB1cHN0cmVhbSBncmFkaWVudCDOtCA9IOKIgkwv4oiCeSBhbmQgbXVzdCBlbWl0IOKIgkwv4oiCeCA9IErhtYDOtCBhbmQg4oiCTC/iiIJXID0gzrTCt3jhtYAgKG91dGVyIHByb2R1Y3QgZm9yIGxpbmVhciBsYXllcnMpLiBUaGUgUmVMVSBzaW1wbHkgZ2F0ZXMgdGhlIGdyYWRpZW50OyBzb2Z0bWF4K2Nyb3NzLWVudHJvcHkgaGFzIHRoZSBlbGVnYW50IHNpbXBsaWZpZWQgZ3JhZGllbnQgxbcgLSB5LiJ9LHsidHlwZSI6InRhYmxlIiwiaGVhZGVycyI6WyJMYXllciIsIkZvcndhcmQiLCLiiIJML+KIglcgKHBhcmFtIGdyYWQpIiwi4oiCTC/iiIJ4IChpbnB1dCBncmFkKSJdLCJyb3dzIjpbWyJMaW5lYXIgeT1XeCtiIiwieSA9IFd4ICsgYiIsIs60IHjhtYAgIChvdXRlciBwcm9kdWN0KSIsIlfhtYAgzrQiXSxbIlJlTFUiLCJ5ID0gbWF4KDAseCkiLCJOL0EiLCLOtCDiipkgMVt4XHUwMDNlMF0iXSxbIlNpZ21vaWQgz4MiLCJ5ID0gMS8oMStlXnsteH0pIiwiTi9BIiwizrQg4oqZIM+DKHgpKDHiiJLPgyh4KSkiXSxbIlNvZnRtYXgrWEVudCIsIsW3PXNvZnRtYXgoeiksIEw9LWxvZyDFt195IiwiTi9BIiwixbcg4oiSIG9uZV9ob3QoeSkiXSxbIkJhdGNoTm9ybSIsIsW3PSh44oiSzrwpL8+DwrfOsyvOsiIsIuKIgkwv4oiCzrM9zqPOtMK3eMyCLCDiiIJML+KIgs6yPc6jzrQiLCJUd28gc3VtbWF0aW9uIHRlcm1zIChjb21wbGV4KSJdXX0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiQ3VzdG9tIFB5VG9yY2ggQXV0b2dyYWQgRnVuY3Rpb24ifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IldoZW4gYSBsYXllclx1MDAyN3MgYmFja3dhcmQgaXMgbm90IGVhc2lseSBleHByZXNzZWQgdGhyb3VnaCBidWlsdC1pbiBvcHMsIHlvdSBpbXBsZW1lbnQgYSBjdXN0b20gdG9yY2guYXV0b2dyYWQuRnVuY3Rpb24gd2l0aCBleHBsaWNpdCBmb3J3YXJkIGFuZCBiYWNrd2FyZC4gVGhpcyBpcyB1c2VkIGZvciBudW1lcmljYWxseSBzdGFibGUgZnVzZWQgb3BzIChmbGFzaCBhdHRlbnRpb24pLCBjdXN0b20gYWN0aXZhdGlvbnMsIG9yIG9wZXJhdGlvbnMgd2l0aCBjbG9zZWQtZm9ybSBncmFkaWVudHMgdGhhdCBhcmUgY2hlYXBlciB0aGFuIGF1dG9kaWZmLiJ9LHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiJpbXBvcnQgdG9yY2hcblxuY2xhc3MgU3F1YXJlZFJlTFUodG9yY2guYXV0b2dyYWQuRnVuY3Rpb24pOlxuICAgICMgZih4KSA9IFJlTFUoeCleMiB3aXRoIG1hbnVhbCBiYWNrd2FyZFxuICAgIEBzdGF0aWNtZXRob2RcbiAgICBkZWYgZm9yd2FyZChjdHgsIHgpOlxuICAgICAgICBtYXNrID0gKHggXHUwMDNlIDApXG4gICAgICAgIGN0eC5zYXZlX2Zvcl9iYWNrd2FyZCh4LCBtYXNrKVxuICAgICAgICByZXR1cm4geCoqMiAqIG1hc2tcblxuICAgIEBzdGF0aWNtZXRob2RcbiAgICBkZWYgYmFja3dhcmQoY3R4LCBncmFkX291dHB1dCk6XG4gICAgICAgIHgsIG1hc2sgPSBjdHguc2F2ZWRfdGVuc29yc1xuICAgICAgICAjIGQvZHhbUmVMVSh4KV4yXSA9IDJ4IGlmIHhcdTAwM2UwIGVsc2UgMFxuICAgICAgICByZXR1cm4gZ3JhZF9vdXRwdXQgKiAyICogeCAqIG1hc2tcblxuIyBUZXN0IGZvcndhcmQgYW5kIGJhY2t3YXJkXG50b3JjaC5tYW51YWxfc2VlZCgwKVxueCA9IHRvcmNoLnJhbmRuKDYsIHJlcXVpcmVzX2dyYWQ9VHJ1ZSlcbnkgPSBTcXVhcmVkUmVMVS5hcHBseSh4KVxubG9zcyA9IHkuc3VtKClcbmxvc3MuYmFja3dhcmQoKVxuXG5wcmludChcdTAwMjdJbnB1dCB4OiAgIFx1MDAyNywgeC5kZXRhY2goKS5yb3VuZChkZWNpbWFscz0zKS50b2xpc3QoKSlcbnByaW50KFx1MDAyN091dHB1dCB5OiAgXHUwMDI3LCB5LmRldGFjaCgpLnJvdW5kKGRlY2ltYWxzPTMpLnRvbGlzdCgpKVxucHJpbnQoXHUwMDI3R3JhZGllbnQ6ICBcdTAwMjcsIHguZ3JhZC5yb3VuZChkZWNpbWFscz0zKS50b2xpc3QoKSlcblxuIyBOdW1lcmljYWwgZ3JhZGllbnQgY2hlY2tcbmggPSAxZS00XG5udW1fZ3JhZCA9IHRvcmNoLnplcm9zX2xpa2UoeC5kZXRhY2goKSlcbmZvciBpIGluIHJhbmdlKGxlbih4KSk6XG4gICAgeHAgPSB4LmRldGFjaCgpLmNsb25lKCk7IHhtID0geC5kZXRhY2goKS5jbG9uZSgpXG4gICAgeHBbaV0gKz0gaDsgeG1baV0gLT0gaFxuICAgIG51bV9ncmFkW2ldID0gKFNxdWFyZWRSZUxVLmFwcGx5KHhwKS5zdW0oKSAtIFNxdWFyZWRSZUxVLmFwcGx5KHhtKS5zdW0oKSkgLyAoMipoKVxuXG5wcmludChcdTAwMjdOdW1lcmljYWwgOlx1MDAyNywgbnVtX2dyYWQucm91bmQoZGVjaW1hbHM9MykudG9saXN0KCkpXG5wcmludChcdTAwMjdNYXggZXJyb3IgOlx1MDAyNywgKHguZ3JhZCAtIG51bV9ncmFkKS5hYnMoKS5tYXgoKS5pdGVtKCkpIn0seyJ0eXBlIjoiY2FsbG91dCIsInZhcmlhbnQiOiJ3YXJuaW5nIiwidGl0bGUiOiJWYW5pc2hpbmcgR3JhZGllbnRzIFRocm91Z2ggU2lnbW9pZHMiLCJjb250ZW50IjoiRWFjaCBzaWdtb2lkIGxheWVyIG11bHRpcGxpZXMgdGhlIGdyYWRpZW50IGJ5IM+DXHUwMDI3KHgpID0gz4MoeCkoMeKIks+DKHgpKSDiiaQgMC4yNS4gVGhyb3VnaCBMIHNpZ21vaWQgbGF5ZXJzIHRoaXMgc2hyaW5rcyB0aGUgZ3JhZGllbnQgYnkgdXAgdG8gMC4yNV5MIOKAlCBleHBvbmVudGlhbGx5IHNtYWxsLiBBIDEwLWxheWVyIHNpZ21vaWQgbmV0d29yayBzaHJpbmtzIGdyYWRpZW50cyBieSBmYWN0b3IgfjEwXnstNn0uIFJlTFUsIEdFTFUsIGFuZCByZXNpZHVhbCBjb25uZWN0aW9ucyBsYXJnZWx5IHNvbHZlIHRoaXMuIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiR3JhZGllbnQgRmxvdyBNb25pdG9yaW5nIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJEaWFnbm9zaW5nIGdyYWRpZW50IGlzc3VlcyAodmFuaXNoaW5nL2V4cGxvZGluZykgcmVxdWlyZXMgbW9uaXRvcmluZyBncmFkaWVudCBub3JtcyBsYXllci1ieS1sYXllci4gQSBoZWFsdGh5IG5ldHdvcmsgc2hvd3Mgcm91Z2hseSB1bmlmb3JtIGdyYWRpZW50IG5vcm1zIGFjcm9zcyBsYXllcnMuIE5vcm1zIGRlY3JlYXNpbmcgdG93YXJkIGVhcmxpZXIgbGF5ZXJzIHNpZ25hbCB2YW5pc2hpbmcgZ3JhZGllbnRzOyBub3JtcyBleHBsb2Rpbmcgc2lnbmFsIGluc3RhYmlsaXR5LiJ9LHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiJpbXBvcnQgdG9yY2hcbmltcG9ydCB0b3JjaC5ubiBhcyBublxuXG5jbGFzcyBNTFAobm4uTW9kdWxlKTpcbiAgICBkZWYgX19pbml0X18oc2VsZiwgZGltcywgYWN0aXZhdGlvbj1ubi5TaWdtb2lkKTpcbiAgICAgICAgc3VwZXIoKS5fX2luaXRfXygpXG4gICAgICAgIGxheWVycyA9IFtdXG4gICAgICAgIGZvciBpIGluIHJhbmdlKGxlbihkaW1zKSAtIDEpOlxuICAgICAgICAgICAgbGF5ZXJzLmFwcGVuZChubi5MaW5lYXIoZGltc1tpXSwgZGltc1tpKzFdKSlcbiAgICAgICAgICAgIGlmIGkgXHUwMDNjIGxlbihkaW1zKSAtIDI6XG4gICAgICAgICAgICAgICAgbGF5ZXJzLmFwcGVuZChhY3RpdmF0aW9uKCkpXG4gICAgICAgIHNlbGYubmV0ID0gbm4uU2VxdWVudGlhbCgqbGF5ZXJzKVxuXG4gICAgZGVmIGZvcndhcmQoc2VsZiwgeCk6XG4gICAgICAgIHJldHVybiBzZWxmLm5ldCh4KVxuXG50b3JjaC5tYW51YWxfc2VlZCgwKVxubW9kZWxfc2lnICA9IE1MUChbMTYsIDY0LCA2NCwgNjQsIDFdLCBhY3RpdmF0aW9uPW5uLlNpZ21vaWQpXG5tb2RlbF9yZWx1ID0gTUxQKFsxNiwgNjQsIDY0LCA2NCwgMV0sIGFjdGl2YXRpb249bm4uUmVMVSlcblxueCA9IHRvcmNoLnJhbmRuKDMyLCAxNilcbnkgPSB0b3JjaC56ZXJvcygzMiwgMSlcblxuZm9yIG5hbWUsIG1vZGVsIGluIFsoXHUwMDI3U2lnbW9pZFx1MDAyNywgbW9kZWxfc2lnKSwgKFx1MDAyN1JlTFVcdTAwMjcsIG1vZGVsX3JlbHUpXTpcbiAgICBsb3NzID0gbm4uTVNFTG9zcygpKG1vZGVsKHgpLCB5KVxuICAgIGxvc3MuYmFja3dhcmQoKVxuICAgIHByaW50KFx1MDAyN0dyYWRpZW50IG5vcm1zIHBlciBMaW5lYXIgbGF5ZXIgKCVzKTpcdTAwMjcgJSBuYW1lKVxuICAgIGxpbmVhcl9pZHggPSAwXG4gICAgZm9yIGxheWVyIGluIG1vZGVsLm5ldDpcbiAgICAgICAgaWYgaXNpbnN0YW5jZShsYXllciwgbm4uTGluZWFyKSBhbmQgbGF5ZXIud2VpZ2h0LmdyYWQgaXMgbm90IE5vbmU6XG4gICAgICAgICAgICBnbm9ybSA9IGxheWVyLndlaWdodC5ncmFkLm5vcm0oKS5pdGVtKClcbiAgICAgICAgICAgIHByaW50KFx1MDAyNyAgTGF5ZXIgJWQ6ICUuMmVcdTAwMjcgJSAobGluZWFyX2lkeCwgZ25vcm0pKVxuICAgICAgICAgICAgbGluZWFyX2lkeCArPSAxXG4gICAgbW9kZWwuemVyb19ncmFkKClcbiAgICBwcmludChcdTAwMjdcdTAwMjcpIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiTnVtZXJpY2FsIEdyYWRpZW50IENoZWNrIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJHcmFkaWVudCBjaGVja2luZyB2ZXJpZmllcyB0aGF0IGFuIGFuYWx5dGljYWwgZ3JhZGllbnQgKGZyb20gYXV0b2dyYWQgb3IgbWFudWFsIGJhY2t3YXJkKSBtYXRjaGVzIHRoZSBudW1lcmljYWwgZXN0aW1hdGUuIFRoZSBudW1lcmljYWwgZ3JhZGllbnQgdXNlcyBjZW50cmFsIGRpZmZlcmVuY2VzOiDiiIJML+KIgs644bWiIOKJiCBbTCjOuCArIGjDquG1oikgLSBMKM64IC0gaMOq4bWiKV0gLyAyaC4gQSBtYXggcmVsYXRpdmUgZXJyb3IgYmVsb3cgMWUtNSBpbmRpY2F0ZXMgYSBjb3JyZWN0IGltcGxlbWVudGF0aW9uLiJ9LHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiJpbXBvcnQgdG9yY2hcbmltcG9ydCB0b3JjaC5ubiBhcyBublxuXG5kZWYgbnVtZXJpY2FsX2dyYWRpZW50KG1vZGVsLCBsb3NzX2ZuLCB4LCB5LCBoPTFlLTQpOlxuICAgICMgQ29tcHV0ZSBudW1lcmljYWwgZ3JhZGllbnQgdy5yLnQuIGFsbCBtb2RlbCBwYXJhbWV0ZXJzXG4gICAgZ3JhZHMgPSB7fVxuICAgIGZvciBuYW1lLCBwYXJhbSBpbiBtb2RlbC5uYW1lZF9wYXJhbWV0ZXJzKCk6XG4gICAgICAgIGdyYWQgPSB0b3JjaC56ZXJvc19saWtlKHBhcmFtKVxuICAgICAgICBmbGF0ID0gcGFyYW0uZGF0YS52aWV3KC0xKVxuICAgICAgICBmb3IgaSBpbiByYW5nZShsZW4oZmxhdCkpOlxuICAgICAgICAgICAgZmxhdFtpXSArPSBoXG4gICAgICAgICAgICBscCA9IGxvc3NfZm4obW9kZWwoeCksIHkpLml0ZW0oKVxuICAgICAgICAgICAgZmxhdFtpXSAtPSAyICogaFxuICAgICAgICAgICAgbG0gPSBsb3NzX2ZuKG1vZGVsKHgpLCB5KS5pdGVtKClcbiAgICAgICAgICAgIGZsYXRbaV0gKz0gaCAgICMgcmVzdG9yZVxuICAgICAgICAgICAgZ3JhZC52aWV3KC0xKVtpXSA9IChscCAtIGxtKSAvICgyICogaClcbiAgICAgICAgZ3JhZHNbbmFtZV0gPSBncmFkXG4gICAgcmV0dXJuIGdyYWRzXG5cbnRvcmNoLm1hbnVhbF9zZWVkKDcpXG5tb2RlbCAgID0gbm4uTGluZWFyKDMsIDIpXG5sb3NzX2ZuID0gbm4uTVNFTG9zcygpXG54ID0gdG9yY2gucmFuZG4oNCwgMylcbnkgPSB0b3JjaC5yYW5kbig0LCAyKVxuXG4jIEFuYWx5dGljYWwgZ3JhZGllbnRcbnByZWQgPSBtb2RlbCh4KVxubG9zcyA9IGxvc3NfZm4ocHJlZCwgeSlcbmxvc3MuYmFja3dhcmQoKVxuYW5hbHl0aWNhbCA9IHtuOiBwLmdyYWQuY2xvbmUoKSBmb3IgbiwgcCBpbiBtb2RlbC5uYW1lZF9wYXJhbWV0ZXJzKCl9XG5cbiMgTnVtZXJpY2FsIGdyYWRpZW50XG5udW1fZ3JhZHMgPSBudW1lcmljYWxfZ3JhZGllbnQobW9kZWwsIGxvc3NfZm4sIHgsIHkpXG5cbnByaW50KFx1MDAyN0dyYWRpZW50IGNoZWNrIChhbmFseXRpY2FsIHZzIG51bWVyaWNhbCk6XHUwMDI3KVxuZm9yIG5hbWUgaW4gYW5hbHl0aWNhbDpcbiAgICBlcnIgPSAoYW5hbHl0aWNhbFtuYW1lXSAtIG51bV9ncmFkc1tuYW1lXSkuYWJzKCkubWF4KCkuaXRlbSgpXG4gICAgc3RhdHVzID0gXHUwMDI3UEFTU1x1MDAyNyBpZiBlcnIgXHUwMDNjIDFlLTUgZWxzZSBcdTAwMjdGQUlMXHUwMDI3XG4gICAgcHJpbnQoXHUwMDI3ICAlLTIwcyBtYXggZXJyb3IgPSAlLjJlICBbJXNdXHUwMDI3ICUgKG5hbWUsIGVyciwgc3RhdHVzKSkifSx7InR5cGUiOiJjYWxsb3V0IiwidmFyaWFudCI6InRpcCIsInRpdGxlIjoiV2hlbiB0byBSdW4gR3JhZGllbnQgQ2hlY2tzIiwiY29udGVudCI6IkFsd2F5cyBydW4gZ3JhZGllbnQgY2hlY2tzIHdoZW4gaW1wbGVtZW50aW5nIGEgY3VzdG9tIGJhY2t3YXJkLiBVc2UgaD0xZS00IGZvciBmbG9hdDMyLiBTa2lwIGlucHV0cyBuZWFyIGtpbmtzIChSZUxVIGJvdW5kYXJ5KSB3aGVyZSB0aGUgbnVtZXJpY2FsIGVzdGltYXRlIGlzIHVucmVsaWFibGUuIFB5VG9yY2hcdTAwMjdzIHRvcmNoLmF1dG9ncmFkLmdyYWRjaGVjayBhdXRvbWF0ZXMgdGhpcyB3aXRoIHJlbGF0aXZlK2Fic29sdXRlIGVycm9yIHRocmVzaG9sZHMuIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiVmFuaXNoaW5nIGFuZCBFeHBsb2RpbmcgR3JhZGllbnRzIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJWYW5pc2hpbmcgZ3JhZGllbnRzIGFyaXNlIHdoZW4gcmVwZWF0ZWQgbXVsdGlwbGljYXRpb24gYnkgdmFsdWVzIFx1MDAzYyAxIHNocmlua3MgdGhlIGdyYWRpZW50IGV4cG9uZW50aWFsbHkgKHNpZ21vaWQsIHRhbmggaW4gZGVlcCBuZXR3b3JrcykuIEV4cGxvZGluZyBncmFkaWVudHMgYXJpc2Ugd2hlbiByZXBlYXRlZCBtdWx0aXBsaWNhdGlvbiBieSB2YWx1ZXMgXHUwMDNlIDEgZ3Jvd3MgdGhlIGdyYWRpZW50IGV4cG9uZW50aWFsbHkgKFJOTnMgd2l0aCBsYXJnZSB3ZWlnaHRzKS4gU3RhbmRhcmQgcmVtZWRpZXMgYXJlIHdlbGwtZXN0YWJsaXNoZWQuIn0seyJ0eXBlIjoibGlzdCIsIm9yZGVyZWQiOmZhbHNlLCJpdGVtcyI6WyJVc2UgUmVMVS9HRUxVIGFjdGl2YXRpb25zIOKAlCBncmFkaWVudCBpcyBlaXRoZXIgMCBvciAxIChubyBzYXR1cmF0aW9uKSIsIlJlc2lkdWFsIGNvbm5lY3Rpb25zIChIZSBldCBhbC4gMjAxNikgcHJvdmlkZSBncmFkaWVudCBoaWdod2F5czog4oiCTC/iiIJ44oKXID0g4oiCTC/iiIJ44oKX4oKK4oKBICsgbG9jYWwgdGVybSIsIkdyYWRpZW50IGNsaXBwaW5nOiBpZiDigJZn4oCWIFx1MDAzZSB0aHJlc2hvbGQsIHNjYWxlIGcg4oaSIGcgwrcgdGhyZXNob2xkL+KAlmfigJYiLCJQcm9wZXIgd2VpZ2h0IGluaXRpYWxpemF0aW9uIChIZSwgWGF2aWVyKSBzZXRzIGluaXRpYWwgZ3JhZGllbnQgc2NhbGUgYXBwcm9wcmlhdGVseSIsIkxheWVyL2JhdGNoIG5vcm1hbGl6YXRpb24gc3RhYmlsaXplcyBhY3RpdmF0aW9ucyBhbmQgZ3JhZGllbnQgbWFnbml0dWRlcyIsIkxTVE0gZ2F0aW5nIG1lY2hhbmlzbXMgY29udHJvbCBncmFkaWVudCBmbG93IHRocm91Z2ggdGltZSBpbiBSTk5zIl19LHsidHlwZSI6ImRpdmlkZXIifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkJhY2twcm9wIGlzIG5vdCBtYWdpYyDigJQgaXQgaXMgdGhlIGNoYWluIHJ1bGUgZXhlY3V0ZWQgaW4gcmV2ZXJzZSB0b3BvbG9naWNhbCBvcmRlciBvbiBhIGNvbXB1dGF0aW9uIGdyYXBoLiBFdmVyeSBcdTAwMjd0cmFpbmluZyB0cmlja1x1MDAyNyB1bHRpbWF0ZWx5IHRyYWNlcyBiYWNrIHRvIG1hbmFnaW5nIGdyYWRpZW50IG1hZ25pdHVkZXMgYW5kIGRpcmVjdGlvbnMgdGhyb3VnaCB0aGlzIGdyYXBoLiJ9XQ=="
 ---
-
 # Chain Rule and Backpropagation
 
-Backpropagation is the chain rule applied systematically to a computation graph. Every gradient in neural network training is an instance of this identity propagated backward through a DAG.
+Backpropagation is the chain rule applied systematically to a computation graph. Every modern deep learning framework implements it automatically, but understanding the mechanics — what each layer's backward computes and why — is essential for debugging, designing custom layers, and diagnosing gradient pathologies.
 
-## Chain Rule: Single Variable
+## The Single-Variable Chain Rule
 
-dz/dx = (dz/dy)(dy/dx). For a depth-L composition, the gradient is a product of L derivatives — the source of vanishing/exploding gradients.
+If y = f(g(x)), then dy/dx = f'(g(x)) · g'(x). The derivative of the outer function (evaluated at the inner function's output) times the derivative of the inner function. This extends to chains of arbitrary depth: dy/dx = (∂y/∂uₙ)(∂uₙ/∂uₙ₋₁)···(∂u₂/∂u₁)(∂u₁/∂x).
 
-## Multivariate Chain Rule: Sum Over Paths
+## Multivariate Chain Rule over Computation Graphs
 
-∂f/∂xⱼ = Σᵢ (∂f/∂gᵢ)(∂gᵢ/∂xⱼ). In matrix form: ∂z/∂x = Jf · Jg. Total derivative = sum over all paths from x to z, each contributing the product of edge derivatives.
-
-## Computation Graphs
-
-DAG where nodes are tensors and edges are operations. Forward pass caches intermediates; backward pass propagates δ (error signals) from root to leaves.
-
-## Gradients for Core Operations
-
-Linear layer z = Wx + b with upstream δ = ∂L/∂z:
-- ∂L/∂W = δ·xᵀ (outer product)
-- ∂L/∂b = δ
-- ∂L/∂x = Wᵀ·δ (gradient propagated backward with transposed weight)
-
-## ReLU Gradient
-
-∂L/∂z = ∂L/∂a · 𝟙[z > 0]. Binary mask: passes gradient through where neuron was active, kills it where it was negative. Dying ReLU problem when most neurons stuck at z ≤ 0.
-
-## Softmax + Cross-Entropy: Combined Gradient
-
-Stable log-sum-exp trick avoids overflow. Combined gradient: ∂L/∂zₖ = pₖ − 𝟙[k=y]. Derivation: ∂L/∂zₖ = pₖ − 𝟙[k=y] via chain rule through −log(p_y). Numerically stable since p_y never appears in denominator.
+In a computation graph (DAG), if a variable x influences the output L through multiple paths, the total gradient is the sum over all paths: ∂L/∂x = Σ_{paths p from x to L} product of local Jacobians along p. Backprop automates this by processing nodes in reverse topological order, accumulating gradients.
 
 ```python
-dz2 = probs.copy(); dz2[y_true] -= 1.0  # Combined softmax+CE gradient
+import numpy as np
+
+# Two-layer network: x -> z1=W1*x+b1 -> h=ReLU(z1) -> z2=W2*h+b2 -> MSE loss
+np.random.seed(42)
+n_in, n_h, n_out = 4, 8, 2
+
+W1 = np.random.randn(n_h, n_in) * 0.1
+b1 = np.zeros(n_h)
+W2 = np.random.randn(n_out, n_h) * 0.1
+b2 = np.zeros(n_out)
+
+x      = np.random.randn(n_in)
+y_true = np.array([1.0, 0.0])
+
+# --- Forward pass ---
+z1    = W1 @ x + b1                          # (n_h,)
+h     = np.maximum(0, z1)                    # ReLU (n_h,)
+z2    = W2 @ h + b2                          # (n_out,)
+y_hat = z2                                   # identity output
+loss  = 0.5 * np.sum((y_hat - y_true)**2)   # MSE
+
+# --- Backward pass (chain rule, reverse order) ---
+dL_dz2 = y_hat - y_true                           # (n_out,)
+dL_dW2 = np.outer(dL_dz2, h)                     # (n_out, n_h)
+dL_db2 = dL_dz2                                   # (n_out,)
+dL_dh  = W2.T @ dL_dz2                           # (n_h,)
+dL_dz1 = dL_dh * (z1 > 0).astype(float)         # ReLU backward
+dL_dW1 = np.outer(dL_dz1, x)                    # (n_h, n_in)
+dL_db1 = dL_dz1                                   # (n_h,)
+
+print('Loss: %.6f' % loss)
+print('dL/dW2 shape: %s  norm: %.4f' % (dL_dW2.shape, np.linalg.norm(dL_dW2)))
+print('dL/dW1 shape: %s  norm: %.4f' % (dL_dW1.shape, np.linalg.norm(dL_dW1)))
+print('dL/db2:', dL_db2.round(4))
+print('dL/db1 norm: %.4f' % np.linalg.norm(dL_db1))
 ```
+
+## Backprop Formulas for Common Layers
+
+Each layer has a local Jacobian. During backward, it receives the upstream gradient δ = ∂L/∂y and must emit ∂L/∂x = Jᵀδ and ∂L/∂W = δ·xᵀ (outer product for linear layers). The ReLU simply gates the gradient; softmax+cross-entropy has the elegant simplified gradient ŷ - y.
+
+| Layer | Forward | ∂L/∂W (param grad) | ∂L/∂x (input grad) |
+| --- | --- | --- | --- |
+| Linear y=Wx+b | y = Wx + b | δ xᵀ  (outer product) | Wᵀ δ |
+| ReLU | y = max(0,x) | N/A | δ ⊙ 1[x>0] |
+| Sigmoid σ | y = 1/(1+e^{-x}) | N/A | δ ⊙ σ(x)(1−σ(x)) |
+| Softmax+XEnt | ŷ=softmax(z), L=-log ŷ_y | N/A | ŷ − one_hot(y) |
+| BatchNorm | ŷ=(x−μ)/σ·γ+β | ∂L/∂γ=Σδ·x̂, ∂L/∂β=Σδ | Two summation terms (complex) |
+
+## Custom PyTorch Autograd Function
+
+When a layer's backward is not easily expressed through built-in ops, you implement a custom torch.autograd.Function with explicit forward and backward. This is used for numerically stable fused ops (flash attention), custom activations, or operations with closed-form gradients that are cheaper than autodiff.
+
+```python
+import torch
+
+class SquaredReLU(torch.autograd.Function):
+    # f(x) = ReLU(x)^2 with manual backward
+    @staticmethod
+    def forward(ctx, x):
+        mask = (x > 0)
+        ctx.save_for_backward(x, mask)
+        return x**2 * mask
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        x, mask = ctx.saved_tensors
+        # d/dx[ReLU(x)^2] = 2x if x>0 else 0
+        return grad_output * 2 * x * mask
+
+# Test forward and backward
+torch.manual_seed(0)
+x = torch.randn(6, requires_grad=True)
+y = SquaredReLU.apply(x)
+loss = y.sum()
+loss.backward()
+
+print('Input x:   ', x.detach().round(decimals=3).tolist())
+print('Output y:  ', y.detach().round(decimals=3).tolist())
+print('Gradient:  ', x.grad.round(decimals=3).tolist())
+
+# Numerical gradient check
+h = 1e-4
+num_grad = torch.zeros_like(x.detach())
+for i in range(len(x)):
+    xp = x.detach().clone(); xm = x.detach().clone()
+    xp[i] += h; xm[i] -= h
+    num_grad[i] = (SquaredReLU.apply(xp).sum() - SquaredReLU.apply(xm).sum()) / (2*h)
+
+print('Numerical :', num_grad.round(decimals=3).tolist())
+print('Max error :', (x.grad - num_grad).abs().max().item())
+```
+
+> **Vanishing Gradients Through Sigmoids**: Each sigmoid layer multiplies the gradient by σ'(x) = σ(x)(1−σ(x)) ≤ 0.25. Through L sigmoid layers this shrinks the gradient by up to 0.25^L — exponentially small. A 10-layer sigmoid network shrinks gradients by factor ~10^{-6}. ReLU, GELU, and residual connections largely solve this.
+
+## Gradient Flow Monitoring
+
+Diagnosing gradient issues (vanishing/exploding) requires monitoring gradient norms layer-by-layer. A healthy network shows roughly uniform gradient norms across layers. Norms decreasing toward earlier layers signal vanishing gradients; norms exploding signal instability.
+
+```python
+import torch
+import torch.nn as nn
+
+class MLP(nn.Module):
+    def __init__(self, dims, activation=nn.Sigmoid):
+        super().__init__()
+        layers = []
+        for i in range(len(dims) - 1):
+            layers.append(nn.Linear(dims[i], dims[i+1]))
+            if i < len(dims) - 2:
+                layers.append(activation())
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.net(x)
+
+torch.manual_seed(0)
+model_sig  = MLP([16, 64, 64, 64, 1], activation=nn.Sigmoid)
+model_relu = MLP([16, 64, 64, 64, 1], activation=nn.ReLU)
+
+x = torch.randn(32, 16)
+y = torch.zeros(32, 1)
+
+for name, model in [('Sigmoid', model_sig), ('ReLU', model_relu)]:
+    loss = nn.MSELoss()(model(x), y)
+    loss.backward()
+    print('Gradient norms per Linear layer (%s):' % name)
+    linear_idx = 0
+    for layer in model.net:
+        if isinstance(layer, nn.Linear) and layer.weight.grad is not None:
+            gnorm = layer.weight.grad.norm().item()
+            print('  Layer %d: %.2e' % (linear_idx, gnorm))
+            linear_idx += 1
+    model.zero_grad()
+    print('')
+```
+
+## Numerical Gradient Check
+
+Gradient checking verifies that an analytical gradient (from autograd or manual backward) matches the numerical estimate. The numerical gradient uses central differences: ∂L/∂θᵢ ≈ [L(θ + hêᵢ) - L(θ - hêᵢ)] / 2h. A max relative error below 1e-5 indicates a correct implementation.
+
+```python
+import torch
+import torch.nn as nn
+
+def numerical_gradient(model, loss_fn, x, y, h=1e-4):
+    # Compute numerical gradient w.r.t. all model parameters
+    grads = {}
+    for name, param in model.named_parameters():
+        grad = torch.zeros_like(param)
+        flat = param.data.view(-1)
+        for i in range(len(flat)):
+            flat[i] += h
+            lp = loss_fn(model(x), y).item()
+            flat[i] -= 2 * h
+            lm = loss_fn(model(x), y).item()
+            flat[i] += h   # restore
+            grad.view(-1)[i] = (lp - lm) / (2 * h)
+        grads[name] = grad
+    return grads
+
+torch.manual_seed(7)
+model   = nn.Linear(3, 2)
+loss_fn = nn.MSELoss()
+x = torch.randn(4, 3)
+y = torch.randn(4, 2)
+
+# Analytical gradient
+pred = model(x)
+loss = loss_fn(pred, y)
+loss.backward()
+analytical = {n: p.grad.clone() for n, p in model.named_parameters()}
+
+# Numerical gradient
+num_grads = numerical_gradient(model, loss_fn, x, y)
+
+print('Gradient check (analytical vs numerical):')
+for name in analytical:
+    err = (analytical[name] - num_grads[name]).abs().max().item()
+    status = 'PASS' if err < 1e-5 else 'FAIL'
+    print('  %-20s max error = %.2e  [%s]' % (name, err, status))
+```
+
+> **When to Run Gradient Checks**: Always run gradient checks when implementing a custom backward. Use h=1e-4 for float32. Skip inputs near kinks (ReLU boundary) where the numerical estimate is unreliable. PyTorch's torch.autograd.gradcheck automates this with relative+absolute error thresholds.
 
 ## Vanishing and Exploding Gradients
 
-For an L-layer RNN: ∂L/∂h₀ = (∏ₜ Wᵀ·diag(σ'(hₜ))) · ∂L/∂hL. If spectral radius ρ < 1 → vanishing; ρ > 1 → exploding. Solutions: ReLU, residual connections (gradient highway), gradient clipping, careful initialisation.
+Vanishing gradients arise when repeated multiplication by values < 1 shrinks the gradient exponentially (sigmoid, tanh in deep networks). Exploding gradients arise when repeated multiplication by values > 1 grows the gradient exponentially (RNNs with large weights). Standard remedies are well-established.
 
-> **Residual gradient highway:** xₗ₊₁ = xₗ + F(xₗ) → ∂L/∂xₗ = ∂L/∂xₗ₊₁ · (I + ∂F/∂xₗ). The identity term guarantees gradient flow regardless of ∂F/∂xₗ.
+- Use ReLU/GELU activations — gradient is either 0 or 1 (no saturation)
+- Residual connections (He et al. 2016) provide gradient highways: ∂L/∂xₗ = ∂L/∂xₗ₊₁ + local term
+- Gradient clipping: if ‖g‖ > threshold, scale g → g · threshold/‖g‖
+- Proper weight initialization (He, Xavier) sets initial gradient scale appropriately
+- Layer/batch normalization stabilizes activations and gradient magnitudes
+- LSTM gating mechanisms control gradient flow through time in RNNs
+
+---
+
+Backprop is not magic — it is the chain rule executed in reverse topological order on a computation graph. Every 'training trick' ultimately traces back to managing gradient magnitudes and directions through this graph.
+

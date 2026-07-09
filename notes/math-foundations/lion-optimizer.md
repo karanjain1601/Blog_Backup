@@ -1,45 +1,217 @@
----
-title: "Lion Optimizer"
+﻿---
+title: "Lion Optimizer — Sign-Based Updates"
 slug: "lion-optimizer"
-description: "Sign-based momentum optimizer discovered via evolutionary search: update rule, sign mechanics, 33% memory savings vs Adam, lower LR requirement, and empirical results vs AdamW."
+description: "Explains the Lion optimizer's sign-based update rule, memory advantages over Adam, trust-region interpretation of sign(), hyperparameter tuning, and comparison with AdamW for LLM pretraining."
 tags: ["calculus", "optimization", "math", "foundations"]
 topic: "math-foundations"
 status: "published"
 updated: "2026-07-10"
-blocks_json: "W3sidHlwZSI6InRleHQiLCJjb250ZW50IjoiTGlvbiAoRXZvTHZlZCBTaWduIE1vbWVudHVtLCBDaGVuIGV0IGFsLiAyMDIzKSBpcyBhbiBvcHRpbWl6ZXIgZGlzY292ZXJlZCB0aHJvdWdoIGV2b2x1dGlvbmFyeSBzZWFyY2ggb24gYSBwcm94eSB0YXNrIOKAlCBub3QgZGVyaXZlZCBmcm9tIG1hdGhlbWF0aWNhbCBmaXJzdCBwcmluY2lwbGVzLiBEZXNwaXRlIGl0cyB1bmNvbnZlbnRpb25hbCBvcmlnaW4sIExpb24gaGFzIGEgY2xlYW4gdXBkYXRlIHJ1bGUgYmFzZWQgb24gdGhlIHNpZ24gb2YgYSBtb21lbnR1bSBpbnRlcnBvbGF0aW9uLCB1c2VzIG9ubHkgaGFsZiB0aGUgbWVtb3J5IG9mIEFkYW0sIGFuZCBhY2hpZXZlcyBjb21wZXRpdGl2ZSBvciBzdXBlcmlvciByZXN1bHRzIG9uIGltYWdlIGNsYXNzaWZpY2F0aW9uLCBsYW5ndWFnZSBtb2RlbGxpbmcsIGFuZCBkaWZmdXNpb24gbW9kZWxzLiBVbmRlcnN0YW5kaW5nIExpb24gaWxsdW1pbmF0ZXMgd2hhdCBwcm9wZXJ0aWVzIG9mIEFkYW0gYXJlIGFjdHVhbGx5IGVzc2VudGlhbCB2cy4gaW5jaWRlbnRhbC4ifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJUaGUgU2lnbi1CYXNlZCBVcGRhdGUgUnVsZSJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiTGlvbiB1cGRhdGUgcnVsZSBhdCBzdGVwIHQ6XG4oMSkgQ29tcHV0ZSB1cGRhdGUgZGlyZWN0aW9uOiBj4oKcID0gzrLigoHCt23igpzigovigoEgKyAoMeKIks6y4oKBKcK3Z+KCnCAoaW50ZXJwb2xhdGUgYmV0d2VlbiBjdXJyZW50IG1vbWVudHVtIGFuZCBncmFkaWVudClcbigyKSBQYXJhbWV0ZXIgdXBkYXRlOiDOuCDihpAgzrgg4oiSIGxywrcoc2lnbihj4oKcKSArIM67zrgpIFtzaWduIHVwZGF0ZSArIHdlaWdodCBkZWNheV1cbigzKSBVcGRhdGUgbW9tZW50dW06IG3igpwgPSDOsuKCgsK3beKCnOKCi+KCgSArICgx4oiSzrLigoIpwrdn4oKcIFtFTUEgbW9tZW50dW0gZm9yIG5leHQgc3RlcF1cbktleTogb25seSB0aGUgc2lnbiBvZiBj4oKcIGlzIHVzZWQg4oCUIG5vdCBpdHMgbWFnbml0dWRlLiBFdmVyeSBwYXJhbWV0ZXIgZ2V0cyB1cGRhdGVkIGJ5IGV4YWN0bHkgwrFsciBwZXIgc3RlcCAocGx1cyB3ZWlnaHQgZGVjYXkpLiBUaGlzIGlzIGZ1bmRhbWVudGFsbHkgZGlmZmVyZW50IGZyb20gQWRhbSB3aGVyZSB0aGUgc3RlcCBzaXplIHZhcmllcyBieSBwYXJhbWV0ZXIgYmFzZWQgb24gZ3JhZGllbnQgaGlzdG9yeS4ifSx7InR5cGUiOiJjb2RlIiwibGFuZ3VhZ2UiOiJweXRob24iLCJjb250ZW50IjoiaW1wb3J0IHRvcmNoXG5cbmNsYXNzIExpb24odG9yY2gub3B0aW0uT3B0aW1pemVyKTpcbiAgICBkZWYgX19pbml0X18oc2VsZiwgcGFyYW1zLCBscj0xZS00LCBiZXRhcz0oMC45LCAwLjk5KSwgd2VpZ2h0X2RlY2F5PTAuMCk6XG4gICAgICAgIGRlZmF1bHRzID0gZGljdChscj1sciwgYmV0YXM9YmV0YXMsIHdlaWdodF9kZWNheT13ZWlnaHRfZGVjYXkpXG4gICAgICAgIHN1cGVyKCkuX19pbml0X18ocGFyYW1zLCBkZWZhdWx0cylcblxuICAgIEB0b3JjaC5ub19ncmFkKClcbiAgICBkZWYgc3RlcChzZWxmKTpcbiAgICAgICAgZm9yIGdyb3VwIGluIHNlbGYucGFyYW1fZ3JvdXBzOlxuICAgICAgICAgICAgbHIgPSBncm91cFsnbHInXVxuICAgICAgICAgICAgYjEsIGIyID0gZ3JvdXBbJ2JldGFzJ11cbiAgICAgICAgICAgIHdkID0gZ3JvdXBbJ3dlaWdodF9kZWNheSddXG4gICAgICAgICAgICBmb3IgcCBpbiBncm91cFsncGFyYW1zJ106XG4gICAgICAgICAgICAgICAgaWYgcC5ncmFkIGlzIE5vbmU6XG4gICAgICAgICAgICAgICAgICAgIGNvbnRpbnVlXG4gICAgICAgICAgICAgICAgZyA9IHAuZ3JhZFxuICAgICAgICAgICAgICAgIHN0YXRlID0gc2VsZi5zdGF0ZVtwXVxuICAgICAgICAgICAgICAgIGlmICdtJyBub3QgaW4gc3RhdGU6XG4gICAgICAgICAgICAgICAgICAgIHN0YXRlWydtJ10gPSB0b3JjaC56ZXJvc19saWtlKHApXG4gICAgICAgICAgICAgICAgbSA9IHN0YXRlWydtJ11cbiAgICAgICAgICAgICAgICAjIEludGVycG9sYXRlIGJldHdlZW4gbW9tZW50dW0gYW5kIGdyYWRpZW50XG4gICAgICAgICAgICAgICAgYyA9IGIxICogbSArICgxIC0gYjEpICogZ1xuICAgICAgICAgICAgICAgICMgVXBkYXRlOiBzaWduKGMpICsgd2VpZ2h0IGRlY2F5XG4gICAgICAgICAgICAgICAgcC5tdWxfKDEgLSBsciAqIHdkKS5hZGRfKGMuc2lnbigpLCBhbHBoYT0tbHIpXG4gICAgICAgICAgICAgICAgIyBVcGRhdGUgbW9tZW50dW0gKGRpZmZlcmVudCBiZXRhIGZyb20gYyBjb21wdXRhdGlvbilcbiAgICAgICAgICAgICAgICBtLm11bF8oYjIpLmFkZF8oZywgYWxwaGE9MSAtIGIyKSJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IldoeSBTaWduIFVwZGF0ZXMgV29yazogRml4ZWQgTWFnbml0dWRlIGFzIEVmZmVjdGl2ZSBSZWd1bGFyaXNhdGlvbiJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiU2lnbi1iYXNlZCBncmFkaWVudCBkZXNjZW50IGhhcyBhIGxvbmcgaGlzdG9yeSAoUnByb3AsIDE5OTMpLiBUaGUgc2lnbiB1cGRhdGUgwrFsciBoYXMgY29uc3RhbnQgbWFnbml0dWRlIHBlciBzdGVwIOKAlCBpdCBkb2VzIG5vdCBzY2FsZSBkb3duIGZvciBsYXJnZSBncmFkaWVudHMgb3Igc2NhbGUgdXAgZm9yIHNtYWxsIG9uZXMuIFRoaXMgaGFzIHNldmVyYWwgZWZmZWN0czogKDEpIEVmZmVjdGl2ZSBiYXRjaCBzaXplIGFtcGxpZmljYXRpb246IHNpZ24obWVhbiBncmFkaWVudCBvdmVyIEIgc2FtcGxlcykgb2Z0ZW4gZXF1YWxzIHNpZ24oZ3JhZGllbnQgb24gYSBzaW5nbGUgc2FtcGxlKSwgc28gTGlvbiBiZWhhdmVzIGFzIGlmIGl0IGhhcyBhIG11Y2ggbGFyZ2VyIGVmZmVjdGl2ZSBiYXRjaCBzaXplIChtb3JlIGNvbnNpc3RlbnQgZ3JhZGllbnQgZGlyZWN0aW9uKS4gKDIpIFJvYnVzdG5lc3MgdG8gZ3JhZGllbnQgc2NhbGU6IExpb24gaXMgaW52YXJpYW50IHRvIHJlLXNjYWxpbmcgdGhlIGxvc3MgKG11bHRpcGx5IEwgYnkgYyDihpIgZ3JhZGllbnRzIHNjYWxlIGJ5IGMg4oaSIHNpZ24gdW5jaGFuZ2VkKS4gKDMpIE5vIG5lZWQgZm9yIHNlY29uZCBtb21lbnQ6IHNpZ24gcmVtb3ZlcyB0aGUgbmVlZCB0byB0cmFjayBncmFkaWVudCB2YXJpYW5jZSDigJQgc2F2aW5nIG1lbW9yeS4ifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJNZW1vcnkgQWR2YW50YWdlOiBPbmUgTW9tZW50dW0gQnVmZmVyIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJBZGFtIG1haW50YWlucyB0d28gc3RhdGUgdGVuc29ycyBwZXIgcGFyYW1ldGVyOiBtIChmaXJzdCBtb21lbnQpIGFuZCB2IChzZWNvbmQgbW9tZW50KS4gTGlvbiBtYWludGFpbnMgb25seSBvbmU6IG0uIEZvciBhIDdCIHBhcmFtZXRlciBtb2RlbCBpbiBmbG9hdDMyOiBBZGFtIG9wdGltaXplciBzdGF0ZXMgPSAyIMOXIDI4R0IgPSA1NkdCOyBMaW9uIG9wdGltaXplciBzdGF0ZXMgPSAyOEdCLiBUaGlzIDMzJSByZWR1Y3Rpb24gaW4gb3B0aW1pemVyIHN0YXRlIG1lbW9yeSBhbGxvd3MgdHJhaW5pbmcgbGFyZ2VyIG1vZGVscyBvbiB0aGUgc2FtZSBoYXJkd2FyZSwgb3IgZml0cyBtb3JlIGRhdGEgcGFyYWxsZWxpc20gd2l0aGluIGEgZml4ZWQgbWVtb3J5IGJ1ZGdldC4gSW4gcHJhY3RpY2UsIHRoaXMgbWVtb3J5IHNhdmluZyBpcyBzaWduaWZpY2FudCBhdCA3MEIrIHBhcmFtZXRlciBzY2FsZSDigJQgdGhlIGRpZmZlcmVuY2UgYmV0d2VlbiBmaXR0aW5nIG9uIDggdnMuIDE2IEgxMDBzIGZvciBaZVJPLTEgdHJhaW5pbmcuIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiTG93ZXIgTGVhcm5pbmcgUmF0ZSBSZXF1aXJlbWVudCJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiTGlvbiByZXF1aXJlcyBhIDMtMTDDlyBsb3dlciBsZWFybmluZyByYXRlIHRoYW4gQWRhbSBmb3IgZXF1aXZhbGVudCB0cmFpbmluZyBkeW5hbWljcy4gSW50dWl0aW9uOiBBZGFtJ3MgZWZmZWN0aXZlIHN0ZXAgc2l6ZSBpcyDOt8K3bcyCLyjiiJp2zIIrzrUpIOKJpCDOtyAoYm91bmRlZCkuIExpb24ncyBzdGVwIHNpemUgcGVyIHBhcmFtZXRlciBpcyBleGFjdGx5IGxyIChpZ25vcmluZyB3ZWlnaHQgZGVjYXkpLiBGb3IgdGhlIHNhbWUgaW50ZW5kZWQgZ3JhZGllbnQgc3RlcDogaWYgQWRhbSB0eXBpY2FsbHkgYWNoaWV2ZXMgzrfCt23Mgi/iiJp2zIIg4omIIDAuMcK3zrcgKGJlY2F1c2Ug4oiadsyCIGlzIH4xMMOXIGxhcmdlciB0aGFuIG3MgiBpbiB0eXBpY2FsIG5ldHdvcmtzKSwgdGhlbiBMaW9uIGF0IGxyID0gMC4xwrfOt19BZGFtIGFjaGlldmVzIHRoZSBzYW1lIGVmZmVjdGl2ZSBtb3ZlbWVudC4gSWYgeW91IG5haXZlbHkgdXNlIEFkYW0ncyBsciB3aXRoIExpb24sIHN0ZXBzIHdpbGwgYmUgfjEww5cgdG9vIGxhcmdlIGFuZCB0cmFpbmluZyB3aWxsIGRpdmVyZ2Ugb3Igb3ZlcnNob290IHNldmVyZWx5LiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IkRpc2NvdmVyZWQgdmlhIEV2b2x1dGlvbmFyeSBTZWFyY2gifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6Ikxpb24gd2FzIG5vdCBkZXJpdmVkIGZyb20gbWF0aGVtYXRpY2FsIG9wdGltaXNhdGlvbiB0aGVvcnkuIENoZW4gZXQgYWwuICgyMDIzKSB1c2VkIGEgcHJvZ3JhbSBzZWFyY2ggb3ZlciBhIHNwYWNlIG9mIG9wdGltaXplciB1cGRhdGUgcnVsZXMgb24gYSBzbWFsbCBwcm94eSB0YXNrIChDSUZBUi0xMCB0cmFpbmluZyksIGV2YWx1YXRlZCBjYW5kaWRhdGUgcnVsZXMgYnkgdGhlaXIgZmluYWwgdHJhaW5pbmcgbG9zcywgYW5kIGV2b2x2ZWQgdGhlIHBvcHVsYXRpb24gdXNpbmcgdG91cm5hbWVudCBzZWxlY3Rpb24gKyBtdXRhdGlvbi4gVGhlIGRpc2NvdmVyZWQgcnVsZSBnZW5lcmFsaXNlZCBmcm9tIENJRkFSLTEwIHRvIEltYWdlTmV0LCBsYW5ndWFnZSBtb2RlbGxpbmcsIGFuZCBkaWZmdXNpb24gbW9kZWxzIOKAlCBhIHJlbWFya2FibGUgZ2VuZXJhbGlzYXRpb24uIFRoZSB0d28gzrIgcGFyYW1ldGVycyBpbiBMaW9uIGRpZmZlcjogzrLigoEgKDAuOSkgY29udHJvbHMgdGhlIGludGVycG9sYXRpb24gZm9yIHRoZSBjdXJyZW50IHVwZGF0ZSBkaXJlY3Rpb24gYzsgzrLigoIgKDAuOTkpIGNvbnRyb2xzIHRoZSBtb21lbnR1bSBidWZmZXIgbS4gVGhpcyBhc3ltbWV0cnkgaXMgdW51c3VhbCBhbmQgaGFzIG5vIG9idmlvdXMgY2xvc2VkLWZvcm0ganVzdGlmaWNhdGlvbi4ifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJFbXBpcmljYWwgUmVzdWx0cyB2cy4gQWRhbSJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiQ2hlbiBldCBhbC4gKDIwMjMpIHJlcG9ydGVkOiAoMSkgVmlzaW9uIHRyYW5zZm9ybWVyczogVmlULUIvMTYgb24gSW1hZ2VOZXQsIExpb24gYWNoaWV2ZXMgKzAuNiUgdG9wLTEgYWNjdXJhY3kgdnMuIEFkYW1XLiAoMikgQ0xJUCB0cmFpbmluZzogTGlvbiBzYXZlcyA1w5cgY29tcHV0ZSBmb3IgZXF1aXZhbGVudCBhY2N1cmFjeS4gKDMpIExhbmd1YWdlIG1vZGVsbGluZzogQzQgcGVycGxleGl0eSBjb21wYXJhYmxlIHRvIEFkYW1XIGF0IGVxdWl2YWxlbnQgc3RlcHMsIHdpdGggbG93ZXIgbWVtb3J5LiAoNCkgRGlmZnVzaW9uIG1vZGVsczogTGlvbiBnZW5lcmF0ZXMgYmV0dGVyIEZJRCBzY29yZXMuIFN1YnNlcXVlbnQgd29yayBoYXMgZm91bmQgTGlvbiB0byBiZSBtb3JlIHNlbnNpdGl2ZSB0byBsZWFybmluZyByYXRlIHNlbGVjdGlvbiBhbmQgd2VpZ2h0IGRlY2F5IHR1bmluZyB0aGFuIEFkYW0g4oCUIHRoZSBuYXJyb3dlciBoeXBlcnBhcmFtZXRlciBzd2VldCBzcG90IHBhcnRpYWxseSBvZmZzZXRzIHRoZSBtZW1vcnkgYW5kIHNwZWVkIGFkdmFudGFnZXMuIEZvciBlc3RhYmxpc2hlZCB0cmFpbmluZyByZWNpcGVzIChMTGFNQSwgR1BULTQpLCBBZGFtVyByZW1haW5zIHRoZSBkZWZhdWx0OyBMaW9uIGlzIGFjdGl2ZWx5IGV4cGxvcmVkIGZvciBuZXcgdHJhaW5pbmcgc2V0dXBzLiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IldlaWdodCBEZWNheSBpbiBMaW9uOiBEZWNvdXBsZWQgYnkgRGVzaWduIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJUaGUgTGlvbiB1cGRhdGUgzrgg4oaQIM64IOKIkiBscsK3c2lnbihj4oKcKSDiiJIgbHLCt867zrggc2VwYXJhdGVzIHRoZSBncmFkaWVudC1iYXNlZCB1cGRhdGUgKOKIkmxywrdzaWduKGPigpwpKSBmcm9tIHdlaWdodCBkZWNheSAo4oiSbHLCt867zrgpLiBUaGlzIGlzIGluaGVyZW50bHkgZGVjb3VwbGVkIOKAlCBlcXVpdmFsZW50IHRvIEFkYW1XJ3MgZGVjb3VwbGVkIHdlaWdodCBkZWNheSwgbm90IEFkYW0ncyBMMiByZWd1bGFyaXNhdGlvbi4gVGhpcyBpcyBpbnRlbnRpb25hbDogdGhlIGV2b2x1dGlvbmFyeSBzZWFyY2ggd2FzIHJ1biB3aXRoIGEgd2VpZ2h0IGRlY2F5IGxvc3MgcGVuYWx0eSwgc28gdGhlIGRpc2NvdmVyZWQgcnVsZSBpbmNvcnBvcmF0ZXMgcHJvcGVyIHdlaWdodCBkZWNheS4gVHlwaWNhbCBzZXR0aW5nczogbHIgPSAxZS00ICgzLTEww5cgbG93ZXIgdGhhbiBBZGFtVydzIDNlLTQpLCDOsuKCgSA9IDAuOSwgzrLigoIgPSAwLjk5LCB3ZWlnaHRfZGVjYXkgPSAwLjEuIEV4Y2x1ZGUgYmlhc2VzIGFuZCBub3JtYWxpc2F0aW9uIHBhcmFtZXRlcnMgZnJvbSB3ZWlnaHQgZGVjYXksIHNhbWUgYXMgQWRhbVcuIn0seyJ0eXBlIjoiY2FsbG91dCIsInZhcmlhbnQiOiJpbmZvIiwidGl0bGUiOiJTeW1ib2xpYyBQcm9wZXJ0aWVzIG9mIExpb24iLCJjb250ZW50IjoiTGlvbiBoYXMgYW4gZWxlZ2FudCBpbnRlcnByZXRhdGlvbjogYXQgZWFjaCBzdGVwLCB0aGUgdXBkYXRlIGRpcmVjdGlvbiBpcyBzaWduKM6y4oKBwrdtICsgKDHiiJLOsuKCgSnCt2cpIOKAlCB0aGUgc2lnbiBvZiBhIGNvbnZleCBjb21iaW5hdGlvbiBiZXR3ZWVuIHRoZSBjdXJyZW50IG1vbWVudHVtIGFuZCB0aGUgY3VycmVudCBncmFkaWVudC4gV2hlbiB0aGUgZ3JhZGllbnQgYW5kIG1vbWVudHVtIGFncmVlIChzYW1lIHNpZ24pLCBMaW9uIHN0ZXBzIGNvbmZpZGVudGx5LiBXaGVuIHRoZXkgZGlzYWdyZWUgKGdyYWRpZW50IGhhcyBmbGlwcGVkKSwgdGhlIGludGVycG9sYXRpb24gbW9kZXJhdGVzIHRoZSBkaXJlY3Rpb24gYmFzZWQgb24gdGhlIGludGVycG9sYXRpb24gd2VpZ2h0ICgx4oiSzrLigoEpLiBUaGlzIGdpdmVzIExpb24gYSBuYXR1cmFsICdncmFkaWVudCBhZ3JlZW1lbnQnIGRldGVjdGlvbiBtZWNoYW5pc20uIENvbXBhcmUgdG8gTmVzdGVyb3YgbW9tZW50dW0sIHdoaWNoIGNvcnJlY3RzIGZvciBvdmVyc2hvb3QgYnkgZXZhbHVhdGluZyB0aGUgZ3JhZGllbnQgYXQgdGhlIGxvb2thaGVhZCBwb3NpdGlvbiDigJQgYm90aCBhcmUgbWVjaGFuaXNtcyBmb3IgZGV0ZWN0aW5nIGFuZCByZXNwb25kaW5nIHRvIGdyYWRpZW50IGRpcmVjdGlvbiBjaGFuZ2VzLiJ9LHsidHlwZSI6ImNhbGxvdXQiLCJ2YXJpYW50Ijoid2FybmluZyIsInRpdGxlIjoiTGlvbiBJcyBTZW5zaXRpdmUgdG8gSHlwZXJwYXJhbWV0ZXJzIiwiY29udGVudCI6Ikxpb24ncyBzaWduLWJhc2VkIHVwZGF0ZSBpcyBhbGwtb3Itbm90aGluZzogdGhlcmUgaXMgbm8gYWRhcHRpdmUgc2NhbGluZyB0byBjb21wZW5zYXRlIGZvciBhIGJhZCBsciBjaG9pY2UuIElmIGxyIGlzIDLDlyB0b28gbGFyZ2UsIGV2ZXJ5IHBhcmFtZXRlciBzdGVwIGlzIDLDlyB0b28gbGFyZ2Ug4oCUIG5vIGFkYXB0aXZlIGRhbXBpbmcgc2F2ZXMgeW91LiBBZGFtIHdpdGggdG9vLWxhcmdlIGxyOiBsYXJnZSBncmFkaWVudHMgZ2V0IGRhbXBlbmVkIGJ5IOKImnbMgjsgTGlvbiB3aXRoIHRvby1sYXJnZSBscjogYWxsIHBhcmFtZXRlcnMgc3RlcCB0b28gZmFyLiBJbiBwcmFjdGljZTogc3RhcnQgd2l0aCBsciA9IEFkYW1fbHIgLyA1IGFuZCB0dW5lIGZyb20gdGhlcmUuIEFsc286IExpb24ncyB3ZWlnaHQgZGVjYXkgaW50ZXJhY3RzIG1vcmUgZGlyZWN0bHkgd2l0aCB0aGUgdXBkYXRlIChzaW5jZSBzaWduKGPigpwpIGhhcyBmaXhlZCBtYWduaXR1ZGUsIHRoZSB3ZWlnaHQgZGVjYXkgdGVybSDiiJJscsK3zrvOuCBpcyBhIGxhcmdlciBmcmFjdGlvbiBvZiB0aGUgdG90YWwgdXBkYXRlIHRoYW4gaW4gQWRhbSkuIFR5cGljYWwgTGlvbiB3ZWlnaHRfZGVjYXkgPSAxZS00IHRvIDFlLTMgKHNtYWxsZXIgdGhhbiBBZGFtVydzIDAuMDEtMC4xKS4ifV0="
+blocks_json: "W3sidHlwZSI6InRleHQiLCJjb250ZW50IjoiTGlvbiAoRXZvTHZlZCBTaWduIE1vbWVudHVtLCBDaGVuIGV0IGFsLiAyMDIzKSB3YXMgZGlzY292ZXJlZCBieSBldm9sdXRpb25hcnkgc2VhcmNoIG92ZXIgb3B0aW1pemVyIHByb2dyYW0gc3BhY2Ug4oCUIG5vdCBkZXJpdmVkIGZyb20gZmlyc3QgcHJpbmNpcGxlcy4gSXRzIGtleSBpbm5vdmF0aW9uczogYSBzaW5nbGUgbW9tZW50dW0gYnVmZmVyICh2cyBBZGFtXHUwMDI3cyB0d28pLCBzaWduLWJhc2VkIHVwZGF0ZXMgdGhhdCBib3VuZCBzdGVwIG1hZ25pdHVkZSwgYW5kIGEgZGVjb3VwbGVkIHdlaWdodCBkZWNheS4gRW1waXJpY2FsbHkgbWF0Y2hlcyBvciBiZWF0cyBBZGFtVyBmb3IgbGFyZ2UgbGFuZ3VhZ2UgbW9kZWwgcHJldHJhaW5pbmcgd2hpbGUgdXNpbmcgbGVzcyBtZW1vcnkuIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiSG93IExpb24gV2FzIERpc2NvdmVyZWQifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6Ikxpb24gZW1lcmdlZCBmcm9tIHByb2dyYW0gc2VhcmNoOiBkZWZpbmUgYSBzbWFsbCBEU0wgb2Ygb3B0aW1pemVyIG9wZXJhdGlvbnMgKGludGVycG9sYXRpb24sIHNpZ24sIGNsaXAsIG1vbWVudHVtIHVwZGF0ZSksIHRoZW4gdXNlIGFuIGV2b2x1dGlvbmFyeSBhbGdvcml0aG0gdG8gc2VhcmNoIGZvciBwcm9ncmFtcyB0aGF0IG1pbmltaXplIHZhbGlkYXRpb24gbG9zcyBvbiBoZWxkLW91dCB0YXNrcy4gVGhlIHdpbm5pbmcgcHJvZ3JhbSB3YXMgc3VycHJpc2luZ2x5IHNpbXBsZSDigJQgc2ltcGxlciB0aGFuIEFkYW0g4oCUIGFuZCBnZW5lcmFsaXplZCBhY3Jvc3MgaW1hZ2UgYW5kIGxhbmd1YWdlIHRhc2tzLiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IlRoZSBMaW9uIFVwZGF0ZSBSdWxlIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJHaXZlbiBjdXJyZW50IGdyYWRpZW50IGcgYW5kIG1vbWVudHVtIGJ1ZmZlciBtLCBMaW9uIGNvbXB1dGVzOiAoMSkgaW50ZXJwb2xhdGVkIGRpcmVjdGlvbiBjID0gzrLigoHCt20gKyAoMeKIks6y4oKBKcK3ZywgKDIpIHVwZGF0ZSDOuCDihpAgzrgg4oiSIGxywrdzaWduKGMpIOKIkiBscsK3zrvCt864ICh3ZWlnaHQgZGVjYXkgYXBwbGllZCBkaXJlY3RseSB0byDOuCksICgzKSB1cGRhdGUgbW9tZW50dW0gbSDihpAgzrLigoLCt20gKyAoMeKIks6y4oKCKcK3Zy4gTm90ZTogbW9tZW50dW0gaXMgdXBkYXRlZCBBRlRFUiB0aGUgc3RlcCwgbm90IGJlZm9yZS4gVHlwaWNhbCB2YWx1ZXM6IM6y4oKBPTAuOSwgzrLigoI9MC45OSwgbHIg4omIIDFlLTQgKDMtMTDDlyBsb3dlciB0aGFuIEFkYW1XKS4ifSx7InR5cGUiOiJjb2RlIiwibGFuZ3VhZ2UiOiJweXRob24iLCJjb250ZW50IjoiaW1wb3J0IHRvcmNoXG5cbmNsYXNzIExpb24odG9yY2gub3B0aW0uT3B0aW1pemVyKTpcbiAgICAjIExpb246IEV2b0x2ZWQgU2lnbiBNb21lbnR1bSAoQ2hlbiBldCBhbC4gMjAyMylcbiAgICAjIGFyeGl2Lm9yZy9hYnMvMjMwMi4wNjY3NVxuICAgIGRlZiBfX2luaXRfXyhzZWxmLCBwYXJhbXMsIGxyPTFlLTQsIGJldGFzPSgwLjksIDAuOTkpLCB3ZWlnaHRfZGVjYXk9MC4wKTpcbiAgICAgICAgZGVmYXVsdHMgPSBkaWN0KGxyPWxyLCBiZXRhcz1iZXRhcywgd2VpZ2h0X2RlY2F5PXdlaWdodF9kZWNheSlcbiAgICAgICAgc3VwZXIoKS5fX2luaXRfXyhwYXJhbXMsIGRlZmF1bHRzKVxuXG4gICAgQHRvcmNoLm5vX2dyYWQoKVxuICAgIGRlZiBzdGVwKHNlbGYsIGNsb3N1cmU9Tm9uZSk6XG4gICAgICAgIGxvc3MgPSBOb25lXG4gICAgICAgIGlmIGNsb3N1cmUgaXMgbm90IE5vbmU6XG4gICAgICAgICAgICB3aXRoIHRvcmNoLmVuYWJsZV9ncmFkKCk6XG4gICAgICAgICAgICAgICAgbG9zcyA9IGNsb3N1cmUoKVxuXG4gICAgICAgIGZvciBncm91cCBpbiBzZWxmLnBhcmFtX2dyb3VwczpcbiAgICAgICAgICAgIGxyID0gZ3JvdXBbXHUwMDI3bHJcdTAwMjddXG4gICAgICAgICAgICBiMSwgYjIgPSBncm91cFtcdTAwMjdiZXRhc1x1MDAyN11cbiAgICAgICAgICAgIHdkID0gZ3JvdXBbXHUwMDI3d2VpZ2h0X2RlY2F5XHUwMDI3XVxuXG4gICAgICAgICAgICBmb3IgcCBpbiBncm91cFtcdTAwMjdwYXJhbXNcdTAwMjddOlxuICAgICAgICAgICAgICAgIGlmIHAuZ3JhZCBpcyBOb25lOlxuICAgICAgICAgICAgICAgICAgICBjb250aW51ZVxuICAgICAgICAgICAgICAgIGcgPSBwLmdyYWRcbiAgICAgICAgICAgICAgICBzdGF0ZSA9IHNlbGYuc3RhdGVbcF1cblxuICAgICAgICAgICAgICAgIGlmIGxlbihzdGF0ZSkgPT0gMDpcbiAgICAgICAgICAgICAgICAgICAgc3RhdGVbXHUwMDI3bVx1MDAyN10gPSB0b3JjaC56ZXJvc19saWtlKHApICAjIHNpbmdsZSBidWZmZXJcblxuICAgICAgICAgICAgICAgIG0gPSBzdGF0ZVtcdTAwMjdtXHUwMDI3XVxuICAgICAgICAgICAgICAgICMgYyA9IGIxKm0gKyAoMS1iMSkqZyAgKGludGVycG9sYXRlIGJldHdlZW4gbW9tZW50dW0gYW5kIGdyYWRpZW50KVxuICAgICAgICAgICAgICAgIGMgPSBiMSAqIG0gKyAoMS4wIC0gYjEpICogZ1xuICAgICAgICAgICAgICAgICMgV2VpZ2h0IGRlY2F5OiB0aGV0YSBcdTAwM2MtIHRoZXRhICogKDEgLSBscip3ZClcbiAgICAgICAgICAgICAgICBpZiB3ZCAhPSAwOlxuICAgICAgICAgICAgICAgICAgICBwLmRhdGEubXVsXygxLjAgLSBsciAqIHdkKVxuICAgICAgICAgICAgICAgICMgU2lnbiB1cGRhdGU6IHRoZXRhIFx1MDAzYy0gdGhldGEgLSBsciAqIHNpZ24oYylcbiAgICAgICAgICAgICAgICBwLmRhdGEuYWRkXyh0b3JjaC5zaWduKGMpLCBhbHBoYT0tbHIpXG4gICAgICAgICAgICAgICAgIyBVcGRhdGUgbW9tZW50dW0gYnVmZmVyIEFGVEVSIHRoZSBzdGVwXG4gICAgICAgICAgICAgICAgbS5tdWxfKGIyKS5hZGRfKGcsIGFscGhhPTEuMCAtIGIyKVxuXG4gICAgICAgIHJldHVybiBsb3NzIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiTWVtb3J5IEVmZmljaWVuY3kgdnMgQWRhbSBhbmQgQWRhbVcifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkFkYW0gc3RvcmVzIHR3byBzdGF0ZSBidWZmZXJzIHBlciBwYXJhbWV0ZXI6IGZpcnN0IG1vbWVudCBtIChtb21lbnR1bSkgYW5kIHNlY29uZCBtb21lbnQgdiAodW5jZW50ZXJlZCB2YXJpYW5jZSkuIExpb24gc3RvcmVzIG9ubHkgT05FIGJ1ZmZlciAobW9tZW50dW0pLiBGb3IgYSA3QiBwYXJhbWV0ZXIgbW9kZWwgaW4gZmxvYXQzMiwgdGhpcyBzYXZlcyBhcHByb3hpbWF0ZWx5IDI4IEdCIG9mIG9wdGltaXplciBzdGF0ZSDigJQgYSBzaWduaWZpY2FudCByZWR1Y3Rpb24gZm9yIEdQVS1tZW1vcnktY29uc3RyYWluZWQgdHJhaW5pbmcgcnVucy4ifSx7InR5cGUiOiJjb2RlIiwibGFuZ3VhZ2UiOiJweXRob24iLCJjb250ZW50IjoiaW1wb3J0IHRvcmNoXG5cbmRlZiBvcHRpbWl6ZXJfbWVtb3J5X2diKG5fcGFyYW1zLCBuX2J1ZmZlcnMsIGR0eXBlX2J5dGVzPTQpOlxuICAgICMgcGFyYW1zICsgZ3JhZHMgKyBvcHRpbWl6ZXIgc3RhdGUgYnVmZmVyc1xuICAgIHBhcmFtc19nYiA9IG5fcGFyYW1zICogZHR5cGVfYnl0ZXMgLyAxZTlcbiAgICBncmFkc19nYiAgPSBuX3BhcmFtcyAqIGR0eXBlX2J5dGVzIC8gMWU5XG4gICAgc3RhdGVfZ2IgID0gbl9wYXJhbXMgKiBkdHlwZV9ieXRlcyAqIG5fYnVmZmVycyAvIDFlOVxuICAgIHRvdGFsX2diICA9IHBhcmFtc19nYiArIGdyYWRzX2diICsgc3RhdGVfZ2JcbiAgICByZXR1cm4gcGFyYW1zX2diLCBncmFkc19nYiwgc3RhdGVfZ2IsIHRvdGFsX2diXG5cbnNjYWxlcyA9IFtcbiAgICAoXHUwMDI3MTI1TVx1MDAyNywgIDEyNV8wMDBfMDAwKSxcbiAgICAoXHUwMDI3MS4zQlx1MDAyNywgIDFfMzAwXzAwMF8wMDApLFxuICAgIChcdTAwMjc3Qlx1MDAyNywgICAgN18wMDBfMDAwXzAwMCksXG4gICAgKFx1MDAyNzcwQlx1MDAyNywgIDcwXzAwMF8wMDBfMDAwKSxcbl1cblxub3B0aW1pemVycyA9IFsoXHUwMDI3U0dEK21vbVx1MDAyNywgMSksIChcdTAwMjdBZGFtL0FkYW1XXHUwMDI3LCAyKSwgKFx1MDAyN0xpb25cdTAwMjcsIDEpXVxuXG5wcmludChcdTAwMjdPcHRpbWl6ZXIgbWVtb3J5IChHQikgYnkgbW9kZWwgc2NhbGU6XHUwMDI3KVxucHJpbnQoXHUwMDI3JS0xMHMgJTEycyAlMTJzICUxMnNcdTAwMjcgJSAoXHUwMDI3U2NhbGVcdTAwMjcsIFx1MDAyN1NHRCttb21cdTAwMjcsIFx1MDAyN0FkYW1XXHUwMDI3LCBcdTAwMjdMaW9uXHUwMDI3KSlcbnByaW50KFx1MDAyNy1cdTAwMjcgKiA1MClcbmZvciBzY2FsZV9uYW1lLCBuX3BhcmFtcyBpbiBzY2FsZXM6XG4gICAgcm93ID0gXHUwMDI3JS0xMHNcdTAwMjcgJSBzY2FsZV9uYW1lXG4gICAgZm9yIF8sIG5fYnVmIGluIG9wdGltaXplcnM6XG4gICAgICAgIF8sIF8sIF8sIHRvdGFsID0gb3B0aW1pemVyX21lbW9yeV9nYihuX3BhcmFtcywgbl9idWYpXG4gICAgICAgIHJvdyArPSBcdTAwMjcgJTEyLjFmXHUwMDI3ICUgdG90YWxcbiAgICBwcmludChyb3cpXG5wcmludChcdTAwMjdcdTAwMjcpXG5wcmludChcdTAwMjdMaW9uIGFuZCBTR0QrbW9tIHVzZSB0aGUgc2FtZSBtZW1vcnk7IGJvdGggaGF2ZSAxIHN0YXRlIGJ1ZmZlci5cdTAwMjcpXG5wcmludChcdTAwMjdMaW9uIHNhdmVzIDEgYnVmZmVyICh+MjUlJSBvZiB0b3RhbCBvcHRpbWl6ZXIgbWVtb3J5KSB2cyBBZGFtVy5cdTAwMjcpIn0seyJ0eXBlIjoidGFibGUiLCJoZWFkZXJzIjpbIk9wdGltaXplciIsIlN0YXRlIEJ1ZmZlcnMiLCJUeXBpY2FsIExSIiwiVHlwaWNhbCBXRCIsIk1lbW9yeSAow5dwYXJhbXMpIiwiQmVzdCBGb3IiXSwicm93cyI6W1siU0dEK21vbWVudHVtIiwiMSAobSkiLCIwLjAx4oCTMC4xIiwiMWUtNCIsIjLDlyIsIkNWIHdpdGggY2FyZWZ1bCB0dW5pbmciXSxbIkFkYW0iLCIyIChtLCB2KSIsIjFlLTMiLCIxZS0yIiwiM8OXIiwiR2VuZXJhbCBkZWVwIGxlYXJuaW5nIl0sWyJBZGFtVyIsIjIgKG0sIHYpIiwiMWUtM+KAkzNlLTQiLCIwLjAx4oCTMC4xIiwiM8OXIiwiVHJhbnNmb3JtZXJzLCBMTE1zIl0sWyJMaW9uIiwiMSAobSkiLCIxZS004oCTM2UtNSIsIjAuMeKAkzEuMCIsIjLDlyIsIkxhcmdlLXNjYWxlIExMTSBwcmV0cmFpbmluZyJdXX0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiVHJ1c3QtUmVnaW9uIFByb3BlcnR5IG9mIHNpZ24oKSJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50Ijoic2lnbihjKSDiiIggey0xLCAwLCArMX0gZm9yIGVhY2ggcGFyYW1ldGVyLCBzbyB0aGUgcmF3IHVwZGF0ZSBtYWduaXR1ZGUgcGVyIHN0ZXAgaXMgZXhhY3RseSBsciAodGhlIGxlYXJuaW5nIHJhdGUpIHJlZ2FyZGxlc3Mgb2YgZ3JhZGllbnQgbWFnbml0dWRlLiBUaGlzIGFjdHMgYXMgYSB0cnVzdC1yZWdpb24gY29uc3RyYWludDogbm8gc2luZ2xlIHN0ZXAgY2FuIG1vdmUgYSBwYXJhbWV0ZXIgbW9yZSB0aGFuIGxyLiBUaGlzIGlzIHdoeSBMaW9uIHJlcXVpcmVzIGEgbXVjaCBsb3dlciBsciB0aGFuIEFkYW0gKHdoaWNoIHNjYWxlcyB1cGRhdGVzIGJ5IDEv4oiadsyCIGJ1dCBub3QgYnkgYSBoYXJkIGJvdW5kKS4ifSx7InR5cGUiOiJjYWxsb3V0IiwidmFyaWFudCI6Indhcm5pbmciLCJ0aXRsZSI6Ikxpb24gSHlwZXJwYXJhbWV0ZXIgVHVuaW5nIiwiY29udGVudCI6IkRvIE5PVCB1c2UgQWRhbVdcdTAwMjdzIGxlYXJuaW5nIHJhdGUgZGlyZWN0bHkgd2l0aCBMaW9uIOKAlCBpdCB3aWxsIGRpdmVyZ2UuIFJ1bGUgb2YgdGh1bWI6IGxyX0xpb24g4omIIGxyX0FkYW1XIC8gMTAuIEFsc28gaW5jcmVhc2Ugd2VpZ2h0IGRlY2F5IGJ5IDUtMTDDlzogd2RfTGlvbiDiiYggMC4x4oCTMS4wICh2cyBBZGFtV1x1MDAyN3MgMC4wMeKAkzAuMSkuIFRoZSBzaWduIHVwZGF0ZSBtYWtlcyBMaW9uIG1vcmUgc2Vuc2l0aXZlIHRvIHdlaWdodCBkZWNheSBmb3IgcmVndWxhcml6YXRpb24uIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiSHlwZXJwYXJhbWV0ZXIgU2Vuc2l0aXZpdHkifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6Ikxpb25cdTAwMjdzIHNpZ24tYmFzZWQgdXBkYXRlIG1lYW5zIHRoZSBkaXJlY3Rpb24gaXMgYWx3YXlzIMKxMSDigJQgZ3JhZGllbnQgbWFnbml0dWRlIGluZm9ybWF0aW9uIGlzIGRpc2NhcmRlZC4gV2VpZ2h0IGRlY2F5IHRoZXJlZm9yZSBwbGF5cyBhIHN0cm9uZ2VyIHJlZ3VsYXJpemF0aW9uIHJvbGUgdGhhbiBpbiBBZGFtICh3aGVyZSB2zIIgYWxyZWFkeSBub3JtYWxpemVzKS4gU2V0dGluZyB3ZWlnaHQgZGVjYXkgdG9vIGxvdyByZXN1bHRzIGluIHVuZGVyZml0dGluZzsgdG9vIGhpZ2ggY2F1c2VzIHRoZSBtb2RlbCB0byBzaHJpbmsgdG9vIGZhc3QuIn0seyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6ImltcG9ydCB0b3JjaFxuaW1wb3J0IHRvcmNoLm5uIGFzIG5uXG5cbiMgQXNzdW1lcyBMaW9uIGNsYXNzIGRlZmluZWQgYWJvdmVcbmRlZiB0cmFpbl9xdWljayhsciwgd2QsIG5fc3RlcHM9MTUwLCBzZWVkPTApOlxuICAgIHRvcmNoLm1hbnVhbF9zZWVkKHNlZWQpXG4gICAgbW9kZWwgPSBubi5TZXF1ZW50aWFsKFxuICAgICAgICBubi5MaW5lYXIoMTYsIDY0KSwgbm4uR0VMVSgpLFxuICAgICAgICBubi5MaW5lYXIoNjQsIDMyKSwgbm4uR0VMVSgpLFxuICAgICAgICBubi5MaW5lYXIoMzIsICA0KVxuICAgIClcbiAgICBvcHQgPSBMaW9uKG1vZGVsLnBhcmFtZXRlcnMoKSwgbHI9bHIsIHdlaWdodF9kZWNheT13ZClcbiAgICB4ID0gdG9yY2gucmFuZG4oMzIsIDE2KVxuICAgIHkgPSB0b3JjaC5yYW5kbigzMiwgIDQpXG4gICAgZm9yIF8gaW4gcmFuZ2Uobl9zdGVwcyk6XG4gICAgICAgIHByZWQgPSBtb2RlbCh4KVxuICAgICAgICBsb3NzID0gbm4uTVNFTG9zcygpKHByZWQsIHkpXG4gICAgICAgIG9wdC56ZXJvX2dyYWQoKVxuICAgICAgICBsb3NzLmJhY2t3YXJkKClcbiAgICAgICAgb3B0LnN0ZXAoKVxuICAgIHJldHVybiByb3VuZChsb3NzLml0ZW0oKSwgNClcblxubHJzID0gWzNlLTUsIDFlLTQsIDNlLTRdXG53ZHMgPSBbMC4wMSwgMC4xLCAxLjBdXG5cbnByaW50KFx1MDAyN0xpb24gZmluYWwgbG9zcyAobHIgdnMgd2VpZ2h0X2RlY2F5LCAxNTAgc3RlcHMpOlx1MDAyNylcbnByaW50KFx1MDAyNyUtOHMgJThzICU4cyAlOHNcdTAwMjcgJSAoXHUwMDI3bHIgXFwgd2RcdTAwMjcsIFx1MDAyNzAuMDFcdTAwMjcsIFx1MDAyNzAuMVx1MDAyNywgXHUwMDI3MS4wXHUwMDI3KSlcbmZvciBsciBpbiBscnM6XG4gICAgcm93ID0gXHUwMDI3JS04c1x1MDAyNyAlIChcdTAwMjclLjBlXHUwMDI3ICUgbHIpXG4gICAgZm9yIHdkIGluIHdkczpcbiAgICAgICAgcm93ICs9IFx1MDAyNyAlOC40Zlx1MDAyNyAlIHRyYWluX3F1aWNrKGxyLCB3ZClcbiAgICBwcmludChyb3cpXG5wcmludChcdTAwMjdcdTAwMjcpXG5wcmludChcdTAwMjdPcHRpbWFsIHpvbmU6IGxyIH4gMWUtNCwgd2QgfiAwLjEgZm9yIHRoaXMgc21hbGwgdGFzay5cdTAwMjcpIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiVHJhaW5pbmcgQ3VydmUgQ29tcGFyaXNvbjogTGlvbiB2cyBBZGFtVyJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiTGlvbiByZXF1aXJlcyBhIGxlYXJuaW5nIHJhdGUgcm91Z2hseSAzLTEww5cgbG93ZXIgdGhhbiBBZGFtVyBmb3Igc3RhYmxlIHRyYWluaW5nLiBUaGUgc2lnbiB1cGRhdGUgbWVhbnMgZWFjaCBwYXJhbWV0ZXIgbW92ZXMgZXhhY3RseSDCsWxyIHBlciBzdGVwLCBzbyBhIGxhcmdlIGxyIGNhdXNlcyBvc2NpbGxhdGlvbi4gSW4gcHJhY3RpY2UsIHNldHRpbmcgbHJfTGlvbiDiiYggbHJfQWRhbVcvMTAgYW5kIHdkX0xpb24g4omIIDUtMTDDl3dkX0FkYW1XIGdpdmVzIGNvbXBhcmFibGUgY29udmVyZ2VuY2Ugd2l0aCBsZXNzIG1lbW9yeS4ifSx7InR5cGUiOiJjb2RlIiwibGFuZ3VhZ2UiOiJweXRob24iLCJjb250ZW50IjoiaW1wb3J0IHRvcmNoXG5pbXBvcnQgdG9yY2gubm4gYXMgbm5cbmltcG9ydCB0b3JjaC5vcHRpbSBhcyBvcHRpbVxuXG4jIEFzc3VtZXMgTGlvbiBjbGFzcyBkZWZpbmVkIGFib3ZlXG5kZWYgbWFrZV9tb2RlbChzZWVkPTApOlxuICAgIHRvcmNoLm1hbnVhbF9zZWVkKHNlZWQpXG4gICAgcmV0dXJuIG5uLlNlcXVlbnRpYWwoXG4gICAgICAgIG5uLkxpbmVhcigzMiwgMTI4KSwgbm4uR0VMVSgpLFxuICAgICAgICBubi5MaW5lYXIoMTI4LCA2NCksIG5uLkdFTFUoKSxcbiAgICAgICAgbm4uTGluZWFyKDY0LCA4KVxuICAgIClcblxuZGVmIHJ1bl90cmFpbmluZyhvcHRfZm4sIG5fc3RlcHM9MzAwLCBzZWVkPTApOlxuICAgIG1vZGVsID0gbWFrZV9tb2RlbChzZWVkKVxuICAgIG9wdCAgID0gb3B0X2ZuKG1vZGVsLnBhcmFtZXRlcnMoKSlcbiAgICB0b3JjaC5tYW51YWxfc2VlZChzZWVkKVxuICAgIHggPSB0b3JjaC5yYW5kbig2NCwgMzIpXG4gICAgeSA9IHRvcmNoLnJhbmRuKDY0LCA4KVxuICAgIGxvc3NlcyA9IFtdXG4gICAgZm9yIF8gaW4gcmFuZ2Uobl9zdGVwcyk6XG4gICAgICAgIGxvc3MgPSBubi5NU0VMb3NzKCkobW9kZWwoeCksIHkpXG4gICAgICAgIG9wdC56ZXJvX2dyYWQoKVxuICAgICAgICBsb3NzLmJhY2t3YXJkKClcbiAgICAgICAgb3B0LnN0ZXAoKVxuICAgICAgICBsb3NzZXMuYXBwZW5kKGxvc3MuaXRlbSgpKVxuICAgIHJldHVybiBsb3NzZXNcblxucmVzdWx0cyA9IHtcbiAgICBcdTAwMjdBZGFtVyAobHI9MWUtMywgd2Q9MC4xKVx1MDAyNzogIHJ1bl90cmFpbmluZyhsYW1iZGEgcDogb3B0aW0uQWRhbVcocCwgbHI9MWUtMywgd2VpZ2h0X2RlY2F5PTAuMSkpLFxuICAgIFx1MDAyN0xpb24gIChscj0xZS00LCB3ZD0wLjMpXHUwMDI3OiAgcnVuX3RyYWluaW5nKGxhbWJkYSBwOiBMaW9uKHAsIGxyPTFlLTQsIHdlaWdodF9kZWNheT0wLjMpKSxcbn1cbmZvciBuYW1lLCBsb3NzZXMgaW4gcmVzdWx0cy5pdGVtcygpOlxuICAgIHByaW50KFx1MDAyNyVzICBpbml0PSUuNGYgIGZpbmFsPSUuNGZcdTAwMjcgJSAobmFtZSwgbG9zc2VzWzBdLCBsb3NzZXNbLTFdKSlcbnByaW50KFx1MDAyN1x1MDAyNylcbnByaW50KFx1MDAyN0tleTogTGlvbiBsciBpcyAxMHggbG93ZXI7IHdkIGlzIDN4IGhpZ2hlciB0aGFuIEFkYW1XIGhlcmUuXHUwMDI3KSJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IkRpZmZlcmVuY2VzIGZyb20gU2lnblNHRCJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiU2lnblNHRCAoQmVybnN0ZWluIGV0IGFsLiAyMDE4KSB1cGRhdGVzIM64IOKGkCDOuCDiiJIgbHLCt3NpZ24oZykgZGlyZWN0bHkg4oCUIHVzaW5nIG9ubHkgdGhlIGN1cnJlbnQgZ3JhZGllbnRcdTAwMjdzIHNpZ24uIExpb24gZGlmZmVycyBpbiB0d28gd2F5czogKDEpIGl0IGludGVycG9sYXRlcyBtb21lbnR1bSB3aXRoIHRoZSBjdXJyZW50IGdyYWRpZW50IGJlZm9yZSB0YWtpbmcgdGhlIHNpZ24sIHByb3ZpZGluZyBzbW9vdGhlciBkaXJlY3Rpb25zLCBhbmQgKDIpIGl0IHVwZGF0ZXMgdGhlIG1vbWVudHVtIGJ1ZmZlciBBRlRFUiB0aGUgc3RlcCAobm90IGJlZm9yZSksIGdpdmluZyBtb3JlIHdlaWdodCB0byB0aGUgY3VycmVudCBncmFkaWVudCBpbiB0aGUgc3RlcCBkaXJlY3Rpb24uIn0seyJ0eXBlIjoibGlzdCIsIm9yZGVyZWQiOmZhbHNlLCJpdGVtcyI6WyJTaWduU0dEOiB1cGRhdGUgPSBzaWduKGcpIOKAlCBjdXJyZW50IGdyYWRpZW50IG9ubHksIG5vIG1vbWVudHVtIiwiTGlvbjogdXBkYXRlID0gc2lnbijOsuKCgcK3bSArICgx4oiSzrLigoEpwrdnKSDigJQgc2lnbiBvZiBtb21lbnR1bS1zbW9vdGhlZCBncmFkaWVudCIsIkxpb25cdTAwMjdzIG1vbWVudHVtIHVwZGF0ZSBoYXBwZW5zIEFGVEVSIHRoZSBzdGVwOiBtIOKGkCDOsuKCgsK3bSArICgx4oiSzrLigoIpwrdnIiwiV2l0aCDOsuKCgeKGkjA6IExpb24gcmVkdWNlcyB0byBTaWduU0dEOyB3aXRoIM6y4oKB4oaSMTogTGlvbiB1c2VzIG9ubHkgb2xkIG1vbWVudHVtIiwiTGlvbiB1c2VzIM6y4oKBPTAuOSwgzrLigoI9MC45OSAobG9uZ2VyIG1lbW9yeSB0aGFuIEFkYW1cdTAwMjdzIHR5cGljYWwgzrLigoE9MC45LCDOsuKCgj0wLjk5OSkiLCJXZWlnaHQgZGVjYXkgaW4gTGlvbiBpcyBkZWNvdXBsZWQgKG11bHRpcGxpZWQgaW50byDOuCBiZWZvcmUgc2lnbiBzdGVwKSJdfSx7InR5cGUiOiJkaXZpZGVyIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJMaW9uIGRlbW9uc3RyYXRlcyB0aGF0IGVmZmVjdGl2ZSBvcHRpbWl6ZXJzIG5lZWQgbm90IGJlIGRlcml2ZWQgZnJvbSBzZWNvbmQtb3JkZXIgcHJpbmNpcGxlcyDigJQgcHJvZ3JhbSBzZWFyY2ggb3ZlciBhIHNpbXBsZSBEU0wgY2FuIGRpc2NvdmVyIGNvbXBldGl0aXZlIGFsZ29yaXRobXMuIEl0cyBtZW1vcnkgYWR2YW50YWdlIG1ha2VzIGl0IHBhcnRpY3VsYXJseSBhdHRyYWN0aXZlIGZvciB0cmFpbmluZyBsYXJnZSBtb2RlbHMgdW5kZXIgR1BVIG1lbW9yeSBjb25zdHJhaW50cy4ifV0="
 ---
+# Lion Optimizer — Sign-Based Updates
 
-# Lion Optimizer
+Lion (EvoLved Sign Momentum, Chen et al. 2023) was discovered by evolutionary search over optimizer program space — not derived from first principles. Its key innovations: a single momentum buffer (vs Adam's two), sign-based updates that bound step magnitude, and a decoupled weight decay. Empirically matches or beats AdamW for large language model pretraining while using less memory.
 
-Lion (EvoLved Sign Momentum) uses only the sign of a momentum interpolation for its update — discovered via evolutionary program search, not mathematical derivation. It is memory-efficient and competitive with AdamW.
+## How Lion Was Discovered
 
-## Update Rule
+Lion emerged from program search: define a small DSL of optimizer operations (interpolation, sign, clip, momentum update), then use an evolutionary algorithm to search for programs that minimize validation loss on held-out tasks. The winning program was surprisingly simple — simpler than Adam — and generalized across image and language tasks.
 
-1. cₜ = β₁·mₜ₋₁ + (1−β₁)·gₜ (interpolate momentum and gradient)
-2. θ ← θ − lr·sign(cₜ) − lr·λθ (sign update + decoupled weight decay)
-3. mₜ = β₂·mₜ₋₁ + (1−β₂)·gₜ (update momentum buffer)
+## The Lion Update Rule
 
-Note: β₁ ≠ β₂ — asymmetric betas, β₁=0.9, β₂=0.99 typical.
-
-## Sign Updates: What They Gain and Lose
-
-Constant magnitude ±lr per step — no gradient scale dependence. Equivalent to larger effective batch (sign is consistent across samples). Invariant to loss re-scaling. No need to track gradient variance → saves 1 state tensor per parameter (33% memory reduction vs Adam).
+Given current gradient g and momentum buffer m, Lion computes: (1) interpolated direction c = β₁·m + (1−β₁)·g, (2) update θ ← θ − lr·sign(c) − lr·λ·θ (weight decay applied directly to θ), (3) update momentum m ← β₂·m + (1−β₂)·g. Note: momentum is updated AFTER the step, not before. Typical values: β₁=0.9, β₂=0.99, lr ≈ 1e-4 (3-10× lower than AdamW).
 
 ```python
-# Core Lion step
-c = b1 * m + (1 - b1) * g
-p.mul_(1 - lr * wd).add_(c.sign(), alpha=-lr)  # sign update + weight decay
-m.mul_(b2).add_(g, alpha=1 - b2)               # momentum update
+import torch
+
+class Lion(torch.optim.Optimizer):
+    # Lion: EvoLved Sign Momentum (Chen et al. 2023)
+    # arxiv.org/abs/2302.06675
+    def __init__(self, params, lr=1e-4, betas=(0.9, 0.99), weight_decay=0.0):
+        defaults = dict(lr=lr, betas=betas, weight_decay=weight_decay)
+        super().__init__(params, defaults)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        for group in self.param_groups:
+            lr = group['lr']
+            b1, b2 = group['betas']
+            wd = group['weight_decay']
+
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                g = p.grad
+                state = self.state[p]
+
+                if len(state) == 0:
+                    state['m'] = torch.zeros_like(p)  # single buffer
+
+                m = state['m']
+                # c = b1*m + (1-b1)*g  (interpolate between momentum and gradient)
+                c = b1 * m + (1.0 - b1) * g
+                # Weight decay: theta <- theta * (1 - lr*wd)
+                if wd != 0:
+                    p.data.mul_(1.0 - lr * wd)
+                # Sign update: theta <- theta - lr * sign(c)
+                p.data.add_(torch.sign(c), alpha=-lr)
+                # Update momentum buffer AFTER the step
+                m.mul_(b2).add_(g, alpha=1.0 - b2)
+
+        return loss
 ```
 
-## Lower LR Requirement
+## Memory Efficiency vs Adam and AdamW
 
-3-10× lower lr than AdamW. Reason: Adam's effective step ≈ η·0.1 (after adaptive scaling); Lion's effective step = lr exactly. Match by setting lr_lion ≈ lr_adam / 5.
+Adam stores two state buffers per parameter: first moment m (momentum) and second moment v (uncentered variance). Lion stores only ONE buffer (momentum). For a 7B parameter model in float32, this saves approximately 28 GB of optimizer state — a significant reduction for GPU-memory-constrained training runs.
 
-## Empirical Results
+```python
+import torch
 
-ViT-B/16 ImageNet: +0.6% vs AdamW. CLIP: 5× compute savings. Lower memory enables larger models or greater data parallelism. More sensitive to hyperparameter tuning than Adam.
+def optimizer_memory_gb(n_params, n_buffers, dtype_bytes=4):
+    # params + grads + optimizer state buffers
+    params_gb = n_params * dtype_bytes / 1e9
+    grads_gb  = n_params * dtype_bytes / 1e9
+    state_gb  = n_params * dtype_bytes * n_buffers / 1e9
+    total_gb  = params_gb + grads_gb + state_gb
+    return params_gb, grads_gb, state_gb, total_gb
 
-## Discovered, Not Derived
+scales = [
+    ('125M',  125_000_000),
+    ('1.3B',  1_300_000_000),
+    ('7B',    7_000_000_000),
+    ('70B',  70_000_000_000),
+]
 
-Program search on CIFAR-10, evolved via tournament selection. Generalised to ImageNet, LMs, diffusion models. No closed-form convergence proof for general non-convex losses.
+optimizers = [('SGD+mom', 1), ('Adam/AdamW', 2), ('Lion', 1)]
+
+print('Optimizer memory (GB) by model scale:')
+print('%-10s %12s %12s %12s' % ('Scale', 'SGD+mom', 'AdamW', 'Lion'))
+print('-' * 50)
+for scale_name, n_params in scales:
+    row = '%-10s' % scale_name
+    for _, n_buf in optimizers:
+        _, _, _, total = optimizer_memory_gb(n_params, n_buf)
+        row += ' %12.1f' % total
+    print(row)
+print('')
+print('Lion and SGD+mom use the same memory; both have 1 state buffer.')
+print('Lion saves 1 buffer (~25%% of total optimizer memory) vs AdamW.')
+```
+
+| Optimizer | State Buffers | Typical LR | Typical WD | Memory (×params) | Best For |
+| --- | --- | --- | --- | --- | --- |
+| SGD+momentum | 1 (m) | 0.01–0.1 | 1e-4 | 2× | CV with careful tuning |
+| Adam | 2 (m, v) | 1e-3 | 1e-2 | 3× | General deep learning |
+| AdamW | 2 (m, v) | 1e-3–3e-4 | 0.01–0.1 | 3× | Transformers, LLMs |
+| Lion | 1 (m) | 1e-4–3e-5 | 0.1–1.0 | 2× | Large-scale LLM pretraining |
+
+## Trust-Region Property of sign()
+
+sign(c) ∈ {-1, 0, +1} for each parameter, so the raw update magnitude per step is exactly lr (the learning rate) regardless of gradient magnitude. This acts as a trust-region constraint: no single step can move a parameter more than lr. This is why Lion requires a much lower lr than Adam (which scales updates by 1/√v̂ but not by a hard bound).
+
+> **Lion Hyperparameter Tuning**: Do NOT use AdamW's learning rate directly with Lion — it will diverge. Rule of thumb: lr_Lion ≈ lr_AdamW / 10. Also increase weight decay by 5-10×: wd_Lion ≈ 0.1–1.0 (vs AdamW's 0.01–0.1). The sign update makes Lion more sensitive to weight decay for regularization.
+
+## Hyperparameter Sensitivity
+
+Lion's sign-based update means the direction is always ±1 — gradient magnitude information is discarded. Weight decay therefore plays a stronger regularization role than in Adam (where v̂ already normalizes). Setting weight decay too low results in underfitting; too high causes the model to shrink too fast.
+
+```python
+import torch
+import torch.nn as nn
+
+# Assumes Lion class defined above
+def train_quick(lr, wd, n_steps=150, seed=0):
+    torch.manual_seed(seed)
+    model = nn.Sequential(
+        nn.Linear(16, 64), nn.GELU(),
+        nn.Linear(64, 32), nn.GELU(),
+        nn.Linear(32,  4)
+    )
+    opt = Lion(model.parameters(), lr=lr, weight_decay=wd)
+    x = torch.randn(32, 16)
+    y = torch.randn(32,  4)
+    for _ in range(n_steps):
+        pred = model(x)
+        loss = nn.MSELoss()(pred, y)
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+    return round(loss.item(), 4)
+
+lrs = [3e-5, 1e-4, 3e-4]
+wds = [0.01, 0.1, 1.0]
+
+print('Lion final loss (lr vs weight_decay, 150 steps):')
+print('%-8s %8s %8s %8s' % ('lr \ wd', '0.01', '0.1', '1.0'))
+for lr in lrs:
+    row = '%-8s' % ('%.0e' % lr)
+    for wd in wds:
+        row += ' %8.4f' % train_quick(lr, wd)
+    print(row)
+print('')
+print('Optimal zone: lr ~ 1e-4, wd ~ 0.1 for this small task.')
+```
+
+## Training Curve Comparison: Lion vs AdamW
+
+Lion requires a learning rate roughly 3-10× lower than AdamW for stable training. The sign update means each parameter moves exactly ±lr per step, so a large lr causes oscillation. In practice, setting lr_Lion ≈ lr_AdamW/10 and wd_Lion ≈ 5-10×wd_AdamW gives comparable convergence with less memory.
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+# Assumes Lion class defined above
+def make_model(seed=0):
+    torch.manual_seed(seed)
+    return nn.Sequential(
+        nn.Linear(32, 128), nn.GELU(),
+        nn.Linear(128, 64), nn.GELU(),
+        nn.Linear(64, 8)
+    )
+
+def run_training(opt_fn, n_steps=300, seed=0):
+    model = make_model(seed)
+    opt   = opt_fn(model.parameters())
+    torch.manual_seed(seed)
+    x = torch.randn(64, 32)
+    y = torch.randn(64, 8)
+    losses = []
+    for _ in range(n_steps):
+        loss = nn.MSELoss()(model(x), y)
+        opt.zero_grad()
+        loss.backward()
+        opt.step()
+        losses.append(loss.item())
+    return losses
+
+results = {
+    'AdamW (lr=1e-3, wd=0.1)':  run_training(lambda p: optim.AdamW(p, lr=1e-3, weight_decay=0.1)),
+    'Lion  (lr=1e-4, wd=0.3)':  run_training(lambda p: Lion(p, lr=1e-4, weight_decay=0.3)),
+}
+for name, losses in results.items():
+    print('%s  init=%.4f  final=%.4f' % (name, losses[0], losses[-1]))
+print('')
+print('Key: Lion lr is 10x lower; wd is 3x higher than AdamW here.')
+```
+
+## Differences from SignSGD
+
+SignSGD (Bernstein et al. 2018) updates θ ← θ − lr·sign(g) directly — using only the current gradient's sign. Lion differs in two ways: (1) it interpolates momentum with the current gradient before taking the sign, providing smoother directions, and (2) it updates the momentum buffer AFTER the step (not before), giving more weight to the current gradient in the step direction.
+
+- SignSGD: update = sign(g) — current gradient only, no momentum
+- Lion: update = sign(β₁·m + (1−β₁)·g) — sign of momentum-smoothed gradient
+- Lion's momentum update happens AFTER the step: m ← β₂·m + (1−β₂)·g
+- With β₁→0: Lion reduces to SignSGD; with β₁→1: Lion uses only old momentum
+- Lion uses β₁=0.9, β₂=0.99 (longer memory than Adam's typical β₁=0.9, β₂=0.999)
+- Weight decay in Lion is decoupled (multiplied into θ before sign step)
+
+---
+
+Lion demonstrates that effective optimizers need not be derived from second-order principles — program search over a simple DSL can discover competitive algorithms. Its memory advantage makes it particularly attractive for training large models under GPU memory constraints.
+

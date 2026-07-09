@@ -1,0 +1,654 @@
+[
+  {
+    "slug": "mutual-information",
+    "title": "Mutual Information",
+    "description": "Mutual information quantifies how much knowing one variable reduces uncertainty about another. Covers I(X;Y), KL-divergence form, MINE, InfoNCE, and the information bottleneck principle.",
+    "tags": ["information-theory", "math", "foundations"],
+    "topic": "math-foundations",
+    "status": "published",
+    "updated": "2026-07-10",
+    "blocks": [
+      {
+        "type": "text",
+        "content": "Mutual information (MI) is one of the most fundamental quantities in information theory. Unlike correlation, which only captures linear dependence, MI captures *all* statistical dependencies between two random variables — including nonlinear ones. It answers the question: how much does knowing X tell us about Y?"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Definition and Core Formula"
+      },
+      {
+        "type": "text",
+        "content": "For two jointly distributed random variables X and Y, mutual information is defined as:\n\nI(X;Y) = H(X) + H(Y) - H(X,Y)\n\nwhere H(X) is the marginal entropy of X, H(Y) is the marginal entropy of Y, and H(X,Y) is their joint entropy. Intuitively: the information gained about X by observing Y equals the reduction in uncertainty about X."
+      },
+      {
+        "type": "text",
+        "content": "Equivalent forms of mutual information:\n- I(X;Y) = H(X) - H(X|Y)  — reduction in X's uncertainty given Y\n- I(X;Y) = H(Y) - H(Y|X)  — reduction in Y's uncertainty given X\n- I(X;Y) = KL(P(X,Y) ‖ P(X)P(Y))  — KL divergence from joint to product of marginals\n\nThe KL-divergence form is particularly illuminating: MI is zero exactly when X and Y are independent (joint = product of marginals), and positive whenever they share structure."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Key Properties"
+      },
+      {
+        "type": "list",
+        "ordered": false,
+        "items": [
+          "Symmetry: I(X;Y) = I(Y;X) — information is shared, not directional",
+          "Non-negativity: I(X;Y) ≥ 0, with equality iff X ⊥ Y",
+          "Self-information: I(X;X) = H(X) — a variable carries full information about itself",
+          "Bounded by entropy: I(X;Y) ≤ min(H(X), H(Y))",
+          "Chain rule: I(X;Y,Z) = I(X;Y) + I(X;Z|Y)"
+        ]
+      },
+      {
+        "type": "callout",
+        "variant": "info",
+        "title": "Venn Diagram Intuition",
+        "content": "Draw overlapping circles for H(X) and H(Y). The overlap region is I(X;Y). The left-only region is H(X|Y), the right-only is H(Y|X), and the union is H(X,Y). This geometric picture makes all four quantities immediately visible."
+      },
+      {
+        "type": "table",
+        "headers": ["Quantity", "Formula", "Venn Region", "Interpretation"],
+        "rows": [
+          ["H(X)", "−Σ p(x) log p(x)", "Full left circle", "Total uncertainty in X"],
+          ["H(Y)", "−Σ p(y) log p(y)", "Full right circle", "Total uncertainty in Y"],
+          ["H(X|Y)", "H(X,Y) − H(Y)", "Left only (not overlap)", "Uncertainty in X after observing Y"],
+          ["H(Y|X)", "H(X,Y) − H(X)", "Right only (not overlap)", "Uncertainty in Y after observing X"],
+          ["I(X;Y)", "H(X) + H(Y) − H(X,Y)", "Overlap region", "Information X and Y share"],
+          ["H(X,Y)", "−Σ p(x,y) log p(x,y)", "Full union", "Joint uncertainty"]
+        ]
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Computing MI from a Joint Distribution"
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import numpy as np\nfrom scipy.stats import entropy\n\ndef mutual_information(joint_prob: np.ndarray) -> float:\n    \"\"\"Compute I(X;Y) from a joint probability table P(X,Y).\n\n    Args:\n        joint_prob: 2D array where joint_prob[i,j] = P(X=i, Y=j).\n    Returns:\n        Mutual information in nats (use log2 for bits).\n    \"\"\"\n    # Marginals\n    p_x = joint_prob.sum(axis=1)  # shape (|X|,)\n    p_y = joint_prob.sum(axis=0)  # shape (|Y|,)\n\n    # Entropies using scipy (base e by default)\n    h_x = entropy(p_x)\n    h_y = entropy(p_y)\n    h_xy = entropy(joint_prob.ravel())  # treat joint as flat distribution\n\n    mi = h_x + h_y - h_xy\n\n    # Alternatively via KL divergence: KL(P(X,Y) || P(X)P(Y))\n    outer = np.outer(p_x, p_y)           # product of marginals\n    mask = joint_prob > 0\n    mi_kl = np.sum(joint_prob[mask] * np.log(joint_prob[mask] / outer[mask]))\n\n    print(f\"H(X)   = {h_x:.4f} nats\")\n    print(f\"H(Y)   = {h_y:.4f} nats\")\n    print(f\"H(X,Y) = {h_xy:.4f} nats\")\n    print(f\"I(X;Y) via entropy decomposition = {mi:.4f} nats\")\n    print(f\"I(X;Y) via KL divergence         = {mi_kl:.4f} nats\")\n    return mi\n\n# Example: X = weather (sunny/rainy), Y = mood (happy/sad)\njoint = np.array([[0.4, 0.1],   # P(sunny,happy), P(sunny,sad)\n                  [0.1, 0.4]])  # P(rainy,happy), P(rainy,sad)\nmutual_information(joint)"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "MI-Based Feature Selection"
+      },
+      {
+        "type": "text",
+        "content": "Mutual information is a powerful criterion for feature selection because it detects any dependence between a feature and the target — not just linear correlation. sklearn's `mutual_info_classif` estimates MI between each feature and the class label using a k-nearest-neighbors estimator for continuous features."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import numpy as np\nfrom sklearn.datasets import load_breast_cancer\nfrom sklearn.feature_selection import mutual_info_classif, SelectKBest\nfrom sklearn.preprocessing import StandardScaler\nfrom sklearn.linear_model import LogisticRegression\nfrom sklearn.model_selection import cross_val_score\nimport matplotlib.pyplot as plt\n\n# Load dataset\nX, y = load_breast_cancer(return_X_y=True)\nfeature_names = load_breast_cancer().feature_names\n\n# Compute MI between each feature and target\nmi_scores = mutual_info_classif(X, y, random_state=42)\n\n# Rank features by MI\nranked_idx = np.argsort(mi_scores)[::-1]\nprint(\"Top 10 features by mutual information:\")\nfor i in ranked_idx[:10]:\n    print(f\"  {feature_names[i]:35s}  MI = {mi_scores[i]:.4f} bits\")\n\n# Compare MI-selected vs all features for classification\nscaler = StandardScaler()\nX_scaled = scaler.fit_transform(X)\n\nfor k in [5, 10, 15, 20, X.shape[1]]:\n    selector = SelectKBest(mutual_info_classif, k=k)\n    X_sel = selector.fit_transform(X_scaled, y)\n    lr = LogisticRegression(max_iter=1000)\n    cv_scores = cross_val_score(lr, X_sel, y, cv=5)\n    label = f\"{k:2d} features\" if k < X.shape[1] else f\"{k:2d} features (all)\"\n    print(f\"  {label}: acc = {cv_scores.mean():.4f} ± {cv_scores.std():.4f}\")"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "MINE — Mutual Information Neural Estimation"
+      },
+      {
+        "type": "text",
+        "content": "For continuous high-dimensional variables, computing MI analytically is intractable. MINE (Belghazi et al., 2018) trains a neural network to lower-bound MI using the Donsker-Varadhan representation of KL divergence:\n\nI(X;Y) ≥ E_{P(X,Y)}[T(x,y)] − log E_{P(X)P(Y)}[e^{T(x,y)}]\n\nwhere T is a neural network. Maximizing this lower bound over T gives a tight estimate."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import torch\nimport torch.nn as nn\nimport torch.optim as optim\nimport numpy as np\n\nclass MINENetwork(nn.Module):\n    \"\"\"Statistics network T(x,y) for MINE.\"\"\"\n    def __init__(self, x_dim: int, y_dim: int, hidden: int = 128):\n        super().__init__()\n        self.net = nn.Sequential(\n            nn.Linear(x_dim + y_dim, hidden),\n            nn.ReLU(),\n            nn.Linear(hidden, hidden),\n            nn.ReLU(),\n            nn.Linear(hidden, 1)\n        )\n\n    def forward(self, x, y):\n        return self.net(torch.cat([x, y], dim=-1))\n\ndef mine_lower_bound(T: MINENetwork, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:\n    \"\"\"Donsker-Varadhan lower bound on I(X;Y).\"\"\"\n    joint_score = T(x, y).mean()           # E_{P(X,Y)}[T]\n    y_shuffled = y[torch.randperm(len(y))] # break dependence → P(X)P(Y)\n    marginal_score = T(x, y_shuffled).exp().mean().log()  # log E_{P(X)P(Y)}[e^T]\n    return joint_score - marginal_score\n\ndef estimate_mi(x_np: np.ndarray, y_np: np.ndarray,\n                epochs: int = 500) -> float:\n    x = torch.FloatTensor(x_np)\n    y = torch.FloatTensor(y_np)\n    model = MINENetwork(x.shape[1], y.shape[1])\n    opt = optim.Adam(model.parameters(), lr=1e-3)\n    for ep in range(epochs):\n        opt.zero_grad()\n        loss = -mine_lower_bound(model, x, y)  # maximize → negate\n        loss.backward()\n        opt.step()\n        if (ep + 1) % 100 == 0:\n            print(f\"  Epoch {ep+1}: MI ≈ {-loss.item():.4f} nats\")\n    return -loss.item()\n\n# Test on correlated Gaussians (true MI known analytically)\nrho = 0.8\nn = 2000\nx_data = np.random.randn(n, 1)\ny_data = rho * x_data + np.sqrt(1 - rho**2) * np.random.randn(n, 1)\ntrue_mi = -0.5 * np.log(1 - rho**2)\nprint(f\"True MI = {true_mi:.4f} nats\")\nestimate_mi(x_data, y_data)"
+      },
+      {
+        "type": "callout",
+        "variant": "warning",
+        "title": "MINE Bias",
+        "content": "MINE can be biased with finite samples, especially when the exponential term in the marginal expectation has high variance. The SMILE estimator and other variants address this by clipping the exponent. For small datasets, histogram or k-NN estimators are more stable."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "InfoNCE and Contrastive Learning"
+      },
+      {
+        "type": "text",
+        "content": "InfoNCE (van den Oord et al., 2018) provides another lower bound on MI and is the objective behind contrastive self-supervised learning (SimCLR, MoCo, CLIP). Given a positive pair (x, y) and N-1 negative pairs, InfoNCE is:\n\nL_InfoNCE = -E[log(e^{f(x,y)} / Σ_{y'} e^{f(x,y')})]\n\nThis lower bounds MI: I(X;Y) ≥ log(N) - L_InfoNCE. The bound tightens as N increases but also requires more negatives."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import torch\nimport torch.nn as nn\nimport torch.nn.functional as F\nimport numpy as np\n\ndef infonce_loss(z_i: torch.Tensor, z_j: torch.Tensor,\n                 temperature: float = 0.07) -> torch.Tensor:\n    \"\"\"InfoNCE / NT-Xent loss for contrastive learning.\n\n    Args:\n        z_i: embeddings of augmented view 1, shape (N, D)\n        z_j: embeddings of augmented view 2, shape (N, D)\n        temperature: softmax temperature tau\n    Returns:\n        Scalar InfoNCE loss (lower = more MI preserved)\n    \"\"\"\n    N = z_i.shape[0]\n\n    # Normalize embeddings to unit sphere\n    z_i = F.normalize(z_i, dim=-1)\n    z_j = F.normalize(z_j, dim=-1)\n\n    # Compute all pairwise similarities: shape (2N, 2N)\n    z = torch.cat([z_i, z_j], dim=0)\n    sim = torch.mm(z, z.T) / temperature\n\n    # Mask out self-similarities\n    mask = torch.eye(2 * N, dtype=torch.bool, device=z.device)\n    sim.masked_fill_(mask, float('-inf'))\n\n    # Positive pairs: (i, N+i) and (N+i, i)\n    labels = torch.cat([torch.arange(N, 2*N), torch.arange(N)]).to(z.device)\n    loss = F.cross_entropy(sim, labels)\n    return loss\n\ndef mi_lower_bound(infonce_val: float, batch_size: int) -> float:\n    \"\"\"MI lower bound from InfoNCE loss.\"\"\"\n    return np.log(batch_size) - infonce_val\n\n# Demonstration\nN, D = 64, 128\nz1 = torch.randn(N, D)\nz2 = z1 + 0.1 * torch.randn(N, D)  # highly correlated views\nloss = infonce_loss(z1, z2)\nprint(f\"InfoNCE loss: {loss.item():.4f}\")\nprint(f\"MI lower bound: {mi_lower_bound(loss.item(), N):.4f} nats\")\nprint(f\"Theoretical max MI bound: log({N}) = {np.log(N):.4f} nats\")"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Information Bottleneck Principle"
+      },
+      {
+        "type": "text",
+        "content": "The Information Bottleneck (Tishby et al., 2000) formalizes the compression-relevance trade-off. Given input X and target Y, we seek a compressed representation Z that:\n- Minimizes I(X;Z) — compress X as much as possible\n- Maximizes I(Z;Y) — retain information about Y\n\nThe IB Lagrangian is: L = I(X;Z) - β·I(Z;Y), where β controls the compression-accuracy trade-off. At β=0 we discard everything; as β→∞ we keep all information. The optimal Z is a sufficient statistic of X for predicting Y."
+      },
+      {
+        "type": "callout",
+        "variant": "tip",
+        "title": "Self-Supervised Learning Connection",
+        "content": "Contrastive self-supervised methods (SimCLR, DINO) implicitly optimize a form of the information bottleneck: they maximize MI between two augmented views of the same image (I(Z;Y)) while the finite-capacity network compresses away view-specific noise (minimizing I(X;Z) indirectly). This explains why strong augmentations — which create a harder compression task — often produce better representations."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Conditional Mutual Information"
+      },
+      {
+        "type": "text",
+        "content": "Conditional MI I(X;Y|Z) measures the information X and Y share *given* knowledge of Z:\n\nI(X;Y|Z) = H(X|Z) - H(X|Y,Z) = E_Z[I(X;Y|Z=z)]\n\nThe chain rule for MI states: I(X;Y,Z) = I(X;Z) + I(X;Y|Z). This is key for feature importance: if I(X;Y|Z) ≈ 0, feature X adds no information about Y beyond what Z already provides — X is redundant given Z."
+      },
+      {
+        "type": "divider"
+      },
+      {
+        "type": "text",
+        "content": "Mutual information unifies feature selection, representation learning, and generative modeling under a single information-theoretic lens. Whether computing it analytically from joint distributions, estimating it with neural bounds (MINE, InfoNCE), or using it to guide compression (IB), MI provides the conceptual foundation for understanding what information a model preserves, discards, or amplifies."
+      }
+    ]
+  },
+  {
+    "slug": "entropy-rate",
+    "title": "Entropy Rate and Information in Sequences",
+    "description": "Entropy rate characterizes the irreducible uncertainty per symbol in a stochastic process. Covers Markov chains, language model perplexity, bits-per-byte, and Lempel-Ziv complexity.",
+    "tags": ["information-theory", "math", "foundations"],
+    "topic": "math-foundations",
+    "status": "published",
+    "updated": "2026-07-10",
+    "blocks": [
+      {
+        "type": "text",
+        "content": "A single random variable has entropy H(X). But real-world data — text, audio, time series — is a *sequence* of random variables with temporal structure. The entropy rate captures how much genuine uncertainty exists per symbol once we account for all the patterns and dependencies in the sequence."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Definition of Entropy Rate"
+      },
+      {
+        "type": "text",
+        "content": "For a stochastic process {Xₙ}, the entropy rate is defined as the limit:\n\nh = lim_{n→∞} (1/n) H(X₁, X₂, ..., Xₙ)\n\nprovided the limit exists. For a *stationary* process, this limit always exists and equals the conditional entropy rate:\n\nh = lim_{n→∞} H(Xₙ | X_{n-1}, ..., X₁)\n\nThe conditional form says: as we observe more context, the per-symbol uncertainty decreases monotonically and converges to h."
+      },
+      {
+        "type": "callout",
+        "variant": "info",
+        "title": "Why the Limit Exists for Stationary Processes",
+        "content": "For a stationary process, H(Xₙ|X_{n-1},...,X₁) is non-increasing in n (more context never increases entropy) and bounded below by 0. By the monotone convergence theorem the limit exists. This is a consequence of the chain rule and sub-additivity of entropy."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Special Cases and Examples"
+      },
+      {
+        "type": "table",
+        "headers": ["Process Type", "Entropy Rate Formula", "Example", "Rate (bits/symbol)"],
+        "rows": [
+          ["i.i.d. uniform binary", "H(X₁) = log₂(2) = 1", "Fair coin flips", "1.0"],
+          ["i.i.d. biased binary", "H(X₁) = −p log p − (1−p) log(1−p)", "Biased coin (p=0.1)", "≈ 0.47"],
+          ["i.i.d. uniform over alphabet A", "log₂(|A|)", "Uniform die rolls (6-sided)", "≈ 2.58"],
+          ["First-order Markov chain", "−Σᵢ πᵢ Σⱼ Pᵢⱼ log Pᵢⱼ", "Weather model", "< H(X₁)"],
+          ["Natural English text", "Shannon experiment estimate", "Written English", "≈ 1.0–1.3"],
+          ["Random (incompressible)", "H(X₁) = max entropy", "True random bits", "= log₂(|A|)"]
+        ]
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Entropy Rate of a Markov Chain"
+      },
+      {
+        "type": "text",
+        "content": "For an ergodic, time-homogeneous Markov chain with transition matrix P and stationary distribution π, the entropy rate has a closed form:\n\nh = −Σᵢ πᵢ Σⱼ Pᵢⱼ log Pᵢⱼ = Σᵢ πᵢ H(Xₙ | Xₙ₋₁=i)\n\nThis is the stationary-distribution-weighted average of the conditional entropy at each state. A highly predictable chain (near-deterministic transitions) has h ≈ 0; a fully random chain has h = log|A|."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import numpy as np\nfrom scipy.linalg import eig\n\ndef markov_entropy_rate(P: np.ndarray, base: float = 2.0) -> float:\n    \"\"\"Compute entropy rate of a finite ergodic Markov chain.\n\n    Args:\n        P: Transition matrix, shape (n_states, n_states). Rows sum to 1.\n        base: Logarithm base (2 = bits, e = nats).\n    Returns:\n        Entropy rate h in specified units.\n    \"\"\"\n    n = P.shape[0]\n    assert np.allclose(P.sum(axis=1), 1.0), \"Rows must sum to 1\"\n\n    # Stationary distribution: left eigenvector for eigenvalue 1\n    # Equivalently, solve π P = π with Σ πᵢ = 1\n    eigenvalues, eigenvectors = eig(P.T)\n    stationary_idx = np.argmin(np.abs(eigenvalues - 1.0))\n    pi = np.real(eigenvectors[:, stationary_idx])\n    pi = pi / pi.sum()  # normalize\n\n    # Compute h = -Σᵢ πᵢ Σⱼ Pᵢⱼ log Pᵢⱼ\n    log_fn = np.log if base == np.e else (lambda x: np.log(x) / np.log(base))\n    row_entropies = np.array([\n        -np.sum(P[i, P[i] > 0] * log_fn(P[i, P[i] > 0]))\n        for i in range(n)\n    ])\n    h = np.dot(pi, row_entropies)\n\n    print(f\"Stationary distribution π: {pi}\")\n    print(f\"Per-state conditional entropies: {row_entropies}\")\n    print(f\"Entropy rate h = {h:.6f} {'bits' if base==2 else 'nats'}/symbol\")\n    return h\n\n# Example: 3-state weather Markov chain\n#   States: 0=sunny, 1=cloudy, 2=rainy\nP = np.array([\n    [0.7, 0.2, 0.1],\n    [0.3, 0.4, 0.3],\n    [0.2, 0.3, 0.5]\n])\nmarkov_entropy_rate(P, base=2)"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Empirical Entropy Rate of Text"
+      },
+      {
+        "type": "text",
+        "content": "Shannon famously estimated English text has an entropy rate of about 1 bit/character through human prediction experiments. We can approximate this computationally by estimating conditional entropy H(Xₙ|Xₙ₋ₖ,...,Xₙ₋₁) using sliding windows of increasing context length k. As k grows, the estimate approaches the true entropy rate."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import numpy as np\nfrom collections import Counter, defaultdict\nfrom math import log2\nfrom typing import Dict, Tuple\n\ndef empirical_conditional_entropy(text: str, context_len: int) -> float:\n    \"\"\"Estimate H(Xₙ | context of length context_len) from text.\n\n    Uses maximum-likelihood (frequency) estimates of conditional probabilities.\n    Returns entropy in bits/character.\n    \"\"\"\n    if context_len == 0:\n        # Marginal entropy\n        counts = Counter(text)\n        total = len(text)\n        probs = np.array([v / total for v in counts.values()])\n        return -np.sum(probs * np.log2(probs))\n\n    # Count transitions: context → next_char\n    context_counts: Dict[str, int] = defaultdict(int)\n    transition_counts: Dict[Tuple[str, str], int] = defaultdict(int)\n\n    for i in range(len(text) - context_len):\n        ctx = text[i:i + context_len]\n        nxt = text[i + context_len]\n        context_counts[ctx] += 1\n        transition_counts[(ctx, nxt)] += 1\n\n    # H(X|context) = Σ_{ctx} P(ctx) H(X|ctx=c)\n    total = sum(context_counts.values())\n    h_cond = 0.0\n    for ctx, ctx_count in context_counts.items():\n        p_ctx = ctx_count / total\n        # Conditional distribution over next chars\n        next_chars = {nxt: transition_counts[(ctx, nxt)] for nxt in set(c for (c2, c) in transition_counts if c2 == ctx)}\n        n_ctx = sum(next_chars.values())\n        h_ctx = -sum((c / n_ctx) * log2(c / n_ctx) for c in next_chars.values() if c > 0)\n        h_cond += p_ctx * h_ctx\n\n    return h_cond\n\n# Download a small sample of text\nsample = \"\"\"the entropy rate of english text is approximately one bit per character\nwhen conditioning on sufficient context this was estimated by claude shannon\nusing human prediction experiments in the 1950s the result shows that english\ntext has enormous redundancy compared to the theoretical maximum\"\"\"\n\nprint(\"Context length → Estimated H(X|context) [bits/char]\")\nfor k in [0, 1, 2, 3, 4]:\n    h = empirical_conditional_entropy(sample, k)\n    print(f\"  k={k}: {h:.4f} bits/char\")"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Language Model Perplexity and Entropy Rate"
+      },
+      {
+        "type": "text",
+        "content": "A language model assigns probability p_model(x₁,...,xₙ) to sequences. The cross-entropy of the model on the true data distribution is:\n\nH(p_true, p_model) = -E_{x~p_true}[log p_model(x)]\n\nFor a *perfect* model (p_model = p_true), cross-entropy equals the true entropy rate. Perplexity is PPL = 2^{cross-entropy} — the geometric mean number of equally likely choices the model sees at each token. A model matching the true entropy rate of English (~1 bit/char ≈ ~2-3 bits/token) would have PPL ≈ 4-8 on character-level tasks."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import numpy as np\nfrom transformers import AutoTokenizer, AutoModelForCausalLM\nimport torch\nfrom typing import List\n\ndef compute_entropy_rate_and_perplexity(\n    texts: List[str],\n    model_name: str = \"gpt2\",\n    stride: int = 512\n) -> dict:\n    \"\"\"Compute perplexity and estimate entropy rate from an LLM.\n\n    Uses stride-based approach to handle long texts without boundary artifacts.\n    \"\"\"\n    tokenizer = AutoTokenizer.from_pretrained(model_name)\n    model = AutoModelForCausalLM.from_pretrained(model_name)\n    model.eval()\n\n    total_log_prob = 0.0\n    total_tokens = 0\n    total_chars = sum(len(t) for t in texts)\n\n    with torch.no_grad():\n        for text in texts:\n            encodings = tokenizer(text, return_tensors=\"pt\")\n            input_ids = encodings.input_ids  # shape (1, T)\n            T = input_ids.shape[1]\n            max_len = model.config.n_positions\n\n            for begin in range(0, T, stride):\n                end = min(begin + max_len, T)\n                tgt_begin = max(begin, begin + max_len - stride)  # only score new tokens\n                chunk = input_ids[:, begin:end]\n                target_len = end - tgt_begin\n\n                outputs = model(chunk, labels=chunk)\n                # outputs.loss is mean NLL over all tokens in chunk\n                # We need to weight by target tokens only — simplified here\n                log_prob = -outputs.loss.item() * (end - begin)\n                total_log_prob += log_prob * (target_len / (end - begin))\n                total_tokens += target_len\n\n    cross_entropy_bits = -total_log_prob / total_tokens / np.log(2)\n    ppl = 2 ** cross_entropy_bits\n    avg_chars_per_token = total_chars / total_tokens\n    bpb = cross_entropy_bits / avg_chars_per_token  # bits-per-byte\n\n    return {\n        \"cross_entropy_bits_per_token\": cross_entropy_bits,\n        \"perplexity\": ppl,\n        \"bits_per_byte\": bpb,\n        \"entropy_rate_estimate_bits_per_char\": bpb\n    }\n\n# Usage (requires transformers + a downloaded model)\n# results = compute_entropy_rate_and_perplexity([\"example text here\"])\n# print(results)"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Lempel-Ziv Complexity and Entropy Rate"
+      },
+      {
+        "type": "text",
+        "content": "The Lempel-Ziv algorithm (LZ77/LZ78) is a universal data compressor: without knowing the source statistics, it converges to the entropy rate as sequence length increases. This makes compression ratio a model-free estimator of entropy rate. The LZ76 complexity c(x) of a string x grows as c(x) ~ n/(log n) · h, where h is the entropy rate."
+      },
+      {
+        "type": "callout",
+        "variant": "tip",
+        "title": "Bits-per-Byte (BPB) as a Universal Metric",
+        "content": "BPB = log₂(PPL) / avg_chars_per_token makes perplexity comparable across models with different tokenizers. GPT-4 tokenizer produces ~4 chars/token while LLaMA SentencePiece produces ~3.5 chars/token — so raw PPL numbers are incomparable, but BPB values are directly comparable."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import gzip\nimport zlib\nimport bz2\nimport lzma\nimport struct\nfrom typing import Dict\n\ndef compression_vs_entropy_bound(\n    text: str,\n    entropy_rate_bits_per_char: float\n) -> Dict[str, dict]:\n    \"\"\"Compare actual compression ratios vs the entropy rate lower bound.\n\n    Shannon's source coding theorem says the best lossless compressor\n    achieves exactly h bits/char. We compare standard algorithms to this bound.\n\n    Args:\n        text: Input text to compress.\n        entropy_rate_bits_per_char: Estimated entropy rate (e.g., 1.0 for English).\n    Returns:\n        Dict with compression statistics per method.\n    \"\"\"\n    data = text.encode('utf-8')\n    original_bytes = len(data)\n    original_bits_per_char = 8.0  # UTF-8 baseline: 8 bits/char (ASCII chars)\n\n    methods = {\n        'gzip-1 (fast)': gzip.compress(data, compresslevel=1),\n        'gzip-9 (best)': gzip.compress(data, compresslevel=9),\n        'zlib-6 (default)': zlib.compress(data, level=6),\n        'bz2 (block)': bz2.compress(data),\n        'lzma (xz)': lzma.compress(data),\n    }\n\n    entropy_bound_bytes = len(text) * entropy_rate_bits_per_char / 8.0\n    print(f\"Original text: {len(text)} chars, {original_bytes} bytes\")\n    print(f\"Entropy bound @ h={entropy_rate_bits_per_char} b/char: {entropy_bound_bytes:.1f} bytes\")\n    print(f\"\\n{'Method':<20} {'Compressed':>12} {'Bits/char':>10} {'vs bound':>10}\")\n    print(\"-\" * 55)\n\n    results = {}\n    for name, compressed in methods.items():\n        n_bytes = len(compressed)\n        bits_per_char = (n_bytes * 8) / len(text)\n        gap_pct = 100 * (bits_per_char - entropy_rate_bits_per_char) / entropy_rate_bits_per_char\n        print(f\"{name:<20} {n_bytes:>12} {bits_per_char:>10.3f} {gap_pct:>+9.1f}%\")\n        results[name] = {'compressed_bytes': n_bytes, 'bits_per_char': bits_per_char}\n\n    return results\n\n# English text sample (entropy rate ≈ 1.0-1.3 bits/char empirically)\nsample = (\"the quick brown fox jumps over the lazy dog \" * 50 +\n          \"information theory and entropy rate of english \" * 30)\ncompression_vs_entropy_bound(sample, entropy_rate_bits_per_char=1.2)"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Source Coding Theorem Connection"
+      },
+      {
+        "type": "text",
+        "content": "Shannon's source coding theorem states that for a stationary ergodic source with entropy rate h, the optimal lossless compression achieves exactly h bits/symbol — no more, no less. Any code achieving fewer than h bits/symbol must have non-zero error probability; any code using more than h bits/symbol is wasting capacity. This is why entropy rate is both a theoretical limit and a practical benchmark for compression algorithms and language models."
+      },
+      {
+        "type": "divider"
+      },
+      {
+        "type": "text",
+        "content": "Entropy rate is the fingerprint of a stochastic process: i.i.d. sources have maximum entropy rate (no exploitable patterns), while structured processes like natural language have rates far below the alphabet maximum. Language model perplexity is the empirical entropy rate of the model's distribution on a test corpus — minimizing it is equivalent to finding a model whose distribution matches the true data distribution as closely as possible."
+      }
+    ]
+  },
+  {
+    "slug": "perplexity-llm",
+    "title": "Perplexity — LLM Evaluation Metric",
+    "description": "Perplexity measures how well a language model predicts held-out text. Covers the information-theoretic definition, stride-based computation, bits-per-byte, tokenizer dependence, and the correlation with downstream tasks.",
+    "tags": ["information-theory", "math", "foundations"],
+    "topic": "math-foundations",
+    "status": "published",
+    "updated": "2026-07-10",
+    "blocks": [
+      {
+        "type": "text",
+        "content": "Perplexity is the standard intrinsic evaluation metric for language models. It answers: on average, how many equally likely choices does the model believe it has at each token position? A model that perfectly predicts every token has PPL=1; a model equivalent to a uniform distribution over a vocabulary of size V has PPL=V."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Information-Theoretic Definition"
+      },
+      {
+        "type": "text",
+        "content": "Given a test corpus (x₁, x₂, ..., x_N), perplexity is defined as:\n\nPPL = exp(H(p_true, p_model)) = exp(-(1/N) Σₜ log p_model(xₜ | x<t))\n\nwhere the log is natural (for nats) or log₂ (for bits). In bits:\n\nPPL = 2^{(-(1/N) Σₜ log₂ p_model(xₜ | x<t))}\n\nThis is the geometric mean of per-token inverse probabilities:\n\nPPL = (Π_{t=1}^{N} 1/p_model(xₜ|x<t))^{1/N}\n\nThe geometric mean makes PPL sensitive to low-probability predictions — a single very wrong prediction has an outsized effect."
+      },
+      {
+        "type": "callout",
+        "variant": "info",
+        "title": "Branching Factor Interpretation",
+        "content": "If a model always assigns equal probability to PPL tokens at each step, it achieves exactly that perplexity. PPL=20 means the model is as uncertain as someone choosing uniformly among 20 options at every step. GPT-2 achieves ~29 PPL on WikiText-103; GPT-4 achieves <10 on the same benchmark."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Stride-Based Perplexity Computation"
+      },
+      {
+        "type": "text",
+        "content": "For documents longer than the model's context window, naive chunking creates boundary artifacts: the model has no context at the start of each chunk and assigns lower probabilities than it would with full context. The solution is a sliding window with stride < context_length, scoring only the new (non-overlapping) tokens at each step."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import torch\nimport numpy as np\nfrom transformers import AutoTokenizer, AutoModelForCausalLM\nfrom typing import Union\n\ndef stride_perplexity(\n    text: str,\n    model_name: str = \"gpt2\",\n    stride: int = 512,\n    device: str = \"cpu\"\n) -> float:\n    \"\"\"Compute perplexity using sliding window to handle long documents.\n\n    The stride controls the overlap. A stride equal to max_length gives\n    non-overlapping chunks (fast but boundary artifacts). Smaller stride\n    gives more accurate estimates at higher compute cost.\n\n    Args:\n        text: Input text to evaluate.\n        model_name: HuggingFace model name.\n        stride: Number of new tokens scored per window.\n        device: 'cpu' or 'cuda'.\n    Returns:\n        Perplexity (lower is better).\n    \"\"\"\n    tokenizer = AutoTokenizer.from_pretrained(model_name)\n    model = AutoModelForCausalLM.from_pretrained(model_name).to(device)\n    model.eval()\n    max_length = model.config.n_positions  # context window size\n\n    encodings = tokenizer(text, return_tensors=\"pt\")\n    input_ids = encodings.input_ids.to(device)  # shape (1, T)\n    T = input_ids.shape[1]\n\n    nlls = []  # negative log-likelihoods per token\n    prev_end = 0\n\n    for begin in range(0, T, stride):\n        end = min(begin + max_length, T)\n        # Tokens we'll actually score (avoid re-scoring old tokens)\n        target_begin = max(begin, prev_end)\n        if target_begin >= end:\n            break\n\n        chunk = input_ids[:, begin:end]          # input to model\n        target_len = end - target_begin\n\n        # Create label: -100 for context tokens (ignored in loss), real IDs for target\n        labels = chunk.clone()\n        labels[:, :target_begin - begin] = -100\n\n        with torch.no_grad():\n            outputs = model(chunk, labels=labels)\n            # outputs.loss = mean NLL over non-masked tokens\n            nlls.append(outputs.loss.item() * target_len)\n\n        prev_end = end\n        if end == T:\n            break\n\n    mean_nll = sum(nlls) / T\n    ppl = np.exp(mean_nll)\n    print(f\"Tokens: {T}, Mean NLL: {mean_nll:.4f} nats, PPL: {ppl:.2f}\")\n    return ppl\n\n# Example usage:\n# ppl = stride_perplexity(\"The entropy of a distribution...\", stride=256)"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Bits-per-Byte (BPB)"
+      },
+      {
+        "type": "text",
+        "content": "Raw perplexity is tokenizer-dependent: GPT-4 with byte-pair encoding and LLaMA with SentencePiece tokenize the same text into different numbers of tokens, making PPL values incomparable. Bits-per-byte (BPB) normalizes by character count:\n\nBPB = (1/|chars|) Σₜ −log₂ p_model(xₜ|x<t) × |chars_in_token_t|\n\nEquivalently: BPB = log₂(PPL) / avg_chars_per_token. Lower is better; the theoretical minimum is the entropy rate of the true distribution."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import torch\nimport numpy as np\nfrom transformers import AutoTokenizer, AutoModelForCausalLM\nfrom typing import Tuple\n\ndef bits_per_byte(\n    text: str,\n    model_name: str = \"gpt2\",\n    stride: int = 512\n) -> Tuple[float, float, float]:\n    \"\"\"Compute bits-per-byte (BPB) — tokenizer-agnostic perplexity.\n\n    Returns:\n        Tuple of (ppl, bpb, avg_chars_per_token)\n    \"\"\"\n    tokenizer = AutoTokenizer.from_pretrained(model_name)\n    model = AutoModelForCausalLM.from_pretrained(model_name)\n    model.eval()\n\n    encodings = tokenizer(text, return_tensors=\"pt\")\n    input_ids = encodings.input_ids  # (1, T)\n    tokens = tokenizer.convert_ids_to_tokens(input_ids[0].tolist())\n\n    # Character length per token (for BPB computation)\n    # Tokens may have special chars (Ġ for GPT-2 word boundaries)\n    char_lengths = [len(t.replace('Ġ', ' ').replace('Ċ', '\\n')) for t in tokens]\n    total_chars = sum(char_lengths)\n    avg_chars_per_token = total_chars / len(tokens)\n\n    max_length = model.config.n_positions\n    T = input_ids.shape[1]\n    total_nll_bits = 0.0\n\n    with torch.no_grad():\n        for begin in range(0, T, stride):\n            end = min(begin + max_length, T)\n            chunk = input_ids[:, begin:end]\n            outputs = model(chunk, labels=chunk)\n            # Convert from nats to bits\n            nll_bits = outputs.loss.item() / np.log(2)\n            total_nll_bits += nll_bits * (end - begin)\n\n    mean_nll_bits_per_token = total_nll_bits / T\n    ppl = 2 ** mean_nll_bits_per_token\n    bpb = mean_nll_bits_per_token / avg_chars_per_token\n\n    print(f\"Model: {model_name}\")\n    print(f\"Avg chars/token: {avg_chars_per_token:.3f}\")\n    print(f\"PPL: {ppl:.2f}\")\n    print(f\"BPB: {bpb:.4f} bits/char\")\n    return ppl, bpb, avg_chars_per_token\n\n# bits_per_byte(\"The quick brown fox jumps over the lazy dog.\", \"gpt2\")"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Comparing Perplexity Across Tokenizers"
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import numpy as np\nfrom transformers import AutoTokenizer\nfrom typing import List, Dict\n\ndef tokenizer_comparison(\n    text: str,\n    model_names: List[str]\n) -> Dict[str, dict]:\n    \"\"\"Compare tokenization statistics across different model tokenizers.\n\n    This demonstrates why raw PPL is incomparable across tokenizers.\n    \"\"\"\n    results = {}\n    chars = len(text)\n\n    for model_name in model_names:\n        try:\n            tokenizer = AutoTokenizer.from_pretrained(model_name)\n            tokens = tokenizer.encode(text)\n            n_tokens = len(tokens)\n            avg_chars = chars / n_tokens\n\n            results[model_name] = {\n                \"n_tokens\": n_tokens,\n                \"avg_chars_per_token\": avg_chars,\n                \"compression_ratio\": chars / n_tokens,\n                # Hypothetical: same true entropy in BPB=0.9\n                # PPL would differ by tokenizer compression ratio\n                \"hypothetical_ppl_at_bpb_0.9\": 2 ** (0.9 * avg_chars)\n            }\n            print(f\"\\n{model_name}:\")\n            print(f\"  Tokens: {n_tokens}, Avg chars/token: {avg_chars:.2f}\")\n            print(f\"  Hypothetical PPL (BPB=0.9): {results[model_name]['hypothetical_ppl_at_bpb_0.9']:.1f}\")\n        except Exception as e:\n            print(f\"  {model_name}: error — {e}\")\n\n    return results\n\nsample_text = \"\"\"The information bottleneck principle formalizes the trade-off between\ncompression and prediction. Given input X and target Y, we seek a compressed\nrepresentation Z that maximizes I(Z;Y) while minimizing I(X;Z).\"\"\"\n\n# Note: these tokenizers have different average chars-per-token\n# gpt2: ~4 chars, llama: ~3.5 chars — PPL not directly comparable\nmodels = [\"gpt2\"]  # add \"meta-llama/Llama-2-7b-hf\" if available\ntokenizer_comparison(sample_text, models)"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Per-Domain Perplexity Breakdown"
+      },
+      {
+        "type": "text",
+        "content": "A single aggregate PPL number obscures important variation. A model might achieve low PPL on news text (well-represented in training) but high PPL on code or mathematics. Per-domain analysis reveals generalization gaps and informs targeted training data collection."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import numpy as np\nfrom typing import Dict, List\n\ndef per_domain_perplexity(\n    domain_texts: Dict[str, List[str]],\n    log_probs_fn,  # function(text) -> list of per-token log probs\n) -> Dict[str, dict]:\n    \"\"\"Compute perplexity broken down by domain.\n\n    Args:\n        domain_texts: Dict mapping domain name to list of text samples.\n        log_probs_fn: Callable returning per-token log₂ probs for a string.\n    Returns:\n        Dict with per-domain PPL and BPB statistics.\n    \"\"\"\n    results = {}\n\n    for domain, texts in domain_texts.items():\n        all_log_probs = []\n        all_chars = 0\n\n        for text in texts:\n            lp = log_probs_fn(text)  # list of log₂ probs\n            all_log_probs.extend(lp)\n            all_chars += len(text)\n\n        mean_nll = -np.mean(all_log_probs)   # bits per token\n        ppl = 2 ** mean_nll\n        avg_cpt = all_chars / len(all_log_probs)\n        bpb = mean_nll / avg_cpt\n\n        results[domain] = {\"ppl\": ppl, \"bpb\": bpb, \"n_tokens\": len(all_log_probs)}\n        print(f\"  {domain:15s}: PPL={ppl:7.1f}, BPB={bpb:.4f}, tokens={len(all_log_probs)}\")\n\n    return results\n\n# Typical GPT-4 level model benchmark results (illustrative)\nprint(\"Typical domain-level perplexity (GPT-4 class model):\")\ndomains = {\n    \"Wikipedia\": 3.2,\n    \"News\": 5.1,\n    \"Python code\": 2.8,\n    \"Math proofs\": 8.4,\n    \"Legal text\": 6.7,\n    \"Medical text\": 9.2,\n}\nfor domain, ppl in domains.items():\n    bpb_approx = np.log2(ppl) / 3.8  # assume 3.8 chars/token\n    print(f\"  {domain:15s}: PPL={ppl:.1f}, BPB≈{bpb_approx:.3f}\")"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Perplexity vs Downstream Task Performance"
+      },
+      {
+        "type": "table",
+        "headers": ["Scenario", "PPL Trend", "Downstream Correlation", "Why?"],
+        "rows": [
+          ["Same model family, different size", "Larger → lower PPL", "Strong positive", "More capacity → better distribution fit → better tasks"],
+          ["Different tokenizers, same LLM size", "Tokenizer-dependent", "Weak (use BPB instead)", "PPL is tokenizer-dependent; BPB normalizes this"],
+          ["Pre-train PPL vs instruction following", "Lower pre-train PPL", "Moderate", "RLHF/SFT can degrade PPL while improving instruction quality"],
+          ["Domain-specific PPL vs domain tasks", "In-domain PPL", "Strong", "Low code PPL → better code generation"],
+          ["PPL after quantization", "Slight PPL increase", "Moderate", "Quantization artifacts don't always hurt downstream tasks equally"],
+          ["PPL on web text vs safety benchmarks", "Uncorrelated", "Near zero", "Safety is a fine-tuning property, not captured by raw text PPL"]
+        ]
+      },
+      {
+        "type": "callout",
+        "variant": "warning",
+        "title": "PPL Does Not Capture Semantic Quality",
+        "content": "A model can achieve low perplexity by assigning high probability to plausible but factually wrong text. PPL measures distributional fit, not factual accuracy, logical coherence, or instruction-following ability. Always pair PPL with downstream task evaluations (MMLU, HumanEval, etc.) for a complete picture."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Compression as an Evaluation Framework"
+      },
+      {
+        "type": "text",
+        "content": "Because perplexity equals 2^{cross-entropy}, a language model is implicitly a compression algorithm: encode each token as −log₂ p_model(xₜ|x<t) bits. Better models compress better. This connection motivates evaluating LLMs by their compression ratio on standardized corpora — a tokenizer-agnostic, compute-cheap alternative to running benchmark suites. The Hutter Prize competition awarded prizes for compressing 100 MB of Wikipedia, directly incentivizing advances in language modeling long before the transformer era."
+      },
+      {
+        "type": "list",
+        "ordered": false,
+        "items": [
+          "PPL = 2^{H(p,q)} — perplexity is compressed bits per token exponentiated",
+          "BPB < 1.0 means the model compresses text below 1 bit/char — comparable to gzip on structured data",
+          "Random baseline PPL = vocabulary size (e.g., 50,000 for GPT-2) — equivalent to uniform guessing",
+          "State-of-the-art models (GPT-4 class) achieve BPB ≈ 0.7–0.9 on diverse English text",
+          "Compression ratio on a held-out corpus is directly comparable across model architectures and tokenizers"
+        ]
+      },
+      {
+        "type": "divider"
+      },
+      {
+        "type": "text",
+        "content": "Perplexity is the workhorse of language model evaluation: information-theoretically grounded, easy to compute, and strongly predictive within a model family. Its limitations — tokenizer dependence, insensitivity to semantic quality, poor cross-domain aggregation — are well understood and addressed by BPB and per-domain breakdowns. A complete evaluation always uses PPL/BPB alongside task-based benchmarks."
+      }
+    ]
+  },
+  {
+    "slug": "noisychannel-shannons-theorem",
+    "title": "Noisy Channel Model and Shannon's Coding Theorem",
+    "description": "Shannon's channel coding theorem establishes that reliable communication is possible at any rate below channel capacity C, and impossible above it. Covers BSC, AWGN, capacity bounds, and connections to noisy-label learning.",
+    "tags": ["information-theory", "math", "foundations"],
+    "topic": "math-foundations",
+    "status": "published",
+    "updated": "2026-07-10",
+    "blocks": [
+      {
+        "type": "text",
+        "content": "Shannon's 1948 paper 'A Mathematical Theory of Communication' is arguably the most important paper in 20th-century engineering. Its central result — the channel coding theorem — showed that reliable communication over a noisy channel is always possible as long as the information rate stays below a finite threshold called channel capacity. This was deeply counter-intuitive: engineers of the time believed noise fundamentally limited reliability."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "The Shannon Communication Model"
+      },
+      {
+        "type": "text",
+        "content": "Shannon's model has five components:\n1. Source — generates a message M from a message set\n2. Encoder — maps M to a codeword x^n from the channel alphabet\n3. Channel — maps x^n to y^n with noise (probabilistic mapping P(y|x))\n4. Decoder — maps y^n back to an estimate M̂ of M\n5. Receiver — uses M̂\n\nThe goal: choose encoder/decoder pairs such that P(M̂ ≠ M) → 0 as block length n → ∞, while transmitting as many bits per channel use as possible."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Channel Capacity"
+      },
+      {
+        "type": "text",
+        "content": "The channel capacity C is the maximum mutual information between input and output, optimized over all input distributions:\n\nC = max_{P(X)} I(X;Y)\n\nCapacity has units of bits per channel use. The optimization is over P(X) — the choice of input distribution — because we control what we send but not the channel's noise behavior."
+      },
+      {
+        "type": "table",
+        "headers": ["Channel Model", "Description", "Capacity Formula", "Example Value"],
+        "rows": [
+          ["Binary Symmetric Channel (BSC)", "Bit flipped with prob p", "C = 1 − H_b(p)", "p=0.1: C≈0.531 bits/use"],
+          ["Binary Erasure Channel (BEC)", "Bit erased with prob ε", "C = 1 − ε", "ε=0.2: C=0.8 bits/use"],
+          ["AWGN", "Gaussian noise with variance σ²", "C = ½ log₂(1 + P/σ²)", "SNR=10dB: C≈3.46 bits/use"],
+          ["Z-Channel", "0→0 always, 1→0 with prob p", "C = log₂(1 + (1−p)·2^{−H_b(p/(1+(1−p)))})", "Asymmetric, used in optical"],
+          ["Discrete Memoryless (general)", "Any P(y|x)", "max_{P(X)} I(X;Y)", "Computed numerically"]
+        ]
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Binary Symmetric Channel — Capacity and Simulation"
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import numpy as np\nfrom scipy.special import entr\n\ndef binary_entropy(p: float) -> float:\n    \"\"\"Binary entropy function H_b(p) = -p log2(p) - (1-p) log2(1-p).\"\"\"\n    if p <= 0 or p >= 1:\n        return 0.0\n    return -p * np.log2(p) - (1 - p) * np.log2(1 - p)\n\ndef bsc_capacity(p: float) -> float:\n    \"\"\"Capacity of Binary Symmetric Channel with crossover probability p.\"\"\"\n    return 1.0 - binary_entropy(p)\n\ndef simulate_bsc(message_bits: np.ndarray, p: float) -> np.ndarray:\n    \"\"\"Simulate BSC: flip each bit independently with probability p.\"\"\"\n    flips = np.random.binomial(1, p, size=message_bits.shape)\n    return (message_bits + flips) % 2  # XOR\n\n# Capacity at key crossover probabilities\nprint(\"BSC capacity C = 1 - H_b(p):\")\nfor p in [0.0, 0.01, 0.05, 0.1, 0.2, 0.5]:\n    c = bsc_capacity(p)\n    print(f\"  p = {p:.2f}: C = {c:.4f} bits/use\")\n\n# Show that capacity is maximized by uniform input (p(X=0) = p(X=1) = 0.5)\nprint(\"\\nCapacity achieved at uniform input distribution\")\nprint(f\"  At p=0.1, BSC capacity = {bsc_capacity(0.1):.4f} bits\")\nprint(f\"  Gap from 1 bit = {1.0 - bsc_capacity(0.1):.4f} bits (cost of noise)\")"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Repetition Codes vs Channel Capacity"
+      },
+      {
+        "type": "text",
+        "content": "The simplest error-correcting code is the repetition code: send each bit n times and decode by majority vote. This shows concretely how rate and reliability trade off around capacity. Below capacity (rate R < C), BER → 0 as n grows. Above capacity, BER stays bounded away from 0."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import numpy as np\n\ndef repetition_code_ber(\n    p_channel: float,\n    n_repeats_list: list,\n    n_trials: int = 5000,\n    n_bits: int = 200\n) -> None:\n    \"\"\"Simulate repetition code performance vs channel capacity on BSC.\n\n    Demonstrates Shannon's theorem: rate < C achieves low BER; rate > C fails.\n\n    Args:\n        p_channel: BSC crossover probability (noise level).\n        n_repeats_list: List of repetition factors to test.\n        n_trials: Number of Monte Carlo trials.\n        n_bits: Number of information bits per trial.\n    \"\"\"\n    capacity = 1.0 - binary_entropy(p_channel)\n    print(f\"Channel: BSC(p={p_channel}), Capacity C = {capacity:.4f} bits/use\")\n    print(f\"\\n{'n_repeats':>10} {'Rate':>8} {'< C?':>6} {'BER':>12} {'Reliable?':>10}\")\n    print(\"-\" * 50)\n\n    for n_repeats in n_repeats_list:\n        rate = 1.0 / n_repeats\n        total_errors = 0\n\n        for _ in range(n_trials):\n            msg = np.random.randint(0, 2, n_bits)\n            encoded = np.repeat(msg, n_repeats)         # n_repeats * n_bits symbols sent\n            flips = np.random.binomial(1, p_channel, encoded.shape)\n            received = (encoded + flips) % 2\n            # Majority vote: sum over repeats, threshold at 0.5\n            decoded = (received.reshape(n_bits, n_repeats).mean(axis=1) > 0.5).astype(int)\n            total_errors += np.sum(decoded != msg)\n\n        ber = total_errors / (n_trials * n_bits)\n        below_cap = \"YES\" if rate < capacity else \"NO \"\n        reliable = \"YES\" if ber < 0.01 else \"NO \"\n        print(f\"{n_repeats:>10} {rate:>8.4f} {below_cap:>6} {ber:>12.6f} {reliable:>10}\")\n\n# BSC with p=0.1 → C ≈ 0.531 bits/use\nrepetition_code_ber(\n    p_channel=0.1,\n    n_repeats_list=[1, 2, 3, 5, 7, 11, 21]\n)"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Shannon's Channel Coding Theorem"
+      },
+      {
+        "type": "text",
+        "content": "**Achievability (R < C):** For any rate R < C, there exists a sequence of (2^{nR}, n) codes such that the maximum error probability P_e^{(n)} → 0 as n → ∞. Shannon proved this via a random coding argument: a randomly chosen code achieves reliable communication.\n\n**Converse (R > C):** For any sequence of (2^{nR}, n) codes with R > C, the error probability P_e^{(n)} → 1 as n → ∞. No encoder/decoder pair can reliably communicate above capacity.\n\nThe proof of achievability uses the method of *typical sequences*: with high probability, the output sequence lies in a small set of jointly typical sequences determined by P(X,Y), and this set can be decoded correctly."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import numpy as np\nfrom typing import Tuple\n\ndef discrete_channel_capacity(\n    P_yx: np.ndarray,\n    n_iter: int = 1000,\n    tol: float = 1e-8\n) -> Tuple[float, np.ndarray]:\n    \"\"\"Compute capacity of a discrete memoryless channel via Blahut-Arimoto algorithm.\n\n    Args:\n        P_yx: Conditional probability P(Y=j|X=i), shape (|X|, |Y|).\n              Rows are input symbols, columns are output symbols.\n        n_iter: Maximum iterations.\n        tol: Convergence tolerance.\n    Returns:\n        (capacity_bits, optimal_input_distribution)\n    \"\"\"\n    n_x, n_y = P_yx.shape\n    q = np.ones(n_x) / n_x  # uniform initial input distribution\n\n    for iteration in range(n_iter):\n        # E-step: compute log of c(x) = exp(Σ_y P(y|x) log P(y|x)/P(y))\n        p_y = P_yx.T @ q  # P(Y=j) = Σᵢ q(i) P(Y=j|X=i)\n        # c(x) ∝ exp(KL(P(Y|X=x) || P(Y)))\n        c = np.exp(np.sum(P_yx * np.log(P_yx / (p_y + 1e-12) + 1e-12), axis=1))\n\n        # M-step: update input distribution\n        q_new = q * c\n        q_new /= q_new.sum()\n\n        if np.max(np.abs(q_new - q)) < tol:\n            q = q_new\n            print(f\"  Converged at iteration {iteration+1}\")\n            break\n        q = q_new\n\n    # Compute capacity at optimal q\n    p_y = P_yx.T @ q\n    mi = 0.0\n    for i in range(n_x):\n        for j in range(n_y):\n            if P_yx[i, j] > 0 and q[i] > 0:\n                mi += q[i] * P_yx[i, j] * np.log2(P_yx[i, j] / p_y[j])\n\n    return mi, q\n\n# BSC with p=0.1\np = 0.1\nP_bsc = np.array([[1-p, p], [p, 1-p]])\nc, q_opt = discrete_channel_capacity(P_bsc)\nprint(f\"BSC capacity (Blahut-Arimoto): {c:.6f} bits\")\nprint(f\"Analytic: {1 - binary_entropy(p):.6f} bits\")\nprint(f\"Optimal input distribution: {q_opt}\")"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "AWGN Channel and Shannon-Hartley Theorem"
+      },
+      {
+        "type": "text",
+        "content": "The Additive White Gaussian Noise (AWGN) channel with bandwidth B Hz and SNR = P/N₀B has capacity:\n\nC = B log₂(1 + SNR) bits/second\n\nThis is the Shannon-Hartley theorem. Key implications: doubling bandwidth doubles capacity; doubling SNR adds only log₂(2) = 1 extra bit/s/Hz — capacity grows logarithmically with power. Modern wireless systems (5G, WiFi 6) operate within 1-2 dB of this Shannon limit using LDPC or polar codes."
+      },
+      {
+        "type": "callout",
+        "variant": "info",
+        "title": "Modern Codes Approach Capacity",
+        "content": "Turbo codes (1993) came within 0.5 dB of the AWGN Shannon limit. LDPC codes (rediscovered 1996) can operate within 0.0045 dB. Polar codes (Arıkan 2009) are the first provably capacity-achieving family for arbitrary binary-input channels and are used in 5G NR standards."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Connection to Machine Learning — Noisy Label Learning"
+      },
+      {
+        "type": "text",
+        "content": "The BSC provides an exact model for label noise: a true label y is flipped to a corrupted label ỹ with probability p (the noise rate). Under this model, the mutual information between true labels and observed labels is I(y;ỹ) = 1 - H_b(p) = C_BSC. This constrains how much information about y is preserved in ỹ — and therefore how well any classifier trained on ỹ can recover y."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import numpy as np\nfrom sklearn.datasets import make_classification\nfrom sklearn.linear_model import LogisticRegression\nfrom sklearn.metrics import accuracy_score\nfrom sklearn.model_selection import train_test_split\n\ndef add_label_noise(y: np.ndarray, noise_rate: float,\n                   n_classes: int = 2) -> np.ndarray:\n    \"\"\"Simulate symmetric label noise (BSC for binary, uniform for multi-class).\"\"\"\n    y_noisy = y.copy()\n    n = len(y)\n    flip_mask = np.random.rand(n) < noise_rate\n\n    for i in np.where(flip_mask)[0]:\n        other_classes = [c for c in range(n_classes) if c != y[i]]\n        y_noisy[i] = np.random.choice(other_classes)\n    return y_noisy\n\ndef noisy_label_experiment():\n    \"\"\"Show how label noise (BSC) degrades classification accuracy.\n\n    The information bottleneck predicts: accuracy bounded by BSC capacity.\n    \"\"\"\n    X, y = make_classification(\n        n_samples=2000, n_features=20, n_informative=10,\n        random_state=42\n    )\n    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)\n\n    # Clean upper bound\n    clf_clean = LogisticRegression(max_iter=1000).fit(X_train, y_train)\n    acc_clean = accuracy_score(y_test, clf_clean.predict(X_test))\n    print(f\"Clean labels accuracy: {acc_clean:.4f}\")\n\n    print(\"\\nNoise rate | BSC Capacity | Test Accuracy | Gap\")\n    for p_noise in [0.0, 0.05, 0.10, 0.20, 0.30, 0.40, 0.49]:\n        y_noisy = add_label_noise(y_train, p_noise)\n        clf = LogisticRegression(max_iter=1000).fit(X_train, y_noisy)\n        acc = accuracy_score(y_test, clf.predict(X_test))\n        capacity = 1.0 - binary_entropy(p_noise)\n        print(f\"  p={p_noise:.2f}     | {capacity:.4f}       | {acc:.4f}        | {acc_clean-acc:.4f}\")\n\nnoisy_label_experiment()"
+      },
+      {
+        "type": "callout",
+        "variant": "tip",
+        "title": "Source-Channel Separation",
+        "content": "Shannon's separation theorem says: compress the source to its entropy rate first (source coding), then transmit at any rate below channel capacity (channel coding). These two steps can be designed independently without loss of optimality. This justifies the modular design of modern communication systems — compression codecs are separate from forward error correction."
+      },
+      {
+        "type": "divider"
+      },
+      {
+        "type": "text",
+        "content": "Shannon's channel coding theorem is one of the great existential theorems of science: it proves that perfect reliability is achievable despite imperfect channels, up to a hard limit C. The theorem is non-constructive — Shannon's random coding proof doesn't tell us *how* to build capacity-achieving codes — but it set the agenda for 60 years of coding theory, culminating in turbo, LDPC, and polar codes that bring practice within a fraction of a dB of theory."
+      }
+    ]
+  },
+  {
+    "slug": "data-processing-inequality",
+    "title": "Data Processing Inequality",
+    "description": "The Data Processing Inequality (DPI) formalizes that information cannot be created by processing: I(X;Z) ≤ I(X;Y) for any Markov chain X→Y→Z. Covers sufficient statistics, the information bottleneck, and differential privacy.",
+    "tags": ["information-theory", "math", "foundations"],
+    "topic": "math-foundations",
+    "status": "published",
+    "updated": "2026-07-10",
+    "blocks": [
+      {
+        "type": "text",
+        "content": "The Data Processing Inequality (DPI) is a fundamental constraint on information flow: no matter how cleverly you process a signal, you cannot extract more information about the original source than was present in the signal itself. This seems obvious in retrospect, but its precise formulation has far-reaching consequences for deep learning theory, privacy, and statistical inference."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Markov Chains and the DPI Statement"
+      },
+      {
+        "type": "text",
+        "content": "Three random variables X, Y, Z form a Markov chain X → Y → Z if Z is conditionally independent of X given Y:\n\nP(Z | X, Y) = P(Z | Y)\n\nIn words: once you know Y, knowing X gives no additional information about Z. The Markov chain condition captures any sequential processing pipeline: X is the original data, Y is some intermediate representation, and Z is the output of further processing applied to Y."
+      },
+      {
+        "type": "text",
+        "content": "**Data Processing Inequality:** If X → Y → Z is a Markov chain, then:\n\nI(X;Z) ≤ I(X;Y)\n\nand also I(X;Z) ≤ I(Y;Z). Processing Y to obtain Z can only lose information about X, never gain it. The inequality is tight (equality holds) if and only if the processing Z = f(Y) is invertible (f is a bijection on the support of Y)."
+      },
+      {
+        "type": "callout",
+        "variant": "info",
+        "title": "Corollary: Invertible Functions Preserve MI",
+        "content": "If Z = f(Y) where f is invertible, then I(X;Z) = I(X;Y). This means lossless transformations — standardization, PCA whitening, invertible neural networks (normalizing flows) — preserve all mutual information. Only lossy transformations reduce MI."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "DPI Demonstration with Explicit Markov Chain"
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import numpy as np\nfrom scipy.stats import entropy as scipy_entropy\nfrom typing import Tuple\n\ndef compute_mi(joint_pxy: np.ndarray) -> float:\n    \"\"\"Compute I(X;Y) from joint distribution.\"\"\"\n    px = joint_pxy.sum(axis=1)\n    py = joint_pxy.sum(axis=0)\n    mi = 0.0\n    for i in range(len(px)):\n        for j in range(len(py)):\n            if joint_pxy[i, j] > 0:\n                mi += joint_pxy[i, j] * np.log2(joint_pxy[i, j] / (px[i] * py[j]))\n    return mi\n\ndef dpi_demonstration() -> None:\n    \"\"\"Verify DPI: I(X;Z) <= I(X;Y) for explicit Markov chain X -> Y -> Z.\"\"\"\n    # X: source (3 states), Y: noisy channel output (3 states), Z: further processed (2 states)\n    np.random.seed(42)\n\n    # P(X): source distribution\n    px = np.array([0.5, 0.3, 0.2])\n\n    # P(Y|X): first channel (noisy)\n    P_yx = np.array([\n        [0.7, 0.2, 0.1],  # P(Y|X=0)\n        [0.1, 0.8, 0.1],  # P(Y|X=1)\n        [0.2, 0.1, 0.7],  # P(Y|X=2)\n    ])\n\n    # P(Z|Y): second channel (further lossy processing, collapses 3 -> 2 states)\n    P_zy = np.array([\n        [0.9, 0.1],  # P(Z|Y=0)\n        [0.4, 0.6],  # P(Z|Y=1)\n        [0.1, 0.9],  # P(Z|Y=2)\n    ])\n\n    # Compute joint P(X,Y)\n    joint_xy = np.outer(px, np.ones(3)) * P_yx  # shape (3,3): joint_xy[i,j] = P(X=i,Y=j)... wait\n    # Correct: joint_xy[i,j] = P(X=i) * P(Y=j|X=i)\n    joint_xy = np.array([[px[i] * P_yx[i, j] for j in range(3)] for i in range(3)])\n\n    # Compute joint P(X,Z) by marginalizing over Y\n    # P(X=i, Z=k) = Σ_j P(X=i, Y=j) * P(Z=k|Y=j)\n    joint_xz = joint_xy @ P_zy  # shape (3, 2)\n\n    mi_xy = compute_mi(joint_xy)\n    mi_xz = compute_mi(joint_xz)\n\n    print(f\"I(X;Y) = {mi_xy:.4f} bits  (before further processing)\")\n    print(f\"I(X;Z) = {mi_xz:.4f} bits  (after further processing)\")\n    print(f\"DPI satisfied: I(X;Z) <= I(X;Y): {mi_xz <= mi_xy + 1e-10}\")\n    print(f\"Information lost in Y->Z processing: {mi_xy - mi_xz:.4f} bits\")\n\ndpi_demonstration()"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "DPI Through Neural Network Layers"
+      },
+      {
+        "type": "text",
+        "content": "Each layer of a neural network is a (deterministic) function of its input. By DPI, the mutual information between the original input X and the layer's output T_l satisfies:\n\nI(X; T_L) ≤ I(X; T_{L-1}) ≤ ... ≤ I(X; T_1) ≤ I(X; X) = H(X)\n\nDeterministic layers actually achieve equality (bijection through differentiable, non-saturating activations). Only lossy operations (pooling, ReLU saturation, dropout) reduce MI. The relevant compression is I(T;X) — how much of the input the representation retains."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import torch\nimport torch.nn as nn\nimport numpy as np\nfrom sklearn.neighbors import NearestNeighbors\n\ndef knn_mi_estimate(X: np.ndarray, Y: np.ndarray, k: int = 5) -> float:\n    \"\"\"Rough k-NN mutual information estimate between X and Y representations.\n\n    Uses the Kraskov-Stoegbauer-Grassberger (KSG) estimator (simplified).\n    This is approximate; use MINE for production use.\n    \"\"\"\n    n = len(X)\n    XY = np.concatenate([X, Y], axis=1)\n\n    nbrs_xy = NearestNeighbors(n_neighbors=k+1).fit(XY)\n    dist_xy, _ = nbrs_xy.kneighbors(XY)\n    eps = dist_xy[:, k]  # distance to k-th neighbor in joint space\n\n    # Count neighbors in marginal spaces within eps\n    def count_neighbors(Z, eps_vals):\n        nbrs = NearestNeighbors(metric='chebyshev').fit(Z)\n        counts = np.array([len(nbrs.radius_neighbors([Z[i]], radius=eps_vals[i], return_distance=False)[0]) - 1\n                           for i in range(n)])\n        return counts\n\n    nx = count_neighbors(X, eps)\n    ny = count_neighbors(Y, eps)\n    from scipy.special import digamma\n    mi = digamma(k) - np.mean(digamma(nx + 1) + digamma(ny + 1)) + digamma(n)\n    return max(0.0, mi)  # MI >= 0\n\ndef mi_through_layers():\n    \"\"\"Demonstrate I(X;T_l) across layers of a neural network.\"\"\"\n    torch.manual_seed(42)\n    np.random.seed(42)\n\n    # Generate data: X = 10-dim Gaussian, Y = sign of first component (binary label)\n    n = 500\n    X = torch.randn(n, 10)\n    y = (X[:, 0] > 0).float()\n\n    model = nn.Sequential(\n        nn.Linear(10, 32), nn.ReLU(),\n        nn.Linear(32, 16), nn.ReLU(),\n        nn.Linear(16, 8),  nn.ReLU(),\n        nn.Linear(8, 1),   nn.Sigmoid()\n    )\n\n    X_np = X.detach().numpy()\n    print(\"Layer | I(X;T_layer) estimate [nats]\")\n    representation = X\n    prev_mi = knn_mi_estimate(X_np[:, :5], X_np[:, 5:])\n    print(f\"  Input: ≈ H(X) (all information present)\")\n\n    with torch.no_grad():\n        for i, layer in enumerate(model):\n            representation = layer(representation)\n            if isinstance(layer, nn.ReLU) or i == len(model) - 1:\n                rep_np = representation.detach().numpy()\n                if rep_np.shape[1] >= 2:\n                    mi = knn_mi_estimate(X_np[:, :5], rep_np)\n                    print(f\"  Layer {i}: I(X;T) ≈ {mi:.4f} nats\")\n\nmi_through_layers()"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Information Bottleneck Plane During Training"
+      },
+      {
+        "type": "text",
+        "content": "Tishby and Schwartz-Ziv (2017) proposed studying deep learning through the *information plane*: plot I(X;T) (compression) on the x-axis and I(T;Y) (task relevance) on the y-axis for each layer T during training. They observed two phases:\n1. **Fitting phase:** I(T;Y) increases rapidly — the network learns to predict\n2. **Compression phase:** I(X;T) decreases — the network forgets input details irrelevant to Y\n\nThe DPI provides the ceiling: I(T;Y) ≤ I(X;Y) always, and I(X;T) ≤ H(X) always."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import torch\nimport torch.nn as nn\nimport torch.optim as optim\nimport numpy as np\nfrom collections import defaultdict\n\ndef information_bottleneck_plane(\n    n_epochs: int = 100,\n    n_samples: int = 1000,\n    record_every: int = 10\n):\n    \"\"\"Track I(X;T) and I(T;Y) across layers during training.\n\n    Uses binning-based MI estimation (fast but biased — Saxe et al. critique applies).\n    For continuous activations, use MINE instead.\n    \"\"\"\n    torch.manual_seed(0)\n    np.random.seed(0)\n\n    # Binary classification: X in R^12, Y = XOR of two feature groups\n    X = torch.randn(n_samples, 12)\n    y = ((X[:, :6].sum(dim=1) > 0) ^ (X[:, 6:].sum(dim=1) > 0)).long()\n\n    model = nn.Sequential(\n        nn.Linear(12, 10), nn.Tanh(),\n        nn.Linear(10, 7),  nn.Tanh(),\n        nn.Linear(7, 5),   nn.Tanh(),\n        nn.Linear(5, 2)\n    )\n    optimizer = optim.Adam(model.parameters(), lr=1e-3)\n    criterion = nn.CrossEntropyLoss()\n\n    def bin_mi(A: np.ndarray, B: np.ndarray, n_bins: int = 30) -> float:\n        \"\"\"Binning-based MI estimate I(A;B). A is continuous, B is discrete.\"\"\"\n        # Discretize A\n        A_flat = A.mean(axis=1)  # reduce to 1D for simplicity\n        edges = np.percentile(A_flat, np.linspace(0, 100, n_bins + 1))\n        A_bins = np.digitize(A_flat, edges[1:-1])\n        # MI via joint histogram\n        joint = np.zeros((n_bins, len(np.unique(B))))\n        for a_bin, b_val in zip(A_bins, B):\n            joint[a_bin - 1, b_val] += 1\n        joint /= joint.sum()\n        pa = joint.sum(axis=1, keepdims=True) + 1e-10\n        pb = joint.sum(axis=0, keepdims=True) + 1e-10\n        mask = joint > 0\n        mi = np.sum(joint[mask] * np.log2(joint[mask] / (pa * pb)[mask]))\n        return max(0.0, mi)\n\n    X_np = X.numpy()\n    y_np = y.numpy()\n    history = defaultdict(list)\n\n    for epoch in range(n_epochs):\n        optimizer.zero_grad()\n        logits = model(X)\n        loss = criterion(logits, y)\n        loss.backward()\n        optimizer.step()\n\n        if (epoch + 1) % record_every == 0:\n            with torch.no_grad():\n                rep = X\n                layer_num = 0\n                for layer in model:\n                    rep = layer(rep)\n                    if isinstance(layer, nn.Tanh):\n                        rep_np = rep.numpy()\n                        ixt = bin_mi(rep_np, y_np)   # proxy for I(X;T)\n                        ity = bin_mi(rep_np, y_np)   # proxy for I(T;Y) — simplified\n                        history[f'layer_{layer_num}'].append((epoch+1, ixt, ity))\n                        layer_num += 1\n            print(f\"Epoch {epoch+1:3d}: loss={loss.item():.4f}\")\n\n    print(\"\\nFinal I(T;Y) estimates per layer (information plane):\")\n    for key, vals in history.items():\n        print(f\"  {key}: final I(T;Y) ≈ {vals[-1][2]:.4f} bits\")\n\ninformation_bottleneck_plane(n_epochs=50, record_every=10)"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Sufficient Statistics and DPI"
+      },
+      {
+        "type": "text",
+        "content": "A statistic T(X) is *sufficient* for parameter θ if the data X contains no additional information about θ beyond T(X):\n\nI(X; θ) = I(T(X); θ)\n\nBy DPI (X → T(X) → anything), we always have I(T(X);θ) ≤ I(X;θ). A sufficient statistic achieves equality — it compresses the data without losing any information about θ. The sample mean is sufficient for the mean of a Gaussian; the sample variance for the variance."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "DPI and Differential Privacy"
+      },
+      {
+        "type": "text",
+        "content": "Differential privacy (DP) adds calibrated noise M(X) to a statistic before releasing it. By the Markov chain X → M(X) → (downstream use), DPI guarantees:\n\nI(X; downstream) ≤ I(X; M(X))\n\nThe more noise added, the lower I(X;M(X)), and the less any downstream computation can reveal about X. This gives an information-theoretic interpretation of DP: privacy is achieved by reducing MI between sensitive data and released outputs."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import numpy as np\nfrom scipy.stats import norm\n\ndef gaussian_mechanism_mi(\n    sensitivity: float,\n    epsilon: float,\n    delta: float,\n    true_values: np.ndarray\n) -> dict:\n    \"\"\"Estimate MI reduction from Gaussian mechanism (differential privacy).\n\n    The Gaussian mechanism adds N(0, sigma^2) noise where\n    sigma = sensitivity * sqrt(2 ln(1.25/delta)) / epsilon.\n\n    By DPI: I(X; M(X)) <= I(X; X) = H(X), but noise reduces it.\n    For Gaussian X and Gaussian noise, MI has closed form:\n    I(X; X+N) = 0.5 * log2(1 + SNR) where SNR = Var(X)/sigma^2.\n    \"\"\"\n    # Gaussian mechanism noise level\n    sigma = sensitivity * np.sqrt(2 * np.log(1.25 / delta)) / epsilon\n\n    # Simulate: X is sensitive value, M(X) = X + Gaussian noise\n    n = len(true_values)\n    noise = np.random.normal(0, sigma, n)\n    released = true_values + noise\n\n    # For Gaussian channel: I(X; X+N) = 0.5 * log2(1 + Var(X)/sigma^2)\n    var_x = np.var(true_values)\n    snr = var_x / (sigma ** 2)\n    mi_bound = 0.5 * np.log2(1 + snr)\n\n    print(f\"Privacy params: epsilon={epsilon}, delta={delta}\")\n    print(f\"Noise sigma: {sigma:.4f}\")\n    print(f\"Signal variance: {var_x:.4f}\")\n    print(f\"SNR: {snr:.4f}\")\n    print(f\"MI upper bound I(X; M(X)) = {mi_bound:.4f} bits\")\n    print(f\"  (Higher epsilon = more info leakage; lower epsilon = more private)\")\n    return {\"sigma\": sigma, \"mi_bound_bits\": mi_bound, \"snr\": snr}\n\n# Sensitive data: individual ages\nnp.random.seed(42)\nages = np.random.normal(35, 10, 1000)  # mean age 35, std 10\nprint(\"Strong privacy (epsilon=0.1):\")\ngaussian_mechanism_mi(sensitivity=1.0, epsilon=0.1, delta=1e-5, true_values=ages)\nprint(\"\\nWeak privacy (epsilon=2.0):\")\ngaussian_mechanism_mi(sensitivity=1.0, epsilon=2.0, delta=1e-5, true_values=ages)"
+      },
+      {
+        "type": "table",
+        "headers": ["Context", "X (source)", "Y (intermediate)", "Z (processed)", "DPI Implication", "Practical Consequence"],
+        "rows": [
+          ["Deep learning layers", "Raw input", "Layer l representation", "Layer l+1 representation", "I(X;Z) ≤ I(X;Y)", "Each layer can only compress, not add info about input"],
+          ["Label noise learning", "True label", "Noisy label", "Model prediction", "I(true;pred) ≤ I(true;noisy) = C_BSC", "Accuracy fundamentally limited by noise rate"],
+          ["Differential privacy", "Sensitive data", "Noisy release M(X)", "Downstream inference", "I(X;downstream) ≤ I(X;M(X))", "Adding more noise reduces privacy leakage"],
+          ["Feature selection", "Original features", "Selected subset", "Model trained on subset", "I(Y;model) ≤ I(Y;subset)", "Discarded features cannot be recovered later"],
+          ["Lossy compression", "Original image", "Compressed image", "Reconstructed image", "I(original;recon) ≤ I(original;compressed)", "Compression quality bounded by encoded information"],
+          ["Tokenization", "Raw text", "Token sequence", "Model embeddings", "I(text;emb) ≤ I(text;tokens)", "Information lost in tokenization cannot be recovered"]
+        ]
+      },
+      {
+        "type": "callout",
+        "variant": "warning",
+        "title": "Saxe et al. Critique of IB Theory",
+        "content": "Saxe et al. (2018) showed that the compression phase observed by Tishby et al. may be an artifact of the binning-based MI estimator and the use of saturating activations (tanh). With ReLU activations and continuous MI estimators, the compression phase often does not appear. The information bottleneck framework remains theoretically sound, but the empirical claims about DNN training dynamics are contested."
+      },
+      {
+        "type": "divider"
+      },
+      {
+        "type": "text",
+        "content": "The Data Processing Inequality is perhaps the most conceptually important inequality in information theory for machine learning practitioners. It establishes a hard ceiling: no downstream processing can recover information discarded by an earlier step. This constrains what neural networks can learn from lossy inputs, what classifiers can achieve with noisy labels, and what adversaries can infer from differentially private releases. Understanding DPI means understanding why information is the fundamental currency of learning."
+      }
+    ]
+  }
+]

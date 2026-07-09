@@ -1,0 +1,772 @@
+[
+  {
+    "slug": "convex-nonconvex-landscapes",
+    "title": "Convex vs Non-Convex Loss Landscapes",
+    "description": "Deep dive into convex and non-convex loss landscapes: definitions, Jensen's inequality, strong convexity, saddle points, loss landscape visualization, mode connectivity, and the NTK regime.",
+    "tags": ["calculus", "optimization", "math", "foundations"],
+    "topic": "math-foundations",
+    "status": "published",
+    "updated": "2026-07-10",
+    "blocks": [
+      {
+        "type": "text",
+        "content": "The geometry of the loss landscape determines whether optimization is tractable, whether gradient descent converges, and where it converges to. Convex landscapes have a single global bowl; non-convex landscapes have ridges, valleys, saddle points, and many local minima. Understanding the difference is essential for choosing optimizers, diagnosing training failures, and reasoning about generalization."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "What is a Convex Function?"
+      },
+      {
+        "type": "text",
+        "content": "A function f: ℝⁿ → ℝ is convex if for all x, y in its domain and all λ ∈ [0,1]: f(λx + (1−λ)y) ≤ λf(x) + (1−λ)f(y). Geometrically, the chord connecting any two points on the graph lies above or on the graph. Equivalently (for differentiable f): f(y) ≥ f(x) + ∇f(x)ᵀ(y−x) — the function lies above all its tangent hyperplanes. For twice-differentiable f: the Hessian ∇²f(x) ⪰ 0 (positive semidefinite) everywhere."
+      },
+      {
+        "type": "list",
+        "ordered": false,
+        "items": [
+          "Convex: f(λx+(1-λ)y) ≤ λf(x)+(1-λ)f(y) — chord lies above graph",
+          "Strictly convex: strict inequality for x≠y — unique minimizer",
+          "μ-strongly convex: f(y) ≥ f(x) + ∇f(x)ᵀ(y-x) + (μ/2)‖y-x‖² — quadratic lower bound guarantees unique global minimum",
+          "L-smooth: ‖∇f(x)-∇f(y)‖ ≤ L‖x-y‖ — Lipschitz gradient, controls step size"
+        ]
+      },
+      {
+        "type": "callout",
+        "variant": "info",
+        "title": "Jensen's Inequality",
+        "content": "For a convex function f and any probability distribution p(x): f(E[x]) ≤ E[f(x)]. This is the functional form of convexity and underlies EM, variational inference, and the log-sum-exp bound. Equality holds iff x is constant or f is linear."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Strongly Convex Functions"
+      },
+      {
+        "type": "text",
+        "content": "A μ-strongly convex function curves at least as sharply as a quadratic with curvature μ. This guarantees: (1) a unique global minimum, (2) gradient descent converges at a linear rate O((1−μ/L)ᵏ), (3) the condition number κ = L/μ controls convergence speed — smaller κ means faster convergence. Ridge regression (L2-regularized) is strongly convex even when the data matrix is rank-deficient."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Why Convexity Matters for ML"
+      },
+      {
+        "type": "text",
+        "content": "Convex objectives offer algorithmic guarantees: any local minimum is a global minimum, gradient descent with appropriate step size converges, and we can certify optimality via duality. Non-convex objectives lack these guarantees — gradient descent may converge to different solutions depending on initialization, learning rate, and noise."
+      },
+      {
+        "type": "table",
+        "headers": ["Property", "Convex", "Strongly Convex", "Non-Convex"],
+        "rows": [
+          ["Definition", "f(λx+(1-λ)y) ≤ λf(x)+(1-λ)f(y)", "f(y) ≥ f(x)+∇f(x)ᵀ(y-x)+(μ/2)‖y-x‖²", "No global curvature guarantee"],
+          ["Global Minimum", "Any local min is global", "Unique global minimum", "Multiple local minima possible"],
+          ["Hessian", "∇²f ⪰ 0 everywhere", "∇²f ⪰ μI everywhere", "Indefinite in general"],
+          ["Examples", "Linear regression, logistic regression, SVMs", "Ridge regression, elastic net", "Neural networks, matrix factorization"],
+          ["Optimization", "GD converges to global min", "GD converges, linear rate 1-μ/L", "SGD/Adam, no convergence guarantee"]
+        ]
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Common Convex ML Objectives"
+      },
+      {
+        "type": "text",
+        "content": "Several foundational ML models have convex loss functions, which is why they can be solved reliably. Linear regression with squared loss is strongly convex when X has full column rank. Logistic regression with log-loss is convex (but not strongly convex without regularization). SVMs with hinge loss are convex QPs. Adding L2 regularization makes any of these strongly convex."
+      },
+      {
+        "type": "list",
+        "ordered": false,
+        "items": [
+          "Linear regression: f(w) = ‖Xw - y‖² — quadratic, strongly convex if X full rank",
+          "Logistic regression: f(w) = Σ log(1+exp(-yᵢwᵀxᵢ)) — convex, smooth",
+          "SVM hinge loss: f(w) = (λ/2)‖w‖² + Σmax(0,1-yᵢwᵀxᵢ) — strongly convex",
+          "Lasso: f(w) = ‖Xw-y‖² + λ‖w‖₁ — convex but non-smooth"
+        ]
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import numpy as np\nimport matplotlib.pyplot as plt\n\n# Define convex and non-convex functions\ndef convex_fn(x, y):\n    \"\"\"Convex: f(x,y) = x^2 + y^2\"\"\"\n    return x**2 + y**2\n\ndef nonconvex_fn(x, y):\n    \"\"\"Non-convex: f(x,y) = sin(x)*cos(y) + 0.1*(x^2+y^2)\"\"\"\n    return np.sin(x) * np.cos(y) + 0.1 * (x**2 + y**2)\n\ndef gradient_descent(fn_grad, x0, lr=0.1, steps=50):\n    path = [x0.copy()]\n    x = x0.copy()\n    for _ in range(steps):\n        x = x - lr * fn_grad(x)\n        path.append(x.copy())\n    return np.array(path)\n\ndef grad_convex(x):\n    return 2 * x\n\ndef grad_nonconvex(x):\n    return np.array([\n        np.cos(x[0]) * np.cos(x[1]) + 0.2 * x[0],\n        -np.sin(x[0]) * np.sin(x[1]) + 0.2 * x[1]\n    ])\n\n# Run GD from multiple starts on the non-convex surface\nstarts = [np.array([3.0, 2.0]), np.array([-3.0, 2.5]), np.array([1.5, -2.0])]\npaths_nc = [gradient_descent(grad_nonconvex, s, lr=0.05) for s in starts]\n\nprint(f\"Convex fn global minimum: {convex_fn(0, 0):.4f}\")\nprint(\"Non-convex: GD converges to different minima depending on start:\")\nfor i, path in enumerate(paths_nc):\n    final = path[-1]\n    print(f\"  Start {starts[i]}: converged to {final}, f={nonconvex_fn(*final):.4f}\")"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Neural Networks Are Non-Convex"
+      },
+      {
+        "type": "text",
+        "content": "Neural networks are non-convex because they compose non-linear activation functions with learned weight matrices. Even a single hidden layer with ReLU activations creates a piecewise-linear, non-convex loss surface. The non-convexity arises from weight space symmetries (permutation of neurons), the product structure of weight matrices (bilinear interactions), and non-linear activations. Critical points where ∇L=0 are classified by the Hessian: positive definite → local min, negative definite → local max, indefinite → saddle point."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import numpy as np\nfrom scipy.linalg import eigh\n\ndef classify_critical_point(hess_matrix):\n    \"\"\"Classify a critical point via Hessian eigenvalues.\"\"\"\n    eigenvalues, _ = eigh(hess_matrix)\n    if np.all(eigenvalues > 1e-10):\n        return \"local minimum\", eigenvalues\n    elif np.all(eigenvalues < -1e-10):\n        return \"local maximum\", eigenvalues\n    else:\n        return \"saddle point\", eigenvalues\n\n# Canonical saddle: f(x,y) = x^2 - y^2, Hessian = diag(2, -2)\nH_saddle = np.array([[2.0, 0.0], [0.0, -2.0]])\nkind, eigs = classify_critical_point(H_saddle)\nprint(f\"f(x,y)=x²-y²  |  Hessian eigenvalues: {eigs}  |  {kind}\")\n\n# In high dimensions, almost all critical points are saddles\nnp.random.seed(42)\nfor n_dims in [10, 100, 500]:\n    n_trials = 300\n    saddle_count = 0\n    for _ in range(n_trials):\n        # Random symmetric matrix with mixed eigenvalues\n        R = np.random.randn(n_dims, n_dims)\n        H_sym = (R + R.T) / 2\n        eigs_nd = np.linalg.eigvalsh(H_sym)\n        if np.any(eigs_nd > 0) and np.any(eigs_nd < 0):\n            saddle_count += 1\n    pct = 100 * saddle_count / n_trials\n    print(f\"n={n_dims:4d}: {pct:.1f}% of critical points are saddles\")\n\nprint(\"\\nDauphin et al. (2014): in high-dim non-convex functions,\")\nprint(\"critical points are overwhelmingly saddle points, not local minima.\")"
+      },
+      {
+        "type": "callout",
+        "variant": "warning",
+        "title": "Saddle Points Dominate High Dimensions",
+        "content": "Dauphin et al. (2014) showed that in high-dimensional non-convex functions, nearly all critical points are saddle points rather than local minima. The probability that a random critical point is a local minimum decreases exponentially with dimension. The loss at saddle points is close to the global minimum for neural networks — escaping them (not finding the global min) is the real challenge."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Loss Landscape Visualization"
+      },
+      {
+        "type": "text",
+        "content": "Directly visualizing the loss landscape of a neural network is impossible (millions of parameters), but Garipov et al. introduced filter normalization: project onto two random directions d₁, d₂ with each filter scaled to match the corresponding filter norm in the trained weights. This removes the scale ambiguity across layers and produces interpretable 2D surface plots."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import numpy as np\n\ndef filter_normalize_direction(weights_list):\n    \"\"\"Create a filter-normalized random perturbation direction (Garipov et al.).\"\"\"\n    direction = []\n    for w in weights_list:\n        d = np.random.randn(*w.shape)\n        if d.ndim >= 2:\n            # Normalize each filter (row) to match the weight filter norm\n            for i in range(d.shape[0]):\n                w_norm = np.linalg.norm(w[i]) + 1e-10\n                d_norm = np.linalg.norm(d[i]) + 1e-10\n                d[i] = d[i] * (w_norm / d_norm)\n        else:\n            d = d * (np.linalg.norm(w) / (np.linalg.norm(d) + 1e-10))\n        direction.append(d)\n    return direction\n\ndef landscape_grid(base_weights, dir1, dir2, loss_fn, n=25, scale=1.0):\n    \"\"\"Evaluate loss on a 2D grid around base_weights.\"\"\"\n    alphas = np.linspace(-scale, scale, n)\n    grid = np.zeros((n, n))\n    for i, a in enumerate(alphas):\n        for j, b in enumerate(alphas):\n            pw = [w + a*d1 + b*d2 for w, d1, d2 in zip(base_weights, dir1, dir2)]\n            grid[i, j] = loss_fn(pw)\n    return alphas, grid\n\nnp.random.seed(7)\nbase = [np.random.randn(8, 4) * 0.3, np.random.randn(8) * 0.1]\n\ndef quad_loss(ws):\n    return sum(np.sum(w**2) for w in ws)\n\nd1 = filter_normalize_direction(base)\nd2 = filter_normalize_direction(base)\nalphas, L = landscape_grid(base, d1, d2, quad_loss, n=20, scale=0.8)\nprint(f\"Landscape grid shape: {L.shape}\")\nprint(f\"Min loss: {L.min():.4f}  Max loss: {L.max():.4f}\")\nprint(f\"Loss at center (0,0): {L[10,10]:.4f}\")\nprint(\"Filter normalization removes scale artifacts — interpretable topology.\")"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Mode Connectivity and the NTK Regime"
+      },
+      {
+        "type": "text",
+        "content": "Garipov et al. and Draxler et al. found that two SGD solutions can be connected by a low-loss path (mode connectivity). The linear interpolation between two solutions often passes through a high-loss barrier, but a curved path (e.g., Bézier curve) can maintain low loss throughout. This suggests the loss landscape has connected valleys rather than isolated minima. In the NTK (Neural Tangent Kernel) regime — infinite-width networks trained with infinitesimal learning rate — the network behaves as a linear model and the loss landscape becomes effectively convex."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import numpy as np\n\ndef linear_interpolate(wa, wb, alpha):\n    \"\"\"Linearly interpolate between two weight sets.\"\"\"\n    return [(1 - alpha) * a + alpha * b for a, b in zip(wa, wb)]\n\ndef path_loss_profile(wa, wb, loss_fn, n_points=25):\n    \"\"\"Evaluate loss along the linear interpolation path.\"\"\"\n    alphas = np.linspace(0, 1, n_points)\n    return alphas, np.array([loss_fn(linear_interpolate(wa, wb, a)) for a in alphas])\n\ndef simulate_sgd(init_weights, lr=0.01, noise_scale=0.15, steps=150):\n    \"\"\"Simulate SGD with gradient noise, landing at different minima.\"\"\"\n    w = [x.copy() for x in init_weights]\n    for _ in range(steps):\n        w = [x - lr * (2 * x + noise_scale * np.random.randn(*x.shape)) for x in w]\n    return w\n\nnp.random.seed(0)\ninit = [np.random.randn(6, 6) * 1.5, np.random.randn(6) * 1.5]\nmodel_a = simulate_sgd(init, lr=0.02, noise_scale=0.3)\nmodel_b = simulate_sgd(init, lr=0.02, noise_scale=0.3)\n\ndef loss_fn(ws):\n    return sum(np.sum(w**2) for w in ws)\n\nalphas, losses = path_loss_profile(model_a, model_b, loss_fn)\nmid = losses[len(losses) // 2]\nend_avg = (losses[0] + losses[-1]) / 2\nbarrier = mid - end_avg\nprint(f\"Model A loss: {losses[0]:.4f}\")\nprint(f\"Model B loss: {losses[-1]:.4f}\")\nprint(f\"Midpoint loss: {mid:.4f}\")\nprint(f\"Loss barrier (mid - avg endpoints): {barrier:.4f}\")\nprint(\"Low barrier => mode connectivity; models share the same loss basin.\")"
+      },
+      {
+        "type": "list",
+        "ordered": false,
+        "items": [
+          "NTK regime: infinite-width networks trained with gradient flow → loss is convex in function space",
+          "Finite-width networks leave the NTK regime quickly; practical landscapes are non-convex",
+          "Mode connectivity: two SGD solutions connected by a low-loss curved path (Garipov 2018)",
+          "Loss barrier on linear path does not imply isolation — curved paths often bypass it",
+          "Practical implication: model averaging (SWA) works because solutions lie in a connected valley"
+        ]
+      },
+      {
+        "type": "divider"
+      }
+    ]
+  },
+  {
+    "slug": "sharp-flat-minima-generalization",
+    "title": "Sharp vs Flat Minima and Generalization",
+    "description": "How the curvature of the loss minimum — measured by Hessian eigenvalues — predicts generalization, why SGD finds flat minima, and how SAM explicitly seeks them.",
+    "tags": ["calculus", "optimization", "math", "foundations"],
+    "topic": "math-foundations",
+    "status": "published",
+    "updated": "2026-07-10",
+    "blocks": [
+      {
+        "type": "text",
+        "content": "Two models can achieve identical training loss yet differ dramatically in test performance. One key geometric factor: the curvature of the loss surface at the minimum. A sharp minimum is surrounded by high-curvature walls — a tiny perturbation to weights causes a large loss increase, and when the train/test distributions differ slightly (as they always do), the model generalizes poorly. A flat minimum is robust to perturbations and tends to generalize better."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Understanding Sharp and Flat Minima"
+      },
+      {
+        "type": "text",
+        "content": "Sharpness is formally quantified by the Hessian ∇²L(θ) at the minimum θ*. The largest eigenvalue λ_max(∇²L) gives the worst-case curvature: a perturbation ε in the direction of the top eigenvector increases loss by approximately (λ_max/2)‖ε‖². For a flat minimum λ_max is small; for a sharp minimum it can be millions. PAC-Bayes bounds connect sharpness to the generalization gap: generalization_gap ≈ O(√(λ_max/n)) where n is training set size."
+      },
+      {
+        "type": "callout",
+        "variant": "info",
+        "title": "Hochreiter & Schmidhuber 1997",
+        "content": "The original flat minima paper argued from an MDL perspective: a flat minimum can be described with fewer bits than a sharp one (you can quantize the weights more aggressively without changing the loss). Lower description length implies better generalization by Occam's razor / MDL principle. Modern PAC-Bayes theory formalizes this into quantitative generalization bounds."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Measuring Sharpness"
+      },
+      {
+        "type": "text",
+        "content": "Computing the full Hessian of a neural network is O(n²) in memory and O(n³) to diagonalize — completely infeasible for large models. Several efficient proxies exist: the largest Hessian eigenvalue via power iteration (Lanczos), the Hessian trace via Hutchinson's estimator, and expected sharpness (average loss over Gaussian weight perturbations). Each captures a different aspect of the curvature geometry."
+      },
+      {
+        "type": "table",
+        "headers": ["Metric", "Formula", "Computational Cost", "Interpretation"],
+        "rows": [
+          ["Max eigenvalue λ_max", "λ_max(∇²L)", "O(n) per power iteration step", "Worst-case curvature direction"],
+          ["Hessian trace", "Tr(∇²L) = Σᵢλᵢ", "O(kn) via Hutchinson estimator", "Average curvature across all directions"],
+          ["Expected sharpness", "E_δ[L(θ+δ)−L(θ)], δ~N(0,σ²I)", "MC sampling, O(kn) per estimate", "Average loss increase under random perturbation"],
+          ["ρ-sharpness (SAM)", "max_{‖ε‖≤ρ} L(θ+ε)−L(θ)", "One gradient ascent step O(n)", "Worst-case perturbation loss increase in ρ-ball"]
+        ]
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import torch\nimport torch.nn as nn\n\ndef largest_hessian_eigenvalue(model, loss_fn, X, y, n_iters=40, tol=1e-5):\n    \"\"\"Power iteration to estimate λ_max(∇²L) — the sharpness metric.\"\"\"\n    params = [p for p in model.parameters() if p.requires_grad]\n\n    # Initialize random unit vector\n    v = [torch.randn_like(p) for p in params]\n    v_norm = torch.sqrt(sum((vi**2).sum() for vi in v))\n    v = [vi / v_norm for vi in v]\n\n    eigenvalue = 0.0\n    for it in range(n_iters):\n        # Forward pass\n        loss = loss_fn(model(X), y)\n        grads = torch.autograd.grad(loss, params, create_graph=True)\n\n        # Hessian-vector product: d/dθ (grads · v)\n        gv_dot = sum((g * vi).sum() for g, vi in zip(grads, v))\n        Hv = torch.autograd.grad(gv_dot, params, retain_graph=False)\n\n        # Rayleigh quotient\n        new_eig = sum((hvi * vi).sum() for hvi, vi in zip(Hv, v)).item()\n\n        # Normalize for next iteration\n        Hv_norm = torch.sqrt(sum((hvi**2).sum() for hvi in Hv)) + 1e-12\n        v = [hvi / Hv_norm for hvi in Hv]\n\n        if abs(new_eig - eigenvalue) < tol:\n            print(f\"  Converged at iteration {it+1}\")\n            break\n        eigenvalue = new_eig\n\n    return eigenvalue\n\ntorch.manual_seed(0)\nmodel = nn.Sequential(nn.Linear(4, 16), nn.ReLU(), nn.Linear(16, 1))\nX, y = torch.randn(64, 4), torch.randn(64, 1)\nsharpness = largest_hessian_eigenvalue(model, nn.MSELoss(), X, y)\nprint(f\"λ_max (sharpness): {sharpness:.4f}\")\nprint(\"Higher λ_max → sharper minimum → expected worse generalization.\")"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Theoretical Connections to Generalization"
+      },
+      {
+        "type": "text",
+        "content": "PAC-Bayes theory bounds the expected test loss in terms of the KL divergence between a perturbed posterior Q (weights + Gaussian noise) and a prior P. Minimizing this bound encourages finding flat regions where adding noise doesn't hurt loss. The connection to sharpness: KL(Q‖P) ∝ λ_max when the noise covariance is isotropic. Large batch training tends to find sharp minima (Keskar et al. 2017) because large batches provide accurate gradients that converge to the nearest minimum rather than exploring; small batches add noise that helps escape sharp regions."
+      },
+      {
+        "type": "list",
+        "ordered": false,
+        "items": [
+          "Large batch → low gradient noise → converges to sharp minima → poor generalization",
+          "Small batch → high gradient noise → biases toward flat minima → better generalization",
+          "High learning rate acts similarly: noisy updates prevent settling in sharp narrow basins",
+          "SGD noise scale: ∝ η·σ²/B where η=learning rate, σ²=gradient variance, B=batch size",
+          "Linear scaling rule (Goyal 2017): scale LR proportional to batch size to maintain noise level"
+        ]
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "SAM: Sharpness-Aware Minimization"
+      },
+      {
+        "type": "text",
+        "content": "SAM (Foret et al. 2021) explicitly minimizes the worst-case loss in a ρ-ball around current weights. Instead of minimizing L(θ), it minimizes max_{‖ε‖≤ρ} L(θ+ε). Each SAM step has two gradient computations: (1) gradient ascent to find the worst-case perturbation ε̂ = ρ·∇L/‖∇L‖, (2) gradient at the perturbed point θ+ε̂ used to update θ. The result is a model that sits in a flat region — any perturbation within the ρ-ball still has low loss."
+      },
+      {
+        "type": "list",
+        "ordered": true,
+        "items": [
+          "Compute gradient ∇L(θ) with current weights",
+          "Compute perturbation ε̂ = ρ · ∇L(θ) / ‖∇L(θ)‖ (normalized gradient scaled by ρ)",
+          "Evaluate gradient at perturbed weights: ∇L(θ + ε̂)",
+          "Update original weights: θ ← θ − η · ∇L(θ + ε̂)",
+          "Cost: 2× forward/backward passes per step vs SGD's 1×"
+        ]
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import torch\n\nclass SAM(torch.optim.Optimizer):\n    \"\"\"Sharpness-Aware Minimization (Foret et al. 2021).\"\"\"\n\n    def __init__(self, params, base_optimizer_cls, rho=0.05, **kwargs):\n        defaults = dict(rho=rho, **kwargs)\n        super().__init__(params, defaults)\n        self.base_optimizer = base_optimizer_cls(self.param_groups, **kwargs)\n        self.param_groups = self.base_optimizer.param_groups\n\n    @torch.no_grad()\n    def first_step(self, zero_grad=False):\n        \"\"\"Climb to the worst-case perturbation point θ + ε̂.\"\"\"\n        grad_norm = self._grad_norm()\n        for group in self.param_groups:\n            scale = group[\"rho\"] / (grad_norm + 1e-12)\n            for p in group[\"params\"]:\n                if p.grad is None:\n                    continue\n                e_w = p.grad * scale.to(p)\n                p.add_(e_w)\n                self.state[p][\"e_w\"] = e_w\n        if zero_grad:\n            self.zero_grad()\n\n    @torch.no_grad()\n    def second_step(self, zero_grad=False):\n        \"\"\"Restore θ, then apply base optimizer step using perturbed gradient.\"\"\"\n        for group in self.param_groups:\n            for p in group[\"params\"]:\n                if p.grad is None:\n                    continue\n                p.sub_(self.state[p][\"e_w\"])\n        self.base_optimizer.step()\n        if zero_grad:\n            self.zero_grad()\n\n    def _grad_norm(self):\n        device = self.param_groups[0][\"params\"][0].device\n        norms = [p.grad.norm(2).to(device)\n                 for g in self.param_groups for p in g[\"params\"]\n                 if p.grad is not None]\n        return torch.stack(norms).norm(2)\n\n# Quick usage demo\ntorch.manual_seed(42)\nnet = torch.nn.Linear(4, 1)\nopt = SAM(net.parameters(), torch.optim.SGD, rho=0.05, lr=0.05)\nX, y = torch.randn(32, 4), torch.randn(32, 1)\nloss_fn = torch.nn.MSELoss()\nfor step in range(4):\n    loss = loss_fn(net(X), y)\n    loss.backward()\n    opt.first_step(zero_grad=True)\n    loss_fn(net(X), y).backward()\n    opt.second_step(zero_grad=True)\n    print(f\"Step {step+1}: loss={loss.item():.4f}\")"
+      },
+      {
+        "type": "callout",
+        "variant": "tip",
+        "title": "SAM Hyperparameter ρ",
+        "content": "ρ is the radius of the perturbation ball. Larger ρ → stronger sharpness regularization but more aggressive perturbation. For CIFAR-10 / ResNet, ρ=0.05 works well. For transformers, ρ=0.02–0.1. If ρ is too large, the perturbation overshoots and SAM diverges. mSAM uses per-micro-batch sharpness; ASAM uses adaptive (per-parameter) normalization."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Comparing SAM vs SGD"
+      },
+      {
+        "type": "text",
+        "content": "On image classification benchmarks, SAM consistently improves test accuracy by 1–2% over SGD with the same training budget. The improvement is largest when training data is limited (high generalization gap). SAM also improves robustness to label noise and distribution shift. The 2× compute cost is the main drawback; scheduled SAM (apply SAM only in later epochs) recovers most of the benefit at lower cost."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import torch\nimport torch.nn as nn\nimport numpy as np\n\ndef train_model(model, optimizer, X_tr, y_tr, use_sam=False, epochs=60):\n    loss_fn = nn.MSELoss()\n    for epoch in range(epochs):\n        model.train()\n        for i in range(0, len(X_tr), 16):\n            xb, yb = X_tr[i:i+16], y_tr[i:i+16]\n            if use_sam:\n                loss = loss_fn(model(xb), yb)\n                loss.backward()\n                optimizer.first_step(zero_grad=True)\n                loss_fn(model(xb), yb).backward()\n                optimizer.second_step(zero_grad=True)\n            else:\n                optimizer.zero_grad()\n                loss = loss_fn(model(xb), yb)\n                loss.backward()\n                optimizer.step()\n\ntorch.manual_seed(0)\nnp.random.seed(0)\nn_tr, n_te = 80, 40\nX_tr = torch.randn(n_tr, 10)\nw_true = torch.randn(10, 1)\ny_tr = X_tr @ w_true + 0.5 * torch.randn(n_tr, 1)\nX_te = torch.randn(n_te, 10)\ny_te = X_te @ w_true + 0.5 * torch.randn(n_te, 1)\n\nresults = {}\nfor method, use_sam in [(\"SGD\", False), (\"SAM\", True)]:\n    torch.manual_seed(1)\n    model = nn.Sequential(nn.Linear(10, 32), nn.ReLU(), nn.Linear(32, 1))\n    if use_sam:\n        opt = SAM(model.parameters(), torch.optim.SGD, rho=0.05, lr=0.05)\n    else:\n        opt = torch.optim.SGD(model.parameters(), lr=0.05)\n    train_model(model, opt, X_tr, y_tr, use_sam=use_sam)\n    with torch.no_grad():\n        test_mse = nn.MSELoss()(model(X_te), y_te).item()\n    results[method] = test_mse\n    print(f\"{method}: test MSE = {test_mse:.4f}\")\nprint(f\"SAM improvement: {100*(results['SGD']-results['SAM'])/results['SGD']:.1f}%\")"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Visualizing the Loss Landscape"
+      },
+      {
+        "type": "text",
+        "content": "We can compare the local loss geometry around two minima by sampling loss values within a small ball. A sharp minimum shows rapidly increasing loss even for small perturbations; a flat minimum maintains low loss across the entire ball. This directly explains generalization: the train-test distribution shift acts like a weight perturbation, so sharp minima suffer a larger test loss increase."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import numpy as np\n\ndef sample_perturbation_losses(center_weights, loss_fn, n_samples=300, radii=(0.1, 0.3, 0.5)):\n    \"\"\"Sample loss at random perturbations of different radii from the minimum.\"\"\"\n    results = {}\n    for r in radii:\n        perturbed_losses = []\n        for _ in range(n_samples):\n            perturbed = [w + np.random.randn(*w.shape) * r for w in center_weights]\n            perturbed_losses.append(loss_fn(perturbed))\n        results[r] = np.array(perturbed_losses)\n    return results\n\ndef sharp_loss(ws):  # High curvature: 100 * ||w||^2\n    return sum(100.0 * np.sum(w**2) for w in ws)\n\ndef flat_loss(ws):   # Low curvature: 1.0 * ||w||^2\n    return sum(1.0 * np.sum(w**2) for w in ws)\n\nnp.random.seed(3)\ncenter = [np.zeros((6,)), np.zeros((4,))]  # at the global minimum\n\nsharp_stats = sample_perturbation_losses(center, sharp_loss)\nflat_stats  = sample_perturbation_losses(center, flat_loss)\n\nprint(f\"{'Radius':<8} {'Sharp Mean':>12} {'Sharp Std':>12} {'Flat Mean':>12} {'Flat Std':>10}\")\nfor r in (0.1, 0.3, 0.5):\n    sm, ss = sharp_stats[r].mean(), sharp_stats[r].std()\n    fm, fs = flat_stats[r].mean(),  flat_stats[r].std()\n    print(f\"{r:<8.1f} {sm:>12.4f} {ss:>12.4f} {fm:>12.4f} {fs:>10.4f}\")\nprint(\"\\nSharp minimum: loss grows rapidly with perturbation radius.\")\nprint(\"Flat minimum: loss stays near zero even for large perturbations.\")"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Extensions and Variants"
+      },
+      {
+        "type": "text",
+        "content": "Several SAM variants improve efficiency or effectiveness. m-SAM computes sharpness on individual micro-batches rather than the full batch, finding sharper per-sample sharpness estimates. ASAM (Adaptive SAM) normalizes the perturbation per parameter by its magnitude, removing the scale sensitivity of fixed-ρ SAM. Scheduled ρ anneals ρ during training — large ρ early for exploration, small ρ later for refinement. Lookahead + SAM combines slow/fast weight averaging with sharpness awareness."
+      },
+      {
+        "type": "list",
+        "ordered": false,
+        "items": [
+          "mSAM (micro-batch SAM): sharpness computed per micro-batch — finds sharper, more harmful minima",
+          "ASAM: adaptive per-parameter normalization ε̂ᵢ = ρ|θᵢ|·gᵢ/‖|θ|·g‖ — scale invariant",
+          "GSAM: gradient decomposition into sharpness and task directions for more stable training",
+          "SWA (Stochastic Weight Averaging): average weights along SGD trajectory → flat region implicitly",
+          "SAM + large batch: partially recovers the flatness bias that small batches provide naturally"
+        ]
+      },
+      {
+        "type": "divider"
+      }
+    ]
+  },
+  {
+    "slug": "lagrangian-kkt-conditions",
+    "title": "Lagrangian Optimization and KKT Conditions",
+    "description": "Equality and inequality constrained optimization via Lagrange multipliers, KKT conditions, strong duality, the SVM dual, and penalty methods in PyTorch.",
+    "tags": ["calculus", "optimization", "math", "foundations"],
+    "topic": "math-foundations",
+    "status": "published",
+    "updated": "2026-07-10",
+    "blocks": [
+      {
+        "type": "text",
+        "content": "Constrained optimization is central to ML: SVMs maximize the margin subject to a classification constraint, RL policy optimization enforces a KL divergence budget, and network compression enforces sparsity or size constraints. The Lagrangian method converts constrained problems into unconstrained ones by penalizing constraint violations with multipliers, and KKT conditions provide necessary (and under convexity, sufficient) conditions for optimality."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Equality Constraints and Lagrange Multipliers"
+      },
+      {
+        "type": "text",
+        "content": "To minimize f(x) subject to g(x) = 0, form the Lagrangian: L(x, λ) = f(x) + λᵀg(x). At optimality, the gradient of the Lagrangian w.r.t. x is zero: ∇ₓL = ∇f(x*) + λᵀ∇g(x*) = 0. This means ∇f is in the span of {∇gᵢ} — the gradient of the objective is a linear combination of constraint gradients. Geometrically: the level curves of f and g are tangent at x*, so no feasible movement can decrease f."
+      },
+      {
+        "type": "callout",
+        "variant": "info",
+        "title": "Lagrange Multiplier Interpretation",
+        "content": "The multiplier λᵢ equals ∂f*/∂bᵢ where bᵢ is the RHS of constraint gᵢ(x)=bᵢ. If λᵢ is large, tightening constraint i significantly improves the objective — the constraint is binding and valuable. If λᵢ=0, the constraint is inactive (satisfied with slack) and removing it doesn't change the solution. This shadow price interpretation is used in economics (shadow prices of resources) and in RL (KL budget cost)."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import numpy as np\nfrom scipy.optimize import minimize\n\n# Minimize f(x,y) = (x-2)^2 + (y-3)^2 subject to x + y = 4\n# Lagrangian: L = (x-2)^2 + (y-3)^2 + lambda*(x+y-4)\n# Stationarity: dL/dx = 2(x-2) + lambda = 0 => x = 2 - lambda/2\n#               dL/dy = 2(y-3) + lambda = 0 => y = 3 - lambda/2\n# Constraint:   (2 - lambda/2) + (3 - lambda/2) = 4 => lambda = 1\n\nlambda_star = 1.0\nx_star = 2.0 - lambda_star / 2.0  # = 1.5\ny_star = 3.0 - lambda_star / 2.0  # = 2.5\n\ndef f(v): return (v[0]-2)**2 + (v[1]-3)**2\ndef grad_f(v): return np.array([2*(v[0]-2), 2*(v[1]-3)])\ndef g(v): return v[0] + v[1] - 4\n\nprint(\"Analytical Lagrangian solution:\")\nprint(f\"  x* = {x_star}, y* = {y_star}\")\nprint(f\"  f* = {f([x_star, y_star]):.4f}\")\nprint(f\"  lambda* = {lambda_star} (shadow price of constraint)\")\n\n# Verify with scipy\nresult = minimize(f, [0, 0],\n    constraints={'type': 'eq', 'fun': g},\n    method='SLSQP')\nprint(f\"\\nScipy SLSQP: x={result.x[0]:.4f}, y={result.x[1]:.4f}, f={result.fun:.4f}\")\nprint(f\"Constraint satisfied: x+y = {result.x.sum():.6f}\")\n\n# Sensitivity: tighten constraint from 4.0 to 4.01\nf_tight = minimize(f, [0,0],\n    constraints={'type':'eq','fun': lambda v: v[0]+v[1]-4.01},\n    method='SLSQP').fun\ndf_drhs = (f_tight - result.fun) / 0.01\nprint(f\"\\nSensitivity: df*/d(RHS) = {df_drhs:.4f} ≈ lambda* = {lambda_star}\")"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Inequality Constraints"
+      },
+      {
+        "type": "text",
+        "content": "For inequality constraints h(x) ≤ 0, the Lagrangian becomes L(x, μ) = f(x) + μᵀh(x) where μ ≥ 0. The non-negativity of μ reflects that tightening an inequality constraint (making it harder to satisfy) can only increase or maintain the optimal value, never decrease it. At the optimum, either the constraint is active (h(x*)=0, μ>0) or inactive (h(x*)<0, μ=0). These two cases are unified by complementary slackness: μᵢhᵢ(x*)=0."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "KKT Conditions"
+      },
+      {
+        "type": "text",
+        "content": "For the general problem: minimize f(x) subject to gᵢ(x)=0 (i=1..m) and hⱼ(x)≤0 (j=1..p), the Karush-Kuhn-Tucker (KKT) conditions are necessary for any local optimum (under constraint qualification) and sufficient for global optimum under convexity. These four conditions must hold simultaneously at x*."
+      },
+      {
+        "type": "list",
+        "ordered": true,
+        "items": [
+          "Stationarity: ∇f(x*) + Σᵢλᵢ∇gᵢ(x*) + Σⱼμⱼ∇hⱼ(x*) = 0",
+          "Primal feasibility: gᵢ(x*)=0 for all i; hⱼ(x*)≤0 for all j",
+          "Dual feasibility: μⱼ ≥ 0 for all j (inequality multipliers non-negative)",
+          "Complementary slackness: μⱼhⱼ(x*)=0 for all j (either constraint active or multiplier zero)"
+        ]
+      },
+      {
+        "type": "table",
+        "headers": ["Condition", "Equality Constraints", "Inequality Constraints", "Geometric Meaning"],
+        "rows": [
+          ["Stationarity", "∇f + λᵀ∇g = 0", "∇f + λᵀ∇g + μᵀ∇h = 0", "No feasible descent direction"],
+          ["Primal Feasibility", "g(x*) = 0", "g(x*)=0 and h(x*)≤0", "Solution is in feasible set"],
+          ["Dual Feasibility", "λ unrestricted", "μ ≥ 0", "Constraint tightening can only worsen objective"],
+          ["Complementary Slackness", "N/A", "μⱼhⱼ(x*)=0 ∀j", "Either constraint binds or its multiplier is zero"]
+        ]
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Strong Duality and Slater's Condition"
+      },
+      {
+        "type": "text",
+        "content": "The dual problem maximizes the dual function g(λ,μ) = inf_x L(x,λ,μ) over (λ,μ≥0). Weak duality always holds: g(λ,μ) ≤ f*. Strong duality (g(λ*,μ*)=f*) holds when Slater's condition is satisfied: there exists a strictly feasible point x̃ with hⱼ(x̃)<0 for all j. For convex problems with Slater's condition, the duality gap is zero and KKT conditions are both necessary and sufficient for global optimality."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "SVM Dual Formulation"
+      },
+      {
+        "type": "text",
+        "content": "The SVM primal minimizes (1/2)‖w‖² subject to yᵢ(wᵀxᵢ+b)≥1. The Lagrangian introduces αᵢ≥0 for each margin constraint. Taking stationarity w.r.t. w and b gives w=Σαᵢyᵢxᵢ and Σαᵢyᵢ=0. Substituting back eliminates w and b, yielding the dual: maximize Σαᵢ - (1/2)Σᵢⱼαᵢαⱼyᵢyⱼxᵢᵀxⱼ subject to 0≤αᵢ≤C and Σαᵢyᵢ=0. Only support vectors (αᵢ>0) contribute to w, and complementary slackness pins the bias b."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import numpy as np\nfrom scipy.optimize import minimize\n\ndef solve_svm_dual(X, y, C=1.0):\n    \"\"\"Solve the SVM dual QP via scipy SLSQP.\"\"\"\n    n = len(y)\n    K = X @ X.T  # linear kernel matrix\n    yy_K = np.outer(y, y) * K\n\n    def neg_dual(alpha):  # negate for minimization\n        return 0.5 * alpha @ yy_K @ alpha - alpha.sum()\n\n    def neg_dual_grad(alpha):\n        return yy_K @ alpha - np.ones(n)\n\n    constraints = [\n        {'type': 'eq', 'fun': lambda a: a @ y, 'jac': lambda a: y}\n    ]\n    bounds = [(0.0, C)] * n\n    result = minimize(neg_dual, np.zeros(n), jac=neg_dual_grad,\n                      bounds=bounds, constraints=constraints, method='SLSQP',\n                      options={'ftol': 1e-9, 'maxiter': 500})\n\n    alpha = result.x\n    sv = alpha > 1e-5           # support vector mask\n    w = (alpha * y) @ X        # primal weights\n    b = np.mean(y[sv] - X[sv] @ w)\n    return alpha, w, b, sv\n\nnp.random.seed(0)\nX = np.vstack([np.random.randn(30, 2) + [2, 2], np.random.randn(30, 2) - [2, 2]])\ny = np.array([1.0]*30 + [-1.0]*30)\n\nalpha, w, b, sv = solve_svm_dual(X, y, C=1.0)\nacc = np.mean(np.sign(X @ w + b) == y)\nprint(f\"Support vectors: {sv.sum()} / {len(y)} total points\")\nprint(f\"Alpha range: [{alpha.min():.4f}, {alpha.max():.4f}]\")\nprint(f\"w = {w},  b = {b:.4f}\")\nprint(f\"Training accuracy: {acc:.2%}\")\nprint(f\"Complementary slackness check:\")\nprint(f\"  Points with alpha~0 AND margin violated: {((alpha<1e-5) & (y*(X@w+b)<1-1e-4)).sum()}\")"
+      },
+      {
+        "type": "callout",
+        "variant": "warning",
+        "title": "Complementary Slackness in SVMs",
+        "content": "Complementary slackness means αᵢ·(yᵢ(wᵀxᵢ+b)−1)=0. So either αᵢ=0 (point is not a support vector, lies outside the margin) or yᵢ(wᵀxᵢ+b)=1 (point is on the margin boundary). Non-support vectors have zero influence on w. Violating complementary slackness in your solver means the KKT conditions are not satisfied — the optimization has not converged."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import numpy as np\nfrom scipy.optimize import minimize\n\ndef check_kkt(x_opt, grad_f, eq_fns, ineq_fns, tol=1e-5):\n    \"\"\"Verify KKT conditions at a candidate solution.\"\"\"\n    print(\"KKT Condition Verification\")\n    print(\"-\" * 45)\n\n    # Primal feasibility\n    print(\"\\n[1] Primal Feasibility:\")\n    for name, fn in eq_fns:\n        val = fn(x_opt)\n        ok = abs(val) < tol\n        print(f\"    {name} = {val:.2e}  {'OK' if ok else 'VIOLATED'}\")\n    for name, fn in ineq_fns:\n        val = fn(x_opt)\n        ok = val <= tol\n        print(f\"    {name} = {val:.2e}  {'OK' if ok else 'VIOLATED'}\")\n\n    gf = grad_f(x_opt)\n    print(f\"\\n[2] Stationarity (grad_f at x*): {gf}\")\n    print(\"    (Full check requires computing Lagrange multipliers)\")\n    return gf\n\n# Example: min x^2+2y^2+3z^2  s.t.  x+y+z=6,  x>=1\ndef f(v): return v[0]**2 + 2*v[1]**2 + 3*v[2]**2\ndef gf(v): return np.array([2*v[0], 4*v[1], 6*v[2]])\n\nconstrs = [\n    {'type': 'eq',   'fun': lambda v: v[0]+v[1]+v[2]-6},\n    {'type': 'ineq', 'fun': lambda v: v[0]-1},  # x >= 1\n]\nres = minimize(f, [2,2,2], jac=gf, constraints=constrs, method='SLSQP')\nx_opt = res.x\n\ncheck_kkt(x_opt, gf,\n    eq_fns=[(\"x+y+z-6\", lambda v: v[0]+v[1]+v[2]-6)],\n    ineq_fns=[(\"x-1 (>=0)\", lambda v: v[0]-1)])\nprint(f\"\\nOptimal: x={x_opt[0]:.4f}, y={x_opt[1]:.4f}, z={x_opt[2]:.4f}\")\nprint(f\"f(x*) = {f(x_opt):.4f}\")"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Constrained Optimization in PyTorch"
+      },
+      {
+        "type": "text",
+        "content": "PyTorch does not natively support constrained optimization, but the penalty / augmented Lagrangian method converts constraints into soft penalties added to the loss. The penalty coefficient ρ is increased across outer iterations, driving the solution toward feasibility. The augmented Lagrangian adds explicit multiplier estimates for better convergence: L_aug = f(x) + λᵀg(x) + (ρ/2)‖g(x)‖²."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import torch\n\ndef penalty_optimize(f_fn, g_eq, h_ineq, x_init, lr=0.02,\n                     rho_init=1.0, n_outer=8, n_inner=150):\n    \"\"\"\n    Quadratic penalty method:\n        min f(x) + (rho/2)*||g(x)||^2 + (rho/2)*||max(0,h(x))||^2\n    Increase rho each outer iteration to enforce feasibility.\n    \"\"\"\n    x = x_init.clone().detach().requires_grad_(True)\n    rho = rho_init\n    log = []\n\n    for outer in range(n_outer):\n        opt = torch.optim.Adam([x], lr=lr)\n        for _ in range(n_inner):\n            opt.zero_grad()\n            loss = (f_fn(x)\n                    + (rho/2) * g_eq(x)**2\n                    + (rho/2) * torch.clamp(h_ineq(x), min=0.0)**2)\n            loss.backward()\n            opt.step()\n        rho *= 4.0\n        with torch.no_grad():\n            log.append({'rho': rho,\n                        'f': f_fn(x).item(),\n                        'g': g_eq(x).item(),\n                        'h': h_ineq(x).item()})\n        print(f\"Outer {outer+1}: rho={rho:.1f}  f={log[-1]['f']:.4f}  \"\n              f\"g={log[-1]['g']:.4f}  h={log[-1]['h']:.4f}\")\n    return x.detach(), log\n\n# min (x0-3)^2 + (x1-2)^2  s.t.  x0+x1=4,  x0>=1\nf_fn  = lambda x: (x[0]-3)**2 + (x[1]-2)**2\ng_eq  = lambda x: x[0] + x[1] - 4.0\nh_ineq = lambda x: 1.0 - x[0]  # h<=0 means x0>=1\n\nx_opt, history = penalty_optimize(f_fn, g_eq, h_ineq, torch.tensor([2.0, 2.0]))\nprint(f\"\\nOptimal: {x_opt.numpy()}, f={f_fn(x_opt).item():.4f}\")\nprint(f\"Feasibility: g={g_eq(x_opt).item():.4f} (target 0), h={h_ineq(x_opt).item():.4f} (target <=0)\")"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Applications in Machine Learning"
+      },
+      {
+        "type": "text",
+        "content": "KKT conditions and Lagrangian duality appear throughout ML beyond SVMs. Constrained policy optimization (CPO) in RL enforces safety constraints as KKT inequality conditions. Variational autoencoders use a Lagrangian to balance reconstruction loss and KL divergence (β-VAE sets the KL multiplier β). Network compression with sparsity budgets is a constrained optimization problem amenable to Lagrangian relaxation."
+      },
+      {
+        "type": "list",
+        "ordered": false,
+        "items": [
+          "SVM: dual QP gives sparse solution via complementary slackness — only support vectors matter",
+          "CPO (Constrained Policy Optimization): KL constraint as Lagrangian in RL",
+          "β-VAE: β is the Lagrange multiplier on the KL ≤ ε information bottleneck constraint",
+          "Water-filling (power allocation): KKT gives closed-form solution for channel capacity",
+          "Lasso / ADMM: augmented Lagrangian splitting for L1-constrained regression",
+          "Fair ML: demographic parity as equality constraint on model outputs"
+        ]
+      },
+      {
+        "type": "divider"
+      }
+    ]
+  },
+  {
+    "slug": "second-order-methods",
+    "title": "Second-Order Methods — Newton and L-BFGS",
+    "description": "Newton's method, quasi-Newton BFGS, L-BFGS with two-loop recursion, Wolfe line search, and when second-order methods beat first-order methods in practice.",
+    "tags": ["calculus", "optimization", "math", "foundations"],
+    "topic": "math-foundations",
+    "status": "published",
+    "updated": "2026-07-10",
+    "blocks": [
+      {
+        "type": "text",
+        "content": "First-order methods (SGD, Adam) use only gradient information and treat all directions as equally important. Second-order methods incorporate curvature information via the Hessian, which rescales the gradient to account for different curvatures in different directions. The result: far fewer iterations to convergence, at the cost of computing, storing, or approximating the Hessian. For deep learning with billions of parameters the full Hessian is infeasible, but approximate second-order methods are an active research area."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Newton's Method"
+      },
+      {
+        "type": "text",
+        "content": "Newton's update is x ← x − H⁻¹∇f(x) where H = ∇²f(x). This is derived from the second-order Taylor expansion: f(x+δ) ≈ f(x) + ∇f(x)ᵀδ + (1/2)δᵀHδ. Setting the gradient of this quadratic to zero gives δ = −H⁻¹∇f — the exact minimizer of the local quadratic approximation. For strictly convex quadratics Newton converges in exactly one step; for general smooth functions it achieves quadratic convergence near the minimum (the number of correct decimal digits roughly doubles each iteration)."
+      },
+      {
+        "type": "callout",
+        "variant": "info",
+        "title": "Quadratic Convergence",
+        "content": "Newton's method converges quadratically: ‖x_{k+1} − x*‖ ≤ C·‖xₖ − x*‖². If the current error is ε, the next error is O(ε²). Starting from error 0.1: next steps are ~0.01, ~0.0001, ~10⁻⁸. This is exponentially faster than gradient descent's linear convergence ‖xₖ₊₁−x*‖ ≤ (1−μ/L)‖xₖ−x*‖. In practice Newton needs only 5–20 iterations where GD needs thousands."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import numpy as np\n\ndef newtons_method(f, grad_f, hess_f, x0, tol=1e-10, max_iter=25):\n    \"\"\"Newton's method: x_{k+1} = x_k - H(x_k)^{-1} * grad_f(x_k).\"\"\"\n    x = x0.copy()\n    history = []\n    for k in range(max_iter):\n        g = grad_f(x)\n        H = hess_f(x)\n        step = np.linalg.solve(H, g)  # more stable than H^{-1} @ g\n        x = x - step\n        grad_norm = np.linalg.norm(grad_f(x))\n        history.append({'iter': k+1, 'f': f(x), 'grad_norm': grad_norm})\n        if grad_norm < tol:\n            break\n    return x, history\n\n# f(x,y) = 2x^2 + xy + 3y^2 - 4x - 6y  (strictly convex quadratic)\ndef f(v):      return 2*v[0]**2 + v[0]*v[1] + 3*v[1]**2 - 4*v[0] - 6*v[1]\ndef grad_f(v): return np.array([4*v[0]+v[1]-4, v[0]+6*v[1]-6])\ndef hess_f(v): return np.array([[4.0, 1.0], [1.0, 6.0]])\n\nx0 = np.array([4.0, 4.0])\nx_opt, hist = newtons_method(f, grad_f, hess_f, x0)\n\nprint(f\"Newton's method on 2D quadratic (start: {x0})\")\nprint(f\"{'Iter':<6} {'f(x)':>14} {'||grad||':>14}\")\nfor h in hist:\n    print(f\"{h['iter']:<6} {h['f']:>14.8f} {h['grad_norm']:>14.2e}\")\nprint(f\"\\nOptimum: {x_opt}\")\nprint(\"Quadratic convergence: error squared each step.\")"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Why Newton Is Impractical for Deep Learning"
+      },
+      {
+        "type": "text",
+        "content": "For a model with n parameters, the Hessian is an n×n matrix. With n=10⁸ (a medium-sized neural network), storing the Hessian requires 10¹⁶ bytes — vastly more than any GPU memory. Even computing Hessian-vector products (which avoid explicit storage) requires one backward pass per vector and you need O(n) such products for Lanczos. Inverting or factoring the Hessian is O(n³) — completely infeasible. These barriers motivate quasi-Newton methods that approximate H⁻¹ cheaply."
+      },
+      {
+        "type": "list",
+        "ordered": false,
+        "items": [
+          "Hessian storage: O(n²) — 10⁸ params → 10¹⁶ bytes (10 petabytes)",
+          "Hessian computation: O(n²) forward/backward passes in naive implementation",
+          "Hessian-vector product: O(n) via autodiff — one backward pass per vector",
+          "Hessian inversion: O(n³) — infeasible even for n=10⁴",
+          "Mini-batch gradients are noisy: second-order methods assume accurate gradient, break under noise",
+          "Non-convex landscapes: H may be indefinite (saddle), causing Newton to ascend"
+        ]
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Quasi-Newton and the Secant Equation"
+      },
+      {
+        "type": "text",
+        "content": "Quasi-Newton methods build up an approximation Bₖ ≈ H(xₖ) (or its inverse Hₖ ≈ H⁻¹) from gradient differences. The secant equation requires: Bₖ₊₁·sₖ = yₖ where sₖ = xₖ₊₁−xₖ (step) and yₖ = ∇f(xₖ₊₁)−∇f(xₖ) (gradient difference). This says the approximate Hessian should satisfy the first-order condition: the quadratic model matches the observed gradient change. BFGS applies a rank-2 update to the inverse Hessian that satisfies the secant equation and maintains positive definiteness."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "L-BFGS: Limited Memory BFGS"
+      },
+      {
+        "type": "text",
+        "content": "L-BFGS (Nocedal 1980) avoids storing the full n×n inverse Hessian approximation by keeping only the last m pairs {(sₖ, yₖ)} of step and gradient-difference vectors. The matrix-vector product Hₖ·q is computed implicitly using the two-loop recursion: it takes O(mn) time and O(mn) memory — dramatically better than O(n²). With m=10–20, L-BFGS achieves near-BFGS convergence on smooth objectives. It requires full-batch (or very large-batch) gradients; noisy mini-batch gradients cause the secant condition to be poorly satisfied."
+      },
+      {
+        "type": "list",
+        "ordered": true,
+        "items": [
+          "Store last m pairs: sₖ = xₖ₊₁−xₖ, yₖ = ∇f(xₖ₊₁)−∇f(xₖ)",
+          "Two-loop recursion: compute Hₖ·g without forming Hₖ explicitly in O(mn)",
+          "Direction: pₖ = −Hₖ·∇f(xₖ) (approximate Newton step)",
+          "Line search: find αₖ satisfying Wolfe conditions (sufficient decrease + curvature condition)",
+          "Update: xₖ₊₁ = xₖ + αₖ·pₖ; store new (s, y) pair; discard oldest if buffer full"
+        ]
+      },
+      {
+        "type": "table",
+        "headers": ["Method", "Memory", "Convergence Rate", "Noisy Gradients", "Typical Use"],
+        "rows": [
+          ["Gradient Descent", "O(n)", "Linear: (1-μ/L)ᵏ", "Robust (SGD)", "Large-scale DL mini-batch"],
+          ["Newton", "O(n²)", "Quadratic near x*", "Very sensitive", "Tiny n, well-conditioned"],
+          ["BFGS", "O(n²)", "Superlinear", "Sensitive", "Medium n full-batch"],
+          ["L-BFGS", "O(mn)", "Superlinear (near BFGS)", "Sensitive", "Moderate n, full/large batch"],
+          ["Adam", "O(n)", "Adaptive, practical", "Robust", "Large-scale DL, mini-batch"],
+          ["K-FAC", "O(n + layer²)", "Near-quadratic (Fisher)", "Moderate", "DL with Kronecker approx"]
+        ]
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import numpy as np\nfrom scipy.optimize import minimize\nimport time\n\ndef rosenbrock(x):\n    return sum(100*(x[i+1]-x[i]**2)**2 + (1-x[i])**2 for i in range(len(x)-1))\n\ndef rosenbrock_grad(x):\n    g = np.zeros_like(x)\n    for i in range(len(x)-1):\n        g[i]   += -400*x[i]*(x[i+1]-x[i]**2) - 2*(1-x[i])\n        g[i+1] += 200*(x[i+1]-x[i]**2)\n    return g\n\nnp.random.seed(7)\nn = 40\nx0 = np.random.randn(n) * 0.5\n\nconfigs = [\n    ('L-BFGS-B', dict(method='L-BFGS-B', jac=rosenbrock_grad,\n                      options={'maxiter': 2000, 'ftol':1e-15, 'gtol':1e-10})),\n    ('CG',       dict(method='CG', jac=rosenbrock_grad,\n                      options={'maxiter': 5000, 'gtol':1e-10})),\n    ('Nelder-Mead', dict(method='Nelder-Mead',\n                         options={'maxiter': 50000, 'xatol':1e-8})),\n]\n\nprint(f\"Rosenbrock (n={n})  global min = 0.0\")\nprint(f\"{'Method':<14} {'Final f':>12} {'Iters':>8} {'Time(s)':>9}\")\nfor name, kwargs in configs:\n    t0 = time.time()\n    res = minimize(rosenbrock, x0.copy(), **kwargs)\n    print(f\"{name:<14} {res.fun:>12.2e} {res.nit:>8} {time.time()-t0:>9.3f}\")\nprint(\"\\nL-BFGS-B uses last m=10 gradient pairs; O(mn) memory vs O(n²) for full BFGS.\")"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "L-BFGS in PyTorch"
+      },
+      {
+        "type": "text",
+        "content": "PyTorch provides torch.optim.LBFGS which requires a closure — a callable that recomputes and returns the loss. This is necessary because L-BFGS performs internal line search with multiple function evaluations per step. The strong Wolfe line search (curvature condition) ensures the step satisfies the secant equation well, which is critical for building a good Hessian approximation."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import torch\nimport torch.nn as nn\n\nclass SmallNet(nn.Module):\n    def __init__(self, d_in=8, hidden=24, d_out=1):\n        super().__init__()\n        self.net = nn.Sequential(\n            nn.Linear(d_in, hidden), nn.Tanh(),\n            nn.Linear(hidden, hidden), nn.Tanh(),\n            nn.Linear(hidden, d_out)\n        )\n    def forward(self, x):\n        return self.net(x)\n\ntorch.manual_seed(0)\nmodel = SmallNet()\noptimizer = torch.optim.LBFGS(\n    model.parameters(),\n    lr=0.1,\n    max_iter=20,           # inner CG iterations per optimizer.step()\n    max_eval=25,           # max function evaluations per step\n    history_size=10,       # m: number of (s,y) pairs stored\n    line_search_fn='strong_wolfe'\n)\n\nX = torch.randn(128, 8)\ny_true = torch.sin(X[:, :1]) + 0.1 * torch.randn(128, 1)\nloss_fn = nn.MSELoss()\n\ndef closure():\n    optimizer.zero_grad()\n    loss = loss_fn(model(X), y_true)\n    loss.backward()\n    return loss\n\nprint(\"L-BFGS training with strong Wolfe line search:\")\nlosses = []\nfor step in range(25):\n    loss = optimizer.step(closure)\n    losses.append(loss.item())\n    if step % 5 == 0:\n        print(f\"  Step {step:3d}: loss={loss.item():.6f}\")\nprint(f\"\\nFinal loss: {losses[-1]:.6f}\")\nprint(f\"Reduction: {losses[0]/losses[-1]:.1f}x in 25 steps\")"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Convergence Rate Comparison"
+      },
+      {
+        "type": "text",
+        "content": "On quadratic problems, the convergence advantage of Newton over gradient descent is most clearly visible: Newton converges in a number of steps equal to the number of distinct eigenvalues of the Hessian (at most n steps for n×n H), while gradient descent needs O(κ·log(1/ε)) steps where κ=L/μ is the condition number. For ill-conditioned problems (large κ), gradient descent is orders of magnitude slower."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import numpy as np\n\ndef make_quadratic(n=20, cond=200, seed=42):\n    \"\"\"Random convex quadratic with controlled condition number.\"\"\"\n    np.random.seed(seed)\n    eigvals = np.linspace(1, cond, n)\n    Q, _ = np.linalg.qr(np.random.randn(n, n))\n    A = Q @ np.diag(eigvals) @ Q.T\n    b = np.random.randn(n)\n    x_star = np.linalg.solve(A, b)\n    return A, b, x_star\n\ndef gd_errors(A, b, x_star, steps=300):\n    L = np.linalg.eigvalsh(A).max()\n    x, errors = np.zeros_like(b), []\n    for _ in range(steps):\n        x = x - (1.0/L) * (A @ x - b)\n        errors.append(np.linalg.norm(x - x_star))\n    return errors\n\ndef newton_errors(A, b, x_star, steps=15):\n    A_inv = np.linalg.inv(A)\n    x, errors = np.zeros_like(b), []\n    for _ in range(steps):\n        x = x - A_inv @ (A @ x - b)\n        errors.append(np.linalg.norm(x - x_star))\n    return errors\n\nA, b, x_star = make_quadratic(n=20, cond=200)\ngd_err = gd_errors(A, b, x_star)\nnewton_err = newton_errors(A, b, x_star)\n\ndef steps_to(errors, tol=1e-6):\n    for i, e in enumerate(errors):\n        if e < tol: return i\n    return len(errors)\n\nprint(f\"Convergence on quadratic (n=20, condition number=200)\")\nprint(f\"{'Method':<10} {'Steps to 1e-6':>15} {'Steps to 1e-10':>15}\")\nprint(f\"{'GD':<10} {steps_to(gd_err,1e-6):>15} {steps_to(gd_err,1e-10):>15}\")\nprint(f\"{'Newton':<10} {steps_to(newton_err,1e-6):>15} {steps_to(newton_err,1e-10):>15}\")\nprint(\"\\nGD every 50 steps:\")\nfor i in range(0, 200, 50):\n    print(f\"  Step {i:3d}: {gd_err[i]:.2e}\")\nprint(\"Newton every step:\")\nfor i, e in enumerate(newton_err[:8]):\n    print(f\"  Step {i:3d}: {e:.2e}\")"
+      },
+      {
+        "type": "callout",
+        "variant": "tip",
+        "title": "When to Use L-BFGS vs Adam",
+        "content": "L-BFGS is the right choice when: (1) you can afford full-batch gradients (small/medium dataset), (2) the objective is smooth and the Hessian is well-conditioned, (3) you need high-precision solutions (physics simulations, scientific computing). Adam is better when: (1) mini-batch gradients are required (large datasets), (2) the landscape is highly non-convex (deep networks), (3) training must be robust to gradient noise. Many practitioners use Adam for DL pretraining and L-BFGS for fine-tuning or small sub-problems."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Approximate Second-Order Methods for Deep Learning"
+      },
+      {
+        "type": "text",
+        "content": "Several methods approximate curvature in deep networks at tractable cost. K-FAC (Kronecker-Factored Approximate Curvature) approximates the Fisher information matrix as a Kronecker product of smaller matrices — one per layer. This brings the per-layer cost to O(d_in² + d_out²) instead of O((d_in·d_out)²). Shampoo similarly uses Kronecker structure with gradient second-moment matrices. Sophia (second-order clipped stochastic optimization) clips the Hessian diagonal to prevent large steps in sharp directions."
+      },
+      {
+        "type": "list",
+        "ordered": false,
+        "items": [
+          "K-FAC: Fisher approximated as Kronecker product of input covariance and output gradient covariance",
+          "Shampoo: full-matrix AdaGrad with Kronecker factor preconditioning, O(d³/m) per step",
+          "Gauss-Newton: approximates Hessian as JᵀJ for least-squares problems — always PSD",
+          "Sophia: clips per-parameter Hessian diagonal estimate to bound step size — stable for LLMs",
+          "Adam as approximate second-order: diagonal Hessian approximation via gradient second moments"
+        ]
+      },
+      {
+        "type": "divider"
+      }
+    ]
+  },
+  {
+    "slug": "gradient-clipping",
+    "title": "Gradient Clipping — Norm and Value Clipping",
+    "description": "Why gradients explode in deep and recurrent networks, global norm clipping vs value clipping, PyTorch implementation, monitoring gradient health, and interactions with gradient accumulation.",
+    "tags": ["calculus", "optimization", "math", "foundations"],
+    "topic": "math-foundations",
+    "status": "published",
+    "updated": "2026-07-10",
+    "blocks": [
+      {
+        "type": "text",
+        "content": "Gradient clipping is a simple but essential training stabilization technique, especially for recurrent networks and large language models. Without it, occasional large gradients can cause weight updates that completely destabilize training — the 'exploding gradient' problem. Clipping bounds the influence of any single gradient signal while preserving the update direction, acting as an adaptive learning rate that scales down only when needed."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Exploding Gradients in Deep Networks"
+      },
+      {
+        "type": "text",
+        "content": "During backpropagation through time (BPTT) in RNNs, the gradient flows through a chain of Jacobians: ∂L/∂h₀ = (∂h_T/∂h₀)ᵀ ∂L/∂h_T = (∏ₜ W_hh·diag(σ'(hₜ)))ᵀ ∂L/∂h_T. If the spectral radius ρ(W_hh) > 1, the product of Jacobians grows exponentially with sequence length T: ‖∏Jₜ‖ ≈ ρᵀ. For ρ=1.1 and T=100, the gradient amplification is 1.1¹⁰⁰ ≈ 10⁴. Deep feedforward networks face the same issue: each layer multiplies by a weight matrix, and if the singular values exceed 1 the product explodes."
+      },
+      {
+        "type": "callout",
+        "variant": "warning",
+        "title": "BPTT and Exponential Gradient Growth",
+        "content": "The product of T Jacobians ∏ₜJₜ has norm that grows as ρ(J)ᵀ where ρ is the spectral radius. For ρ>1: exponential explosion. For ρ<1: exponential vanishing. The 1.0 boundary is unstable — typical RNNs initialized with ρ≈1 quickly drift. Gradient clipping handles the explosion side; gating mechanisms (LSTM, GRU) and careful initialization handle vanishing."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import torch\nimport numpy as np\n\ndef rnn_step(h, x, W_hh, W_xh, b):\n    \"\"\"Single RNN step: h_t = tanh(W_hh @ h_{t-1} + W_xh @ x_t + b).\"\"\"\n    return torch.tanh(W_hh @ h + W_xh @ x + b)\n\ndef track_bptt_gradient_norms(seq_len=80, hidden=16, spectral_radius=1.1, seed=0):\n    torch.manual_seed(seed)\n    # Initialize W_hh with given spectral radius\n    W_raw = torch.randn(hidden, hidden)\n    U, S, Vh = torch.linalg.svd(W_raw)\n    W_hh = (U @ Vh) * spectral_radius  # spectral radius exactly = 1.1\n    W_hh.requires_grad_(True)\n\n    W_xh = torch.randn(hidden, 4) * 0.1\n    b = torch.zeros(hidden)\n    x_seq = torch.randn(seq_len, 4)\n\n    print(f\"BPTT gradient norms (hidden={hidden}, spectral radius={spectral_radius})\")\n    print(f\"{'Time step':>10} {'||dL/dW_hh||':>16} {'Status':>12}\")\n\n    norms = []\n    for t in range(seq_len):\n        h = torch.zeros(hidden)\n        for s in range(t + 1):\n            h = rnn_step(h, x_seq[s], W_hh, W_xh, b)\n        loss = h.sum()\n        loss.backward()\n        if W_hh.grad is not None and t % 15 == 0:\n            gn = W_hh.grad.norm().item()\n            norms.append((t, gn))\n            status = \"EXPLODING\" if gn > 50 else (\"warning\" if gn > 5 else \"stable\")\n            print(f\"{t:>10} {gn:>16.2f} {status:>12}\")\n            W_hh.grad.zero_()\n    return norms\n\nnorms = track_bptt_gradient_norms(seq_len=75, hidden=12, spectral_radius=1.08)\nprint(\"\\nGradient grows exponentially with sequence length — clipping is essential.\")"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Global Norm Clipping"
+      },
+      {
+        "type": "text",
+        "content": "Global norm clipping computes the norm across ALL parameters simultaneously: g_norm = √(Σᵢ‖∇θᵢ‖²). If g_norm exceeds the threshold c, every gradient is scaled by the same factor c/g_norm. This is the critical property: all gradients are scaled uniformly, so their relative magnitudes and thus the gradient direction is preserved. The optimizer takes a step in the same direction as the true gradient, just shorter."
+      },
+      {
+        "type": "list",
+        "ordered": true,
+        "items": [
+          "Compute global gradient norm: g_norm = sqrt(sum over all params of ||grad_i||²)",
+          "If g_norm > threshold: scale = threshold / g_norm; else scale = 1.0",
+          "Apply: grad_i ← grad_i * scale for ALL parameter groups simultaneously",
+          "Pass scaled gradients to optimizer.step() — direction preserved, magnitude bounded"
+        ]
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Value Clipping and Why It Is Inferior"
+      },
+      {
+        "type": "text",
+        "content": "Value clipping clips each gradient component independently: gᵢ ← clip(gᵢ, −c, c). This is simpler but changes the gradient direction: if one parameter has a large gradient that gets clipped while others are small, the relative magnitudes are distorted. The resulting update points in a different direction than the true gradient. This can slow convergence and introduce systematic bias, particularly problematic for correlated parameters. Value clipping is sometimes used in DQN-style RL but is generally not recommended."
+      },
+      {
+        "type": "callout",
+        "variant": "info",
+        "title": "Why Direction Matters",
+        "content": "Gradient descent works because −∇f points in the steepest descent direction. Any positive scaling of the gradient still points downhill. But elementwise clipping creates a gradient that is no longer proportional to ∇f — some components are suppressed relative to others, effectively changing the preconditioning. The resulting update direction may not be a descent direction at all for non-separable objectives."
+      },
+      {
+        "type": "table",
+        "headers": ["Method", "Formula", "Direction Preserved", "Recommended"],
+        "rows": [
+          ["Global Norm Clip", "g ← g·min(1, c/‖g‖_global)", "Yes — all params scaled uniformly", "Yes — default for transformers, RNNs, LLMs"],
+          ["Value Clip", "gᵢ ← clip(gᵢ, −c, c) per element", "No — changes relative magnitudes", "Rarely — some RL (DQN), not recommended for supervised"],
+          ["Per-layer Norm Clip", "gₗ ← gₗ·min(1, c/‖gₗ‖) per layer l", "Yes — within each layer", "Sometimes — layer-sensitive architectures"]
+        ]
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import torch\nimport numpy as np\n\ndef global_norm_clip(grads, threshold):\n    \"\"\"Clip by global norm — preserves gradient direction.\"\"\"\n    global_norm = torch.sqrt(sum(g.norm()**2 for g in grads))\n    if global_norm > threshold:\n        scale = threshold / (global_norm + 1e-12)\n        return [g * scale for g in grads], global_norm.item(), True\n    return list(grads), global_norm.item(), False\n\ndef value_clip(grads, threshold):\n    \"\"\"Clip each element independently — changes gradient direction.\"\"\"\n    clipped = [torch.clamp(g, -threshold, threshold) for g in grads]\n    orig_norm = torch.sqrt(sum(g.norm()**2 for g in grads)).item()\n    clip_norm = torch.sqrt(sum(g.norm()**2 for g in clipped)).item()\n    return clipped, orig_norm, clip_norm\n\ntorch.manual_seed(5)\ngrads = [torch.randn(4, 6) * 4.0, torch.randn(4) * 8.0]\nthreshold = 1.0\n\nnorm_g, g_norm, was_clipped = global_norm_clip(grads, threshold)\nval_g, orig_norm, val_norm = value_clip(grads, threshold)\n\ndir_orig = torch.cat([g.flatten() for g in grads]).float()\ndir_norm = torch.cat([g.flatten() for g in norm_g]).float()\ndir_val  = torch.cat([g.flatten() for g in val_g]).float()\n\ncos_norm = torch.dot(dir_orig/dir_orig.norm(), dir_norm/dir_norm.norm()).item()\ncos_val  = torch.dot(dir_orig/dir_orig.norm(), dir_val/dir_val.norm()).item()\n\nprint(f\"Original global norm: {g_norm:.4f}\")\nprint(f\"\\nGlobal Norm Clip (threshold={threshold}):\")\nprint(f\"  Result norm: {torch.sqrt(sum(g.norm()**2 for g in norm_g)).item():.4f}\")\nprint(f\"  Cosine similarity with original: {cos_norm:.6f} (1.0 = same direction)\")\nprint(f\"\\nValue Clip (threshold={threshold}):\")\nprint(f\"  Result norm: {val_norm:.4f}\")\nprint(f\"  Cosine similarity with original: {cos_val:.4f}  <- direction changed!\")"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "PyTorch Implementation"
+      },
+      {
+        "type": "text",
+        "content": "torch.nn.utils.clip_grad_norm_ is the standard PyTorch function for global norm clipping. It returns the pre-clipping gradient norm, which is invaluable for monitoring training health. The function modifies gradients in-place before the optimizer step. It must be called AFTER loss.backward() and BEFORE optimizer.step(). When using gradient accumulation, clip after the full accumulation is complete — not after each micro-batch backward."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import torch\nimport torch.nn as nn\nfrom collections import deque\n\nclass GradNormTracker:\n    def __init__(self, window=100):\n        self.window = deque(maxlen=window)\n        self.total = 0\n        self.clipped = 0\n\n    def update(self, norm, threshold):\n        self.window.append(norm)\n        self.total += 1\n        if norm > threshold:\n            self.clipped += 1\n\n    @property\n    def clip_rate(self):\n        return self.clipped / max(self.total, 1)\n\ndef train_loop(model, X, y, clip_threshold=1.0, n_steps=100):\n    loss_fn = nn.MSELoss()\n    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)\n    tracker = GradNormTracker()\n\n    for step in range(n_steps):\n        optimizer.zero_grad()\n        loss = loss_fn(model(X), y)\n        loss.backward()\n\n        # clip_grad_norm_ returns pre-clip norm and clips in-place\n        pre_clip_norm = nn.utils.clip_grad_norm_(model.parameters(), clip_threshold)\n        tracker.update(pre_clip_norm.item(), clip_threshold)\n\n        optimizer.step()\n\n        if step % 25 == 0:\n            print(f\"Step {step:3d}: loss={loss.item():.4f}  \"\n                  f\"grad_norm={pre_clip_norm.item():.4f}  \"\n                  f\"clip_rate={tracker.clip_rate:.1%}\")\n\n    return tracker\n\ntorch.manual_seed(42)\nmodel = nn.Sequential(\n    nn.Linear(8, 32), nn.ReLU(),\n    nn.Linear(32, 16), nn.ReLU(),\n    nn.Linear(16, 1)\n)\nX = torch.randn(64, 8)\ny = torch.randn(64, 1)\n\nprint(\"Training with global norm clipping (threshold=1.0):\")\ntracker = train_loop(model, X, y, clip_threshold=1.0, n_steps=80)\nprint(f\"\\nOverall clip rate: {tracker.clip_rate:.1%}\")\nprint(f\"Recent norm window: mean={sum(tracker.window)/len(tracker.window):.4f}\")"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Gradient Norm Monitoring"
+      },
+      {
+        "type": "text",
+        "content": "The pre-clipping gradient norm is one of the most informative training signals available. During a healthy training run the norm should be roughly stable (or slowly decreasing). Sudden spikes indicate a bad batch, numerical instability, or a learning rate that is too high. A persistently high clip rate (>50%) suggests the threshold is too low or the learning rate needs reducing. Per-layer norm tracking reveals which layers are most active — very different norms across layers can indicate initialization issues."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import torch\nimport torch.nn as nn\nimport numpy as np\nfrom collections import defaultdict\n\ndef monitor_gradient_norms(model, X, y, optimizer, clip_thresh=1.0, n_steps=60):\n    \"\"\"Track per-layer and global gradient norms across training.\"\"\"\n    loss_fn = nn.MSELoss()\n    history = defaultdict(list)\n\n    for step in range(n_steps):\n        optimizer.zero_grad()\n        loss = loss_fn(model(X), y)\n        loss.backward()\n\n        # Record per-layer norms before clipping\n        for name, p in model.named_parameters():\n            if p.grad is not None:\n                history[name].append(p.grad.norm().item())\n\n        global_norm = nn.utils.clip_grad_norm_(model.parameters(), clip_thresh)\n        history['_global'].append(global_norm.item())\n        optimizer.step()\n\n    print(f\"\\nGradient Norm Report ({n_steps} steps, clip={clip_thresh})\")\n    print(f\"{'Parameter':<28} {'Mean':>8} {'Std':>8} {'Max':>8} {'Clip%':>7}\")\n    print(\"-\" * 62)\n    for name, vals in sorted(history.items()):\n        arr = np.array(vals)\n        clip_pct = 100*(arr > clip_thresh).mean() if name == '_global' else 0.0\n        label = '[GLOBAL]' if name == '_global' else name\n        print(f\"{label:<28} {arr.mean():>8.4f} {arr.std():>8.4f} {arr.max():>8.4f} \"\n              f\"{clip_pct:>6.1f}%\")\n    return history\n\ntorch.manual_seed(3)\nmodel = nn.Sequential(\n    nn.Linear(8, 24), nn.ReLU(),\n    nn.Linear(24, 12), nn.ReLU(),\n    nn.Linear(12, 1)\n)\noptimizer = torch.optim.SGD(model.parameters(), lr=0.05, momentum=0.9)\nX, y = torch.randn(96, 8), torch.randn(96, 1)\nhistory = monitor_gradient_norms(model, X, y, optimizer, n_steps=50)\nprint(\"\\nSpikes in [GLOBAL] norm indicate training instability.\")"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Interaction with Other Training Techniques"
+      },
+      {
+        "type": "text",
+        "content": "Gradient clipping interacts with several other training components in ways that require careful ordering. With gradient accumulation, backward is called on multiple micro-batches before step. Clipping must happen after all micro-batch gradients are accumulated — clipping per micro-batch and then summing gives a different (incorrect) effective threshold. With mixed precision (AMP), unscale the gradients first (scaler.unscale_(optimizer)) before clipping, then call scaler.step(optimizer) — PyTorch's GradScaler handles this automatically."
+      },
+      {
+        "type": "list",
+        "ordered": false,
+        "items": [
+          "Gradient accumulation: call clip_grad_norm_ once AFTER all micro-batch backward passes, not per micro-batch",
+          "Mixed precision (AMP): scaler.unscale_(optimizer) before clip_grad_norm_ — GradScaler does this if used correctly",
+          "Distributed training: gradients are already all-reduced across devices before clipping — clip once on each replica",
+          "Gradient checkpointing: no interaction, recomputation happens inside backward — clip on final accumulated grads",
+          "Optimizer interaction: clip before optimizer.step() always; some optimizers (AdaGrad, Adam) maintain second moments of raw (pre-clip) gradients internally"
+        ]
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Setting the Clipping Threshold"
+      },
+      {
+        "type": "text",
+        "content": "The clipping threshold is a hyperparameter that should be set by monitoring the gradient norm histogram during the first few hundred steps of training (before any clipping). A good threshold is roughly the 95th–99th percentile of the natural gradient norm distribution — high enough that it rarely clips during stable training but catches pathological spikes. For transformer language models the community default is 1.0; for RNNs 1.0–5.0; for CNNs clipping is often not needed."
+      },
+      {
+        "type": "list",
+        "ordered": false,
+        "items": [
+          "Transformer LLMs: threshold=1.0 is the near-universal default (GPT-2, GPT-3, LLaMA all use 1.0)",
+          "RNNs / LSTMs: threshold=1.0–5.0 depending on sequence length and hidden size",
+          "CNNs: often no clipping needed; gradients are usually well-behaved with BN",
+          "Monitor clip rate: if >10% of steps clip, consider reducing LR or increasing threshold",
+          "Watch for persistent high norms at initialization: may indicate bad weight init or very high LR",
+          "Log gradient norm as a W&B / TensorBoard metric — it's one of the best early warning signals"
+        ]
+      },
+      {
+        "type": "divider"
+      }
+    ]
+  }
+]

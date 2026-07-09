@@ -1,82 +1,273 @@
 ﻿---
 title: "Mutual Information"
 slug: "mutual-information"
-description: "The four equivalent formulations of mutual information, its properties, use in feature selection, InfoNCE contrastive learning, and MINE neural estimation."
-tags: ["information-theory","math","foundations"]
+description: "Mutual information quantifies how much knowing one variable reduces uncertainty about another. Covers I(X;Y), KL-divergence form, MINE, InfoNCE, and the information bottleneck principle."
+tags: ["information-theory", "math", "foundations"]
 topic: "math-foundations"
 status: "published"
 updated: "2026-07-10"
-blocks_json: "WwogIHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiTXV0dWFsIGluZm9ybWF0aW9uIChNSSkgaXMgdGhlIGNhbm9uaWNhbCBtZWFzdXJlIG9mIHN0YXRpc3RpY2FsIGRlcGVuZGVuY2UgYmV0d2VlbiB0d28gcmFuZG9tIHZhcmlhYmxlcy4gSXQgcXVhbnRpZmllcyBob3cgbXVjaCBrbm93aW5nIG9uZSB2YXJpYWJsZSByZWR1Y2VzIHVuY2VydGFpbnR5IGFib3V0IHRoZSBvdGhlci4gVW5saWtlIGNvcnJlbGF0aW9uLCBNSSBjYXB0dXJlcyBub25saW5lYXIgZGVwZW5kZW5jaWVzIGFuZCBpcyBpbnZhcmlhbnQgdG8gaW52ZXJ0aWJsZSB0cmFuc2Zvcm1hdGlvbnMuIEluIE1MLCBNSSB1bmRlcnBpbnMgZmVhdHVyZSBzZWxlY3Rpb24sIGNvbnRyYXN0aXZlIGxlYXJuaW5nIG9iamVjdGl2ZXMgKEluZm9OQ0UpLCBzZWxmLXN1cGVydmlzZWQgcmVwcmVzZW50YXRpb24gbGVhcm5pbmcsIGFuZCB0aGUgaW5mb3JtYXRpb24gYm90dGxlbmVjayBmcmFtZXdvcmsgZm9yIHVuZGVyc3RhbmRpbmcgZGVlcCBuZXR3b3Jrcy4ifSwKICB7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJGb3VyIEVxdWl2YWxlbnQgRGVmaW5pdGlvbnMifSwKICB7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6Ik11dHVhbCBpbmZvcm1hdGlvbiBiZXR3ZWVuIFggYW5kIFkgY2FuIGJlIHdyaXR0ZW4gZm91ciBlcXVpdmFsZW50IHdheXM6XG5cbjEuIEkoWDtZKSA9IEgoWCkgLSBIKFh8WSkgICAgICAgW3JlZHVjdGlvbiBpbiBYLXVuY2VydGFpbnR5IGZyb20ga25vd2luZyBZXVxuMi4gSShYO1kpID0gSChZKSAtIEgoWXxYKSAgICAgICBbcmVkdWN0aW9uIGluIFktdW5jZXJ0YWludHkgZnJvbSBrbm93aW5nIFhdXG4zLiBJKFg7WSkgPSBIKFgpICsgSChZKSAtIEgoWCxZKSBbdG90YWwgbWludXMgam9pbnQgZW50cm9weV1cbjQuIEkoWDtZKSA9IEtMKFAoWCxZKSB8fCBQKFgpUChZKSkgW0tMIGZyb20gam9pbnQgdG8gcHJvZHVjdC1vZi1tYXJnaW5hbHNdXG5cbkFsbCBmb3VyIGFyZSBlcXVhbC4gVGhlIEtMIGZvcm11bGF0aW9uICg0KSBzaG93cyB0aGF0IE1JIG1lYXN1cmVzIGhvdyBmYXIgdGhlIGpvaW50IGRpc3RyaWJ1dGlvbiBkZXZpYXRlcyBmcm9tIGluZGVwZW5kZW5jZS4gTUk9MCBpZmYgUChYLFkpPVAoWClQKFkpLCBpLmUuLCBYIGFuZCBZIGFyZSBpbmRlcGVuZGVudC4ifSwKICB7InR5cGUiOiJjYWxsb3V0IiwidmFyaWFudCI6ImluZm8iLCJ0aXRsZSI6Ik1JIGFuZCB0aGUgVmVubiBEaWFncmFtIG9mIEVudHJvcHkiLCJjb250ZW50IjoiSChYKSBhbmQgSChZKSBhcmUgdHdvIG92ZXJsYXBwaW5nIGNpcmNsZXMuIFRoZSBpbnRlcnNlY3Rpb24gaXMgSShYO1kpIOKAlCBzaGFyZWQgaW5mb3JtYXRpb24uIEgoWHxZKSBpcyB0aGUgWC1vbmx5IHBhcnQuIEgoWXxYKSBpcyB0aGUgWS1vbmx5IHBhcnQuIEgoWCxZKSBpcyB0aGUgdW5pb24uIElkZW50aXRpZXM6IEgoWCxZKSA9IEgoWCkgKyBIKFkpIC0gSShYO1kpIGFuZCBJKFg7WSkgPSBIKFgpICsgSChZKSAtIEgoWCxZKS4ifSwKICB7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJQcm9wZXJ0aWVzIn0sCiAgeyJ0eXBlIjoibGlzdCIsIm9yZGVyZWQiOmZhbHNlLCJpdGVtcyI6WyJOb24tbmVnYXRpdml0eTogSShYO1kpID49IDAgYWx3YXlzLCB3aXRoIGVxdWFsaXR5IGlmZiBYIGFuZCBZIGFyZSBpbmRlcGVuZGVudCIsIlN5bW1ldHJ5OiBJKFg7WSkgPSBJKFk7WCkg4oCUIE1JIGlzIHN5bW1ldHJpYywgdW5saWtlIGNvbmRpdGlvbmFsIGVudHJvcHkiLCJVcHBlciBib3VuZDogSShYO1kpIDw9IG1pbihIKFgpLCBIKFkpKSIsIkludmFyaWFuY2U6IEkoWDtZKSA9IEkoZihYKTtZKSBmb3IgYW55IGludmVydGlibGUgZnVuY3Rpb24gZiDigJQgTUkgaXMgcHJlc2VydmVkIHVuZGVyIHJlcGFyYW1ldHJpc2F0aW9uIiwiRGF0YSBwcm9jZXNzaW5nOiBJKFg7WikgPD0gSShYO1kpIGZvciBNYXJrb3YgY2hhaW4gWC0+WS0+WiIsIkNoYWluIHJ1bGU6IEkoWDEsLi4uLFhuO1kpID0gc3VtX2kgSShYaTtZfFgxLC4uLixYX3tpLTF9KSJdfSwKICB7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJNSSBpbiBGZWF0dXJlIFNlbGVjdGlvbiJ9LAogIHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiTUktYmFzZWQgZmVhdHVyZSBzZWxlY3Rpb24gcmFua3MgZmVhdHVyZXMgWF9pIGJ5IEkoWF9pOyBZKSB3aGVyZSBZIGlzIHRoZSB0YXJnZXQgbGFiZWwuIFRoaXMgY2FwdHVyZXMgYW55IHN0YXRpc3RpY2FsIGRlcGVuZGVuY3ksIG5vdCBqdXN0IGxpbmVhciBjb3JyZWxhdGlvbi4gVGhlIGFkdmFudGFnZSBvdmVyIFBlYXJzb24gY29ycmVsYXRpb246IE1JIGRldGVjdHMgbm9ubGluZWFyIHJlbGF0aW9uc2hpcHMgKGUuZy4sIFheMiByZWxhdGlvbnNoaXAgd2hlcmUgY29ycj0wIGJ1dCBNST4wKS5cblxuTXV0dWFsIEluZm9ybWF0aW9uIEZlYXR1cmUgU2VsZWN0aW9uIChNSUZTKSwgbWF4aW11bSByZWxldmFuY2UgbWluaW11bSByZWR1bmRhbmN5IChtUk1SKSwgYW5kIEpvaW50IE11dHVhbCBJbmZvcm1hdGlvbiAoSk1JKSBleHRlbmQgdGhpcyB0byBzZWxlY3Qgam9pbnRseSBpbmZvcm1hdGl2ZSwgbm9uLXJlZHVuZGFudCBmZWF0dXJlIHNldHM6XG5tUk1SOiBtYXhfe1N9IFtJKFhfUzsgWSkgLSAoMS98U3wpIHN1bV97aSxqIGluIFN9IEkoWF9pOyBYX2opXVxuXG5UaGlzIHNlbGVjdHMgZmVhdHVyZXMgd2l0aCBoaWdoIHJlbGV2YW5jZSB0byBZIGJ1dCBsb3cgbXV0dWFsIHJlZHVuZGFuY3kgYW1vbmcgdGhlbXNlbHZlcy4ifSwKICB7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJJbmZvTkNFIGFuZCBDb250cmFzdGl2ZSBMZWFybmluZyJ9LAogIHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiSW5mb05DRSAodmFuIGRlbiBPb3JkIGV0IGFsLiwgMjAxOCkgaXMgYSBjb250cmFzdGl2ZSBsb3NzIHRoYXQgcHJvdmlkZXMgYSB0cmFjdGFibGUgbG93ZXIgYm91bmQgb24gTUk6XG5cbkkoWDtZKSA+PSBJX05DRShYO1kpID0gRVtsb2coZih4LHkpIC8gc3VtX3trPTF9XksgZih4LHlfaykpXVxuXG53aGVyZSBmKHgseSkgaXMgYSBsZWFybmVkIHNjb3JlIGZ1bmN0aW9uIChkb3QgcHJvZHVjdCBvZiBlbWJlZGRpbmdzKSwgSyBpcyB0aGUgbnVtYmVyIG9mIG5lZ2F0aXZlIHNhbXBsZXMuIFRoZSBib3VuZCB0aWdodGVucyBhcyBLIGluY3JlYXNlcy4gVGhpcyBvYmplY3RpdmUgdHJhaW5zIGVuY29kZXJzIHRvIG1heGltaXNlIE1JIGJldHdlZW4gdmlld3Mgb2YgdGhlIHNhbWUgZGF0YSAoZS5nLiwgZGlmZmVyZW50IGF1Z21lbnRhdGlvbnMgb2YgYW4gaW1hZ2UpLlxuXG5TaW1DTFIsIE1vQ28sIENMSVAsIGFuZCBzaW1pbGFyIG1vZGVscyBhbGwgb3B0aW1pc2UgdmFyaWFudHMgb2YgSW5mb05DRS4gVGhlIHRlbXBlcmF0dXJlIHBhcmFtZXRlciBUIHNjYWxlcyB0aGUgbG9naXRzOiBmKHgseSkvVC4gTG93ZXIgVCBzaGFycGVucyB0aGUgZGlzdHJpYnV0aW9uLCBtYWtpbmcgdGhlIG9iamVjdGl2ZSBoYXJkZXIgYW5kIHBvdGVudGlhbGx5IGxlYXJuaW5nIGZpbmVyLWdyYWluZWQgcmVwcmVzZW50YXRpb25zLiJ9LAogIHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiJpbXBvcnQgdG9yY2hcbmltcG9ydCB0b3JjaC5ubi5mdW5jdGlvbmFsIGFzIEZcblxuZGVmIGluZm9uY2VfbG9zcyh6MSwgejIsIHRlbXBlcmF0dXJlPTAuMSk6XG4gICAgXCJcIlwiXG4gICAgSW5mb05DRSAvIE5ULVhlbnQgbG9zcyBmb3IgY29udHJhc3RpdmUgbGVhcm5pbmcuXG4gICAgejEsIHoyOiBbTiwgRF0gbm9ybWFsaXplZCBlbWJlZGRpbmdzIG9mIHR3byB2aWV3cy5cbiAgICBEaWFnb25hbCBlbnRyaWVzIGFyZSBwb3NpdGl2ZSBwYWlyczsgb2ZmLWRpYWdvbmFsIGFyZSBuZWdhdGl2ZXMuXG4gICAgXCJcIlwiXG4gICAgTiA9IHoxLnNoYXBlWzBdXG4gICAgIyBTaW1pbGFyaXR5IG1hdHJpeCBbTiwgTl1cbiAgICBzaW0gPSB0b3JjaC5tbSh6MSwgejIuVCkgLyB0ZW1wZXJhdHVyZSAgIyBjb3NpbmUgc2ltIChhc3N1bWVzIHVuaXQgdmVjdG9ycylcbiAgICAjIExhYmVsczogZWFjaCBzYW1wbGUgaSBpcyBwb3NpdGl2ZSB3aXRoIGl0c2VsZiAoZGlhZ29uYWwpXG4gICAgbGFiZWxzID0gdG9yY2guYXJhbmdlKE4sIGRldmljZT16MS5kZXZpY2UpXG4gICAgIyBDcm9zcy1lbnRyb3B5IG92ZXIgZWFjaCByb3cgKEluZm9OQ0UpXG4gICAgbG9zcyA9IEYuY3Jvc3NfZW50cm9weShzaW0sIGxhYmVscylcbiAgICByZXR1cm4gbG9zc1xuXG4jIEVzdGltYXRlIE1JIHVzaW5nIGRpc2NyZXRlIE1JIChmb3IgZmVhdHVyZSBzZWxlY3Rpb24pXG5kZWYgZGlzY3JldGVfbWkoeCwgeSwgYmlucz0xMCk6XG4gICAgXCJcIlwiTXV0dWFsIGluZm9ybWF0aW9uIHZpYSBoaXN0b2dyYW0gYmlubmluZy4gUm91Z2ggZXN0aW1hdGUuXCJcIlwiXG4gICAgaW1wb3J0IG51bXB5IGFzIG5wXG4gICAgY194eSA9IG5wLmhpc3RvZ3JhbTJkKHgsIHksIGJpbnM9YmlucylbMF1cbiAgICBjX3ggID0gY194eS5zdW0oYXhpcz0xKVxuICAgIGNfeSAgPSBjX3h5LnN1bShheGlzPTApXG4gICAgbiAgICA9IGNfeHkuc3VtKClcbiAgICBwX3h5ID0gY194eSAvIG5cbiAgICBwX3ggID0gY194ICAvIG5cbiAgICBwX3kgID0gY195ICAvIG5cbiAgICBtaSA9IDAuMFxuICAgIGZvciBpIGluIHJhbmdlKGJpbnMpOlxuICAgICAgICBmb3IgaiBpbiByYW5nZShiaW5zKTpcbiAgICAgICAgICAgIGlmIHBfeHlbaSxqXSA+IDA6XG4gICAgICAgICAgICAgICAgbWkgKz0gcF94eVtpLGpdICogbnAubG9nKHBfeHlbaSxqXSAvIChwX3hbaV0qcF95W2pdKzFlLTEwKSlcbiAgICByZXR1cm4gbWkifSwKICB7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJNSU5FOiBNdXR1YWwgSW5mb3JtYXRpb24gTmV1cmFsIEVzdGltYXRpb24ifSwKICB7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkZvciBoaWdoLWRpbWVuc2lvbmFsIGNvbnRpbnVvdXMgdmFyaWFibGVzLCBjb21wdXRpbmcgTUkgZXhhY3RseSBpcyBpbnRyYWN0YWJsZS4gTUlORSAoQmVsZ2hhemkgZXQgYWwuLCAyMDE4KSB1c2VzIGEgbmV1cmFsIG5ldHdvcmsgVF90aGV0YSB0byBlc3RpbWF0ZSBNSSB2aWEgdGhlIERvbnNrZXItVmFyYWRoYW4gcmVwcmVzZW50YXRpb246XG5cbktMKFB8fFEpID0gc3VwX1QgW0VfUFtUXSAtIGxvZyBFX1FbZV5UXV1cblxuQXBwbGllZCB0byBNSTpcbkkoWDtZKSA9IEtMKFAoWCxZKSB8fCBQKFgpUChZKSkgPSBzdXBfe1RfdGhldGF9IFtFX3tQKFgsWSl9W1RfdGhldGEoeCx5KV0gLSBsb2cgRV97UChYKVAoWSl9W2Vee1RfdGhldGEoeCx5KX1dXVxuXG5UaGUgc3VwcmVtdW0gaXMgYWNoaWV2ZWQgYnkgVCooeCx5KSA9IGxvZyhQKFgsWSkvUChYKVAoWSkpICsgY29uc3QuIFRfdGhldGEgaXMgdHJhaW5lZCBieSBncmFkaWVudCBhc2NlbnQuIFRoZSBleHBlY3RhdGlvbiB1bmRlciBQKFgpUChZKSAodGhlIHByb2R1Y3Qgb2YgbWFyZ2luYWxzKSBpcyBhcHByb3hpbWF0ZWQgYnkgc2h1ZmZsaW5nIFkgc2FtcGxlcyBpbmRlcGVuZGVudGx5IG9mIFguXG5cbk1JTkUgaXMgdXNlZCBpbiBBTURJTSBhbmQgQ01DIChjb250cmFzdGl2ZSBtdWx0aXZpZXcgY29kaW5nKSBmb3IgbGVhcm5pbmcgcmVwcmVzZW50YXRpb25zIHRoYXQgbWF4aW1pc2UgTUkgYmV0d2VlbiBkaWZmZXJlbnQgdmlld3Mgb2YgdGhlIHNhbWUgZGF0YS4ifSwKICB7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJDb25kaXRpb25hbCBNdXR1YWwgSW5mb3JtYXRpb24ifSwKICB7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkNvbmRpdGlvbmFsIE1JIEkoWDtZfFopID0gSChYfFopIC0gSChYfFksWikgPSBIKFl8WikgLSBIKFl8WCxaKSBtZWFzdXJlcyB0aGUgZGVwZW5kZW5jeSBiZXR3ZWVuIFggYW5kIFkgZ2l2ZW4gWi5cblxuSWYgWCBhbmQgWSBhcmUgaW5kZXBlbmRlbnQgZ2l2ZW4gWiAoaS5lLiwgWC0+Wi0+WSBpcyBhIE1hcmtvdiBjaGFpbiksIHRoZW4gSShYO1l8WikgPSAwLlxuXG5Db25kaXRpb25hbCBNSSBpcyB0aGUgYmFzaXMgb2YgbWFueSBjYXVzYWwgZGlzY292ZXJ5IGFsZ29yaXRobXMgKGUuZy4sIFBDIGFsZ29yaXRobSwgRkNJKSB3aGljaCB0ZXN0IEkoWGk7WGp8Uyk9MCBmb3Igc3Vic2V0cyBTIHRvIGlkZW50aWZ5IGNvbmRpdGlvbmFsIGluZGVwZW5kZW5jaWVzIGFuZCBpbmZlciBjYXVzYWwgc3RydWN0dXJlLiJ9LAogIHsidHlwZSI6InRhYmxlIiwiaGVhZGVycyI6WyJGb3JtdWxhIiwiSW50ZXJwcmV0YXRpb24iLCJVc2UgQ2FzZSJdLCJyb3dzIjpbWyJIKFgpIC0gSChYfFkpIiwiVW5jZXJ0YWludHkgcmVkdWN0aW9uIiwiRmVhdHVyZSByZWxldmFuY2UiXSxbIktMKFAoWCxZKXx8UChYKVAoWSkpIiwiRGl2ZXJnZW5jZSBmcm9tIGluZGVwZW5kZW5jZSIsIkRlcGVuZGVuY3kgZGV0ZWN0aW9uIl0sWyJJX05DRSBsb3dlciBib3VuZCIsIlRyYWN0YWJsZSBjb250cmFzdGl2ZSBlc3RpbWF0ZSIsIlNpbUNMUiwgTW9DbywgQ0xJUCJdLFsiTUlORSBlc3RpbWF0ZSIsIk5ldXJhbCBuZXR3b3JrIGVzdGltYXRpb24iLCJIaWdoLWRpbWVuc2lvbmFsIGNvbnRpbnVvdXMgWCxZIl0sWyJJKFg7WXxaKSA9IDAiLCJDb25kaXRpb25hbCBpbmRlcGVuZGVuY2UiLCJDYXVzYWwgZGlzY292ZXJ5Il1dfSwKICB7InR5cGUiOiJjYWxsb3V0IiwidmFyaWFudCI6InRpcCIsInRpdGxlIjoiTUkgTWF4aW1pc2F0aW9uIHZzIENyb3NzLUVudHJvcHkgTWluaW1pc2F0aW9uIiwiY29udGVudCI6IkluZm9OQ0UgbG9zcyBpcyBlcXVpdmFsZW50IHRvIGNyb3NzLWVudHJvcHkgb24gYSBjbGFzc2lmaWNhdGlvbiBwcm9ibGVtICh3aGljaCBvZiBLIHNhbXBsZXMgaXMgdGhlIHBvc2l0aXZlPykuIE1heGltaXNpbmcgSW5mb05DRSA9IG1pbmltaXNpbmcgY3Jvc3MtZW50cm9weSA9IG1heGltaXNpbmcgYSBsb3dlciBib3VuZCBvbiBNSS4gVGhpcyB1bmlmaWVzIGNvbnRyYXN0aXZlIGxlYXJuaW5nIHdpdGggc3RhbmRhcmQgY2xhc3NpZmljYXRpb24gdHJhaW5pbmcsIGV4cGxhaW5pbmcgd2h5IGNvbnRyYXN0aXZlIG9iamVjdGl2ZXMgcHJvZHVjZSBzdWNoIHN0cm9uZyByZXByZXNlbnRhdGlvbnM6IHRoZXkgYXJlIGRpcmVjdGx5IG9wdGltaXNpbmcgZm9yIGluZm9ybWF0aW9uIGNvbnRlbnQgYWJvdXQgdGhlIGlucHV0LiJ9LAogIHsidHlwZSI6ImNhbGxvdXQiLCJ2YXJpYW50Ijoid2FybmluZyIsInRpdGxlIjoiSGlnaC1EaW1lbnNpb25hbCBNSSBFc3RpbWF0aW9uIGlzIEhhcmQiLCJjb250ZW50IjoiRm9yIGNvbnRpbnVvdXMgaGlnaC1kaW1lbnNpb25hbCB2YXJpYWJsZXMsIE1JIGVzdGltYXRpb24gc3VmZmVycyBmcm9tIHRoZSBjdXJzZSBvZiBkaW1lbnNpb25hbGl0eS4gSGlzdG9ncmFtIG1ldGhvZHMgcmVxdWlyZSBleHBvbmVudGlhbCBzYW1wbGVzLiBNSU5FIGNvbnZlcmdlcyBzbG93bHkgYW5kIGhhcyBoaWdoIHZhcmlhbmNlLiBrLU5OIGJhc2VkIGVzdGltYXRvcnMgKEtyYXNrb3YgZXQgYWwuKSB3b3JrIGJldHRlciBpbiBwcmFjdGljZSBmb3IgbW9kZXJhdGUgZGltZW5zaW9ucyAofjEwLTUwKS4gRm9yIHZlcnkgaGlnaCBkaW1lbnNpb25zLCBJbmZvTkNFIGlzIHRoZSBtb3N0IHByYWN0aWNhbCBhcHByb2FjaCwgYnV0IGl0IG9ubHkgcHJvdmlkZXMgYSBsb3dlciBib3VuZC4ifQpd"
+blocks_json: "W3sidHlwZSI6InRleHQiLCJjb250ZW50IjoiTXV0dWFsIGluZm9ybWF0aW9uIChNSSkgaXMgb25lIG9mIHRoZSBtb3N0IGZ1bmRhbWVudGFsIHF1YW50aXRpZXMgaW4gaW5mb3JtYXRpb24gdGhlb3J5LiBVbmxpa2UgY29ycmVsYXRpb24sIHdoaWNoIG9ubHkgY2FwdHVyZXMgbGluZWFyIGRlcGVuZGVuY2UsIE1JIGNhcHR1cmVzICphbGwqIHN0YXRpc3RpY2FsIGRlcGVuZGVuY2llcyBiZXR3ZWVuIHR3byByYW5kb20gdmFyaWFibGVzIOKAlCBpbmNsdWRpbmcgbm9ubGluZWFyIG9uZXMuIEl0IGFuc3dlcnMgdGhlIHF1ZXN0aW9uOiBob3cgbXVjaCBkb2VzIGtub3dpbmcgWCB0ZWxsIHVzIGFib3V0IFk/In0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiRGVmaW5pdGlvbiBhbmQgQ29yZSBGb3JtdWxhIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJGb3IgdHdvIGpvaW50bHkgZGlzdHJpYnV0ZWQgcmFuZG9tIHZhcmlhYmxlcyBYIGFuZCBZLCBtdXR1YWwgaW5mb3JtYXRpb24gaXMgZGVmaW5lZCBhczpcblxuSShYO1kpID0gSChYKSArIEgoWSkgLSBIKFgsWSlcblxud2hlcmUgSChYKSBpcyB0aGUgbWFyZ2luYWwgZW50cm9weSBvZiBYLCBIKFkpIGlzIHRoZSBtYXJnaW5hbCBlbnRyb3B5IG9mIFksIGFuZCBIKFgsWSkgaXMgdGhlaXIgam9pbnQgZW50cm9weS4gSW50dWl0aXZlbHk6IHRoZSBpbmZvcm1hdGlvbiBnYWluZWQgYWJvdXQgWCBieSBvYnNlcnZpbmcgWSBlcXVhbHMgdGhlIHJlZHVjdGlvbiBpbiB1bmNlcnRhaW50eSBhYm91dCBYLiJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiRXF1aXZhbGVudCBmb3JtcyBvZiBtdXR1YWwgaW5mb3JtYXRpb246XG4tIEkoWDtZKSA9IEgoWCkgLSBIKFh8WSkgIOKAlCByZWR1Y3Rpb24gaW4gWFx1MDAyN3MgdW5jZXJ0YWludHkgZ2l2ZW4gWVxuLSBJKFg7WSkgPSBIKFkpIC0gSChZfFgpICDigJQgcmVkdWN0aW9uIGluIFlcdTAwMjdzIHVuY2VydGFpbnR5IGdpdmVuIFhcbi0gSShYO1kpID0gS0woUChYLFkpIOKAliBQKFgpUChZKSkgIOKAlCBLTCBkaXZlcmdlbmNlIGZyb20gam9pbnQgdG8gcHJvZHVjdCBvZiBtYXJnaW5hbHNcblxuVGhlIEtMLWRpdmVyZ2VuY2UgZm9ybSBpcyBwYXJ0aWN1bGFybHkgaWxsdW1pbmF0aW5nOiBNSSBpcyB6ZXJvIGV4YWN0bHkgd2hlbiBYIGFuZCBZIGFyZSBpbmRlcGVuZGVudCAoam9pbnQgPSBwcm9kdWN0IG9mIG1hcmdpbmFscyksIGFuZCBwb3NpdGl2ZSB3aGVuZXZlciB0aGV5IHNoYXJlIHN0cnVjdHVyZS4ifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJLZXkgUHJvcGVydGllcyJ9LHsidHlwZSI6Imxpc3QiLCJvcmRlcmVkIjpmYWxzZSwiaXRlbXMiOlsiU3ltbWV0cnk6IEkoWDtZKSA9IEkoWTtYKSDigJQgaW5mb3JtYXRpb24gaXMgc2hhcmVkLCBub3QgZGlyZWN0aW9uYWwiLCJOb24tbmVnYXRpdml0eTogSShYO1kpIOKJpSAwLCB3aXRoIGVxdWFsaXR5IGlmZiBYIOKKpSBZIiwiU2VsZi1pbmZvcm1hdGlvbjogSShYO1gpID0gSChYKSDigJQgYSB2YXJpYWJsZSBjYXJyaWVzIGZ1bGwgaW5mb3JtYXRpb24gYWJvdXQgaXRzZWxmIiwiQm91bmRlZCBieSBlbnRyb3B5OiBJKFg7WSkg4omkIG1pbihIKFgpLCBIKFkpKSIsIkNoYWluIHJ1bGU6IEkoWDtZLFopID0gSShYO1kpICsgSShYO1p8WSkiXX0seyJ0eXBlIjoiY2FsbG91dCIsInZhcmlhbnQiOiJpbmZvIiwidGl0bGUiOiJWZW5uIERpYWdyYW0gSW50dWl0aW9uIiwiY29udGVudCI6IkRyYXcgb3ZlcmxhcHBpbmcgY2lyY2xlcyBmb3IgSChYKSBhbmQgSChZKS4gVGhlIG92ZXJsYXAgcmVnaW9uIGlzIEkoWDtZKS4gVGhlIGxlZnQtb25seSByZWdpb24gaXMgSChYfFkpLCB0aGUgcmlnaHQtb25seSBpcyBIKFl8WCksIGFuZCB0aGUgdW5pb24gaXMgSChYLFkpLiBUaGlzIGdlb21ldHJpYyBwaWN0dXJlIG1ha2VzIGFsbCBmb3VyIHF1YW50aXRpZXMgaW1tZWRpYXRlbHkgdmlzaWJsZS4ifSx7InR5cGUiOiJ0YWJsZSIsImhlYWRlcnMiOlsiUXVhbnRpdHkiLCJGb3JtdWxhIiwiVmVubiBSZWdpb24iLCJJbnRlcnByZXRhdGlvbiJdLCJyb3dzIjpbWyJIKFgpIiwi4oiSzqMgcCh4KSBsb2cgcCh4KSIsIkZ1bGwgbGVmdCBjaXJjbGUiLCJUb3RhbCB1bmNlcnRhaW50eSBpbiBYIl0sWyJIKFkpIiwi4oiSzqMgcCh5KSBsb2cgcCh5KSIsIkZ1bGwgcmlnaHQgY2lyY2xlIiwiVG90YWwgdW5jZXJ0YWludHkgaW4gWSJdLFsiSChYfFkpIiwiSChYLFkpIOKIkiBIKFkpIiwiTGVmdCBvbmx5IChub3Qgb3ZlcmxhcCkiLCJVbmNlcnRhaW50eSBpbiBYIGFmdGVyIG9ic2VydmluZyBZIl0sWyJIKFl8WCkiLCJIKFgsWSkg4oiSIEgoWCkiLCJSaWdodCBvbmx5IChub3Qgb3ZlcmxhcCkiLCJVbmNlcnRhaW50eSBpbiBZIGFmdGVyIG9ic2VydmluZyBYIl0sWyJJKFg7WSkiLCJIKFgpICsgSChZKSDiiJIgSChYLFkpIiwiT3ZlcmxhcCByZWdpb24iLCJJbmZvcm1hdGlvbiBYIGFuZCBZIHNoYXJlIl0sWyJIKFgsWSkiLCLiiJLOoyBwKHgseSkgbG9nIHAoeCx5KSIsIkZ1bGwgdW5pb24iLCJKb2ludCB1bmNlcnRhaW50eSJdXX0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiQ29tcHV0aW5nIE1JIGZyb20gYSBKb2ludCBEaXN0cmlidXRpb24ifSx7InR5cGUiOiJjb2RlIiwibGFuZ3VhZ2UiOiJweXRob24iLCJjb250ZW50IjoiaW1wb3J0IG51bXB5IGFzIG5wXG5mcm9tIHNjaXB5LnN0YXRzIGltcG9ydCBlbnRyb3B5XG5cbmRlZiBtdXR1YWxfaW5mb3JtYXRpb24oam9pbnRfcHJvYjogbnAubmRhcnJheSkgLVx1MDAzZSBmbG9hdDpcbiAgICBcIlwiXCJDb21wdXRlIEkoWDtZKSBmcm9tIGEgam9pbnQgcHJvYmFiaWxpdHkgdGFibGUgUChYLFkpLlxuXG4gICAgQXJnczpcbiAgICAgICAgam9pbnRfcHJvYjogMkQgYXJyYXkgd2hlcmUgam9pbnRfcHJvYltpLGpdID0gUChYPWksIFk9aikuXG4gICAgUmV0dXJuczpcbiAgICAgICAgTXV0dWFsIGluZm9ybWF0aW9uIGluIG5hdHMgKHVzZSBsb2cyIGZvciBiaXRzKS5cbiAgICBcIlwiXCJcbiAgICAjIE1hcmdpbmFsc1xuICAgIHBfeCA9IGpvaW50X3Byb2Iuc3VtKGF4aXM9MSkgICMgc2hhcGUgKHxYfCwpXG4gICAgcF95ID0gam9pbnRfcHJvYi5zdW0oYXhpcz0wKSAgIyBzaGFwZSAofFl8LClcblxuICAgICMgRW50cm9waWVzIHVzaW5nIHNjaXB5IChiYXNlIGUgYnkgZGVmYXVsdClcbiAgICBoX3ggPSBlbnRyb3B5KHBfeClcbiAgICBoX3kgPSBlbnRyb3B5KHBfeSlcbiAgICBoX3h5ID0gZW50cm9weShqb2ludF9wcm9iLnJhdmVsKCkpICAjIHRyZWF0IGpvaW50IGFzIGZsYXQgZGlzdHJpYnV0aW9uXG5cbiAgICBtaSA9IGhfeCArIGhfeSAtIGhfeHlcblxuICAgICMgQWx0ZXJuYXRpdmVseSB2aWEgS0wgZGl2ZXJnZW5jZTogS0woUChYLFkpIHx8IFAoWClQKFkpKVxuICAgIG91dGVyID0gbnAub3V0ZXIocF94LCBwX3kpICAgICAgICAgICAjIHByb2R1Y3Qgb2YgbWFyZ2luYWxzXG4gICAgbWFzayA9IGpvaW50X3Byb2IgXHUwMDNlIDBcbiAgICBtaV9rbCA9IG5wLnN1bShqb2ludF9wcm9iW21hc2tdICogbnAubG9nKGpvaW50X3Byb2JbbWFza10gLyBvdXRlclttYXNrXSkpXG5cbiAgICBwcmludChmXCJIKFgpICAgPSB7aF94Oi40Zn0gbmF0c1wiKVxuICAgIHByaW50KGZcIkgoWSkgICA9IHtoX3k6LjRmfSBuYXRzXCIpXG4gICAgcHJpbnQoZlwiSChYLFkpID0ge2hfeHk6LjRmfSBuYXRzXCIpXG4gICAgcHJpbnQoZlwiSShYO1kpIHZpYSBlbnRyb3B5IGRlY29tcG9zaXRpb24gPSB7bWk6LjRmfSBuYXRzXCIpXG4gICAgcHJpbnQoZlwiSShYO1kpIHZpYSBLTCBkaXZlcmdlbmNlICAgICAgICAgPSB7bWlfa2w6LjRmfSBuYXRzXCIpXG4gICAgcmV0dXJuIG1pXG5cbiMgRXhhbXBsZTogWCA9IHdlYXRoZXIgKHN1bm55L3JhaW55KSwgWSA9IG1vb2QgKGhhcHB5L3NhZClcbmpvaW50ID0gbnAuYXJyYXkoW1swLjQsIDAuMV0sICAgIyBQKHN1bm55LGhhcHB5KSwgUChzdW5ueSxzYWQpXG4gICAgICAgICAgICAgICAgICBbMC4xLCAwLjRdXSkgICMgUChyYWlueSxoYXBweSksIFAocmFpbnksc2FkKVxubXV0dWFsX2luZm9ybWF0aW9uKGpvaW50KSJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6Ik1JLUJhc2VkIEZlYXR1cmUgU2VsZWN0aW9uIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJNdXR1YWwgaW5mb3JtYXRpb24gaXMgYSBwb3dlcmZ1bCBjcml0ZXJpb24gZm9yIGZlYXR1cmUgc2VsZWN0aW9uIGJlY2F1c2UgaXQgZGV0ZWN0cyBhbnkgZGVwZW5kZW5jZSBiZXR3ZWVuIGEgZmVhdHVyZSBhbmQgdGhlIHRhcmdldCDigJQgbm90IGp1c3QgbGluZWFyIGNvcnJlbGF0aW9uLiBza2xlYXJuXHUwMDI3cyBgbXV0dWFsX2luZm9fY2xhc3NpZmAgZXN0aW1hdGVzIE1JIGJldHdlZW4gZWFjaCBmZWF0dXJlIGFuZCB0aGUgY2xhc3MgbGFiZWwgdXNpbmcgYSBrLW5lYXJlc3QtbmVpZ2hib3JzIGVzdGltYXRvciBmb3IgY29udGludW91cyBmZWF0dXJlcy4ifSx7InR5cGUiOiJjb2RlIiwibGFuZ3VhZ2UiOiJweXRob24iLCJjb250ZW50IjoiaW1wb3J0IG51bXB5IGFzIG5wXG5mcm9tIHNrbGVhcm4uZGF0YXNldHMgaW1wb3J0IGxvYWRfYnJlYXN0X2NhbmNlclxuZnJvbSBza2xlYXJuLmZlYXR1cmVfc2VsZWN0aW9uIGltcG9ydCBtdXR1YWxfaW5mb19jbGFzc2lmLCBTZWxlY3RLQmVzdFxuZnJvbSBza2xlYXJuLnByZXByb2Nlc3NpbmcgaW1wb3J0IFN0YW5kYXJkU2NhbGVyXG5mcm9tIHNrbGVhcm4ubGluZWFyX21vZGVsIGltcG9ydCBMb2dpc3RpY1JlZ3Jlc3Npb25cbmZyb20gc2tsZWFybi5tb2RlbF9zZWxlY3Rpb24gaW1wb3J0IGNyb3NzX3ZhbF9zY29yZVxuaW1wb3J0IG1hdHBsb3RsaWIucHlwbG90IGFzIHBsdFxuXG4jIExvYWQgZGF0YXNldFxuWCwgeSA9IGxvYWRfYnJlYXN0X2NhbmNlcihyZXR1cm5fWF95PVRydWUpXG5mZWF0dXJlX25hbWVzID0gbG9hZF9icmVhc3RfY2FuY2VyKCkuZmVhdHVyZV9uYW1lc1xuXG4jIENvbXB1dGUgTUkgYmV0d2VlbiBlYWNoIGZlYXR1cmUgYW5kIHRhcmdldFxubWlfc2NvcmVzID0gbXV0dWFsX2luZm9fY2xhc3NpZihYLCB5LCByYW5kb21fc3RhdGU9NDIpXG5cbiMgUmFuayBmZWF0dXJlcyBieSBNSVxucmFua2VkX2lkeCA9IG5wLmFyZ3NvcnQobWlfc2NvcmVzKVs6Oi0xXVxucHJpbnQoXCJUb3AgMTAgZmVhdHVyZXMgYnkgbXV0dWFsIGluZm9ybWF0aW9uOlwiKVxuZm9yIGkgaW4gcmFua2VkX2lkeFs6MTBdOlxuICAgIHByaW50KGZcIiAge2ZlYXR1cmVfbmFtZXNbaV06MzVzfSAgTUkgPSB7bWlfc2NvcmVzW2ldOi40Zn0gYml0c1wiKVxuXG4jIENvbXBhcmUgTUktc2VsZWN0ZWQgdnMgYWxsIGZlYXR1cmVzIGZvciBjbGFzc2lmaWNhdGlvblxuc2NhbGVyID0gU3RhbmRhcmRTY2FsZXIoKVxuWF9zY2FsZWQgPSBzY2FsZXIuZml0X3RyYW5zZm9ybShYKVxuXG5mb3IgayBpbiBbNSwgMTAsIDE1LCAyMCwgWC5zaGFwZVsxXV06XG4gICAgc2VsZWN0b3IgPSBTZWxlY3RLQmVzdChtdXR1YWxfaW5mb19jbGFzc2lmLCBrPWspXG4gICAgWF9zZWwgPSBzZWxlY3Rvci5maXRfdHJhbnNmb3JtKFhfc2NhbGVkLCB5KVxuICAgIGxyID0gTG9naXN0aWNSZWdyZXNzaW9uKG1heF9pdGVyPTEwMDApXG4gICAgY3Zfc2NvcmVzID0gY3Jvc3NfdmFsX3Njb3JlKGxyLCBYX3NlbCwgeSwgY3Y9NSlcbiAgICBsYWJlbCA9IGZcIntrOjJkfSBmZWF0dXJlc1wiIGlmIGsgXHUwMDNjIFguc2hhcGVbMV0gZWxzZSBmXCJ7azoyZH0gZmVhdHVyZXMgKGFsbClcIlxuICAgIHByaW50KGZcIiAge2xhYmVsfTogYWNjID0ge2N2X3Njb3Jlcy5tZWFuKCk6LjRmfSDCsSB7Y3Zfc2NvcmVzLnN0ZCgpOi40Zn1cIikifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJNSU5FIOKAlCBNdXR1YWwgSW5mb3JtYXRpb24gTmV1cmFsIEVzdGltYXRpb24ifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkZvciBjb250aW51b3VzIGhpZ2gtZGltZW5zaW9uYWwgdmFyaWFibGVzLCBjb21wdXRpbmcgTUkgYW5hbHl0aWNhbGx5IGlzIGludHJhY3RhYmxlLiBNSU5FIChCZWxnaGF6aSBldCBhbC4sIDIwMTgpIHRyYWlucyBhIG5ldXJhbCBuZXR3b3JrIHRvIGxvd2VyLWJvdW5kIE1JIHVzaW5nIHRoZSBEb25za2VyLVZhcmFkaGFuIHJlcHJlc2VudGF0aW9uIG9mIEtMIGRpdmVyZ2VuY2U6XG5cbkkoWDtZKSDiiaUgRV97UChYLFkpfVtUKHgseSldIOKIkiBsb2cgRV97UChYKVAoWSl9W2Vee1QoeCx5KX1dXG5cbndoZXJlIFQgaXMgYSBuZXVyYWwgbmV0d29yay4gTWF4aW1pemluZyB0aGlzIGxvd2VyIGJvdW5kIG92ZXIgVCBnaXZlcyBhIHRpZ2h0IGVzdGltYXRlLiJ9LHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiJpbXBvcnQgdG9yY2hcbmltcG9ydCB0b3JjaC5ubiBhcyBublxuaW1wb3J0IHRvcmNoLm9wdGltIGFzIG9wdGltXG5pbXBvcnQgbnVtcHkgYXMgbnBcblxuY2xhc3MgTUlORU5ldHdvcmsobm4uTW9kdWxlKTpcbiAgICBcIlwiXCJTdGF0aXN0aWNzIG5ldHdvcmsgVCh4LHkpIGZvciBNSU5FLlwiXCJcIlxuICAgIGRlZiBfX2luaXRfXyhzZWxmLCB4X2RpbTogaW50LCB5X2RpbTogaW50LCBoaWRkZW46IGludCA9IDEyOCk6XG4gICAgICAgIHN1cGVyKCkuX19pbml0X18oKVxuICAgICAgICBzZWxmLm5ldCA9IG5uLlNlcXVlbnRpYWwoXG4gICAgICAgICAgICBubi5MaW5lYXIoeF9kaW0gKyB5X2RpbSwgaGlkZGVuKSxcbiAgICAgICAgICAgIG5uLlJlTFUoKSxcbiAgICAgICAgICAgIG5uLkxpbmVhcihoaWRkZW4sIGhpZGRlbiksXG4gICAgICAgICAgICBubi5SZUxVKCksXG4gICAgICAgICAgICBubi5MaW5lYXIoaGlkZGVuLCAxKVxuICAgICAgICApXG5cbiAgICBkZWYgZm9yd2FyZChzZWxmLCB4LCB5KTpcbiAgICAgICAgcmV0dXJuIHNlbGYubmV0KHRvcmNoLmNhdChbeCwgeV0sIGRpbT0tMSkpXG5cbmRlZiBtaW5lX2xvd2VyX2JvdW5kKFQ6IE1JTkVOZXR3b3JrLCB4OiB0b3JjaC5UZW5zb3IsIHk6IHRvcmNoLlRlbnNvcikgLVx1MDAzZSB0b3JjaC5UZW5zb3I6XG4gICAgXCJcIlwiRG9uc2tlci1WYXJhZGhhbiBsb3dlciBib3VuZCBvbiBJKFg7WSkuXCJcIlwiXG4gICAgam9pbnRfc2NvcmUgPSBUKHgsIHkpLm1lYW4oKSAgICAgICAgICAgIyBFX3tQKFgsWSl9W1RdXG4gICAgeV9zaHVmZmxlZCA9IHlbdG9yY2gucmFuZHBlcm0obGVuKHkpKV0gIyBicmVhayBkZXBlbmRlbmNlIOKGkiBQKFgpUChZKVxuICAgIG1hcmdpbmFsX3Njb3JlID0gVCh4LCB5X3NodWZmbGVkKS5leHAoKS5tZWFuKCkubG9nKCkgICMgbG9nIEVfe1AoWClQKFkpfVtlXlRdXG4gICAgcmV0dXJuIGpvaW50X3Njb3JlIC0gbWFyZ2luYWxfc2NvcmVcblxuZGVmIGVzdGltYXRlX21pKHhfbnA6IG5wLm5kYXJyYXksIHlfbnA6IG5wLm5kYXJyYXksXG4gICAgICAgICAgICAgICAgZXBvY2hzOiBpbnQgPSA1MDApIC1cdTAwM2UgZmxvYXQ6XG4gICAgeCA9IHRvcmNoLkZsb2F0VGVuc29yKHhfbnApXG4gICAgeSA9IHRvcmNoLkZsb2F0VGVuc29yKHlfbnApXG4gICAgbW9kZWwgPSBNSU5FTmV0d29yayh4LnNoYXBlWzFdLCB5LnNoYXBlWzFdKVxuICAgIG9wdCA9IG9wdGltLkFkYW0obW9kZWwucGFyYW1ldGVycygpLCBscj0xZS0zKVxuICAgIGZvciBlcCBpbiByYW5nZShlcG9jaHMpOlxuICAgICAgICBvcHQuemVyb19ncmFkKClcbiAgICAgICAgbG9zcyA9IC1taW5lX2xvd2VyX2JvdW5kKG1vZGVsLCB4LCB5KSAgIyBtYXhpbWl6ZSDihpIgbmVnYXRlXG4gICAgICAgIGxvc3MuYmFja3dhcmQoKVxuICAgICAgICBvcHQuc3RlcCgpXG4gICAgICAgIGlmIChlcCArIDEpICUgMTAwID09IDA6XG4gICAgICAgICAgICBwcmludChmXCIgIEVwb2NoIHtlcCsxfTogTUkg4omIIHstbG9zcy5pdGVtKCk6LjRmfSBuYXRzXCIpXG4gICAgcmV0dXJuIC1sb3NzLml0ZW0oKVxuXG4jIFRlc3Qgb24gY29ycmVsYXRlZCBHYXVzc2lhbnMgKHRydWUgTUkga25vd24gYW5hbHl0aWNhbGx5KVxucmhvID0gMC44XG5uID0gMjAwMFxueF9kYXRhID0gbnAucmFuZG9tLnJhbmRuKG4sIDEpXG55X2RhdGEgPSByaG8gKiB4X2RhdGEgKyBucC5zcXJ0KDEgLSByaG8qKjIpICogbnAucmFuZG9tLnJhbmRuKG4sIDEpXG50cnVlX21pID0gLTAuNSAqIG5wLmxvZygxIC0gcmhvKioyKVxucHJpbnQoZlwiVHJ1ZSBNSSA9IHt0cnVlX21pOi40Zn0gbmF0c1wiKVxuZXN0aW1hdGVfbWkoeF9kYXRhLCB5X2RhdGEpIn0seyJ0eXBlIjoiY2FsbG91dCIsInZhcmlhbnQiOiJ3YXJuaW5nIiwidGl0bGUiOiJNSU5FIEJpYXMiLCJjb250ZW50IjoiTUlORSBjYW4gYmUgYmlhc2VkIHdpdGggZmluaXRlIHNhbXBsZXMsIGVzcGVjaWFsbHkgd2hlbiB0aGUgZXhwb25lbnRpYWwgdGVybSBpbiB0aGUgbWFyZ2luYWwgZXhwZWN0YXRpb24gaGFzIGhpZ2ggdmFyaWFuY2UuIFRoZSBTTUlMRSBlc3RpbWF0b3IgYW5kIG90aGVyIHZhcmlhbnRzIGFkZHJlc3MgdGhpcyBieSBjbGlwcGluZyB0aGUgZXhwb25lbnQuIEZvciBzbWFsbCBkYXRhc2V0cywgaGlzdG9ncmFtIG9yIGstTk4gZXN0aW1hdG9ycyBhcmUgbW9yZSBzdGFibGUuIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiSW5mb05DRSBhbmQgQ29udHJhc3RpdmUgTGVhcm5pbmcifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkluZm9OQ0UgKHZhbiBkZW4gT29yZCBldCBhbC4sIDIwMTgpIHByb3ZpZGVzIGFub3RoZXIgbG93ZXIgYm91bmQgb24gTUkgYW5kIGlzIHRoZSBvYmplY3RpdmUgYmVoaW5kIGNvbnRyYXN0aXZlIHNlbGYtc3VwZXJ2aXNlZCBsZWFybmluZyAoU2ltQ0xSLCBNb0NvLCBDTElQKS4gR2l2ZW4gYSBwb3NpdGl2ZSBwYWlyICh4LCB5KSBhbmQgTi0xIG5lZ2F0aXZlIHBhaXJzLCBJbmZvTkNFIGlzOlxuXG5MX0luZm9OQ0UgPSAtRVtsb2coZV57Zih4LHkpfSAvIM6jX3t5XHUwMDI3fSBlXntmKHgseVx1MDAyNyl9KV1cblxuVGhpcyBsb3dlciBib3VuZHMgTUk6IEkoWDtZKSDiiaUgbG9nKE4pIC0gTF9JbmZvTkNFLiBUaGUgYm91bmQgdGlnaHRlbnMgYXMgTiBpbmNyZWFzZXMgYnV0IGFsc28gcmVxdWlyZXMgbW9yZSBuZWdhdGl2ZXMuIn0seyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6ImltcG9ydCB0b3JjaFxuaW1wb3J0IHRvcmNoLm5uIGFzIG5uXG5pbXBvcnQgdG9yY2gubm4uZnVuY3Rpb25hbCBhcyBGXG5pbXBvcnQgbnVtcHkgYXMgbnBcblxuZGVmIGluZm9uY2VfbG9zcyh6X2k6IHRvcmNoLlRlbnNvciwgel9qOiB0b3JjaC5UZW5zb3IsXG4gICAgICAgICAgICAgICAgIHRlbXBlcmF0dXJlOiBmbG9hdCA9IDAuMDcpIC1cdTAwM2UgdG9yY2guVGVuc29yOlxuICAgIFwiXCJcIkluZm9OQ0UgLyBOVC1YZW50IGxvc3MgZm9yIGNvbnRyYXN0aXZlIGxlYXJuaW5nLlxuXG4gICAgQXJnczpcbiAgICAgICAgel9pOiBlbWJlZGRpbmdzIG9mIGF1Z21lbnRlZCB2aWV3IDEsIHNoYXBlIChOLCBEKVxuICAgICAgICB6X2o6IGVtYmVkZGluZ3Mgb2YgYXVnbWVudGVkIHZpZXcgMiwgc2hhcGUgKE4sIEQpXG4gICAgICAgIHRlbXBlcmF0dXJlOiBzb2Z0bWF4IHRlbXBlcmF0dXJlIHRhdVxuICAgIFJldHVybnM6XG4gICAgICAgIFNjYWxhciBJbmZvTkNFIGxvc3MgKGxvd2VyID0gbW9yZSBNSSBwcmVzZXJ2ZWQpXG4gICAgXCJcIlwiXG4gICAgTiA9IHpfaS5zaGFwZVswXVxuXG4gICAgIyBOb3JtYWxpemUgZW1iZWRkaW5ncyB0byB1bml0IHNwaGVyZVxuICAgIHpfaSA9IEYubm9ybWFsaXplKHpfaSwgZGltPS0xKVxuICAgIHpfaiA9IEYubm9ybWFsaXplKHpfaiwgZGltPS0xKVxuXG4gICAgIyBDb21wdXRlIGFsbCBwYWlyd2lzZSBzaW1pbGFyaXRpZXM6IHNoYXBlICgyTiwgMk4pXG4gICAgeiA9IHRvcmNoLmNhdChbel9pLCB6X2pdLCBkaW09MClcbiAgICBzaW0gPSB0b3JjaC5tbSh6LCB6LlQpIC8gdGVtcGVyYXR1cmVcblxuICAgICMgTWFzayBvdXQgc2VsZi1zaW1pbGFyaXRpZXNcbiAgICBtYXNrID0gdG9yY2guZXllKDIgKiBOLCBkdHlwZT10b3JjaC5ib29sLCBkZXZpY2U9ei5kZXZpY2UpXG4gICAgc2ltLm1hc2tlZF9maWxsXyhtYXNrLCBmbG9hdChcdTAwMjctaW5mXHUwMDI3KSlcblxuICAgICMgUG9zaXRpdmUgcGFpcnM6IChpLCBOK2kpIGFuZCAoTitpLCBpKVxuICAgIGxhYmVscyA9IHRvcmNoLmNhdChbdG9yY2guYXJhbmdlKE4sIDIqTiksIHRvcmNoLmFyYW5nZShOKV0pLnRvKHouZGV2aWNlKVxuICAgIGxvc3MgPSBGLmNyb3NzX2VudHJvcHkoc2ltLCBsYWJlbHMpXG4gICAgcmV0dXJuIGxvc3NcblxuZGVmIG1pX2xvd2VyX2JvdW5kKGluZm9uY2VfdmFsOiBmbG9hdCwgYmF0Y2hfc2l6ZTogaW50KSAtXHUwMDNlIGZsb2F0OlxuICAgIFwiXCJcIk1JIGxvd2VyIGJvdW5kIGZyb20gSW5mb05DRSBsb3NzLlwiXCJcIlxuICAgIHJldHVybiBucC5sb2coYmF0Y2hfc2l6ZSkgLSBpbmZvbmNlX3ZhbFxuXG4jIERlbW9uc3RyYXRpb25cbk4sIEQgPSA2NCwgMTI4XG56MSA9IHRvcmNoLnJhbmRuKE4sIEQpXG56MiA9IHoxICsgMC4xICogdG9yY2gucmFuZG4oTiwgRCkgICMgaGlnaGx5IGNvcnJlbGF0ZWQgdmlld3Ncbmxvc3MgPSBpbmZvbmNlX2xvc3MoejEsIHoyKVxucHJpbnQoZlwiSW5mb05DRSBsb3NzOiB7bG9zcy5pdGVtKCk6LjRmfVwiKVxucHJpbnQoZlwiTUkgbG93ZXIgYm91bmQ6IHttaV9sb3dlcl9ib3VuZChsb3NzLml0ZW0oKSwgTik6LjRmfSBuYXRzXCIpXG5wcmludChmXCJUaGVvcmV0aWNhbCBtYXggTUkgYm91bmQ6IGxvZyh7Tn0pID0ge25wLmxvZyhOKTouNGZ9IG5hdHNcIikifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJJbmZvcm1hdGlvbiBCb3R0bGVuZWNrIFByaW5jaXBsZSJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiVGhlIEluZm9ybWF0aW9uIEJvdHRsZW5lY2sgKFRpc2hieSBldCBhbC4sIDIwMDApIGZvcm1hbGl6ZXMgdGhlIGNvbXByZXNzaW9uLXJlbGV2YW5jZSB0cmFkZS1vZmYuIEdpdmVuIGlucHV0IFggYW5kIHRhcmdldCBZLCB3ZSBzZWVrIGEgY29tcHJlc3NlZCByZXByZXNlbnRhdGlvbiBaIHRoYXQ6XG4tIE1pbmltaXplcyBJKFg7Wikg4oCUIGNvbXByZXNzIFggYXMgbXVjaCBhcyBwb3NzaWJsZVxuLSBNYXhpbWl6ZXMgSShaO1kpIOKAlCByZXRhaW4gaW5mb3JtYXRpb24gYWJvdXQgWVxuXG5UaGUgSUIgTGFncmFuZ2lhbiBpczogTCA9IEkoWDtaKSAtIM6ywrdJKFo7WSksIHdoZXJlIM6yIGNvbnRyb2xzIHRoZSBjb21wcmVzc2lvbi1hY2N1cmFjeSB0cmFkZS1vZmYuIEF0IM6yPTAgd2UgZGlzY2FyZCBldmVyeXRoaW5nOyBhcyDOsuKGkuKIniB3ZSBrZWVwIGFsbCBpbmZvcm1hdGlvbi4gVGhlIG9wdGltYWwgWiBpcyBhIHN1ZmZpY2llbnQgc3RhdGlzdGljIG9mIFggZm9yIHByZWRpY3RpbmcgWS4ifSx7InR5cGUiOiJjYWxsb3V0IiwidmFyaWFudCI6InRpcCIsInRpdGxlIjoiU2VsZi1TdXBlcnZpc2VkIExlYXJuaW5nIENvbm5lY3Rpb24iLCJjb250ZW50IjoiQ29udHJhc3RpdmUgc2VsZi1zdXBlcnZpc2VkIG1ldGhvZHMgKFNpbUNMUiwgRElOTykgaW1wbGljaXRseSBvcHRpbWl6ZSBhIGZvcm0gb2YgdGhlIGluZm9ybWF0aW9uIGJvdHRsZW5lY2s6IHRoZXkgbWF4aW1pemUgTUkgYmV0d2VlbiB0d28gYXVnbWVudGVkIHZpZXdzIG9mIHRoZSBzYW1lIGltYWdlIChJKFo7WSkpIHdoaWxlIHRoZSBmaW5pdGUtY2FwYWNpdHkgbmV0d29yayBjb21wcmVzc2VzIGF3YXkgdmlldy1zcGVjaWZpYyBub2lzZSAobWluaW1pemluZyBJKFg7WikgaW5kaXJlY3RseSkuIFRoaXMgZXhwbGFpbnMgd2h5IHN0cm9uZyBhdWdtZW50YXRpb25zIOKAlCB3aGljaCBjcmVhdGUgYSBoYXJkZXIgY29tcHJlc3Npb24gdGFzayDigJQgb2Z0ZW4gcHJvZHVjZSBiZXR0ZXIgcmVwcmVzZW50YXRpb25zLiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IkNvbmRpdGlvbmFsIE11dHVhbCBJbmZvcm1hdGlvbiJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiQ29uZGl0aW9uYWwgTUkgSShYO1l8WikgbWVhc3VyZXMgdGhlIGluZm9ybWF0aW9uIFggYW5kIFkgc2hhcmUgKmdpdmVuKiBrbm93bGVkZ2Ugb2YgWjpcblxuSShYO1l8WikgPSBIKFh8WikgLSBIKFh8WSxaKSA9IEVfWltJKFg7WXxaPXopXVxuXG5UaGUgY2hhaW4gcnVsZSBmb3IgTUkgc3RhdGVzOiBJKFg7WSxaKSA9IEkoWDtaKSArIEkoWDtZfFopLiBUaGlzIGlzIGtleSBmb3IgZmVhdHVyZSBpbXBvcnRhbmNlOiBpZiBJKFg7WXxaKSDiiYggMCwgZmVhdHVyZSBYIGFkZHMgbm8gaW5mb3JtYXRpb24gYWJvdXQgWSBiZXlvbmQgd2hhdCBaIGFscmVhZHkgcHJvdmlkZXMg4oCUIFggaXMgcmVkdW5kYW50IGdpdmVuIFouIn0seyJ0eXBlIjoiZGl2aWRlciJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiTXV0dWFsIGluZm9ybWF0aW9uIHVuaWZpZXMgZmVhdHVyZSBzZWxlY3Rpb24sIHJlcHJlc2VudGF0aW9uIGxlYXJuaW5nLCBhbmQgZ2VuZXJhdGl2ZSBtb2RlbGluZyB1bmRlciBhIHNpbmdsZSBpbmZvcm1hdGlvbi10aGVvcmV0aWMgbGVucy4gV2hldGhlciBjb21wdXRpbmcgaXQgYW5hbHl0aWNhbGx5IGZyb20gam9pbnQgZGlzdHJpYnV0aW9ucywgZXN0aW1hdGluZyBpdCB3aXRoIG5ldXJhbCBib3VuZHMgKE1JTkUsIEluZm9OQ0UpLCBvciB1c2luZyBpdCB0byBndWlkZSBjb21wcmVzc2lvbiAoSUIpLCBNSSBwcm92aWRlcyB0aGUgY29uY2VwdHVhbCBmb3VuZGF0aW9uIGZvciB1bmRlcnN0YW5kaW5nIHdoYXQgaW5mb3JtYXRpb24gYSBtb2RlbCBwcmVzZXJ2ZXMsIGRpc2NhcmRzLCBvciBhbXBsaWZpZXMuIn1d"
 ---
 # Mutual Information
 
-Mutual information (MI) is the canonical measure of statistical dependence between two random variables. Unlike correlation, MI captures nonlinear dependencies and is invariant to invertible transformations. It underpins feature selection, contrastive learning (InfoNCE), and the information bottleneck framework.
+Mutual information (MI) is one of the most fundamental quantities in information theory. Unlike correlation, which only captures linear dependence, MI captures *all* statistical dependencies between two random variables — including nonlinear ones. It answers the question: how much does knowing X tell us about Y?
 
-## Four Equivalent Definitions
+## Definition and Core Formula
 
-$$I(X;Y) = H(X) - H(X|Y) = H(Y) - H(Y|X) = H(X)+H(Y)-H(X,Y) = \text{KL}(P(X,Y)\|P(X)P(Y))$$
+For two jointly distributed random variables X and Y, mutual information is defined as:
 
-The KL form shows MI measures how far the joint distribution deviates from independence. $I(X;Y)=0$ iff $X \perp Y$.
+I(X;Y) = H(X) + H(Y) - H(X,Y)
 
-> **INFO: MI and the Venn Diagram of Entropy**
-> H(X) and H(Y) are overlapping circles. Their intersection is I(X;Y). H(X,Y) is their union. I(X;Y) = H(X) + H(Y) - H(X,Y).
+where H(X) is the marginal entropy of X, H(Y) is the marginal entropy of Y, and H(X,Y) is their joint entropy. Intuitively: the information gained about X by observing Y equals the reduction in uncertainty about X.
 
-## Properties
+Equivalent forms of mutual information:
+- I(X;Y) = H(X) - H(X|Y)  — reduction in X's uncertainty given Y
+- I(X;Y) = H(Y) - H(Y|X)  — reduction in Y's uncertainty given X
+- I(X;Y) = KL(P(X,Y) ‖ P(X)P(Y))  — KL divergence from joint to product of marginals
 
-- **Non-negativity:** $I(X;Y) \geq 0$, equality iff $X \perp Y$
-- **Symmetry:** $I(X;Y) = I(Y;X)$
-- **Upper bound:** $I(X;Y) \leq \min(H(X), H(Y))$
-- **Invariance:** $I(f(X);Y) = I(X;Y)$ for invertible $f$
-- **Data processing:** $I(X;Z) \leq I(X;Y)$ for Markov chain $X\to Y\to Z$
+The KL-divergence form is particularly illuminating: MI is zero exactly when X and Y are independent (joint = product of marginals), and positive whenever they share structure.
 
-## MI in Feature Selection
+## Key Properties
 
-MI-based feature selection ranks features by $I(X_i; Y)$, capturing nonlinear dependencies invisible to Pearson correlation. **mRMR** selects features with high relevance and low redundancy:
+- Symmetry: I(X;Y) = I(Y;X) — information is shared, not directional
+- Non-negativity: I(X;Y) ≥ 0, with equality iff X ⊥ Y
+- Self-information: I(X;X) = H(X) — a variable carries full information about itself
+- Bounded by entropy: I(X;Y) ≤ min(H(X), H(Y))
+- Chain rule: I(X;Y,Z) = I(X;Y) + I(X;Z|Y)
 
-$$\max_S \left[I(X_S; Y) - \frac{1}{|S|}\sum_{i,j\in S} I(X_i; X_j)\right]$$
+> **Venn Diagram Intuition**: Draw overlapping circles for H(X) and H(Y). The overlap region is I(X;Y). The left-only region is H(X|Y), the right-only is H(Y|X), and the union is H(X,Y). This geometric picture makes all four quantities immediately visible.
 
-## InfoNCE and Contrastive Learning
+| Quantity | Formula | Venn Region | Interpretation |
+| --- | --- | --- | --- |
+| H(X) | −Σ p(x) log p(x) | Full left circle | Total uncertainty in X |
+| H(Y) | −Σ p(y) log p(y) | Full right circle | Total uncertainty in Y |
+| H(X|Y) | H(X,Y) − H(Y) | Left only (not overlap) | Uncertainty in X after observing Y |
+| H(Y|X) | H(X,Y) − H(X) | Right only (not overlap) | Uncertainty in Y after observing X |
+| I(X;Y) | H(X) + H(Y) − H(X,Y) | Overlap region | Information X and Y share |
+| H(X,Y) | −Σ p(x,y) log p(x,y) | Full union | Joint uncertainty |
 
-$$I(X;Y) \geq \mathbb{E}\!\left[\log\frac{f(x,y)}{\sum_{k=1}^K f(x,y_k)}\right]$$
+## Computing MI from a Joint Distribution
 
-InfoNCE provides a tractable lower bound on MI. SimCLR, MoCo, and CLIP all optimise variants of this objective.
+```python
+import numpy as np
+from scipy.stats import entropy
+
+def mutual_information(joint_prob: np.ndarray) -> float:
+    """Compute I(X;Y) from a joint probability table P(X,Y).
+
+    Args:
+        joint_prob: 2D array where joint_prob[i,j] = P(X=i, Y=j).
+    Returns:
+        Mutual information in nats (use log2 for bits).
+    """
+    # Marginals
+    p_x = joint_prob.sum(axis=1)  # shape (|X|,)
+    p_y = joint_prob.sum(axis=0)  # shape (|Y|,)
+
+    # Entropies using scipy (base e by default)
+    h_x = entropy(p_x)
+    h_y = entropy(p_y)
+    h_xy = entropy(joint_prob.ravel())  # treat joint as flat distribution
+
+    mi = h_x + h_y - h_xy
+
+    # Alternatively via KL divergence: KL(P(X,Y) || P(X)P(Y))
+    outer = np.outer(p_x, p_y)           # product of marginals
+    mask = joint_prob > 0
+    mi_kl = np.sum(joint_prob[mask] * np.log(joint_prob[mask] / outer[mask]))
+
+    print(f"H(X)   = {h_x:.4f} nats")
+    print(f"H(Y)   = {h_y:.4f} nats")
+    print(f"H(X,Y) = {h_xy:.4f} nats")
+    print(f"I(X;Y) via entropy decomposition = {mi:.4f} nats")
+    print(f"I(X;Y) via KL divergence         = {mi_kl:.4f} nats")
+    return mi
+
+# Example: X = weather (sunny/rainy), Y = mood (happy/sad)
+joint = np.array([[0.4, 0.1],   # P(sunny,happy), P(sunny,sad)
+                  [0.1, 0.4]])  # P(rainy,happy), P(rainy,sad)
+mutual_information(joint)
+```
+
+## MI-Based Feature Selection
+
+Mutual information is a powerful criterion for feature selection because it detects any dependence between a feature and the target — not just linear correlation. sklearn's `mutual_info_classif` estimates MI between each feature and the class label using a k-nearest-neighbors estimator for continuous features.
+
+```python
+import numpy as np
+from sklearn.datasets import load_breast_cancer
+from sklearn.feature_selection import mutual_info_classif, SelectKBest
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import cross_val_score
+import matplotlib.pyplot as plt
+
+# Load dataset
+X, y = load_breast_cancer(return_X_y=True)
+feature_names = load_breast_cancer().feature_names
+
+# Compute MI between each feature and target
+mi_scores = mutual_info_classif(X, y, random_state=42)
+
+# Rank features by MI
+ranked_idx = np.argsort(mi_scores)[::-1]
+print("Top 10 features by mutual information:")
+for i in ranked_idx[:10]:
+    print(f"  {feature_names[i]:35s}  MI = {mi_scores[i]:.4f} bits")
+
+# Compare MI-selected vs all features for classification
+scaler = StandardScaler()
+X_scaled = scaler.fit_transform(X)
+
+for k in [5, 10, 15, 20, X.shape[1]]:
+    selector = SelectKBest(mutual_info_classif, k=k)
+    X_sel = selector.fit_transform(X_scaled, y)
+    lr = LogisticRegression(max_iter=1000)
+    cv_scores = cross_val_score(lr, X_sel, y, cv=5)
+    label = f"{k:2d} features" if k < X.shape[1] else f"{k:2d} features (all)"
+    print(f"  {label}: acc = {cv_scores.mean():.4f} ± {cv_scores.std():.4f}")
+```
+
+## MINE — Mutual Information Neural Estimation
+
+For continuous high-dimensional variables, computing MI analytically is intractable. MINE (Belghazi et al., 2018) trains a neural network to lower-bound MI using the Donsker-Varadhan representation of KL divergence:
+
+I(X;Y) ≥ E_{P(X,Y)}[T(x,y)] − log E_{P(X)P(Y)}[e^{T(x,y)}]
+
+where T is a neural network. Maximizing this lower bound over T gives a tight estimate.
 
 ```python
 import torch
-import torch.nn.functional as F
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
 
-def infonce_loss(z1, z2, temperature=0.1):
-    """InfoNCE / NT-Xent loss. z1, z2: [N, D] normalized embeddings."""
-    N = z1.shape[0]
-    sim = torch.mm(z1, z2.T) / temperature   # [N, N] cosine similarities
-    labels = torch.arange(N, device=z1.device)
-    return F.cross_entropy(sim, labels)      # diagonal = positive pairs
+class MINENetwork(nn.Module):
+    """Statistics network T(x,y) for MINE."""
+    def __init__(self, x_dim: int, y_dim: int, hidden: int = 128):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(x_dim + y_dim, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, 1)
+        )
+
+    def forward(self, x, y):
+        return self.net(torch.cat([x, y], dim=-1))
+
+def mine_lower_bound(T: MINENetwork, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    """Donsker-Varadhan lower bound on I(X;Y)."""
+    joint_score = T(x, y).mean()           # E_{P(X,Y)}[T]
+    y_shuffled = y[torch.randperm(len(y))] # break dependence → P(X)P(Y)
+    marginal_score = T(x, y_shuffled).exp().mean().log()  # log E_{P(X)P(Y)}[e^T]
+    return joint_score - marginal_score
+
+def estimate_mi(x_np: np.ndarray, y_np: np.ndarray,
+                epochs: int = 500) -> float:
+    x = torch.FloatTensor(x_np)
+    y = torch.FloatTensor(y_np)
+    model = MINENetwork(x.shape[1], y.shape[1])
+    opt = optim.Adam(model.parameters(), lr=1e-3)
+    for ep in range(epochs):
+        opt.zero_grad()
+        loss = -mine_lower_bound(model, x, y)  # maximize → negate
+        loss.backward()
+        opt.step()
+        if (ep + 1) % 100 == 0:
+            print(f"  Epoch {ep+1}: MI ≈ {-loss.item():.4f} nats")
+    return -loss.item()
+
+# Test on correlated Gaussians (true MI known analytically)
+rho = 0.8
+n = 2000
+x_data = np.random.randn(n, 1)
+y_data = rho * x_data + np.sqrt(1 - rho**2) * np.random.randn(n, 1)
+true_mi = -0.5 * np.log(1 - rho**2)
+print(f"True MI = {true_mi:.4f} nats")
+estimate_mi(x_data, y_data)
 ```
 
-## MINE: Mutual Information Neural Estimation
+> **MINE Bias**: MINE can be biased with finite samples, especially when the exponential term in the marginal expectation has high variance. The SMILE estimator and other variants address this by clipping the exponent. For small datasets, histogram or k-NN estimators are more stable.
 
-Using the Donsker-Varadhan representation:
+## InfoNCE and Contrastive Learning
 
-$$I(X;Y) = \sup_{T_\theta}\left[\mathbb{E}_{P(X,Y)}[T_\theta] - \log\mathbb{E}_{P(X)P(Y)}[e^{T_\theta}]\right]$$
+InfoNCE (van den Oord et al., 2018) provides another lower bound on MI and is the objective behind contrastive self-supervised learning (SimCLR, MoCo, CLIP). Given a positive pair (x, y) and N-1 negative pairs, InfoNCE is:
 
-$T_\theta$ is trained by gradient ascent. Used in AMDIM and CMC for representation learning.
+L_InfoNCE = -E[log(e^{f(x,y)} / Σ_{y'} e^{f(x,y')})]
+
+This lower bounds MI: I(X;Y) ≥ log(N) - L_InfoNCE. The bound tightens as N increases but also requires more negatives.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+
+def infonce_loss(z_i: torch.Tensor, z_j: torch.Tensor,
+                 temperature: float = 0.07) -> torch.Tensor:
+    """InfoNCE / NT-Xent loss for contrastive learning.
+
+    Args:
+        z_i: embeddings of augmented view 1, shape (N, D)
+        z_j: embeddings of augmented view 2, shape (N, D)
+        temperature: softmax temperature tau
+    Returns:
+        Scalar InfoNCE loss (lower = more MI preserved)
+    """
+    N = z_i.shape[0]
+
+    # Normalize embeddings to unit sphere
+    z_i = F.normalize(z_i, dim=-1)
+    z_j = F.normalize(z_j, dim=-1)
+
+    # Compute all pairwise similarities: shape (2N, 2N)
+    z = torch.cat([z_i, z_j], dim=0)
+    sim = torch.mm(z, z.T) / temperature
+
+    # Mask out self-similarities
+    mask = torch.eye(2 * N, dtype=torch.bool, device=z.device)
+    sim.masked_fill_(mask, float('-inf'))
+
+    # Positive pairs: (i, N+i) and (N+i, i)
+    labels = torch.cat([torch.arange(N, 2*N), torch.arange(N)]).to(z.device)
+    loss = F.cross_entropy(sim, labels)
+    return loss
+
+def mi_lower_bound(infonce_val: float, batch_size: int) -> float:
+    """MI lower bound from InfoNCE loss."""
+    return np.log(batch_size) - infonce_val
+
+# Demonstration
+N, D = 64, 128
+z1 = torch.randn(N, D)
+z2 = z1 + 0.1 * torch.randn(N, D)  # highly correlated views
+loss = infonce_loss(z1, z2)
+print(f"InfoNCE loss: {loss.item():.4f}")
+print(f"MI lower bound: {mi_lower_bound(loss.item(), N):.4f} nats")
+print(f"Theoretical max MI bound: log({N}) = {np.log(N):.4f} nats")
+```
+
+## Information Bottleneck Principle
+
+The Information Bottleneck (Tishby et al., 2000) formalizes the compression-relevance trade-off. Given input X and target Y, we seek a compressed representation Z that:
+- Minimizes I(X;Z) — compress X as much as possible
+- Maximizes I(Z;Y) — retain information about Y
+
+The IB Lagrangian is: L = I(X;Z) - β·I(Z;Y), where β controls the compression-accuracy trade-off. At β=0 we discard everything; as β→∞ we keep all information. The optimal Z is a sufficient statistic of X for predicting Y.
+
+> **Self-Supervised Learning Connection**: Contrastive self-supervised methods (SimCLR, DINO) implicitly optimize a form of the information bottleneck: they maximize MI between two augmented views of the same image (I(Z;Y)) while the finite-capacity network compresses away view-specific noise (minimizing I(X;Z) indirectly). This explains why strong augmentations — which create a harder compression task — often produce better representations.
 
 ## Conditional Mutual Information
 
-$I(X;Y|Z) = H(X|Z) - H(X|Y,Z)$. If $X\to Z\to Y$ is Markov, $I(X;Y|Z)=0$.
+Conditional MI I(X;Y|Z) measures the information X and Y share *given* knowledge of Z:
 
-The basis of causal discovery algorithms (PC, FCI) that test conditional independence.
+I(X;Y|Z) = H(X|Z) - H(X|Y,Z) = E_Z[I(X;Y|Z=z)]
 
-| Formula | Interpretation | Use Case |
-|---|---|---|
-| H(X) − H(X\|Y) | Uncertainty reduction | Feature relevance |
-| KL(P(X,Y)‖P(X)P(Y)) | Divergence from independence | Dependency detection |
-| InfoNCE lower bound | Tractable contrastive estimate | SimCLR, MoCo, CLIP |
-| MINE estimate | Neural network estimation | High-dim continuous X,Y |
-| I(X;Y\|Z) = 0 | Conditional independence | Causal discovery |
+The chain rule for MI states: I(X;Y,Z) = I(X;Z) + I(X;Y|Z). This is key for feature importance: if I(X;Y|Z) ≈ 0, feature X adds no information about Y beyond what Z already provides — X is redundant given Z.
 
-> **TIP: MI Maximisation vs Cross-Entropy Minimisation**
-> InfoNCE is cross-entropy on a classification problem (which of K samples is positive?). Minimising cross-entropy = maximising a lower bound on MI. Contrastive objectives directly optimise information content.
+---
 
-> **WARNING: High-Dimensional MI Estimation is Hard**
-> For continuous high-dimensional variables MI estimation suffers from the curse of dimensionality. Histogram methods require exponential samples. k-NN estimators work for moderate dimensions. For very high dimensions InfoNCE is most practical but only provides a lower bound.
+Mutual information unifies feature selection, representation learning, and generative modeling under a single information-theoretic lens. Whether computing it analytically from joint distributions, estimating it with neural bounds (MINE, InfoNCE), or using it to guide compression (IB), MI provides the conceptual foundation for understanding what information a model preserves, discards, or amplifies.
+
