@@ -1,0 +1,190 @@
+﻿---
+title: "Matrix Calculus"
+slug: "matrix-calculus"
+description: "Jacobian and Hessian matrices, gradients of linear maps, trace tricks, layout conventions, chain rule, and backpropagation."
+tags: ["linear-algebra", "math", "foundations"]
+topic: "math-foundations"
+status: "published"
+updated: "2026-07-10"
+blocks_json: "WwogIHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiTWF0cml4IGNhbGN1bHVzIGV4dGVuZHMgZGlmZmVyZW50aWFsIGNhbGN1bHVzIHRvIGZ1bmN0aW9ucyB3aG9zZSBpbnB1dHMgb3Igb3V0cHV0cyBhcmUgdmVjdG9ycyBhbmQgbWF0cmljZXMuIEl0IGlzIHRoZSBtYXRoZW1hdGljYWwgbGFuZ3VhZ2Ugb2YgYmFja3Byb3BhZ2F0aW9uIOKAlCBldmVyeSBncmFkaWVudCBjb21wdXRhdGlvbiBpbiBhIG5ldXJhbCBuZXR3b3JrIGlzIGEgbWF0cml4IGNhbGN1bHVzIG9wZXJhdGlvbi4gVW5kZXJzdGFuZGluZyBKYWNvYmlhbnMsIEhlc3NpYW5zLCBhbmQgdGhlIGNoYWluIHJ1bGUgaW4gbWF0cml4IGZvcm0gZGVteXN0aWZpZXMgaG93IGdyYWRpZW50cyBmbG93IHRocm91Z2ggbGluZWFyIGxheWVycywgYXR0ZW50aW9uLCBhbmQgbG9zcyBmdW5jdGlvbnMuIn0sCiAgeyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiR3JhZGllbnRzIG9mIFNjYWxhciBGdW5jdGlvbnMifSwKICB7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IlRoZSAqKmdyYWRpZW50Kiogb2YgYSBzY2FsYXIgZnVuY3Rpb24gZih4KSB3aGVyZSAqKngqKiDiiIgg4oSd4oG/IGlzIGEgY29sdW1uIHZlY3RvciBvZiBwYXJ0aWFsIGRlcml2YXRpdmVzOlxuXG4gIOKIh194IGYgPSBb4oiCZi/iiIJ44oKBLCDiiIJmL+KIgnjigoIsIC4uLiwg4oiCZi/iiIJ44oKZXeG1gFxuXG5UaGlzIGZvbGxvd3MgKipkZW5vbWluYXRvciBsYXlvdXQqKiAoZ3JhZGllbnQgaXMgc2FtZSBzaGFwZSBhcyB4LCB0aGUgZGVub21pbmF0b3IpLiBTb21lIHJlZmVyZW5jZXMgdXNlIG51bWVyYXRvciBsYXlvdXQgKGdyYWRpZW50IGlzIGEgcm93IHZlY3RvcikuIFRoZSBncmFkaWVudCBhbHdheXMgcG9pbnRzIGluIHRoZSBkaXJlY3Rpb24gb2Ygc3RlZXBlc3QgYXNjZW50LCBhbmQgaXRzIG5lZ2F0aXZlIHBvaW50cyB0b3dhcmQgdGhlIG1pbmltdW0g4oCUIHRoZSBkaXJlY3Rpb24gZm9sbG93ZWQgYnkgZ3JhZGllbnQgZGVzY2VudC5cblxuS2V5IHJlc3VsdHM6IOKIh194IChh4bWAeCkgPSBhLCDiiIdfeCAoeOG1gEF4KSA9IChBICsgQeG1gCl4ICg9IDJBeCBpZiBBIGlzIHN5bW1ldHJpYyksIOKIh194IHx8eHx84oKCwrIgPSAyeCwg4oiHX3ggKGLhtYBBeCkgPSBB4bWAYi4ifSwKICB7InR5cGUiOiJjb2RlIiwibGFuZ3VhZ2UiOiJweXRob24iLCJjb250ZW50IjoiaW1wb3J0IHRvcmNoXG5cbiMgVmVyaWZ5IGdyYWRpZW50IGZvcm11bGFzIHdpdGggYXV0b2dyYWRcbnggPSB0b3JjaC50ZW5zb3IoWzEuLCAyLiwgMy5dLCByZXF1aXJlc19ncmFkPVRydWUpXG5hID0gdG9yY2gudGVuc29yKFs0LiwgNS4sIDYuXSlcblxuIyBncmFkIG9mIGFeVCB4ID0gYVxueSA9IGEgQCB4ICAjIHNjYWxhclxueS5iYWNrd2FyZCgpXG5wcmludCgnZ3JhZChhXlQgeCkgPScsIHguZ3JhZCkgICMgc2hvdWxkIGJlIFs0LDUsNl1cblxuIyBncmFkIG9mIHheVCBBIHggPSAyQXggKGZvciBzeW1tZXRyaWMgQSlcbngyID0gdG9yY2gudGVuc29yKFsxLiwgMi4sIDMuXSwgcmVxdWlyZXNfZ3JhZD1UcnVlKVxuQSA9IHRvcmNoLnRlbnNvcihbWzIuLCAxLiwgMC5dLCBbMS4sIDMuLCAxLl0sIFswLiwgMS4sIDIuXV0sIGR0eXBlPXRvcmNoLmZsb2F0KVxucSA9IHgyIEAgQSBAIHgyICAjIHheVCBBIHhcbnEuYmFja3dhcmQoKVxucHJpbnQoJ2dyYWQoeF5UIEEgeCkgPScsIHgyLmdyYWQpICAgICAgICAgIyBhdXRvZ3JhZFxucHJpbnQoJ01hbnVhbDogMkF4ID0nLCAyKihBIEAgeDIuZGV0YWNoKCkpKSAgIyBzaG91bGQgbWF0Y2gifSwKICB7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJUaGUgSmFjb2JpYW4gTWF0cml4In0sCiAgeyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJUaGUgKipKYWNvYmlhbioqIG9mIGEgdmVjdG9yIGZ1bmN0aW9uICoqZioqOiDihJ3igb8g4oaSIOKEneG1kCBpcyBhbiBtw5duIG1hdHJpeCBvZiBhbGwgcGFydGlhbCBkZXJpdmF0aXZlczpcblxuICBKX2YgPSDiiIJmL+KIgnjhtYAsICB3aGVyZSBKW2ksal0gPSDiiIJm4bWiL+KIgnjisbxcblxuVGhlIEphY29iaWFuIGdlbmVyYWxpemVzIHRoZSBncmFkaWVudCB0byB2ZWN0b3ItdmFsdWVkIGZ1bmN0aW9ucy4gRm9yIGY6IOKEneKBvyDihpIg4oSdwrkgKHNjYWxhciksIHRoZSBKYWNvYmlhbiBpcyB0aGUgdHJhbnNwb3NlIG9mIHRoZSBncmFkaWVudCAoYSByb3cgdmVjdG9yIGluIG51bWVyYXRvciBsYXlvdXQpLlxuXG5JbiBiYWNrcHJvcGFnYXRpb246IGlmICoqeiA9IGYoeCkqKiBhbmQgd2UgaGF2ZSB0aGUgdXBzdHJlYW0gZ3JhZGllbnQg4oiCTC/iiIJ6IChzaGFwZSBtKSwgdGhlbiB0aGUgZG93bnN0cmVhbSBncmFkaWVudCBpcyDiiIJML+KIgnggPSAqKkrhtYAqKiDCtyAo4oiCTC/iiIJ6KSAobWF0cml4LXZlY3RvciBwcm9kdWN0IHdpdGggdGhlIHRyYW5zcG9zZWQgSmFjb2JpYW4sIHNoYXBlIG4pLiBUaGUgSmFjb2JpYW4gaXMgbmV2ZXIgZXhwbGljaXRseSBmb3JtZWQgZm9yIGxhcmdlIG5ldHdvcmtzIOKAlCBpbnN0ZWFkLCAqKnZlY3Rvci1KYWNvYmlhbiBwcm9kdWN0cyAoVkpQcykqKiBhcmUgY29tcHV0ZWQgZWZmaWNpZW50bHkuIn0sCiAgeyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiVGhlIEhlc3NpYW4gTWF0cml4In0sCiAgeyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJUaGUgKipIZXNzaWFuKiogb2YgYSBzY2FsYXIgZnVuY3Rpb24gZigqKngqKik6IOKEneKBvyDihpIg4oSdIGlzIHRoZSBuw5duIG1hdHJpeCBvZiBzZWNvbmQgcGFydGlhbCBkZXJpdmF0aXZlczpcblxuICBIX2YgPSDiiILCsmYgLyDiiIJ44oiCeOG1gCwgIHdoZXJlIEhbaSxqXSA9IOKIgsKyZiAvICjiiIJ44bWiIOKIgnjisbwpXG5cblRoZSBIZXNzaWFuIGlzIGFsd2F5cyBzeW1tZXRyaWMuIEl0cyBlaWdlbnZhbHVlcyBtZWFzdXJlIGN1cnZhdHVyZSBpbiBlYWNoIGRpcmVjdGlvbiDigJQgdGhlIEhlc3NpYW4gYmVpbmcgUFNEIGlzIGVxdWl2YWxlbnQgdG8gZiBiZWluZyBjb252ZXguIFRoZSBUYXlsb3IgZXhwYW5zaW9uIGFyb3VuZCBhIHBvaW50IHjigoA6XG5cbiAgZih44oKAICsgzrQpIOKJiCBmKHjigoApICsg4oiHZuG1gM60ICsgKDEvMinOtOG1gEjOtFxuXG5zaG93cyBob3cgdGhlIEhlc3NpYW4gZGV0ZXJtaW5lcyBzZWNvbmQtb3JkZXIgY29udmVyZ2VuY2UgYmVoYXZpb3IuIEluIE1MLCB0aGUgY29uZGl0aW9uIG51bWJlciBvZiB0aGUgSGVzc2lhbiBhdCB0aGUgbWluaW11bSBkZXRlcm1pbmVzIGhvdyBmYXN0IGdyYWRpZW50IGRlc2NlbnQgY29udmVyZ2VzIOKAlCBpbGwtY29uZGl0aW9uZWQgSGVzc2lhbnMgYXJlIHdoeSBhZGFwdGl2ZSBvcHRpbWl6ZXJzIG91dHBlcmZvcm0gU0dEIGZvciBtYW55IGFyY2hpdGVjdHVyZXMuIn0sCiAgeyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiR3JhZGllbnQgb2YgQXg6IExpbmVhciBMYXllciBGb3J3YXJkIn0sCiAgeyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJGb3IgdGhlIGxpbmVhciBtYXAgKip5ID0gQXgqKiB3aGVyZSAqKkEqKiBpcyBtw5duIGFuZCAqKngqKiBpcyBuLXZlY3RvcjpcblxuLSAqKuKIgnkv4oiCeCoqIChKYWNvYmlhbiBvZiB5IHcuci50LiB4KTogVGhpcyBpcyBqdXN0ICoqQSoqIGl0c2VsZiAobcOXbiBtYXRyaXgpLiBFYWNoIG91dHB1dCB54bWiID0gYeG1ouG1gHgsIHNvIOKIgnnhtaIv4oiCeOKxvCA9IEHhtaLisbwuXG4tICoq4oiCKGPhtYB5KS/iiIJ4KiogKGdyYWRpZW50IG9mIGEgc2NhbGFyIGxvc3MgdGhhdCB1c2VzIHkpOiBCeSBjaGFpbiBydWxlLCA9ICoqQeG1gGMqKiAobi12ZWN0b3IpLlxuLSAqKuKIgnkv4oiCQSoqIChncmFkaWVudCB3LnIudC4gd2VpZ2h0IG1hdHJpeCk6IEZvciBsb3NzIEwgPSBzY2FsYXIsIOKIgkwv4oiCQSA9ICjiiIJML+KIgnkpIHjhtYAg4oCUIG91dGVyIHByb2R1Y3Qgb2YgdXBzdHJlYW0gZ3JhZGllbnQgYW5kIGlucHV0LlxuXG5UaGVzZSB0aHJlZSBpZGVudGl0aWVzIGFyZSB0aGUgbWF0aGVtYXRpY2FsIGNvcmUgb2YgYmFja3Byb3BhZ2F0aW9uIHRocm91Z2ggYSBsaW5lYXIgbGF5ZXIuIn0sCiAgeyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6ImltcG9ydCB0b3JjaFxuXG4jIEJhY2twcm9wIHRocm91Z2ggbGluZWFyIGxheWVyOiB5ID0gQXggKyBiXG5BID0gdG9yY2gucmFuZG4oNCwgMywgcmVxdWlyZXNfZ3JhZD1UcnVlKVxuYiA9IHRvcmNoLnJhbmRuKDQsIHJlcXVpcmVzX2dyYWQ9VHJ1ZSlcbnggPSB0b3JjaC5yYW5kbigzKVxuXG55ID0gQSBAIHggKyBiXG5Mb3NzID0geS5zdW0oKSAgIyBzaW1wbGVzdCBzY2FsYXIgbG9zc1xuTG9zcy5iYWNrd2FyZCgpXG5cbnByaW50KCdkTC9kQTonLCBBLmdyYWQpICAgICAgICAgICAjIHNob3VsZCBiZSBvdXRlciBwcm9kdWN0OiAxcyAqIHheVFxucHJpbnQoJ0V4cGVjdGVkIGRML2RBOicsIHRvcmNoLm91dGVyKHRvcmNoLm9uZXMoNCksIHgpKVxucHJpbnQoJ2RML2RiOicsIGIuZ3JhZCkgICAgICAgICAgICMgc2hvdWxkIGJlIGFsbC1vbmVzIChkTC9keSA9IDEpXG5cbiMgRm9yIGEgZ2VuZXJhbCBsb3NzIEwgd2l0aCB1cHN0cmVhbSBncmFkIGRML2R5OlxuZExfZHkgPSB0b3JjaC5yYW5kbig0KSAgICAgICAgICAgICMgc2ltdWxhdGUgdXBzdHJlYW0gZ3JhZGllbnRcbiMgZEwvZHggPSBBXlQgQCBkTC9keVxuZExfZHggPSBBLmRldGFjaCgpLlQgQCBkTF9keVxuIyBkTC9kQSA9IG91dGVyKGRMX2R5LCB4KVxuZExfZEEgPSB0b3JjaC5vdXRlcihkTF9keSwgeClcbnByaW50KCdTaGFwZXM6IGRML2R4JywgZExfZHguc2hhcGUsICcgIGRML2RBJywgZExfZEEuc2hhcGUpIn0sCiAgeyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiVHJhY2UgVHJpY2tzIGZvciBNYXRyaXggRGVyaXZhdGl2ZXMifSwKICB7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6Ik1hbnkgbWF0cml4IGRlcml2YXRpdmUgY29tcHV0YXRpb25zIHVzZSB0aGUgKip0cmFjZSBpZGVudGl0eSoqOiBmb3IgY29tcGF0aWJsZSBtYXRyaWNlcyBBLCBCLCBDOlxuXG4gIHRyKEFCQykgPSB0cihDQUIpID0gdHIoQkNBKSAgKGN5Y2xpYyBwcm9wZXJ0eSlcbiAgdHIoQeG1gEIpID0gzqPhtaLisbwgQeG1ouKxvELhtaLisbwgPSDin6hBLCBC4p+pX0YgIChGcm9iZW5pdXMgaW5uZXIgcHJvZHVjdClcblxuVGhlc2UgYWxsb3cgcmV3cml0aW5nIHNjYWxhciBxdWFudGl0aWVzICh3aGljaCBhcmUgdHJhY2VzIG9mIDHDlzEgbWF0cmljZXMpIGludG8gZm9ybXMgd2hlcmUgc3RhbmRhcmQgZGlmZmVyZW50aWF0aW9uIHJ1bGVzIGFwcGx5LiBGb3IgZXhhbXBsZSwgdGhlIGdyYWRpZW50IG9mIHRoZSBsb2ctbGlrZWxpaG9vZCBvZiBhIG11bHRpdmFyaWF0ZSBHYXVzc2lhbiBpbnZvbHZlcyBkZXJpdmF0aXZlcyBvZiBsb2cgZGV0KM6jKSBhbmQgcXVhZHJhdGljIGZvcm1zICh44bWAzqPigbvCuXgpLCBib3RoIGNvbXB1dGVkIHVzaW5nIHRyYWNlIHRyaWNrcyBhbmQgdGhlIG1hdHJpeCBpZGVudGl0eSDiiIIgbG9nIGRldChBKS/iiIJBID0gQeKBu+G1gC4ifSwKICB7InR5cGUiOiJjb2RlIiwibGFuZ3VhZ2UiOiJweXRob24iLCJjb250ZW50IjoiaW1wb3J0IHRvcmNoXG5cbiMgVmVyaWZ5IHRyYWNlIGN5Y2xpYyBwcm9wZXJ0eVxuQSA9IHRvcmNoLnJhbmRuKDMsIDQpXG5CID0gdG9yY2gucmFuZG4oNCwgNSlcbkMgPSB0b3JjaC5yYW5kbig1LCAzKVxucHJpbnQoJ3RyKEFCQyk6JywgdG9yY2gudHJhY2UoQSBAIEIgQCBDKS5pdGVtKCkpXG5wcmludCgndHIoQkNBKTonLCB0b3JjaC50cmFjZShCIEAgQyBAIEEpLml0ZW0oKSlcbnByaW50KCd0cihDQUIpOicsIHRvcmNoLnRyYWNlKEMgQCBBIEAgQikuaXRlbSgpKVxuIyBBbGwgZXF1YWwgKGN5Y2xpYyBpbnZhcmlhbmNlKVxuXG4jIEdyYWRpZW50IG9mIHRyKEFYKSB3LnIudC4gWCBpcyBBXlRcblggPSB0b3JjaC5yYW5kbigzLCAzLCByZXF1aXJlc19ncmFkPVRydWUpXG5BMiA9IHRvcmNoLnJhbmRuKDMsIDMpXG5mID0gdG9yY2gudHJhY2UoQTIgQCBYKVxuZi5iYWNrd2FyZCgpXG5wcmludCgnZCB0cihBWCkvZFggPT0gQV5UPycsIHRvcmNoLmFsbGNsb3NlKFguZ3JhZCwgQTIuVCkpIn0sCiAgeyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiTGF5b3V0IENvbnZlbnRpb25zOiBOdW1lcmF0b3IgdnMgRGVub21pbmF0b3IifSwKICB7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6Ik1hdHJpeCBjYWxjdWx1cyBoYXMgdHdvIGNvbXBldGluZyBsYXlvdXQgY29udmVudGlvbnMgdGhhdCBjYXVzZSBlbmRsZXNzIGNvbmZ1c2lvbjpcblxuLSAqKk51bWVyYXRvciBsYXlvdXQqKiAoSmFjb2JpYW4gbGF5b3V0KTogSWYgZjog4oSd4bWQIGFuZCB4OiDihJ3igb8sIHRoZW4g4oiCZi/iiIJ44bWAIGlzIG3Dl24uIEdyYWRpZW50IG9mIHNjYWxhciBpcyBhIHJvdyB2ZWN0b3IuIFVzZWQgaW4gbWFueSBlbmdpbmVlcmluZyB0ZXh0cy5cbi0gKipEZW5vbWluYXRvciBsYXlvdXQqKjog4oiCZi/iiIJ4IGlzIG7Dl20gKHRyYW5zcG9zZWQpLiBHcmFkaWVudCBvZiBzY2FsYXIgaXMgYSBjb2x1bW4gdmVjdG9yLiBVc2VkIGluIG1vc3QgTUwvc3RhdGlzdGljcyB0ZXh0cy5cblxuVGhlIGNoYWluIHJ1bGUgaW4gbnVtZXJhdG9yIGxheW91dDogZC9keCBmKGcoeCkpID0gKOKIgmYv4oiCZ+G1gCko4oiCZy/iiIJ44bWAKSDigJQgSmFjb2JpYW4gbWF0cmljZXMgbXVsdGlwbHkgbGVmdC10by1yaWdodC4gSW4gZGVub21pbmF0b3IgbGF5b3V0LCB0aGV5IG11bHRpcGx5IHJpZ2h0LXRvLWxlZnQgKG1hdGNoaW5nIHRoZSBpbnR1aXRpdmUgaW5uZXItdG8tb3V0ZXIgb3JkZXIgb2YgZnVuY3Rpb24gY29tcG9zaXRpb24pLiAqKlB5VG9yY2ggdXNlcyBkZW5vbWluYXRvciBsYXlvdXQqKiBieSBjb252ZW50aW9uOiBncmFkaWVudHMgYXJlIHNhbWUgc2hhcGUgYXMgdmFyaWFibGVzLiJ9LAogIHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IkNoYWluIFJ1bGUgaW4gTWF0cml4IEZvcm0gYW5kIEJhY2twcm9wYWdhdGlvbiJ9LAogIHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiRm9yIGEgY29tcG9zaXRpb24geiA9IGYoeSksIHkgPSBnKHgpLCB0aGUgY2hhaW4gcnVsZSBpbiB2ZWN0b3IgZm9ybSBpczpcblxuICDiiIJML+KIgnggPSAo4oiCeS/iiIJ4KeG1gCDCtyAo4oiCTC/iiIJ5KSAgPSAgSuG1gCDCtyB2XG5cbndoZXJlICoqSiA9IOKIgnkv4oiCeCoqIGlzIHRoZSBKYWNvYmlhbiBhbmQgKip2ID0g4oiCTC/iiIJ5KiogaXMgdGhlIHVwc3RyZWFtIGdyYWRpZW50LiBUaGlzIGlzIHRoZSAqKnZlY3Rvci1KYWNvYmlhbiBwcm9kdWN0IChWSlApKiog4oCUIHRoZSBvcGVyYXRpb24gcGVyZm9ybWVkIGJ5IGAuYmFja3dhcmQoKWAgaW4gUHlUb3JjaC4gVGhlIGtleSBpbnNpZ2h0OiB3ZSBuZXZlciBmb3JtIHRoZSBmdWxsIEphY29iaWFuICh3aGljaCB3b3VsZCBiZSBodWdlIGZvciBsYXJnZSBuZXR3b3Jrcyk7IGluc3RlYWQsIHdlIGNvbXB1dGUgSuG1gHYgZGlyZWN0bHkgZm9yIGVhY2ggb3BlcmF0aW9uLlxuXG5Gb3IgYSBsaW5lYXIgbGF5ZXIgeSA9IFd4ICsgYjpcbi0gVkpQIGZvciB4OiBK4bWAdiA9IFfhtYB2IChtYXRyaXgtdmVjdG9yIG11bHRpcGx5KVxuLSBWSlAgZm9yIFc6IG91dGVyIHByb2R1Y3QgdnjhtYBcbi0gVGhpcyBpcyBleGFjdGx5IHdoYXQgUHlUb3JjaCBjb21wdXRlcyBkdXJpbmcgYC5iYWNrd2FyZCgpYCJ9LAogIHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiJpbXBvcnQgdG9yY2hcbmltcG9ydCB0b3JjaC5ubi5mdW5jdGlvbmFsIGFzIEZcblxuIyBUcmFjaW5nIGJhY2twcm9wIHRocm91Z2ggYSB0d28tbGF5ZXIgbmV0d29ya1xueCA9IHRvcmNoLnJhbmRuKDMsIHJlcXVpcmVzX2dyYWQ9VHJ1ZSlcblxuVzEgPSB0b3JjaC5yYW5kbig0LCAzLCByZXF1aXJlc19ncmFkPVRydWUpXG5iMSA9IHRvcmNoLnJhbmRuKDQsIHJlcXVpcmVzX2dyYWQ9VHJ1ZSlcblcyID0gdG9yY2gucmFuZG4oMiwgNCwgcmVxdWlyZXNfZ3JhZD1UcnVlKVxuXG4jIEZvcndhcmQgcGFzc1xuaCA9IEYucmVsdShXMSBAIHggKyBiMSkgICAgICAgIyAoNCwpXG55ID0gVzIgQCBoICAgICAgICAgICAgICAgICAgICAgIyAoMiwpXG5MID0geS5wb3coMikuc3VtKCkgICAgICAgICAgICAgIyBzY2FsYXIgbG9zc1xuXG4jIEJhY2t3YXJkOiBjaGFpbiBydWxlIGNvbXB1dGVkIGJ5IGF1dG9ncmFkXG5MLmJhY2t3YXJkKClcblxucHJpbnQoJ2RML2R4IHNoYXBlOicsIHguZ3JhZC5zaGFwZSkgICAjICgzLClcbnByaW50KCdkTC9kVzEgc2hhcGU6JywgVzEuZ3JhZC5zaGFwZSkgIyAoNCwzKSA9IG91dGVyKGRML2RoLCB4KVxucHJpbnQoJ2RML2RXMiBzaGFwZTonLCBXMi5ncmFkLnNoYXBlKSAjICgyLDQpID0gb3V0ZXIoZEwvZHksIGgpIn0sCiAgeyJ0eXBlIjoiY2FsbG91dCIsInZhcmlhbnQiOiJpbmZvIiwidGl0bGUiOiJIZXNzaWFuLUZyZWUgT3B0aW1pemF0aW9uIiwiY29udGVudCI6IkNvbXB1dGluZyB0aGUgZnVsbCBuw5duIEhlc3NpYW4gZm9yIG1vZGVybiBuZXR3b3JrcyAobiA9IGJpbGxpb25zIG9mIHBhcmFtZXRlcnMpIGlzIGNvbXBsZXRlbHkgaW5mZWFzaWJsZS4gSW5zdGVhZCwgc2Vjb25kLW9yZGVyIG1ldGhvZHMgdXNlIEhlc3NpYW4tdmVjdG9yIHByb2R1Y3RzIChIVlBzKTogSMK3diBjYW4gYmUgY29tcHV0ZWQgaW4gTyhuKSB0aW1lIHVzaW5nIGEgZG91YmxlIGJhY2t3YXJkIHBhc3MgKGJhY2t3YXJkIHRocm91Z2ggdGhlIGdyYWRpZW50KS4gVGhpcyBlbmFibGVzOiBjb25qdWdhdGUgZ3JhZGllbnQgKE5ld3Rvbi1DRyksIExhbmN6b3MgZm9yIGN1cnZhdHVyZSBhbmFseXNpcywgYW5kIEstRkFDIHdoaWNoIGFwcHJveGltYXRlcyB0aGUgRmlzaGVyIGluZm9ybWF0aW9uIG1hdHJpeCB1c2luZyBLcm9uZWNrZXIgZmFjdG9yaW5nLiJ9LAogIHsidHlwZSI6InRhYmxlIiwiaGVhZGVycyI6WyJGdW5jdGlvbiBmIiwiSW5wdXQiLCJHcmFkaWVudC9KYWNvYmlhbiIsIlJlc3VsdCJdLCJyb3dzIjpbWyJh4bWAeCAoc2NhbGFyKSIsInjiiIjihJ3igb8iLCLiiIJmL+KIgngiLCJhIChjb2x1bW4gdmVjdG9yKSJdLFsieOG1gEF4IChzY2FsYXIpIiwieOKIiOKEneKBvyIsIuKIgmYv4oiCeCIsIihBK0HhtYApeCA9IDJBeCBpZiBzeW1tZXRyaWMiXSxbIkF4ICh2ZWN0b3IpIiwieOKIiOKEneKBvyIsIkphY29iaWFuIOKIgkF4L+KIgnjhtYAiLCJBIChtYXRyaXggbcOXbikiXSxbInRyKEFYKSAoc2NhbGFyKSIsIljiiIjihJ3igb/Lo+KBvyIsIuKIgmYv4oiCWCIsIkHhtYAiXSxbImxvZyBkZXQoQSkgKHNjYWxhcikiLCJB4oiI4oSd4oG/y6Pigb8iLCLiiIJmL+KIgkEiLCJB4oG74bWAID0gKEHigbvCuSnhtYAiXSxbInx8QXgtYnx84oKCwrIgKHNjYWxhcikiLCJ44oiI4oSd4oG/Iiwi4oiCZi/iiIJ4IiwiMkHhtYAoQXgtYikiXV19Cl0K"
+---
+
+# Matrix Calculus
+
+Matrix calculus extends differential calculus to functions whose inputs or outputs are vectors and matrices. It is the mathematical language of backpropagation — every gradient computation in a neural network is a matrix calculus operation. Understanding Jacobians, Hessians, and the chain rule in matrix form demystifies how gradients flow through linear layers, attention, and loss functions.
+
+## Gradients of Scalar Functions
+
+The **gradient** of a scalar function f(x) where **x** ∈ ℝⁿ is a column vector of partial derivatives:
+
+  ∇_x f = [∂f/∂x₁, ∂f/∂x₂, ..., ∂f/∂xₙ]ᵀ
+
+This follows **denominator layout** (gradient is same shape as x, the denominator). Some references use numerator layout (gradient is a row vector). The gradient always points in the direction of steepest ascent, and its negative points toward the minimum — the direction followed by gradient descent.
+
+Key results: ∇_x (aᵀx) = a, ∇_x (xᵀAx) = (A + Aᵀ)x (= 2Ax if A is symmetric), ∇_x ||x||₂² = 2x, ∇_x (bᵀAx) = Aᵀb.
+
+```python
+import torch
+
+# Verify gradient formulas with autograd
+x = torch.tensor([1., 2., 3.], requires_grad=True)
+a = torch.tensor([4., 5., 6.])
+
+# grad of a^T x = a
+y = a @ x  # scalar
+y.backward()
+print('grad(a^T x) =', x.grad)  # should be [4,5,6]
+
+# grad of x^T A x = 2Ax (for symmetric A)
+x2 = torch.tensor([1., 2., 3.], requires_grad=True)
+A = torch.tensor([[2., 1., 0.], [1., 3., 1.], [0., 1., 2.]], dtype=torch.float)
+q = x2 @ A @ x2  # x^T A x
+q.backward()
+print('grad(x^T A x) =', x2.grad)         # autograd
+print('Manual: 2Ax =', 2*(A @ x2.detach()))  # should match
+```
+
+## The Jacobian Matrix
+
+The **Jacobian** of a vector function **f**: ℝⁿ → ℝᵐ is an m×n matrix of all partial derivatives:
+
+  J_f = ∂f/∂xᵀ,  where J[i,j] = ∂fᵢ/∂xⱼ
+
+The Jacobian generalizes the gradient to vector-valued functions. For f: ℝⁿ → ℝ¹ (scalar), the Jacobian is the transpose of the gradient (a row vector in numerator layout).
+
+In backpropagation: if **z = f(x)** and we have the upstream gradient ∂L/∂z (shape m), then the downstream gradient is ∂L/∂x = **Jᵀ** · (∂L/∂z) (matrix-vector product with the transposed Jacobian, shape n). The Jacobian is never explicitly formed for large networks — instead, **vector-Jacobian products (VJPs)** are computed efficiently.
+
+## The Hessian Matrix
+
+The **Hessian** of a scalar function f(**x**): ℝⁿ → ℝ is the n×n matrix of second partial derivatives:
+
+  H_f = ∂²f / ∂x∂xᵀ,  where H[i,j] = ∂²f / (∂xᵢ ∂xⱼ)
+
+The Hessian is always symmetric. Its eigenvalues measure curvature in each direction — the Hessian being PSD is equivalent to f being convex. The Taylor expansion around a point x₀:
+
+  f(x₀ + δ) ≈ f(x₀) + ∇fᵀδ + (1/2)δᵀHδ
+
+shows how the Hessian determines second-order convergence behavior. In ML, the condition number of the Hessian at the minimum determines how fast gradient descent converges — ill-conditioned Hessians are why adaptive optimizers outperform SGD for many architectures.
+
+## Gradient of Ax: Linear Layer Forward
+
+For the linear map **y = Ax** where **A** is m×n and **x** is n-vector:
+
+- **∂y/∂x** (Jacobian of y w.r.t. x): This is just **A** itself (m×n matrix). Each output yᵢ = aᵢᵀx, so ∂yᵢ/∂xⱼ = Aᵢⱼ.
+- **∂(cᵀy)/∂x** (gradient of a scalar loss that uses y): By chain rule, = **Aᵀc** (n-vector).
+- **∂y/∂A** (gradient w.r.t. weight matrix): For loss L = scalar, ∂L/∂A = (∂L/∂y) xᵀ — outer product of upstream gradient and input.
+
+These three identities are the mathematical core of backpropagation through a linear layer.
+
+```python
+import torch
+
+# Backprop through linear layer: y = Ax + b
+A = torch.randn(4, 3, requires_grad=True)
+b = torch.randn(4, requires_grad=True)
+x = torch.randn(3)
+
+y = A @ x + b
+Loss = y.sum()  # simplest scalar loss
+Loss.backward()
+
+print('dL/dA:', A.grad)           # should be outer product: 1s * x^T
+print('Expected dL/dA:', torch.outer(torch.ones(4), x))
+print('dL/db:', b.grad)           # should be all-ones (dL/dy = 1)
+
+# For a general loss L with upstream grad dL/dy:
+dL_dy = torch.randn(4)            # simulate upstream gradient
+# dL/dx = A^T @ dL/dy
+dL_dx = A.detach().T @ dL_dy
+# dL/dA = outer(dL_dy, x)
+dL_dA = torch.outer(dL_dy, x)
+print('Shapes: dL/dx', dL_dx.shape, '  dL/dA', dL_dA.shape)
+```
+
+## Trace Tricks for Matrix Derivatives
+
+Many matrix derivative computations use the **trace identity**: for compatible matrices A, B, C:
+
+  tr(ABC) = tr(CAB) = tr(BCA)  (cyclic property)
+  tr(AᵀB) = Σᵢⱼ AᵢⱼBᵢⱼ = ⟨A, B⟩_F  (Frobenius inner product)
+
+These allow rewriting scalar quantities (which are traces of 1×1 matrices) into forms where standard differentiation rules apply. For example, the gradient of the log-likelihood of a multivariate Gaussian involves derivatives of log det(Σ) and quadratic forms (xᵀΣ⁻¹x), both computed using trace tricks and the matrix identity ∂ log det(A)/∂A = A⁻ᵀ.
+
+```python
+import torch
+
+# Verify trace cyclic property
+A = torch.randn(3, 4)
+B = torch.randn(4, 5)
+C = torch.randn(5, 3)
+print('tr(ABC):', torch.trace(A @ B @ C).item())
+print('tr(BCA):', torch.trace(B @ C @ A).item())
+print('tr(CAB):', torch.trace(C @ A @ B).item())
+# All equal (cyclic invariance)
+
+# Gradient of tr(AX) w.r.t. X is A^T
+X = torch.randn(3, 3, requires_grad=True)
+A2 = torch.randn(3, 3)
+f = torch.trace(A2 @ X)
+f.backward()
+print('d tr(AX)/dX == A^T?', torch.allclose(X.grad, A2.T))
+```
+
+## Layout Conventions: Numerator vs Denominator
+
+Matrix calculus has two competing layout conventions that cause endless confusion:
+
+- **Numerator layout** (Jacobian layout): If f: ℝᵐ and x: ℝⁿ, then ∂f/∂xᵀ is m×n. Gradient of scalar is a row vector. Used in many engineering texts.
+- **Denominator layout**: ∂f/∂x is n×m (transposed). Gradient of scalar is a column vector. Used in most ML/statistics texts.
+
+The chain rule in numerator layout: d/dx f(g(x)) = (∂f/∂gᵀ)(∂g/∂xᵀ) — Jacobian matrices multiply left-to-right. In denominator layout, they multiply right-to-left (matching the intuitive inner-to-outer order of function composition). **PyTorch uses denominator layout** by convention: gradients are same shape as variables.
+
+## Chain Rule in Matrix Form and Backpropagation
+
+For a composition z = f(y), y = g(x), the chain rule in vector form is:
+
+  ∂L/∂x = (∂y/∂x)ᵀ · (∂L/∂y)  =  Jᵀ · v
+
+where **J = ∂y/∂x** is the Jacobian and **v = ∂L/∂y** is the upstream gradient. This is the **vector-Jacobian product (VJP)** — the operation performed by `.backward()` in PyTorch. The key insight: we never form the full Jacobian (which would be huge for large networks); instead, we compute Jᵀv directly for each operation.
+
+For a linear layer y = Wx + b:
+- VJP for x: Jᵀv = Wᵀv (matrix-vector multiply)
+- VJP for W: outer product vxᵀ
+- This is exactly what PyTorch computes during `.backward()`
+
+```python
+import torch
+import torch.nn.functional as F
+
+# Tracing backprop through a two-layer network
+x = torch.randn(3, requires_grad=True)
+
+W1 = torch.randn(4, 3, requires_grad=True)
+b1 = torch.randn(4, requires_grad=True)
+W2 = torch.randn(2, 4, requires_grad=True)
+
+# Forward pass
+h = F.relu(W1 @ x + b1)       # (4,)
+y = W2 @ h                     # (2,)
+L = y.pow(2).sum()             # scalar loss
+
+# Backward: chain rule computed by autograd
+L.backward()
+
+print('dL/dx shape:', x.grad.shape)   # (3,)
+print('dL/dW1 shape:', W1.grad.shape) # (4,3) = outer(dL/dh, x)
+print('dL/dW2 shape:', W2.grad.shape) # (2,4) = outer(dL/dy, h)
+```
+
+> **[INFO] Hessian-Free Optimization**
+>
+> Computing the full n×n Hessian for modern networks (n = billions of parameters) is completely infeasible. Instead, second-order methods use Hessian-vector products (HVPs): H·v can be computed in O(n) time using a double backward pass (backward through the gradient). This enables: conjugate gradient (Newton-CG), Lanczos for curvature analysis, and K-FAC which approximates the Fisher information matrix using Kronecker factoring.
+
+| Function f | Input | Gradient/Jacobian | Result |
+| --- | --- | --- | --- |
+| aᵀx (scalar) | x∈ℝⁿ | ∂f/∂x | a (column vector) |
+| xᵀAx (scalar) | x∈ℝⁿ | ∂f/∂x | (A+Aᵀ)x = 2Ax if symmetric |
+| Ax (vector) | x∈ℝⁿ | Jacobian ∂Ax/∂xᵀ | A (matrix m×n) |
+| tr(AX) (scalar) | X∈ℝⁿˣⁿ | ∂f/∂X | Aᵀ |
+| log det(A) (scalar) | A∈ℝⁿˣⁿ | ∂f/∂A | A⁻ᵀ = (A⁻¹)ᵀ |
+| ||Ax-b||₂² (scalar) | x∈ℝⁿ | ∂f/∂x | 2Aᵀ(Ax-b) |

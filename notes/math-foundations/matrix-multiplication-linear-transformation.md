@@ -1,0 +1,171 @@
+﻿---
+title: "Matrix Multiplication as Linear Transformation"
+slug: "matrix-multiplication-linear-transformation"
+description: "Geometric interpretation of matrix multiplication including rotation, scaling, composition, and its role in neural network layers."
+tags: ["linear-algebra", "math", "foundations"]
+topic: "math-foundations"
+status: "published"
+updated: "2026-07-10"
+blocks_json: "WwogIHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiTWF0cml4IG11bHRpcGxpY2F0aW9uIGlzIG5vdCBtZXJlbHkgYW4gYXJpdGhtZXRpYyBwcm9jZWR1cmUg4oCUIGl0IGVuY29kZXMgKipsaW5lYXIgdHJhbnNmb3JtYXRpb25zKio6IGZ1bmN0aW9ucyB0aGF0IG1hcCB2ZWN0b3JzIHRvIHZlY3RvcnMgd2hpbGUgcHJlc2VydmluZyB0aGUgb3BlcmF0aW9ucyBvZiB2ZWN0b3IgYWRkaXRpb24gYW5kIHNjYWxhciBtdWx0aXBsaWNhdGlvbi4gRXZlcnkgbmV1cmFsIG5ldHdvcmsgbGF5ZXIsIGV2ZXJ5IGltYWdlIGZpbHRlciwgZXZlcnkgY29vcmRpbmF0ZSBjaGFuZ2UgaW4gZ3JhcGhpY3MgaXMgYSBsaW5lYXIgdHJhbnNmb3JtYXRpb24gdW5kZXIgdGhlIGhvb2QuIERldmVsb3BpbmcgYSBnZW9tZXRyaWMgaW50dWl0aW9uIGZvciB3aGF0IG1hdHJpeCBtdWx0aXBsaWNhdGlvbiAqZG9lcyogaXMgb25lIG9mIHRoZSBoaWdoZXN0LWxldmVyYWdlIHNraWxscyBpbiBhcHBsaWVkIE1MLiJ9LAogIHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6Ikdlb21ldHJpYyBJbnRlcnByZXRhdGlvbjogV2hhdCBNYXRyaWNlcyBEbyB0byBTcGFjZSJ9LAogIHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiTXVsdGlwbHlpbmcgYSB2ZWN0b3IgKip2KiogYnkgYSBtYXRyaXggKipBKiogdHJhbnNmb3JtcyBpdCB0byBhIG5ldyB2ZWN0b3IgKipBdioqLiBHZW9tZXRyaWNhbGx5LCBhIDLDlzIgbWF0cml4IGNhbjpcblxuLSAqKlNjYWxlKio6IHN0cmV0Y2ggb3IgY29tcHJlc3Mgc3BhY2UgYWxvbmcgYXhlc1xuLSAqKlJvdGF0ZSoqOiBzcGluIHRoZSBjb29yZGluYXRlIHN5c3RlbVxuLSAqKlNoZWFyKio6IHNsYW50IHNwYWNlIGFsb25nIG9uZSBheGlzXG4tICoqUHJvamVjdCoqOiBjb2xsYXBzZSBzcGFjZSBvbnRvIGEgbG93ZXItZGltZW5zaW9uYWwgc3Vic3BhY2Vcbi0gKipSZWZsZWN0Kio6IGZsaXAgYWNyb3NzIGFuIGF4aXNcblxuVGhlIGtleSBpbnNpZ2h0OiBhIG1hdHJpeCBmdWxseSBkZXNjcmliZXMgaG93IGFuIGVudGlyZSB2ZWN0b3Igc3BhY2UgaXMgdHJhbnNmb3JtZWQsIG5vdCBqdXN0IGluZGl2aWR1YWwgcG9pbnRzLiBFdmVyeSBjb2x1bW4gb2YgKipBKiogdGVsbHMgeW91IHdoZXJlIHRoZSBjb3JyZXNwb25kaW5nIHN0YW5kYXJkIGJhc2lzIHZlY3RvciBsYW5kcyBhZnRlciB0aGUgdHJhbnNmb3JtYXRpb24uIn0sCiAgeyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6ImltcG9ydCBudW1weSBhcyBucFxuaW1wb3J0IG1hdHBsb3RsaWIucHlwbG90IGFzIHBsdFxuXG4jIDJEIHJvdGF0aW9uIG1hdHJpeCBieSBhbmdsZSB0aGV0YVxuZGVmIHJvdGF0aW9uKHRoZXRhKTpcbiAgICBjLCBzID0gbnAuY29zKHRoZXRhKSwgbnAuc2luKHRoZXRhKVxuICAgIHJldHVybiBucC5hcnJheShbW2MsIC1zXSwgW3MsIGNdXSlcblxuIyBTY2FsaW5nIG1hdHJpeFxuZGVmIHNjYWxpbmcoc3gsIHN5KTpcbiAgICByZXR1cm4gbnAuYXJyYXkoW1tzeCwgMF0sIFswLCBzeV1dKVxuXG4jIFNoZWFyIG1hdHJpeFxuZGVmIHNoZWFyKGspOlxuICAgIHJldHVybiBucC5hcnJheShbWzEsIGtdLCBbMCwgMV1dKVxuXG4jIFByb2plY3Rpb24gb250byB4LWF4aXNcblBfeCA9IG5wLmFycmF5KFtbMSwgMF0sIFswLCAwXV0pXG5cbnYgPSBucC5hcnJheShbMy4sIDIuXSlcbnByaW50KCdPcmlnaW5hbDonLCB2KVxucHJpbnQoJ1JvdGF0ZWQgNDUgZGVnOicsIHJvdGF0aW9uKG5wLnBpLzQpIEAgdilcbnByaW50KCdTY2FsZWQgKDJ4LCAwLjV5KTonLCBzY2FsaW5nKDIsIDAuNSkgQCB2KVxucHJpbnQoJ1Byb2plY3RlZCB0byB4LWF4aXM6JywgUF94IEAgdikifSwKICB7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJXaHkgT3JkZXIgTWF0dGVyczogTm9uLUNvbW11dGF0aXZpdHkifSwKICB7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6Ik1hdHJpeCBtdWx0aXBsaWNhdGlvbiBpcyAqKm5vdCBjb21tdXRhdGl2ZSoqOiAqKkFCIOKJoCBCQSoqIGluIGdlbmVyYWwuIFRoaXMgcmVmbGVjdHMgdGhlIGdlb21ldHJpYyBmYWN0IHRoYXQgdGhlIG9yZGVyIG9mIHRyYW5zZm9ybWF0aW9ucyBtYXR0ZXJzIOKAlCByb3RhdGluZyB0aGVuIHNjYWxpbmcgeWllbGRzIGEgZGlmZmVyZW50IHJlc3VsdCB0aGFuIHNjYWxpbmcgdGhlbiByb3RhdGluZyAodW5sZXNzIHRoZSBzY2FsaW5nIGlzIHVuaWZvcm0pLlxuXG5Db21tdXRhdGl2aXR5IGZhaWxzIGV2ZW4gZm9yIHNxdWFyZSBtYXRyaWNlcyBvZiB0aGUgc2FtZSBzaXplLiBPbmUgdXNlZnVsIGlkZW50aXR5OiAqKnRyKEFCKSA9IHRyKEJBKSoqICh0cmFjZXMgY29tbXV0ZSksIGJ1dCB0aGUgbWF0cmljZXMgdGhlbXNlbHZlcyBkbyBub3QuIEluIGRlZXAgbmV0d29ya3MsIHRoZSBvcmRlcmluZyBvZiB3ZWlnaHQgbWF0cmljZXMgZGVmaW5lcyB0aGUgY29tcG9zaXRpb24gb2YgdHJhbnNmb3JtYXRpb25zIGFwcGxpZWQgdG8gdGhlIGlucHV0LCBhbmQgY2hhbmdpbmcgdGhlIG9yZGVyIGZ1bmRhbWVudGFsbHkgY2hhbmdlcyB0aGUgbmV0d29yay4ifSwKICB7InR5cGUiOiJjb2RlIiwibGFuZ3VhZ2UiOiJweXRob24iLCJjb250ZW50IjoiaW1wb3J0IG51bXB5IGFzIG5wXG5cbkEgPSBucC5hcnJheShbWzEsMl0sWzMsNF1dKVxuQiA9IG5wLmFycmF5KFtbMCwxXSxbMSwwXV0pICAjIHN3YXAgcm93c1xuXG5BQiA9IEEgQCBCXG5CQSA9IEIgQCBBXG5wcmludCgnQUI6XFxuJywgQUIpXG5wcmludCgnQkE6XFxuJywgQkEpXG5wcmludCgnQUIgPT0gQkE/JywgbnAuYWxsY2xvc2UoQUIsIEJBKSkgICMgRmFsc2VcblxuIyBHZW9tZXRyaWM6IHJvdGF0ZSB0aGVuIHNjYWxlICE9IHNjYWxlIHRoZW4gcm90YXRlXG5SID0gbnAuYXJyYXkoW1swLC0xXSxbMSwwXV0pICAgIyA5MC1kZWdyZWUgcm90YXRpb25cblMgPSBucC5hcnJheShbWzIsMF0sWzAsMV1dKSAgICAjIHNjYWxlIHggYnkgMlxudiA9IG5wLmFycmF5KFsxLiwwLl0pXG5wcmludCgnUiB0aGVuIFM6JywgUyBAIChSIEAgdikpICAjIFswLiwgMS5dIHNjYWxlZCAtPiBbMC4sIDEuXVxucHJpbnQoJ1MgdGhlbiBSOicsIFIgQCAoUyBAIHYpKSAgIyBbMi4sIDAuXSByb3RhdGVkIC0+IFswLiwgMi5dIn0sCiAgeyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiVGhlIENvbHVtbiBTcGFjZSBWaWV3OiBBeCBhcyBMaW5lYXIgQ29tYmluYXRpb24ifSwKICB7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IlRoZSBtb3N0IGltcG9ydGFudCB3YXkgdG8gcmVhZCB0aGUgbWF0cml4LXZlY3RvciBwcm9kdWN0ICoqQXgqKiBpcyBhcyBhICoqbGluZWFyIGNvbWJpbmF0aW9uIG9mIHRoZSBjb2x1bW5zIG9mIEEqKjpcblxuICAqKkF4KiogPSB44oKBKiphKirigoEgKyB44oKCKiphKirigoIgKyAuLi4gKyB44oKZKiphKirigplcblxud2hlcmUgKiphKirhtaIgaXMgdGhlIGktdGggY29sdW1uIG9mICoqQSoqIGFuZCB44bWiIGlzIHRoZSBpLXRoIGNvbXBvbmVudCBvZiAqKngqKi4gVGhlIG91dHB1dCBsaXZlcyBpbiB0aGUgKipjb2x1bW4gc3BhY2UqKiBvZiAqKkEqKiDigJQgdGhlIHNldCBvZiBhbGwgcG9zc2libGUgbGluZWFyIGNvbWJpbmF0aW9ucyBvZiBBJ3MgY29sdW1ucy4gVGhpcyB2aWV3IHJldmVhbHMgd2h5IGEgcmFuay1kZWZpY2llbnQgbWF0cml4IGNhbm5vdCBzcGFuIHRoZSBmdWxsIG91dHB1dCBzcGFjZTogaXRzIGNvbHVtbnMgYXJlIGxpbmVhcmx5IGRlcGVuZGVudCwgc28gdGhlIG91dHB1dCBpcyBjb25maW5lZCB0byBhIGxvd2VyLWRpbWVuc2lvbmFsIHN1YnNwYWNlLiJ9LAogIHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IkZvdXIgSW50ZXJwcmV0YXRpb25zIG9mIHRoZSBQcm9kdWN0IEF4In0sCiAgeyJ0eXBlIjoibGlzdCIsIm9yZGVyZWQiOnRydWUsIml0ZW1zIjpbIioqRG90IHByb2R1Y3RzIChyb3cgdmlldykqKjogRWFjaCBvdXRwdXQgZWxlbWVudCAoQXgp4bWiID0gYeG1ouG1gHgsIHRoZSBkb3QgcHJvZHVjdCBvZiByb3cgaSBvZiBBIHdpdGggeC4gVGhpcyBpcyB0aGUgbmFpdmUgY29tcHV0YXRpb25hbCB2aWV3LiIsIioqTGluZWFyIGNvbWJpbmF0aW9uIChjb2x1bW4gdmlldykqKjogQXggPSB44oKBYeKCgSArIHjigoJh4oKCICsg4oCmICsgeOKCmWHigpkuIFRoZSBvdXRwdXQgaXMgYSB3ZWlnaHRlZCBzdW0gb2YgY29sdW1ucywgd2VpZ2h0cyBnaXZlbiBieSB4LiBCZXN0IGZvciB1bmRlcnN0YW5kaW5nIHJhbmdlL2NvbHVtbiBzcGFjZS4iLCIqKkNoYW5nZSBvZiBiYXNpcyoqOiBBIG1hcHMgeCBmcm9tIG9uZSBjb29yZGluYXRlIHN5c3RlbSB0byBhbm90aGVyLiBJZiB0aGUgY29sdW1ucyBvZiBBIGFyZSB0aGUgbmV3IGJhc2lzIHZlY3RvcnMgZXhwcmVzc2VkIGluIHRoZSBzdGFuZGFyZCBiYXNpcywgQXggZ2l2ZXMgdGhlIHN0YW5kYXJkLWJhc2lzIGNvb3JkaW5hdGVzIG9mIHRoZSBwb2ludCB4LiIsIioqTGluZWFyIG1hcCoqOiBBeCBpcyB0aGUgaW1hZ2Ugb2YgeCB1bmRlciB0aGUgbGluZWFyIGZ1bmN0aW9uIGYoeCk9QXguIFRoaXMgZnVuY3Rpb25hbCB2aWV3IGlzIGNlbnRyYWwgdG8gdW5kZXJzdGFuZGluZyBjb21wb3NpdGlvbiwgaW52ZXJ0aWJpbGl0eSwgYW5kIHRoZSBmb3VyIGZ1bmRhbWVudGFsIHN1YnNwYWNlcy4iXX0sCiAgeyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiQ29tcG9zaXRpb24gb2YgVHJhbnNmb3JtYXRpb25zIn0sCiAgeyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJBcHBseWluZyB0cmFuc2Zvcm1hdGlvbiAqKkIqKiBmb2xsb3dlZCBieSAqKkEqKiBpcyBlcXVpdmFsZW50IHRvIGFwcGx5aW5nIHRoZSBzaW5nbGUgbWF0cml4ICoqQUIqKi4gVGhpcyBjb21wb3NhYmlsaXR5IGlzIHdoYXQgbWFrZXMgbWF0cml4IG11bHRpcGxpY2F0aW9uIHRoZSB1bml2ZXJzYWwgbGFuZ3VhZ2Ugb2Ygc2VxdWVuY2VkIGxpbmVhciBvcGVyYXRpb25zLlxuXG5JbiBjb2RlOiBgQSBAIEIgQCB2YCBhcHBsaWVzIEIgZmlyc3QgKHJpZ2h0bW9zdCksIHRoZW4gQS4gVGhlIGFzc29jaWF0aXZpdHkgcHJvcGVydHkgYChBQilDID0gQShCQylgIG1lYW5zIHlvdSBjYW4gcHJlLWNvbXB1dGUgYEFCYCBvbmNlIGFuZCByZXVzZSBpdC4gVGhpcyBpcyBleHBsb2l0ZWQgaW4gbmV1cmFsIG5ldHdvcmtzOiB0aGUgcHJvZHVjdCBvZiB3ZWlnaHQgbWF0cmljZXMgYWNyb3NzIGxpbmVhciBsYXllcnMgZXF1YWxzIGEgc2luZ2xlIGxpbmVhciBtYXAg4oCUIHdoaWNoIGlzIHdoeSBkZXB0aCB3aXRob3V0IG5vbmxpbmVhcml0eSBpcyB1c2VsZXNzIChtdWx0aXBsZSBsaW5lYXIgbGF5ZXJzIGNvbGxhcHNlIHRvIG9uZSkuIn0sCiAgeyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6ImltcG9ydCBudW1weSBhcyBucFxuXG4jIENvbXBvc2l0aW9uOiB0d28gcm90YXRpb25zID0gb25lIHJvdGF0aW9uIGJ5IHRoZSBzdW1cbmRlZiByb3QyZCh0aGV0YSk6XG4gICAgYywgcyA9IG5wLmNvcyh0aGV0YSksIG5wLnNpbih0aGV0YSlcbiAgICByZXR1cm4gbnAuYXJyYXkoW1tjLC1zXSxbcyxjXV0pXG5cblIzMCA9IHJvdDJkKG5wLnBpLzYpICAgICMgMzAgZGVncmVlc1xuUjYwID0gcm90MmQobnAucGkvMykgICAgIyA2MCBkZWdyZWVzXG5SOTAgPSByb3QyZChucC5waS8yKSAgICAjIDkwIGRlZ3JlZXNcblxudiA9IG5wLmFycmF5KFsxLiwwLl0pXG5wcmludCgnUjYwIEAgUjMwIEAgdjonLCAoUjYwIEAgUjMwKSBAIHYpICAgIyBzaG91bGQgbWF0Y2ggUjkwIEAgdlxucHJpbnQoJ1I5MCBAIHY6JywgUjkwIEAgdilcbnByaW50KCdFcXVhbD8nLCBucC5hbGxjbG9zZSgoUjYwIEAgUjMwKSBAIHYsIFI5MCBAIHYpKSAgIyBUcnVlXG5cbiMgS2V5IGluc2lnaHQ6IHR3byBsaW5lYXIgbGF5ZXJzIHdpdGhvdXQgbm9ubGluZWFyaXR5ID0gb25lIGxheWVyXG5XMSA9IG5wLnJhbmRvbS5yYW5kbig0LCA4KVxuVzIgPSBucC5yYW5kb20ucmFuZG4oMiwgNClcbmNvbGxhcHNlZCA9IFcyIEAgVzEgICAgICMgKDIsOCkgLS0gc2FtZSBhcyBhcHBseWluZyBib3RoXG5wcmludCgnQ29sbGFwc2VkIHNoYXBlOicsIGNvbGxhcHNlZC5zaGFwZSkifSwKICB7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJOZXVyYWwgTmV0d29yayBMYXllcnMgYXMgTGluZWFyIFRyYW5zZm9ybWF0aW9ucyJ9LAogIHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiRXZlcnkgZnVsbHkgY29ubmVjdGVkIGxheWVyIGNvbXB1dGVzICoqeSA9IFd4ICsgYioqLCB3aGVyZSAqKlcqKiBpcyB0aGUgd2VpZ2h0IG1hdHJpeCBhbmQgKipiKiogaXMgdGhlIGJpYXMgdmVjdG9yLiBUaGUgd2VpZ2h0IG1hdHJpeCAqKlcqKiAoc2hhcGUgYChkX291dCwgZF9pbilgKSBlbmNvZGVzIGEgbGluZWFyIHRyYW5zZm9ybWF0aW9uIGZyb20gYGRfaW5gLWRpbWVuc2lvbmFsIGlucHV0IHNwYWNlIHRvIGBkX291dGAtZGltZW5zaW9uYWwgb3V0cHV0IHNwYWNlLlxuXG5UaGUgYmlhcyAqKmIqKiBtYWtlcyB0aGlzIGFuICoqYWZmaW5lKiogKG5vdCBwdXJlbHkgbGluZWFyKSB0cmFuc2Zvcm1hdGlvbiDigJQgaXQgYWxsb3dzIHRoZSBoeXBlcnBsYW5lIGRlY2lzaW9uIGJvdW5kYXJ5IHRvIGJlIG9mZnNldCBmcm9tIHRoZSBvcmlnaW4uIEFkZGluZyBhIG5vbmxpbmVhcml0eSAoUmVMVSwgR0VMVSkgYWZ0ZXIgdGhpcyBsaW5lYXIgbWFwIGlzIHdoYXQgbWFrZXMgZGVlcCBuZXR3b3JrcyBwb3dlcmZ1bDogdGhleSBjYW4gcmVwcmVzZW50IGFyYml0cmFyaWx5IGNvbXBsZXggZnVuY3Rpb25zIGJ5IGNvbXBvc2luZyBtYW55IGFmZmluZS10aGVuLW5vbmxpbmVhciBzdGVwcy5cblxuQXR0ZW50aW9uIGluIHRyYW5zZm9ybWVycyBpcyBhbHNvIGJ1aWx0IG9uIGxpbmVhciBtYXBzOiBRPVhXX1EsIEs9WFdfSywgVj1YV19WLiBUaGUgd2VpZ2h0IG1hdHJpY2VzIHByb2plY3QgdGhlIGlucHV0IGludG8gcXVlcnkva2V5L3ZhbHVlIHNwYWNlcywgYW5kIHRoZSBhdHRlbnRpb24gc2NvcmVzIGFyZSBjb21wdXRlZCBhcyBkb3QgcHJvZHVjdHMgaW4gdGhvc2UgcHJvamVjdGVkIHNwYWNlcy4ifSwKICB7InR5cGUiOiJjb2RlIiwibGFuZ3VhZ2UiOiJweXRob24iLCJjb250ZW50IjoiaW1wb3J0IHRvcmNoXG5pbXBvcnQgdG9yY2gubm4gYXMgbm5cblxuIyBMaW5lYXIgbGF5ZXIgSVMgYSBtYXRyaXggbXVsdGlwbHkgKyBiaWFzXG5sYXllciA9IG5uLkxpbmVhcihpbl9mZWF0dXJlcz04LCBvdXRfZmVhdHVyZXM9NClcbnggPSB0b3JjaC5yYW5kbigzMiwgOCkgICAgIyBiYXRjaCBvZiAzMiwgOCBmZWF0dXJlcyBlYWNoXG55ID0gbGF5ZXIoeCkgICAgICAgICAgICAgICAjICgzMiwgNClcblxuIyBFcXVpdmFsZW50IG1hbnVhbCBjb21wdXRhdGlvblxuVyA9IGxheWVyLndlaWdodCAgICAgICAgICAgIyAoNCwgOClcbmIgPSBsYXllci5iaWFzICAgICAgICAgICAgICMgKDQsKVxueV9tYW51YWwgPSB4IEAgVy5UICsgYiAgICAgIyAoMzIsIDQpIC0tIG5vdGU6IFcgaXMgc3RvcmVkIHRyYW5zcG9zZWRcbnByaW50KCdNYXRjaDonLCB0b3JjaC5hbGxjbG9zZSh5LCB5X21hbnVhbCwgYXRvbD0xZS02KSlcblxuIyBUcmFuc2Zvcm1lciBRS1YgcHJvamVjdGlvbnNcbmRfbW9kZWwsIGRfayA9IDUxMiwgNjRcbldfUSA9IHRvcmNoLnJhbmRuKGRfbW9kZWwsIGRfaylcblggPSB0b3JjaC5yYW5kbigzMiwgMTAwLCBkX21vZGVsKSAgIyAoYmF0Y2gsIHNlcV9sZW4sIGRfbW9kZWwpXG5RID0gWCBAIFdfUSAgICAgICAgICAgICAgICAgICAgICAgICMgKDMyLCAxMDAsIGRfaykgLS0gcHJvamVjdCB0byBxdWVyeSBzcGFjZSJ9LAogIHsidHlwZSI6ImNhbGxvdXQiLCJ2YXJpYW50IjoiaW5mbyIsInRpdGxlIjoiV2h5IE5vbmxpbmVhcml0eSBpcyBFc3NlbnRpYWwiLCJjb250ZW50IjoiV2l0aG91dCBhY3RpdmF0aW9uIGZ1bmN0aW9ucywgc3RhY2tpbmcgbiBsaW5lYXIgbGF5ZXJzIGlzIGVxdWl2YWxlbnQgdG8gYSBzaW5nbGUgbGluZWFyIGxheWVyOiBXX24gLi4uIFdfMiBXXzEgPSBXX2NvbWJpbmVkLiBUaGlzIGlzIHRoZSAnbGluZWFyIGNvbGxhcHNlJyBwcm9ibGVtLiBUaGUgVW5pdmVyc2FsIEFwcHJveGltYXRpb24gVGhlb3JlbSBndWFyYW50ZWVzIHRoYXQgYSBuZXR3b3JrIHdpdGggZXZlbiBhIHNpbmdsZSBoaWRkZW4gbGF5ZXIgYW5kIG5vbmxpbmVhciBhY3RpdmF0aW9uIGNhbiBhcHByb3hpbWF0ZSBhbnkgY29udGludW91cyBmdW5jdGlvbiDigJQgYnV0IGRlcHRoIG1ha2VzIHRoaXMgYXBwcm94aW1hdGlvbiBleHBvbmVudGlhbGx5IG1vcmUgcGFyYW1ldGVyLWVmZmljaWVudC4ifSwKICB7InR5cGUiOiJ0YWJsZSIsImhlYWRlcnMiOlsiVHJhbnNmb3JtYXRpb24iLCJNYXRyaXggKDJEKSIsIkdlb21ldHJpYyBFZmZlY3QiLCJNTCBSZWxldmFuY2UiXSwicm93cyI6W1siSWRlbnRpdHkiLCJbWzEsMF0sWzAsMV1dIiwiTm8gY2hhbmdlIiwiU2tpcCBjb25uZWN0aW9ucyAoUmVzTmV0KSJdLFsiU2NhbGluZyIsIltbcywwXSxbMCxzXV0iLCJVbmlmb3JtIHN0cmV0Y2giLCJCYXRjaCBub3JtLCBsYXllciBub3JtIl0sWyJSb3RhdGlvbiIsIltbYywtc10sW3MsY11dIiwiUmlnaWQgcm90YXRpb24iLCJPcnRob2dvbmFsIHdlaWdodCBpbml0Il0sWyJQcm9qZWN0aW9uIiwiW1sxLDBdLFswLDBdXSIsIkNvbGxhcHNlIHRvIHN1YnNwYWNlIiwiQXR0ZW50aW9uIChsb3ctcmFuaykiXSxbIlNoZWFyIiwiW1sxLGtdLFswLDFdXSIsIlNsYW50IGFsb25nIGF4aXMiLCJHZW5lcmFsIHdlaWdodCBtYXRyaWNlcyJdLFsiUmVmbGVjdGlvbiIsIltbLTEsMF0sWzAsMV1dIiwiTWlycm9yIGZsaXAiLCJTeW1tZXRyeSBhdWdtZW50YXRpb24iXV19LAogIHsidHlwZSI6ImNhbGxvdXQiLCJ2YXJpYW50IjoidGlwIiwidGl0bGUiOiJWaXN1YWxpemUgVHJhbnNmb3JtYXRpb25zIHdpdGggVW5pdCBDaXJjbGUiLCJjb250ZW50IjoiVG8gaW50dWl0aXZlbHkgdW5kZXJzdGFuZCB3aGF0IGEgMsOXMiBtYXRyaXggZG9lcywgYXBwbHkgaXQgdG8gYSB1bml0IGNpcmNsZSAoYSBzZXQgb2YgcG9pbnRzIG9uIHRoZSBjaXJjbGUpLiBUaGUgcmVzdWx0aW5nIGVsbGlwc2UgcmV2ZWFsczogdGhlIHR3byBheGVzIGxlbmd0aHMgYXJlIHRoZSBzaW5ndWxhciB2YWx1ZXMsIGFuZCB0aGUgYXhpcyBvcmllbnRhdGlvbnMgYXJlIHRoZSByaWdodC9sZWZ0IHNpbmd1bGFyIHZlY3RvcnMuIFRoaXMgaXMgdGhlIGdlb21ldHJpYyBoZWFydCBvZiBTVkQuIn0KXQo="
+---
+
+# Matrix Multiplication as Linear Transformation
+
+Matrix multiplication is not merely an arithmetic procedure — it encodes **linear transformations**: functions that map vectors to vectors while preserving the operations of vector addition and scalar multiplication. Every neural network layer, every image filter, every coordinate change in graphics is a linear transformation under the hood. Developing a geometric intuition for what matrix multiplication *does* is one of the highest-leverage skills in applied ML.
+
+## Geometric Interpretation: What Matrices Do to Space
+
+Multiplying a vector **v** by a matrix **A** transforms it to a new vector **Av**. Geometrically, a 2×2 matrix can:
+
+- **Scale**: stretch or compress space along axes
+- **Rotate**: spin the coordinate system
+- **Shear**: slant space along one axis
+- **Project**: collapse space onto a lower-dimensional subspace
+- **Reflect**: flip across an axis
+
+The key insight: a matrix fully describes how an entire vector space is transformed, not just individual points. Every column of **A** tells you where the corresponding standard basis vector lands after the transformation.
+
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+# 2D rotation matrix by angle theta
+def rotation(theta):
+    c, s = np.cos(theta), np.sin(theta)
+    return np.array([[c, -s], [s, c]])
+
+# Scaling matrix
+def scaling(sx, sy):
+    return np.array([[sx, 0], [0, sy]])
+
+# Shear matrix
+def shear(k):
+    return np.array([[1, k], [0, 1]])
+
+# Projection onto x-axis
+P_x = np.array([[1, 0], [0, 0]])
+
+v = np.array([3., 2.])
+print('Original:', v)
+print('Rotated 45 deg:', rotation(np.pi/4) @ v)
+print('Scaled (2x, 0.5y):', scaling(2, 0.5) @ v)
+print('Projected to x-axis:', P_x @ v)
+```
+
+## Why Order Matters: Non-Commutativity
+
+Matrix multiplication is **not commutative**: **AB ≠ BA** in general. This reflects the geometric fact that the order of transformations matters — rotating then scaling yields a different result than scaling then rotating (unless the scaling is uniform).
+
+Commutativity fails even for square matrices of the same size. One useful identity: **tr(AB) = tr(BA)** (traces commute), but the matrices themselves do not. In deep networks, the ordering of weight matrices defines the composition of transformations applied to the input, and changing the order fundamentally changes the network.
+
+```python
+import numpy as np
+
+A = np.array([[1,2],[3,4]])
+B = np.array([[0,1],[1,0]])  # swap rows
+
+AB = A @ B
+BA = B @ A
+print('AB:\n', AB)
+print('BA:\n', BA)
+print('AB == BA?', np.allclose(AB, BA))  # False
+
+# Geometric: rotate then scale != scale then rotate
+R = np.array([[0,-1],[1,0]])   # 90-degree rotation
+S = np.array([[2,0],[0,1]])    # scale x by 2
+v = np.array([1.,0.])
+print('R then S:', S @ (R @ v))  # [0., 1.] scaled -> [0., 1.]
+print('S then R:', R @ (S @ v))  # [2., 0.] rotated -> [0., 2.]
+```
+
+## The Column Space View: Ax as Linear Combination
+
+The most important way to read the matrix-vector product **Ax** is as a **linear combination of the columns of A**:
+
+  **Ax** = x₁**a**₁ + x₂**a**₂ + ... + xₙ**a**ₙ
+
+where **a**ᵢ is the i-th column of **A** and xᵢ is the i-th component of **x**. The output lives in the **column space** of **A** — the set of all possible linear combinations of A's columns. This view reveals why a rank-deficient matrix cannot span the full output space: its columns are linearly dependent, so the output is confined to a lower-dimensional subspace.
+
+## Four Interpretations of the Product Ax
+
+1. **Dot products (row view)**: Each output element (Ax)ᵢ = aᵢᵀx, the dot product of row i of A with x. This is the naive computational view.
+2. **Linear combination (column view)**: Ax = x₁a₁ + x₂a₂ + … + xₙaₙ. The output is a weighted sum of columns, weights given by x. Best for understanding range/column space.
+3. **Change of basis**: A maps x from one coordinate system to another. If the columns of A are the new basis vectors expressed in the standard basis, Ax gives the standard-basis coordinates of the point x.
+4. **Linear map**: Ax is the image of x under the linear function f(x)=Ax. This functional view is central to understanding composition, invertibility, and the four fundamental subspaces.
+
+## Composition of Transformations
+
+Applying transformation **B** followed by **A** is equivalent to applying the single matrix **AB**. This composability is what makes matrix multiplication the universal language of sequenced linear operations.
+
+In code: `A @ B @ v` applies B first (rightmost), then A. The associativity property `(AB)C = A(BC)` means you can pre-compute `AB` once and reuse it. This is exploited in neural networks: the product of weight matrices across linear layers equals a single linear map — which is why depth without nonlinearity is useless (multiple linear layers collapse to one).
+
+```python
+import numpy as np
+
+# Composition: two rotations = one rotation by the sum
+def rot2d(theta):
+    c, s = np.cos(theta), np.sin(theta)
+    return np.array([[c,-s],[s,c]])
+
+R30 = rot2d(np.pi/6)    # 30 degrees
+R60 = rot2d(np.pi/3)    # 60 degrees
+R90 = rot2d(np.pi/2)    # 90 degrees
+
+v = np.array([1.,0.])
+print('R60 @ R30 @ v:', (R60 @ R30) @ v)   # should match R90 @ v
+print('R90 @ v:', R90 @ v)
+print('Equal?', np.allclose((R60 @ R30) @ v, R90 @ v))  # True
+
+# Key insight: two linear layers without nonlinearity = one layer
+W1 = np.random.randn(4, 8)
+W2 = np.random.randn(2, 4)
+collapsed = W2 @ W1     # (2,8) -- same as applying both
+print('Collapsed shape:', collapsed.shape)
+```
+
+## Neural Network Layers as Linear Transformations
+
+Every fully connected layer computes **y = Wx + b**, where **W** is the weight matrix and **b** is the bias vector. The weight matrix **W** (shape `(d_out, d_in)`) encodes a linear transformation from `d_in`-dimensional input space to `d_out`-dimensional output space.
+
+The bias **b** makes this an **affine** (not purely linear) transformation — it allows the hyperplane decision boundary to be offset from the origin. Adding a nonlinearity (ReLU, GELU) after this linear map is what makes deep networks powerful: they can represent arbitrarily complex functions by composing many affine-then-nonlinear steps.
+
+Attention in transformers is also built on linear maps: Q=XW_Q, K=XW_K, V=XW_V. The weight matrices project the input into query/key/value spaces, and the attention scores are computed as dot products in those projected spaces.
+
+```python
+import torch
+import torch.nn as nn
+
+# Linear layer IS a matrix multiply + bias
+layer = nn.Linear(in_features=8, out_features=4)
+x = torch.randn(32, 8)    # batch of 32, 8 features each
+y = layer(x)               # (32, 4)
+
+# Equivalent manual computation
+W = layer.weight           # (4, 8)
+b = layer.bias             # (4,)
+y_manual = x @ W.T + b     # (32, 4) -- note: W is stored transposed
+print('Match:', torch.allclose(y, y_manual, atol=1e-6))
+
+# Transformer QKV projections
+d_model, d_k = 512, 64
+W_Q = torch.randn(d_model, d_k)
+X = torch.randn(32, 100, d_model)  # (batch, seq_len, d_model)
+Q = X @ W_Q                        # (32, 100, d_k) -- project to query space
+```
+
+> **[INFO] Why Nonlinearity is Essential**
+>
+> Without activation functions, stacking n linear layers is equivalent to a single linear layer: W_n ... W_2 W_1 = W_combined. This is the 'linear collapse' problem. The Universal Approximation Theorem guarantees that a network with even a single hidden layer and nonlinear activation can approximate any continuous function — but depth makes this approximation exponentially more parameter-efficient.
+
+| Transformation | Matrix (2D) | Geometric Effect | ML Relevance |
+| --- | --- | --- | --- |
+| Identity | [[1,0],[0,1]] | No change | Skip connections (ResNet) |
+| Scaling | [[s,0],[0,s]] | Uniform stretch | Batch norm, layer norm |
+| Rotation | [[c,-s],[s,c]] | Rigid rotation | Orthogonal weight init |
+| Projection | [[1,0],[0,0]] | Collapse to subspace | Attention (low-rank) |
+| Shear | [[1,k],[0,1]] | Slant along axis | General weight matrices |
+| Reflection | [[-1,0],[0,1]] | Mirror flip | Symmetry augmentation |
+
+> **[TIP] Visualize Transformations with Unit Circle**
+>
+> To intuitively understand what a 2×2 matrix does, apply it to a unit circle (a set of points on the circle). The resulting ellipse reveals: the two axes lengths are the singular values, and the axis orientations are the right/left singular vectors. This is the geometric heart of SVD.
