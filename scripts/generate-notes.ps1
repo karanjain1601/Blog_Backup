@@ -107,7 +107,8 @@ blocks_json: "$b64"
     # 4. Write file (UTF-8 without BOM)
     $filePath = Join-Path $OutputDir "$($note.slug).md"
     $fullContent = $frontmatter + "`n" + $body
-    [System.IO.File]::WriteAllText($filePath, $fullContent, [System.Text.Encoding]::UTF8)
+    $utf8NoBOM = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($filePath, $fullContent, $utf8NoBOM)
 
     $kb = [math]::Round((Get-Item $filePath).Length / 1KB, 1)
     $codeCount = ($note.blocks | Where-Object { $_.type -eq 'code' } | Measure-Object).Count

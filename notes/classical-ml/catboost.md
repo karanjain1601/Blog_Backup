@@ -1,0 +1,188 @@
+---
+title: "CatBoost — Ordered Boosting and Categorical Features"
+slug: "catboost"
+description: "Understand how ordered boosting prevents target leakage and prediction shift, how oblivious trees enable fast inference, and how CatBoost handles categoricals natively without preprocessing."
+tags: ["supervised-learning", "classical-ml"]
+topic: "classical-ml"
+status: "published"
+updated: "2026-07-10"
+blocks_json: "W3sidHlwZSI6InRleHQiLCJjb250ZW50IjoiQ2F0Qm9vc3QgaXMgYSBncmFkaWVudCBib29zdGluZyBsaWJyYXJ5IGRldmVsb3BlZCBieSBZYW5kZXggdGhhdCBpbnRyb2R1Y2VzIHR3byBrZXkgaW5ub3ZhdGlvbnM6IG9yZGVyZWQgYm9vc3RpbmcgdG8gcHJldmVudCBwcmVkaWN0aW9uIHNoaWZ0IChhIHN1YnRsZSBmb3JtIG9mIHRhcmdldCBsZWFrYWdlIGluIHN0YW5kYXJkIGdyYWRpZW50IGJvb3N0aW5nKSwgYW5kIG5hdGl2ZSBjYXRlZ29yaWNhbCBmZWF0dXJlIHN1cHBvcnQgdmlhIG9yZGVyZWQgdGFyZ2V0IHN0YXRpc3RpY3MuIFRoZXNlIGltcHJvdmVtZW50cyBtYWtlIENhdEJvb3N0IHBhcnRpY3VsYXJseSBzdHJvbmcgb3V0LW9mLXRoZS1ib3gg4oCUIGl0IG9mdGVuIHJlcXVpcmVzIGxlc3MgdHVuaW5nIHRoYW4gWEdCb29zdCBvciBMaWdodEdCTSBhbmQgYWNoaWV2ZXMgY29tcGV0aXRpdmUgYWNjdXJhY3kgd2l0aG91dCBtYW51YWwgZW5jb2Rpbmcgb2YgY2F0ZWdvcmljYWwgdmFyaWFibGVzLiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IlByZWRpY3Rpb24gU2hpZnQgaW4gU3RhbmRhcmQgR3JhZGllbnQgQm9vc3RpbmcifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkluIHN0YW5kYXJkIGdyYWRpZW50IGJvb3N0aW5nLCB3aGVuIGNvbXB1dGluZyB0aGUgcmVzaWR1YWwgZm9yIHNhbXBsZSBpIGluIGl0ZXJhdGlvbiB0LCB0aGUgbW9kZWwgZl97dC0xfSB3YXMgcGFydGlhbGx5IHRyYWluZWQgb24gc2FtcGxlIGkgaXRzZWxmLiBUaGlzIGNyZWF0ZXMgYSBjaXJjdWxhciBkZXBlbmRlbmN5OiB0aGUgZ3JhZGllbnQgdGFyZ2V0IGZvciBzYW1wbGUgaSBpcyBjb21wdXRlZCBmcm9tIGEgbW9kZWwgdGhhdCBoYXMgYWxyZWFkeSBcdTAwMjdzZWVuXHUwMDI3IGksIHByb2R1Y2luZyBvdmVyY29uZmlkZW50IGxlYWYgdmFsdWVzLiBUaGlzIGlzIGNhbGxlZCBwcmVkaWN0aW9uIHNoaWZ0OiB0aGUgZGlzdHJpYnV0aW9uIG9mIGdyYWRpZW50IHRhcmdldHMgdXNlZCBkdXJpbmcgdHJhaW5pbmcgZGlmZmVycyBmcm9tIHRoZSBkaXN0cmlidXRpb24gYXQgdGVzdCB0aW1lLiBUaGUgZWZmZWN0IGlzIHN0cm9uZ2VzdCBmb3Igc2FtcGxlcyBpbiBzbWFsbCBsZWF2ZXMgYW5kIG9uIHNtYWxsIGRhdGFzZXRzIHdoZXJlIGVhY2ggc2FtcGxlIGhhcyBvdXRzaXplZCBpbmZsdWVuY2Ugb24gdGhlIHRyZWUuIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiT3JkZXJlZCBCb29zdGluZyDigJQgRml4aW5nIFByZWRpY3Rpb24gU2hpZnQifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkNhdEJvb3N0IGFkZHJlc3NlcyBwcmVkaWN0aW9uIHNoaWZ0IHdpdGggb3JkZXJlZCBib29zdGluZy4gQmVmb3JlIHRyYWluaW5nLCBhIHJhbmRvbSBwZXJtdXRhdGlvbiDPgyBvZiB0aGUgdHJhaW5pbmcgc2FtcGxlcyBpcyBkcmF3bi4gV2hlbiBjb21wdXRpbmcgdGhlIHJlc2lkdWFsIGZvciBzYW1wbGUgz4MoaSkgYXQgc3RlcCB0LCBvbmx5IHRoZSBzYW1wbGVzIM+DKDEpLCAuLi4sIM+DKGktMSkgdGhhdCBwcmVjZWRlIGl0IGluIHRoZSBwZXJtdXRhdGlvbiBhcmUgdXNlZCB0byBidWlsZCB0aGUgbW9kZWwgZl97dC0xfS4gVGhpcyBlbnN1cmVzIGVhY2ggc2FtcGxlXHUwMDI3cyByZXNpZHVhbCBpcyBjb21wdXRlZCBmcm9tIGEgbW9kZWwgdGhhdCBoYXMgbmV2ZXIgc2VlbiB0aGF0IHNhbXBsZSDigJQgZXhhY3RseSB0aGUgdW5iaWFzZWQgY29uZGl0aW9uIHJlcXVpcmVkIGZvciBjbGVhbiBncmFkaWVudCB0YXJnZXRzLiBJbiBwcmFjdGljZSwgQ2F0Qm9vc3QgbWFpbnRhaW5zIHNldmVyYWwgcGVybXV0YXRpb25zIGFuZCBtb2RlbCBjb3BpZXMgdG8gcmVkdWNlIHZhcmlhbmNlIGZyb20gYSBzaW5nbGUgcGVybXV0YXRpb24gY2hvaWNlLiJ9LHsidHlwZSI6ImNhbGxvdXQiLCJ2YXJpYW50IjoiaW5mbyIsInRpdGxlIjoiV2h5IE9yZGVyZWQgQm9vc3RpbmcgTWF0dGVycyIsImNvbnRlbnQiOiJTdGFuZGFyZCBHQiB1c2VzIHNhbXBsZSBpIHRvIGJvdGggYnVpbGQgdGhlIG1vZGVsIGFuZCBldmFsdWF0ZSBpdHMgcmVzaWR1YWwg4oCUIGEgY2lyY3VsYXIgZGVwZW5kZW5jeS4gT3JkZXJlZCBib29zdGluZyBicmVha3MgdGhpcyBieSBlbnN1cmluZyBlYWNoIHNhbXBsZVx1MDAyN3MgZ3JhZGllbnQgaXMgY29tcHV0ZWQgZnJvbSBhIG1vZGVsIHRyYWluZWQgb25seSBvbiBwcmVjZWRpbmcgc2FtcGxlcyBpbiBhIHJhbmRvbSBwZXJtdXRhdGlvbi4gVGhpcyBpcyBhbmFsb2dvdXMgdG8gdGltZS1zZXJpZXMgY3Jvc3MtdmFsaWRhdGlvbiBhcHBsaWVkIHRvIGV2ZXJ5IHNhbXBsZSwgYW5kIGl0IHByb2R1Y2VzIGJldHRlci1jYWxpYnJhdGVkIGxlYWYgdmFsdWVzLCBlc3BlY2lhbGx5IG9uIHNtYWxsIGRhdGFzZXRzIHdoZXJlIHByZWRpY3Rpb24gc2hpZnQgaXMgbW9zdCBzZXZlcmUuIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiT2JsaXZpb3VzIFRyZWVzIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJDYXRCb29zdCB1c2VzIG9ibGl2aW91cyAoc3ltbWV0cmljKSBkZWNpc2lvbiB0cmVlcyBhcyBiYXNlIGxlYXJuZXJzLiBVbmxpa2Ugc3RhbmRhcmQgQ0FSVCB0cmVlcyB3aGVyZSBlYWNoIG5vZGUgY2FuIHVzZSBhIGRpZmZlcmVudCBzcGxpdCBmZWF0dXJlIGFuZCB0aHJlc2hvbGQsIG9ibGl2aW91cyB0cmVlcyBhcHBseSB0aGUgc2FtZSBzcGxpdCBjb25kaXRpb24gYXQgZXZlcnkgbm9kZSBvZiBhIGdpdmVuIGRlcHRoIGxldmVsLiBBIGRlcHRoLWQgb2JsaXZpb3VzIHRyZWUgaXMgZnVsbHkgZGVzY3JpYmVkIGJ5IGQgKGZlYXR1cmUsIHRocmVzaG9sZCkgcGFpcnMuIFByZWRpY3Rpb24gaXMgTyhkZXB0aCkg4oCUIGEgc2FtcGxlIHRyYXZlcnNlcyB0aGUgdHJlZSBieSBldmFsdWF0aW5nIGQgY29uZGl0aW9ucyBhbmQgaW5kZXhpbmcgaW50byBhIGxvb2t1cCB0YWJsZSBvZiAyXmQgbGVhdmVzLiBUaGlzIGVuYWJsZXMgdmVyeSBmYXN0IHByZWRpY3Rpb24gKGNhY2hlLWZyaWVuZGx5LCBubyBicmFuY2hpbmcpIGFuZCBhbHNvIGFjdHMgYXMgYSByZWd1bGFyaXNlcjogb2JsaXZpb3VzIHRyZWVzIGFyZSBsZXNzIGV4cHJlc3NpdmUgdGhhbiBhc3ltbWV0cmljIHRyZWVzLCB3aGljaCByZWR1Y2VzIHZhcmlhbmNlLiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6Ik5hdGl2ZSBDYXRlZ29yaWNhbCBGZWF0dXJlIEhhbmRsaW5nIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJTdGFuZGFyZCB0YXJnZXQgZW5jb2RpbmcgY29tcHV0ZXMgbWVhbih5IHwgY2F0ZWdvcnk9YykgdXNpbmcgdGhlIGZ1bGwgdHJhaW5pbmcgc2V0IOKAlCB0aGlzIGxlYWtzIHRoZSB0YXJnZXQgZm9yIGVhY2ggc2FtcGxlIGludG8gaXRzIG93biBlbmNvZGluZy4gQ2F0Qm9vc3QgdXNlcyBvcmRlcmVkIHRhcmdldCBzdGF0aXN0aWNzOiBmb3Igc2FtcGxlIM+DKGkpIGluIGNhdGVnb3J5IGMsIHRoZSBlbmNvZGluZyBpcyBtZWFuKHkgfCBjYXRlZ29yeT1jLCBqIFx1MDAzYyBpIGluIHBlcm11dGF0aW9uIM+DKSwgcGx1cyBMYXBsYWNlIHNtb290aGluZyB0byBoYW5kbGUgcmFyZSBjYXRlZ29yaWVzLiBDb21iaW5lZCB3aXRoIG9yZGVyZWQgYm9vc3RpbmcsIHRoaXMgZ2l2ZXMgY29tcGxldGVseSB1bmJpYXNlZCBjYXRlZ29yaWNhbCBlbmNvZGluZ3MuIENhdEJvb3N0IGFsc28gYXV0b21hdGljYWxseSBkZXRlY3RzIGNvbWJpbmF0aW9ucyBvZiBjYXRlZ29yaWNhbCBmZWF0dXJlcyAoaW50ZXJhY3Rpb24gdGVybXMpLCB3aGljaCB3b3VsZCBiZSBleHBlbnNpdmUgdG8gY3JlYXRlIG1hbnVhbGx5LiJ9LHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiJpbXBvcnQgbnVtcHkgYXMgbnBcbmltcG9ydCBwYW5kYXMgYXMgcGRcbmZyb20gY2F0Ym9vc3QgaW1wb3J0IENhdEJvb3N0Q2xhc3NpZmllclxuZnJvbSBza2xlYXJuLm1vZGVsX3NlbGVjdGlvbiBpbXBvcnQgdHJhaW5fdGVzdF9zcGxpdFxuZnJvbSBza2xlYXJuLm1ldHJpY3MgaW1wb3J0IGFjY3VyYWN5X3Njb3JlXG5cbm5wLnJhbmRvbS5zZWVkKDQyKVxubiA9IDEwMDBcbmRmID0gcGQuRGF0YUZyYW1lKHtcbiAgICBcdTAwMjdjaXR5XHUwMDI3OiAgIG5wLnJhbmRvbS5jaG9pY2UoW1x1MDAyN05ZQ1x1MDAyNywgXHUwMDI3TEFcdTAwMjcsIFx1MDAyN0NoaWNhZ29cdTAwMjcsIFx1MDAyN0hvdXN0b25cdTAwMjcsIFx1MDAyN1Bob2VuaXhcdTAwMjddLCBuKSxcbiAgICBcdTAwMjdkZXZpY2VcdTAwMjc6IG5wLnJhbmRvbS5jaG9pY2UoW1x1MDAyN21vYmlsZVx1MDAyNywgXHUwMDI3ZGVza3RvcFx1MDAyNywgXHUwMDI3dGFibGV0XHUwMDI3XSwgbiksXG4gICAgXHUwMDI3YWdlXHUwMDI3OiAgICBucC5yYW5kb20ucmFuZGludCgxOCwgNzAsIG4pLFxuICAgIFx1MDAyN2luY29tZVx1MDAyNzogbnAucmFuZG9tLmV4cG9uZW50aWFsKDUwMDAwLCBuKSxcbn0pXG5kZltcdTAwMjdsYWJlbFx1MDAyN10gPSAoKGRmW1x1MDAyN2luY29tZVx1MDAyN10gXHUwMDNlIDUwMDAwKSBcdTAwMjYgKGRmW1x1MDAyN2FnZVx1MDAyN10gXHUwMDNlIDMwKSkuYXN0eXBlKGludClcbmRmW1x1MDAyN2xhYmVsXHUwMDI3XSBePSBucC5yYW5kb20uYmlub21pYWwoMSwgMC4xLCBuKVxuXG5YID0gZGYuZHJvcChcdTAwMjdsYWJlbFx1MDAyNywgYXhpcz0xKVxueSA9IGRmW1x1MDAyN2xhYmVsXHUwMDI3XVxuWF90ciwgWF90ZSwgeV90ciwgeV90ZSA9IHRyYWluX3Rlc3Rfc3BsaXQoWCwgeSwgdGVzdF9zaXplPTAuMiwgcmFuZG9tX3N0YXRlPTQyKVxuXG4jIFBhc3MgY2F0ZWdvcmljYWwgZmVhdHVyZSBuYW1lcyBkaXJlY3RseSDigJQgbm8gZW5jb2RpbmcgbmVlZGVkXG5tb2RlbCA9IENhdEJvb3N0Q2xhc3NpZmllcihcbiAgICBpdGVyYXRpb25zPTMwMCwgZGVwdGg9NiwgbGVhcm5pbmdfcmF0ZT0wLjA1LFxuICAgIGNhdF9mZWF0dXJlcz1bXHUwMDI3Y2l0eVx1MDAyNywgXHUwMDI3ZGV2aWNlXHUwMDI3XSwgdmVyYm9zZT0wLCByYW5kb21fc2VlZD00MlxuKVxubW9kZWwuZml0KFhfdHIsIHlfdHIpXG5wcmVkcyA9IG1vZGVsLnByZWRpY3QoWF90ZSlcbnByaW50KGZcdTAwMjdDYXRCb29zdCBhY2N1cmFjeToge2FjY3VyYWN5X3Njb3JlKHlfdGUsIHByZWRzKTouNGZ9XHUwMDI3KVxucHJpbnQoXHUwMDI3RmVhdHVyZSBpbXBvcnRhbmNlczpcdTAwMjcsIGRpY3QoemlwKFguY29sdW1ucywgbW9kZWwuZ2V0X2ZlYXR1cmVfaW1wb3J0YW5jZSgpLnJvdW5kKDIpKSkpIn0seyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6ImltcG9ydCBudW1weSBhcyBucFxuZnJvbSBza2xlYXJuLmRhdGFzZXRzIGltcG9ydCBtYWtlX2NsYXNzaWZpY2F0aW9uXG5mcm9tIHNrbGVhcm4ubW9kZWxfc2VsZWN0aW9uIGltcG9ydCB0cmFpbl90ZXN0X3NwbGl0XG5mcm9tIHNrbGVhcm4ubWV0cmljcyBpbXBvcnQgbG9nX2xvc3NcbmZyb20gY2F0Ym9vc3QgaW1wb3J0IENhdEJvb3N0Q2xhc3NpZmllclxuXG4jIENvbXBhcmUgb3JkZXJlZCB2cyBwbGFpbiBib29zdGluZyDigJQgbWVhc3VyZSBvdmVyZml0dGluZyBnYXBcbm5wLnJhbmRvbS5zZWVkKDApXG5YLCB5ID0gbWFrZV9jbGFzc2lmaWNhdGlvbihuX3NhbXBsZXM9MzAwLCBuX2ZlYXR1cmVzPTIwLCBuX2luZm9ybWF0aXZlPTEwLFxuICAgICAgICAgICAgICAgICAgICAgICAgICAgIG5fcmVkdW5kYW50PTUsIHJhbmRvbV9zdGF0ZT0wKVxuWF90ciwgWF90ZSwgeV90ciwgeV90ZSA9IHRyYWluX3Rlc3Rfc3BsaXQoWCwgeSwgdGVzdF9zaXplPTAuMywgcmFuZG9tX3N0YXRlPTApXG5cbmZvciBib29zdGluZ190eXBlIGluIFtcdTAwMjdPcmRlcmVkXHUwMDI3LCBcdTAwMjdQbGFpblx1MDAyN106XG4gICAgbSA9IENhdEJvb3N0Q2xhc3NpZmllcihcbiAgICAgICAgaXRlcmF0aW9ucz01MDAsIGRlcHRoPTYsIGxlYXJuaW5nX3JhdGU9MC4wNSxcbiAgICAgICAgYm9vc3RpbmdfdHlwZT1ib29zdGluZ190eXBlLCB2ZXJib3NlPTAsIHJhbmRvbV9zZWVkPTQyXG4gICAgKVxuICAgIG0uZml0KFhfdHIsIHlfdHIsIGV2YWxfc2V0PShYX3RlLCB5X3RlKSlcbiAgICB0cl9sb3NzID0gbG9nX2xvc3MoeV90ciwgbS5wcmVkaWN0X3Byb2JhKFhfdHIpKVxuICAgIHRlX2xvc3MgPSBsb2dfbG9zcyh5X3RlLCBtLnByZWRpY3RfcHJvYmEoWF90ZSkpXG4gICAgcHJpbnQoZlx1MDAyN3tib29zdGluZ190eXBlOjhzfTogdHJhaW49e3RyX2xvc3M6LjRmfSAgdGVzdD17dGVfbG9zczouNGZ9ICBcdTAwMjdcbiAgICAgICAgICBmXHUwMDI3Z2FwPXt0ZV9sb3NzIC0gdHJfbG9zczouNGZ9XHUwMDI3KSJ9LHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiJpbXBvcnQgbnVtcHkgYXMgbnBcbmZyb20gc2tsZWFybi5kYXRhc2V0cyBpbXBvcnQgbWFrZV9jbGFzc2lmaWNhdGlvblxuZnJvbSBza2xlYXJuLm1vZGVsX3NlbGVjdGlvbiBpbXBvcnQgdHJhaW5fdGVzdF9zcGxpdFxuZnJvbSBza2xlYXJuLm1ldHJpY3MgaW1wb3J0IGFjY3VyYWN5X3Njb3JlXG5mcm9tIGNhdGJvb3N0IGltcG9ydCBDYXRCb29zdENsYXNzaWZpZXJcblxudHJ5OlxuICAgIGZyb20geGdib29zdCBpbXBvcnQgWEdCQ2xhc3NpZmllclxuICAgIGZyb20gbGlnaHRnYm0gaW1wb3J0IExHQk1DbGFzc2lmaWVyXG4gICAgaGFzX290aGVycyA9IFRydWVcbmV4Y2VwdCBJbXBvcnRFcnJvcjpcbiAgICBoYXNfb3RoZXJzID0gRmFsc2VcblxubnAucmFuZG9tLnNlZWQoNDIpXG5YLCB5ID0gbWFrZV9jbGFzc2lmaWNhdGlvbihuX3NhbXBsZXM9MjAwMCwgbl9mZWF0dXJlcz0zMCwgbl9pbmZvcm1hdGl2ZT0xNSxcbiAgICAgICAgICAgICAgICAgICAgICAgICAgICBuX3JlZHVuZGFudD04LCByYW5kb21fc3RhdGU9NDIpXG5YX3RyLCBYX3RlLCB5X3RyLCB5X3RlID0gdHJhaW5fdGVzdF9zcGxpdChYLCB5LCB0ZXN0X3NpemU9MC4yNSwgcmFuZG9tX3N0YXRlPTQyKVxuXG5jYiA9IENhdEJvb3N0Q2xhc3NpZmllcihpdGVyYXRpb25zPTQwMCwgZGVwdGg9NiwgbGVhcm5pbmdfcmF0ZT0wLjA1LFxuICAgICAgICAgICAgICAgICAgICAgICAgIHZlcmJvc2U9MCwgcmFuZG9tX3NlZWQ9NDIpXG5jYi5maXQoWF90ciwgeV90cilcbnByaW50KGZcdTAwMjdDYXRCb29zdCA6IHthY2N1cmFjeV9zY29yZSh5X3RlLCBjYi5wcmVkaWN0KFhfdGUpKTouNGZ9XHUwMDI3KVxuXG5pZiBoYXNfb3RoZXJzOlxuICAgIHhnYiA9IFhHQkNsYXNzaWZpZXIobl9lc3RpbWF0b3JzPTQwMCwgbWF4X2RlcHRoPTYsIGxlYXJuaW5nX3JhdGU9MC4wNSxcbiAgICAgICAgICAgICAgICAgICAgICAgICBldmFsX21ldHJpYz1cdTAwMjdsb2dsb3NzXHUwMDI3LCB2ZXJib3NpdHk9MCwgcmFuZG9tX3N0YXRlPTQyKVxuICAgIHhnYi5maXQoWF90ciwgeV90cilcbiAgICBwcmludChmXHUwMDI3WEdCb29zdCAgOiB7YWNjdXJhY3lfc2NvcmUoeV90ZSwgeGdiLnByZWRpY3QoWF90ZSkpOi40Zn1cdTAwMjcpXG4gICAgbGdibSA9IExHQk1DbGFzc2lmaWVyKG5fZXN0aW1hdG9ycz00MDAsIG1heF9kZXB0aD02LCBsZWFybmluZ19yYXRlPTAuMDUsXG4gICAgICAgICAgICAgICAgICAgICAgICAgICB2ZXJib3NlPS0xLCByYW5kb21fc3RhdGU9NDIpXG4gICAgbGdibS5maXQoWF90ciwgeV90cilcbiAgICBwcmludChmXHUwMDI3TGlnaHRHQk0gOiB7YWNjdXJhY3lfc2NvcmUoeV90ZSwgbGdibS5wcmVkaWN0KFhfdGUpKTouNGZ9XHUwMDI3KSJ9LHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiJpbXBvcnQgbnVtcHkgYXMgbnBcbmZyb20gc2tsZWFybi5kYXRhc2V0cyBpbXBvcnQgbWFrZV9jbGFzc2lmaWNhdGlvblxuZnJvbSBza2xlYXJuLm1vZGVsX3NlbGVjdGlvbiBpbXBvcnQgdHJhaW5fdGVzdF9zcGxpdFxuZnJvbSBjYXRib29zdCBpbXBvcnQgQ2F0Qm9vc3RDbGFzc2lmaWVyLCBQb29sXG5cbnRyeTpcbiAgICBpbXBvcnQgc2hhcFxuICAgIGhhc19zaGFwID0gVHJ1ZVxuZXhjZXB0IEltcG9ydEVycm9yOlxuICAgIGhhc19zaGFwID0gRmFsc2VcblxubnAucmFuZG9tLnNlZWQoNDIpXG5YLCB5ID0gbWFrZV9jbGFzc2lmaWNhdGlvbihuX3NhbXBsZXM9MTAwMCwgbl9mZWF0dXJlcz0xMCwgbl9pbmZvcm1hdGl2ZT02LCByYW5kb21fc3RhdGU9NDIpXG5mZWF0dXJlX25hbWVzID0gW2ZcdTAwMjdmZWF0X3tpfVx1MDAyNyBmb3IgaSBpbiByYW5nZShYLnNoYXBlWzFdKV1cblhfdHIsIFhfdGUsIHlfdHIsIHlfdGUgPSB0cmFpbl90ZXN0X3NwbGl0KFgsIHksIHRlc3Rfc2l6ZT0wLjIsIHJhbmRvbV9zdGF0ZT00MilcblxubW9kZWwgPSBDYXRCb29zdENsYXNzaWZpZXIoaXRlcmF0aW9ucz0yMDAsIGRlcHRoPTUsIGxlYXJuaW5nX3JhdGU9MC4xLFxuICAgICAgICAgICAgICAgICAgICAgICAgICAgIHZlcmJvc2U9MCwgcmFuZG9tX3NlZWQ9NDIpXG5tb2RlbC5maXQoWF90ciwgeV90cilcblxuIyBCdWlsdC1pbiBmZWF0dXJlIGltcG9ydGFuY2VcbmZpID0gbW9kZWwuZ2V0X2ZlYXR1cmVfaW1wb3J0YW5jZSh0eXBlPVx1MDAyN1ByZWRpY3Rpb25WYWx1ZXNDaGFuZ2VcdTAwMjcpXG5mb3IgbmFtZSwgaW1wIGluIHNvcnRlZCh6aXAoZmVhdHVyZV9uYW1lcywgZmkpLCBrZXk9bGFtYmRhIHg6IC14WzFdKVs6NV06XG4gICAgcHJpbnQoZlx1MDAyNyAge25hbWV9OiB7aW1wOi4zZn1cdTAwMjcpXG5cbmlmIGhhc19zaGFwOlxuICAgIGV4cGxhaW5lciA9IHNoYXAuVHJlZUV4cGxhaW5lcihtb2RlbClcbiAgICBzaGFwX3ZhbHMgPSBleHBsYWluZXIuc2hhcF92YWx1ZXMoUG9vbChYX3RlLCBsYWJlbD15X3RlKSlcbiAgICBtZWFuX2Fic19zaGFwID0gbnAuYWJzKHNoYXBfdmFscykubWVhbihheGlzPTApXG4gICAgdG9wID0gc29ydGVkKHppcChmZWF0dXJlX25hbWVzLCBtZWFuX2Fic19zaGFwKSwga2V5PWxhbWJkYSB4OiAteFsxXSlbOjVdXG4gICAgcHJpbnQoXHUwMDI3VG9wIFNIQVA6XHUwMDI3LCBbKG4sIHJvdW5kKHYsIDQpKSBmb3IgbiwgdiBpbiB0b3BdKSJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IkdQVSBUcmFpbmluZyBhbmQgS2V5IEh5cGVycGFyYW1ldGVycyJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiQ2F0Qm9vc3Qgc3VwcG9ydHMgR1BVIHRyYWluaW5nIHZpYSB0YXNrX3R5cGU9XHUwMDI3R1BVXHUwMDI3LCB3aGljaCBwcm92aWRlcyA0MOKAkzEwMHggc3BlZWR1cCBvbiBsYXJnZSBkYXRhc2V0cy4gS2V5IGh5cGVycGFyYW1ldGVyczogaXRlcmF0aW9ucyAodG90YWwgdHJlZXMg4oCUIHVzZSAxMDAwKyB3aXRoIGVhcmx5IHN0b3BwaW5nIHJhdGhlciB0aGFuIHR1bmluZyBhIHNtYWxsIG51bWJlciksIGRlcHRoICg2IGlzIGEgc3Ryb25nIGRlZmF1bHQ7IG9ibGl2aW91cyB0cmVlcyBhcmUgYWxyZWFkeSByZWd1bGFyaXNlZCBzbyBkZXB0aCA4LTEwIGlzIGZlYXNpYmxlKSwgbGVhcm5pbmdfcmF0ZSAoZGVmYXVsdCAwLjAzIGlzIGNvbnNlcnZhdGl2ZTsgcmFpc2UgdG8gMC4xIHdpdGggZmV3ZXIgaXRlcmF0aW9ucyBmb3Igc3BlZWQpLCBsMl9sZWFmX3JlZyAoTDIgcmVndWxhcmlzYXRpb24gb24gbGVhZiB2YWx1ZXMpLiBVc2UgZWFybHlfc3RvcHBpbmdfcm91bmRzPTUwIHdpdGggYW4gZXZhbF9zZXQgdG8gcHJldmVudCBvdmVyZml0dGluZyB3aXRob3V0IGdyaWQtc2VhcmNoaW5nIGl0ZXJhdGlvbnMuIn0seyJ0eXBlIjoidGFibGUiLCJoZWFkZXJzIjpbIkVuY29kaW5nIE1ldGhvZCIsIlByb3MiLCJDb25zIiwiTGVha2FnZSBSaXNrIl0sInJvd3MiOltbIk9uZS1ob3QgZW5jb2RpbmciLCJObyBsZWFrYWdlLCBzaW1wbGUiLCJIaWdoIGNhcmRpbmFsaXR5IOKGkiBodWdlIGRpbWVuc2lvbmFsaXR5IiwiTm9uZSJdLFsiT3JkaW5hbCBlbmNvZGluZyIsIkNvbXBhY3QsIGZhc3QiLCJJbXBvc2VzIGZhbHNlIG9yZGVyaW5nIG9uIHVub3JkZXJlZCBjYXRlZ29yaWVzIiwiTm9uZSJdLFsiTWVhbiB0YXJnZXQgZW5jb2RpbmcgKGdsb2JhbCkiLCJDb21wYWN0LCBjYXB0dXJlcyB0YXJnZXQgc2lnbmFsIiwiU2V2ZXJlbHkgb3ZlcmZpdHMgcmFyZSBjYXRlZ29yaWVzIiwiSGlnaCDigJQgc2FtcGxlIHVzZXMgb3duIGxhYmVsIl0sWyJUYXJnZXQgZW5jb2RpbmcgKyA1LWZvbGQgQ1YiLCJHb29kIHNpZ25hbCwgcmVkdWNlZCBsZWFrYWdlIiwiQ29tcGxleCBwaXBlbGluZSwgc3RpbGwgc29tZSBsZWFrYWdlIiwiTG93LW1vZGVyYXRlIl0sWyJDYXRCb29zdCBvcmRlcmVkIHN0YXRpc3RpY3MiLCJObyBsZWFrYWdlLCBMYXBsYWNlIHNtb290aGluZyBmb3IgcmFyZSBjYXRzIiwiQ2F0Qm9vc3Qtc3BlY2lmaWMsIG5vdCBleHBvcnRhYmxlIiwiTm9uZSDigJQgb3JkZXJlZCBieSBkZXNpZ24iXV19LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IldoZW4gQ2F0Qm9vc3QgV2lucyBhbmQgUHJhY3RpY2FsIFRpcHMifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkNhdEJvb3N0IHRlbmRzIHRvIG91dHBlcmZvcm0gb3RoZXIgYm9vc3RpbmcgZnJhbWV3b3JrcyB3aGVuOiAoMSkgdGhlIGRhdGFzZXQgaGFzIG1hbnkgaGlnaC1jYXJkaW5hbGl0eSBjYXRlZ29yaWNhbCBmZWF0dXJlczsgKDIpIHRoZSBkYXRhc2V0IGlzIHNtYWxsIChvcmRlcmVkIGJvb3N0aW5nXHUwMDI3cyB1bmJpYXNlZG5lc3MgaXMgbW9zdCB2YWx1YWJsZSk7ICgzKSBtaW5pbWFsIHByZXByb2Nlc3NpbmcgaXMgZGVzaXJlZC4gT24gZnVsbHkgbnVtZXJpY2FsIGRhdGFzZXRzIHdpdGggbGFyZ2UgbiwgTGlnaHRHQk0gaXMgb2Z0ZW4gZmFzdGVyLiBPbiBkYXRhc2V0cyByZXF1aXJpbmcgZXhhY3QgcmVwbGljYXRpb24gb3IgbGFyZ2UgU0hBUCBjb21tdW5pdGllcywgWEdCb29zdCBoYXMgYSBtb3JlIG1hdHVyZSBlY29zeXN0ZW0uIEZvciBwcm9kdWN0aW9uIHN5c3RlbXMgd2l0aCBtaXhlZCBjYXRlZ29yaWNhbC9udW1lcmljYWwgZGF0YSBhbmQgbW9kZXJhdGUgc2l6ZSwgQ2F0Qm9vc3QgaXMgb2Z0ZW4gdGhlIGJlc3Qgc3RhcnRpbmcgcG9pbnQgcmVxdWlyaW5nIHRoZSBsZWFzdCBmZWF0dXJlIGVuZ2luZWVyaW5nLiJ9LHsidHlwZSI6Imxpc3QiLCJvcmRlcmVkIjpmYWxzZSwiaXRlbXMiOlsiUGFzcyBjYXRfZmVhdHVyZXMgYnkgbmFtZSBvciBpbmRleCDigJQgQ2F0Qm9vc3QgaGFuZGxlcyBhbGwgZW5jb2RpbmcgaW50ZXJuYWxseSB3aXRoIG9yZGVyZWQgc3RhdGlzdGljcy4iLCJVc2UgZWFybHlfc3RvcHBpbmdfcm91bmRzPTUwIHdpdGggYW4gZXZhbF9zZXQgdG8gZmluZCBvcHRpbWFsIGl0ZXJhdGlvbnMgd2l0aG91dCBncmlkIHNlYXJjaC4iLCJDYXRCb29zdFx1MDAyN3MgZGVmYXVsdCBoeXBlcnBhcmFtZXRlcnMgYXJlIHdlbGwtdHVuZWQg4oCUIHRlc3Qgd2l0aG91dCB0dW5pbmcgZmlyc3QsIHRoZW4gdHVuZSBkZXB0aCBhbmQgbDJfbGVhZl9yZWcuIiwiRm9yIGltYmFsYW5jZWQgY2xhc3NpZmljYXRpb24sIHNldCBhdXRvX2NsYXNzX3dlaWdodHM9XHUwMDI3QmFsYW5jZWRcdTAwMjcgdG8gdXB3ZWlnaHQgdGhlIG1pbm9yaXR5IGNsYXNzLiIsIlNhdmUgbW9kZWxzIHdpdGggbW9kZWwuc2F2ZV9tb2RlbChcdTAwMjdjYi5jYm1cdTAwMjcpIGZvciBlZmZpY2llbnQgQysrIGluZmVyZW5jZSB3aXRob3V0IFB5dGhvbiBydW50aW1lLiIsIkdQVSB0cmFpbmluZzogc2V0IHRhc2tfdHlwZT1cdTAwMjdHUFVcdTAwMjcgYW5kIGRldmljZXM9XHUwMDI3MFx1MDAyNyDigJQgcmVxdWlyZXMgQ1VEQSB0b29sa2l0OyBzdXBwb3J0cyBvYmxpdmlvdXMgdHJlZXMgb25seS4iXX0seyJ0eXBlIjoiY2FsbG91dCIsInZhcmlhbnQiOiJ0aXAiLCJ0aXRsZSI6IkNhdEJvb3N0IERlZmF1bHQgSHlwZXJwYXJhbWV0ZXJzIEFyZSBTdHJvbmciLCJjb250ZW50IjoiVW5saWtlIFhHQm9vc3QgYW5kIExpZ2h0R0JNIHdoaWNoIG9mdGVuIHJlcXVpcmUgc2lnbmlmaWNhbnQgdHVuaW5nLCBDYXRCb29zdFx1MDAyN3MgZGVmYXVsdHMg4oCUIGRlcHRoPTYsIGxlYXJuaW5nX3JhdGU9MC4wMywgaXRlcmF0aW9ucz0xMDAwIHdpdGggZWFybHkgc3RvcHBpbmcg4oCUIGFyZSBjb21wZXRpdGl2ZSBhY3Jvc3MgYSB3aWRlIHJhbmdlIG9mIHRhYnVsYXIgZGF0YXNldHMuIFRoZSBvcmRlcmVkIGJvb3N0aW5nIHJlZHVjZXMgb3ZlcmZpdHRpbmcgYXV0b21hdGljYWxseSwgc28gYWdncmVzc2l2ZSByZWd1bGFyaXNhdGlvbiB0dW5pbmcgaXMgbGVzcyBjcml0aWNhbC4gU3RhcnQgd2l0aCBkZWZhdWx0cywgdGhlbiB0dW5lIG9ubHkgZGVwdGggYW5kIGwyX2xlYWZfcmVnIGlmIG5lZWRlZC4ifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkNhdEJvb3N0XHUwMDI3cyBvcmRlcmVkIGJvb3N0aW5nIGFuZCBuYXRpdmUgY2F0ZWdvcmljYWwgc3VwcG9ydCByZXByZXNlbnQgYSBwcmluY2lwbGVkIHNvbHV0aW9uIHRvIHR3byBvZiB0aGUgbW9zdCBjb21tb24gcHJhY3RpY2FsIHByb2JsZW1zIGluIGdyYWRpZW50IGJvb3N0aW5nOiBvdmVyZml0dGluZyBvbiBzbWFsbCBkYXRhc2V0cyBhbmQgdGhlIG5lZWQgZm9yIGV4dGVuc2l2ZSBjYXRlZ29yaWNhbCBwcmVwcm9jZXNzaW5nLiBXaGlsZSBYR0Jvb3N0IGFuZCBMaWdodEdCTSByZW1haW4gc3Ryb25nIGFsdGVybmF0aXZlcywgQ2F0Qm9vc3RcdTAwMjdzIG91dC1vZi10aGUtYm94IHBlcmZvcm1hbmNlLCBlc3BlY2lhbGx5IG9uIGRhdGFzZXRzIHdpdGggY2F0ZWdvcmljYWwgdmFyaWFibGVzLCBtYWtlcyBpdCB0aGUgcHJlZmVycmVkIHN0YXJ0aW5nIHBvaW50IGZvciBtYW55IHJlYWwtd29ybGQgdGFidWxhciBtYWNoaW5lIGxlYXJuaW5nIHRhc2tzLiJ9LHsidHlwZSI6ImRpdmlkZXIifV0="
+---
+# CatBoost — Ordered Boosting and Categorical Features
+
+CatBoost is a gradient boosting library developed by Yandex that introduces two key innovations: ordered boosting to prevent prediction shift (a subtle form of target leakage in standard gradient boosting), and native categorical feature support via ordered target statistics. These improvements make CatBoost particularly strong out-of-the-box — it often requires less tuning than XGBoost or LightGBM and achieves competitive accuracy without manual encoding of categorical variables.
+
+## Prediction Shift in Standard Gradient Boosting
+
+In standard gradient boosting, when computing the residual for sample i in iteration t, the model f_{t-1} was partially trained on sample i itself. This creates a circular dependency: the gradient target for sample i is computed from a model that has already 'seen' i, producing overconfident leaf values. This is called prediction shift: the distribution of gradient targets used during training differs from the distribution at test time. The effect is strongest for samples in small leaves and on small datasets where each sample has outsized influence on the tree.
+
+## Ordered Boosting — Fixing Prediction Shift
+
+CatBoost addresses prediction shift with ordered boosting. Before training, a random permutation σ of the training samples is drawn. When computing the residual for sample σ(i) at step t, only the samples σ(1), ..., σ(i-1) that precede it in the permutation are used to build the model f_{t-1}. This ensures each sample's residual is computed from a model that has never seen that sample — exactly the unbiased condition required for clean gradient targets. In practice, CatBoost maintains several permutations and model copies to reduce variance from a single permutation choice.
+
+> **Why Ordered Boosting Matters**: Standard GB uses sample i to both build the model and evaluate its residual — a circular dependency. Ordered boosting breaks this by ensuring each sample's gradient is computed from a model trained only on preceding samples in a random permutation. This is analogous to time-series cross-validation applied to every sample, and it produces better-calibrated leaf values, especially on small datasets where prediction shift is most severe.
+
+## Oblivious Trees
+
+CatBoost uses oblivious (symmetric) decision trees as base learners. Unlike standard CART trees where each node can use a different split feature and threshold, oblivious trees apply the same split condition at every node of a given depth level. A depth-d oblivious tree is fully described by d (feature, threshold) pairs. Prediction is O(depth) — a sample traverses the tree by evaluating d conditions and indexing into a lookup table of 2^d leaves. This enables very fast prediction (cache-friendly, no branching) and also acts as a regulariser: oblivious trees are less expressive than asymmetric trees, which reduces variance.
+
+## Native Categorical Feature Handling
+
+Standard target encoding computes mean(y | category=c) using the full training set — this leaks the target for each sample into its own encoding. CatBoost uses ordered target statistics: for sample σ(i) in category c, the encoding is mean(y | category=c, j < i in permutation σ), plus Laplace smoothing to handle rare categories. Combined with ordered boosting, this gives completely unbiased categorical encodings. CatBoost also automatically detects combinations of categorical features (interaction terms), which would be expensive to create manually.
+
+```python
+import numpy as np
+import pandas as pd
+from catboost import CatBoostClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+
+np.random.seed(42)
+n = 1000
+df = pd.DataFrame({
+    'city':   np.random.choice(['NYC', 'LA', 'Chicago', 'Houston', 'Phoenix'], n),
+    'device': np.random.choice(['mobile', 'desktop', 'tablet'], n),
+    'age':    np.random.randint(18, 70, n),
+    'income': np.random.exponential(50000, n),
+})
+df['label'] = ((df['income'] > 50000) & (df['age'] > 30)).astype(int)
+df['label'] ^= np.random.binomial(1, 0.1, n)
+
+X = df.drop('label', axis=1)
+y = df['label']
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Pass categorical feature names directly — no encoding needed
+model = CatBoostClassifier(
+    iterations=300, depth=6, learning_rate=0.05,
+    cat_features=['city', 'device'], verbose=0, random_seed=42
+)
+model.fit(X_tr, y_tr)
+preds = model.predict(X_te)
+print(f'CatBoost accuracy: {accuracy_score(y_te, preds):.4f}')
+print('Feature importances:', dict(zip(X.columns, model.get_feature_importance().round(2))))
+```
+
+```python
+import numpy as np
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import log_loss
+from catboost import CatBoostClassifier
+
+# Compare ordered vs plain boosting — measure overfitting gap
+np.random.seed(0)
+X, y = make_classification(n_samples=300, n_features=20, n_informative=10,
+                            n_redundant=5, random_state=0)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.3, random_state=0)
+
+for boosting_type in ['Ordered', 'Plain']:
+    m = CatBoostClassifier(
+        iterations=500, depth=6, learning_rate=0.05,
+        boosting_type=boosting_type, verbose=0, random_seed=42
+    )
+    m.fit(X_tr, y_tr, eval_set=(X_te, y_te))
+    tr_loss = log_loss(y_tr, m.predict_proba(X_tr))
+    te_loss = log_loss(y_te, m.predict_proba(X_te))
+    print(f'{boosting_type:8s}: train={tr_loss:.4f}  test={te_loss:.4f}  '
+          f'gap={te_loss - tr_loss:.4f}')
+```
+
+```python
+import numpy as np
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+from catboost import CatBoostClassifier
+
+try:
+    from xgboost import XGBClassifier
+    from lightgbm import LGBMClassifier
+    has_others = True
+except ImportError:
+    has_others = False
+
+np.random.seed(42)
+X, y = make_classification(n_samples=2000, n_features=30, n_informative=15,
+                            n_redundant=8, random_state=42)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.25, random_state=42)
+
+cb = CatBoostClassifier(iterations=400, depth=6, learning_rate=0.05,
+                         verbose=0, random_seed=42)
+cb.fit(X_tr, y_tr)
+print(f'CatBoost : {accuracy_score(y_te, cb.predict(X_te)):.4f}')
+
+if has_others:
+    xgb = XGBClassifier(n_estimators=400, max_depth=6, learning_rate=0.05,
+                         eval_metric='logloss', verbosity=0, random_state=42)
+    xgb.fit(X_tr, y_tr)
+    print(f'XGBoost  : {accuracy_score(y_te, xgb.predict(X_te)):.4f}')
+    lgbm = LGBMClassifier(n_estimators=400, max_depth=6, learning_rate=0.05,
+                           verbose=-1, random_state=42)
+    lgbm.fit(X_tr, y_tr)
+    print(f'LightGBM : {accuracy_score(y_te, lgbm.predict(X_te)):.4f}')
+```
+
+```python
+import numpy as np
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+from catboost import CatBoostClassifier, Pool
+
+try:
+    import shap
+    has_shap = True
+except ImportError:
+    has_shap = False
+
+np.random.seed(42)
+X, y = make_classification(n_samples=1000, n_features=10, n_informative=6, random_state=42)
+feature_names = [f'feat_{i}' for i in range(X.shape[1])]
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
+
+model = CatBoostClassifier(iterations=200, depth=5, learning_rate=0.1,
+                            verbose=0, random_seed=42)
+model.fit(X_tr, y_tr)
+
+# Built-in feature importance
+fi = model.get_feature_importance(type='PredictionValuesChange')
+for name, imp in sorted(zip(feature_names, fi), key=lambda x: -x[1])[:5]:
+    print(f'  {name}: {imp:.3f}')
+
+if has_shap:
+    explainer = shap.TreeExplainer(model)
+    shap_vals = explainer.shap_values(Pool(X_te, label=y_te))
+    mean_abs_shap = np.abs(shap_vals).mean(axis=0)
+    top = sorted(zip(feature_names, mean_abs_shap), key=lambda x: -x[1])[:5]
+    print('Top SHAP:', [(n, round(v, 4)) for n, v in top])
+```
+
+## GPU Training and Key Hyperparameters
+
+CatBoost supports GPU training via task_type='GPU', which provides 40–100x speedup on large datasets. Key hyperparameters: iterations (total trees — use 1000+ with early stopping rather than tuning a small number), depth (6 is a strong default; oblivious trees are already regularised so depth 8-10 is feasible), learning_rate (default 0.03 is conservative; raise to 0.1 with fewer iterations for speed), l2_leaf_reg (L2 regularisation on leaf values). Use early_stopping_rounds=50 with an eval_set to prevent overfitting without grid-searching iterations.
+
+| Encoding Method | Pros | Cons | Leakage Risk |
+| --- | --- | --- | --- |
+| One-hot encoding | No leakage, simple | High cardinality → huge dimensionality | None |
+| Ordinal encoding | Compact, fast | Imposes false ordering on unordered categories | None |
+| Mean target encoding (global) | Compact, captures target signal | Severely overfits rare categories | High — sample uses own label |
+| Target encoding + 5-fold CV | Good signal, reduced leakage | Complex pipeline, still some leakage | Low-moderate |
+| CatBoost ordered statistics | No leakage, Laplace smoothing for rare cats | CatBoost-specific, not exportable | None — ordered by design |
+
+## When CatBoost Wins and Practical Tips
+
+CatBoost tends to outperform other boosting frameworks when: (1) the dataset has many high-cardinality categorical features; (2) the dataset is small (ordered boosting's unbiasedness is most valuable); (3) minimal preprocessing is desired. On fully numerical datasets with large n, LightGBM is often faster. On datasets requiring exact replication or large SHAP communities, XGBoost has a more mature ecosystem. For production systems with mixed categorical/numerical data and moderate size, CatBoost is often the best starting point requiring the least feature engineering.
+
+- Pass cat_features by name or index — CatBoost handles all encoding internally with ordered statistics.
+- Use early_stopping_rounds=50 with an eval_set to find optimal iterations without grid search.
+- CatBoost's default hyperparameters are well-tuned — test without tuning first, then tune depth and l2_leaf_reg.
+- For imbalanced classification, set auto_class_weights='Balanced' to upweight the minority class.
+- Save models with model.save_model('cb.cbm') for efficient C++ inference without Python runtime.
+- GPU training: set task_type='GPU' and devices='0' — requires CUDA toolkit; supports oblivious trees only.
+
+> **CatBoost Default Hyperparameters Are Strong**: Unlike XGBoost and LightGBM which often require significant tuning, CatBoost's defaults — depth=6, learning_rate=0.03, iterations=1000 with early stopping — are competitive across a wide range of tabular datasets. The ordered boosting reduces overfitting automatically, so aggressive regularisation tuning is less critical. Start with defaults, then tune only depth and l2_leaf_reg if needed.
+
+CatBoost's ordered boosting and native categorical support represent a principled solution to two of the most common practical problems in gradient boosting: overfitting on small datasets and the need for extensive categorical preprocessing. While XGBoost and LightGBM remain strong alternatives, CatBoost's out-of-the-box performance, especially on datasets with categorical variables, makes it the preferred starting point for many real-world tabular machine learning tasks.
+
+---
+

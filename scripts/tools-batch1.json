@@ -1,0 +1,368 @@
+[
+  {
+    "slug": "pytorch-fundamentals",
+    "title": "PyTorch — Autograd, Tensors, nn.Module, and DataLoader",
+    "description": "PyTorch core primitives: tensor operations with autograd, building models with nn.Module, loading data with DataLoader, and writing a complete training loop.",
+    "tags": ["pytorch", "tools", "classical-ml"],
+    "topic": "classical-ml",
+    "status": "published",
+    "updated": "2026-07-10",
+    "blocks": [
+      {"type": "text", "content": "PyTorch is the dominant deep learning framework for research and increasingly for production. Its core design — eager execution, dynamic graphs, Pythonic API — makes debugging natural and custom architectures straightforward. Understanding the four primitives (tensors, autograd, nn.Module, DataLoader) unlocks everything else."},
+      {"type": "heading", "level": 2, "content": "Tensors and Data Types"},
+      {"type": "text", "content": "A torch.Tensor is an N-dimensional array backed by a contiguous block of memory, with a dtype (float32, float16, bfloat16, int64, bool), a device (cpu, cuda, mps), and optional autograd tracking via requires_grad. Operations on tensors with requires_grad=True are recorded into a computational graph."},
+      {"type": "list", "ordered": false, "items": [
+        "float32: default dtype for model weights — 32-bit IEEE 754, safe for most operations",
+        "float16: 16-bit reduced precision — faster on tensor cores, risks overflow (max ~65504)",
+        "bfloat16: 16-bit with same exponent range as float32 — preferred for training on A100/H100",
+        "Leaf tensors: tensors created by the user (not by operations) — only these accumulate .grad",
+        "Non-leaf tensors: outputs of operations — their .grad is not retained unless retain_grad() called",
+        "Device movement: tensor.to('cuda'), tensor.cuda(), tensor.cpu() — always synchronous"
+      ]},
+      {"type": "heading", "level": 2, "content": "Tensors and Autograd from Scratch"},
+      {"type": "text", "content": "The computational graph is built dynamically during the forward pass. Calling .backward() on a scalar traverses this graph in reverse, computing gradients via chain rule and accumulating them in .grad of each leaf tensor."},
+      {"type": "code", "language": "python", "content": "import torch\nimport torch.nn as nn\n\n# Basic tensor with gradient tracking\nx = torch.tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)\nW = torch.tensor([[0.5, -0.5], [1.0, 0.3]], requires_grad=True)\n\n# Forward pass — builds computational graph\nz = x @ W          # matrix multiply\nloss = z.sum()     # scalar loss\n\n# Backward pass — traverses graph, fills .grad\nloss.backward()\nprint('x.grad:', x.grad)   # dl/dx\nprint('W.grad:', W.grad)   # dl/dW\n\n# Critical: zero gradients before next backward pass\n# (gradients accumulate by default — a common bug)\nx.grad.zero_()\nW.grad.zero_()\n\n# torch.no_grad() for inference — no graph, lower memory\nwith torch.no_grad():\n    z_inf = x @ W\n    print('Requires grad (inference):', z_inf.requires_grad)  # False\n\n# Detach a tensor from the graph (used in RL, GAN targets)\nz_detached = z.detach()\nprint('Detached requires grad:', z_detached.requires_grad)  # False"},
+      {"type": "heading", "level": 2, "content": "Building Models with nn.Module"},
+      {"type": "text", "content": "nn.Module is the base class for all neural network layers and models. It tracks parameters automatically, supports device movement via .to(), and provides state_dict() for serialization. Every custom layer subclasses nn.Module and implements forward()."},
+      {"type": "code", "language": "python", "content": "import torch\nimport torch.nn as nn\nimport torch.nn.functional as F\n\nclass ResidualBlock(nn.Module):\n    def __init__(self, dim: int, dropout: float = 0.1):\n        super().__init__()\n        self.fc1    = nn.Linear(dim, dim * 2)\n        self.fc2    = nn.Linear(dim * 2, dim)\n        self.norm1  = nn.LayerNorm(dim)\n        self.norm2  = nn.LayerNorm(dim)\n        self.drop   = nn.Dropout(dropout)\n\n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        residual = x\n        x = self.norm1(x)\n        x = F.gelu(self.fc1(x))\n        x = self.drop(x)\n        x = self.fc2(x)\n        return self.norm2(x + residual)  # residual connection\n\nclass TabularMLP(nn.Module):\n    def __init__(self, n_in: int, n_out: int, depth: int = 3, width: int = 256):\n        super().__init__()\n        self.input_proj = nn.Linear(n_in, width)\n        self.blocks     = nn.ModuleList([ResidualBlock(width) for _ in range(depth)])\n        self.head       = nn.Linear(width, n_out)\n\n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        x = self.input_proj(x)\n        for block in self.blocks:\n            x = block(x)\n        return self.head(x)\n\nmodel = TabularMLP(n_in=20, n_out=2)\nprint(f'Parameters: {sum(p.numel() for p in model.parameters()):,}')\nprint(model)"},
+      {"type": "heading", "level": 2, "content": "Custom Dataset and DataLoader"},
+      {"type": "text", "content": "DataLoader wraps a Dataset, handles batching, shuffling, and parallel loading. Implementing __len__ and __getitem__ is all that is required for a custom Dataset. pin_memory=True and num_workers>0 are key for GPU training throughput."},
+      {"type": "code", "language": "python", "content": "import torch\nfrom torch.utils.data import Dataset, DataLoader\nimport numpy as np\nfrom sklearn.preprocessing import StandardScaler\n\nclass TabularDataset(Dataset):\n    def __init__(self, X: np.ndarray, y: np.ndarray, scaler=None, fit_scaler=False):\n        if scaler is None:\n            scaler = StandardScaler()\n        if fit_scaler:\n            X = scaler.fit_transform(X)\n        else:\n            X = scaler.transform(X)\n        self.X      = torch.FloatTensor(X)\n        self.y      = torch.LongTensor(y)\n        self.scaler = scaler\n\n    def __len__(self) -> int:\n        return len(self.X)\n\n    def __getitem__(self, idx: int):\n        return self.X[idx], self.y[idx]\n\n# Usage\nfrom sklearn.datasets import make_classification\nX, y = make_classification(n_samples=5000, n_features=20, random_state=42)\n\ntrain_ds = TabularDataset(X[:4000], y[:4000], fit_scaler=True)\nval_ds   = TabularDataset(X[4000:], y[4000:], scaler=train_ds.scaler)\n\ntrain_loader = DataLoader(train_ds, batch_size=256, shuffle=True,\n                          num_workers=0, pin_memory=False)\nval_loader   = DataLoader(val_ds,   batch_size=512, shuffle=False)\n\nfor X_batch, y_batch in train_loader:\n    print(f'Batch shape: {X_batch.shape}, dtype: {X_batch.dtype}')\n    break"},
+      {"type": "heading", "level": 2, "content": "Complete Training Loop"},
+      {"type": "text", "content": "A production training loop includes: gradient zeroing before each forward pass, model.eval() for validation (disables dropout/BatchNorm), a learning rate scheduler, and early stopping based on validation loss."},
+      {"type": "code", "language": "python", "content": "import torch\nimport torch.nn as nn\nfrom torch.optim.lr_scheduler import CosineAnnealingLR\n\ndef train_epoch(model, loader, optimizer, criterion, device):\n    model.train()\n    total_loss, correct, total = 0.0, 0, 0\n    for X_batch, y_batch in loader:\n        X_batch, y_batch = X_batch.to(device), y_batch.to(device)\n        optimizer.zero_grad(set_to_none=True)  # memory-efficient zero_grad\n        logits = model(X_batch)\n        loss   = criterion(logits, y_batch)\n        loss.backward()\n        nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)\n        optimizer.step()\n        total_loss += loss.item() * len(y_batch)\n        correct    += (logits.argmax(1) == y_batch).sum().item()\n        total      += len(y_batch)\n    return total_loss / total, correct / total\n\n@torch.no_grad()\ndef eval_epoch(model, loader, criterion, device):\n    model.eval()  # disables dropout and sets BN to eval mode\n    total_loss, correct, total = 0.0, 0, 0\n    for X_batch, y_batch in loader:\n        X_batch, y_batch = X_batch.to(device), y_batch.to(device)\n        logits = model(X_batch)\n        total_loss += criterion(logits, y_batch).item() * len(y_batch)\n        correct    += (logits.argmax(1) == y_batch).sum().item()\n        total      += len(y_batch)\n    return total_loss / total, correct / total"},
+      {"type": "divider"},
+      {"type": "heading", "level": 2, "content": "Key nn.Module Methods"},
+      {"type": "table", "headers": ["Method", "Purpose", "Common Usage"], "rows": [
+        ["forward(x)", "Define the computation", "Called via model(x), not model.forward(x)"],
+        ["parameters()", "Iterator over all trainable params", "optimizer = Adam(model.parameters())"],
+        ["state_dict()", "Ordered dict of all param tensors", "torch.save(model.state_dict(), path)"],
+        ["load_state_dict(d)", "Load saved weights", "model.load_state_dict(torch.load(path))"],
+        ["to(device)", "Move all params to device", "model.to('cuda') or model.cuda()"],
+        ["train() / eval()", "Set training vs inference mode", "Affects Dropout and BatchNorm behavior"],
+        ["named_parameters()", "Iterator over (name, param) pairs", "Inspecting or freezing specific layers"]
+      ]},
+      {"type": "callout", "variant": "tip", "title": "set_to_none=True in zero_grad", "content": "Using optimizer.zero_grad(set_to_none=True) sets gradient tensors to None instead of zeroing them. This avoids allocating memory for gradients that will be immediately overwritten, saving 10-20% GPU memory in large models. It is the default in recent PyTorch versions."},
+      {"type": "heading", "level": 2, "content": "Key Takeaways"},
+      {"type": "list", "ordered": false, "items": [
+        "torch.Tensor = N-dim array with dtype, device, and optional autograd (requires_grad=True for leaf tensors)",
+        "autograd builds the computational graph on the forward pass; .backward() computes gradients via reverse-mode AD",
+        "nn.Module tracks parameters automatically — implement forward(), use ModuleList/ModuleDict for submodules",
+        "DataLoader handles batching, shuffling, and parallel loading — set pin_memory=True and num_workers>0 for GPU",
+        "Training loop pattern: zero_grad → forward → loss → backward → clip_grad → step → scheduler.step"
+      ]}
+    ]
+  },
+  {
+    "slug": "pytorch-internals",
+    "title": "PyTorch Internals — Strides, Contiguous Memory, and Dispatch",
+    "description": "Under the hood of PyTorch: tensor storage layout, strides, non-contiguous tensors, the dispatcher, custom autograd Functions, TorchScript, and torch.fx.",
+    "tags": ["pytorch", "tools", "classical-ml"],
+    "topic": "classical-ml",
+    "status": "published",
+    "updated": "2026-07-10",
+    "blocks": [
+      {"type": "text", "content": "Most PyTorch users never need to think about tensor strides or the dispatcher — until performance degrades unexpectedly or a custom CUDA kernel must be integrated. Understanding how PyTorch stores tensors in memory, routes operations to backends, and traces computation graphs is essential for optimizing and extending the framework."},
+      {"type": "heading", "level": 2, "content": "Tensor Storage: Strides and Contiguity"},
+      {"type": "text", "content": "A PyTorch tensor is not just data — it is a view into a contiguous memory block defined by: storage (raw memory), offset (start position), shape (size per dimension), and strides (step size in memory to advance one element along each dimension)."},
+      {"type": "list", "ordered": false, "items": [
+        "Contiguous tensor: strides[i] = product of shape[i+1:] — elements stored in row-major (C) order",
+        "After transpose: strides swap — the data is the same, but the view is different (non-contiguous)",
+        "After narrow/slice: strides unchanged, offset shifts — another non-contiguous view",
+        ".is_contiguous() returns True only if strides match the expected C-order layout",
+        ".contiguous() forces a copy to a new contiguous allocation — needed before operations that require contiguous input",
+        "view() requires contiguous input; reshape() uses view if possible, otherwise copies"
+      ]},
+      {"type": "heading", "level": 2, "content": "Strides in Practice"},
+      {"type": "text", "content": "Understanding strides helps diagnose why certain operations are slow (non-contiguous memory access) and when reshape vs contiguous+view is needed."},
+      {"type": "code", "language": "python", "content": "import torch\n\n# Contiguous tensor: shape (3, 4)\nx = torch.arange(12).reshape(3, 4)\nprint(f'Shape:          {x.shape}')\nprint(f'Strides:        {x.stride()}')   # (4, 1) — row-major\nprint(f'Is contiguous:  {x.is_contiguous()}')\n\n# Transpose: same data, swapped strides\nx_t = x.T\nprint(f'\\nTransposed strides: {x_t.stride()}')  # (1, 4) — non-contiguous\nprint(f'Is contiguous:      {x_t.is_contiguous()}')\n\n# view() fails on non-contiguous tensor\ntry:\n    x_t.view(6, 2)\nexcept RuntimeError as e:\n    print(f'\\nview() error: {e}')\n\n# contiguous() creates a copy with correct strides\nx_t_contig = x_t.contiguous()\nprint(f'\\nAfter contiguous(), strides: {x_t_contig.stride()}')\nx_t_contig.view(6, 2)  # now works\n\n# reshape() = view if contiguous, else copy\nx_reshaped = x_t.reshape(6, 2)\nprint(f'x_reshaped shares storage: {x_reshaped.storage().data_ptr() == x_t.storage().data_ptr()}')"},
+      {"type": "heading", "level": 2, "content": "Custom Autograd Functions"},
+      {"type": "text", "content": "When a numerically stable or fused operation is needed that autograd cannot handle automatically, torch.autograd.Function lets you define both the forward computation and the exact backward (gradient) formula."},
+      {"type": "code", "language": "python", "content": "import torch\nfrom torch.autograd import Function\n\nclass StableSigmoid(Function):\n    \"\"\"Numerically stable sigmoid with saved output for backward.\"\"\"\n\n    @staticmethod\n    def forward(ctx, x: torch.Tensor) -> torch.Tensor:\n        # Numerically stable: use negative exponential for positive x\n        sig = torch.where(x >= 0,\n                          1 / (1 + torch.exp(-x)),\n                          torch.exp(x) / (1 + torch.exp(x)))\n        ctx.save_for_backward(sig)  # save output for backward pass\n        return sig\n\n    @staticmethod\n    def backward(ctx, grad_output: torch.Tensor) -> torch.Tensor:\n        sig, = ctx.saved_tensors\n        # d/dx sigmoid(x) = sigmoid(x) * (1 - sigmoid(x))\n        return grad_output * sig * (1 - sig)\n\n# Register as a callable function\nstable_sigmoid = StableSigmoid.apply\n\n# Test: compare with torch.sigmoid\nx = torch.randn(5, requires_grad=True)\nout_custom = stable_sigmoid(x)\nout_custom.sum().backward()\nprint('Custom gradient:', x.grad)\n\nx2 = x.detach().clone().requires_grad_(True)\ntorch.sigmoid(x2).sum().backward()\nprint('Torch gradient: ', x2.grad)\nprint('Match:', torch.allclose(x.grad, x2.grad, atol=1e-6))"},
+      {"type": "heading", "level": 2, "content": "TorchScript — Tracing vs Scripting"},
+      {"type": "text", "content": "TorchScript compiles Python code to a portable IR (intermediate representation) that can be serialized, optimized, and deployed without a Python interpreter — essential for mobile and C++ serving. Two modes: trace (records operations on a sample input) and script (analyzes Python source code statically)."},
+      {"type": "code", "language": "python", "content": "import torch\nimport torch.nn as nn\n\nclass SimpleNet(nn.Module):\n    def __init__(self, dim: int):\n        super().__init__()\n        self.fc = nn.Linear(dim, dim)\n\n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        return torch.relu(self.fc(x))\n\nmodel = SimpleNet(64)\nmodel.eval()\n\n# Method 1: torch.jit.trace — records operations on a sample input\nsample = torch.randn(1, 64)\ntraced = torch.jit.trace(model, sample)\ntraced.save('model_traced.pt')  # portable serialized model\nprint('Traced output:', traced(sample).shape)\n\n# Method 2: torch.jit.script — analyzes Python AST, supports control flow\n@torch.jit.script\ndef conditional_op(x: torch.Tensor, flag: bool) -> torch.Tensor:\n    if flag:  # control flow preserved in scripted IR\n        return torch.relu(x)\n    else:\n        return torch.sigmoid(x)\n\nprint('Script with flag=True: ', conditional_op(torch.randn(3), True))\nprint('Script with flag=False:', conditional_op(torch.randn(3), False))\n\n# Load and run traced model in a new session (no model definition needed)\nloaded = torch.jit.load('model_traced.pt')\nprint('Loaded model output:', loaded(sample).shape)"},
+      {"type": "heading", "level": 2, "content": "torch.fx — Graph Capture and Manipulation"},
+      {"type": "text", "content": "torch.fx captures the symbolic execution trace of a nn.Module as an explicit graph (FX IR). This graph can be inspected, transformed, and compiled — the foundation for torch.compile's Dynamo tracing."},
+      {"type": "code", "language": "python", "content": "import torch\nimport torch.nn as nn\nimport torch.fx as fx\n\nclass SmallNet(nn.Module):\n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        x = torch.relu(x)\n        x = x * 2.0\n        return x.sum(dim=-1)\n\nmodel = SmallNet()\n\n# Capture the FX graph by symbolic tracing\ngraph_module = fx.symbolic_trace(model)\n\nprint('=== FX Graph Nodes ===')\nfor node in graph_module.graph.nodes:\n    print(f'  {node.op:<15} {node.name:<20} target={node.target}')\n\n# Example transformation: replace relu with gelu\nfor node in graph_module.graph.nodes:\n    if node.op == 'call_function' and node.target == torch.relu:\n        node.target = torch.nn.functional.gelu\n        print(f'\\nReplaced relu -> gelu in node: {node.name}')\n\ngraph_module.recompile()  # regenerate Python code from modified graph\nx_test = torch.randn(4, 8)\nout = graph_module(x_test)\nprint(f'Output after transformation: {out.shape}')"},
+      {"type": "divider"},
+      {"type": "heading", "level": 2, "content": "Tensor Operations: Views vs Copies"},
+      {"type": "table", "headers": ["Operation", "Copies Data", "Stride Change", "Requires Contiguous", "When to Use"], "rows": [
+        ["view(shape)", "No — zero-copy", "Yes (recomputed)", "Yes", "Reshape contiguous tensors efficiently"],
+        ["reshape(shape)", "Only if needed", "Yes", "No (copies if needed)", "General reshape — prefer over view"],
+        ["transpose(d0, d1)", "No — zero-copy", "Yes (swapped)", "No", "Swap two dimensions; check contiguity after"],
+        ["permute(dims)", "No — zero-copy", "Yes (reordered)", "No", "Arbitrary dimension reordering"],
+        ["contiguous()", "Yes if needed", "Reset to C-order", "N/A", "Before view() or kernel requiring contig input"]
+      ]},
+      {"type": "callout", "variant": "warning", "title": "Non-Contiguous Tensors and Kernel Performance", "content": "CUDA kernels assume contiguous memory for maximum throughput. Operating on a non-contiguous tensor (e.g., after transpose) forces PyTorch to either copy the tensor first or use a slower generic kernel. Profile with torch.profiler if you observe unexpected slowdowns — a single .contiguous() call before a compute-heavy operation often resolves it."},
+      {"type": "heading", "level": 2, "content": "Key Takeaways"},
+      {"type": "list", "ordered": false, "items": [
+        "Tensors are (storage, offset, shape, strides) — transpose and slice create non-contiguous views without copying",
+        ".contiguous() forces a copy to C-order memory — required before view() and many CUDA kernels",
+        "Custom autograd Functions: define forward + backward explicitly with ctx.save_for_backward",
+        "TorchScript trace records operations on a sample; script parses Python AST — script supports control flow, trace does not",
+        "torch.fx captures the execution graph as an editable IR — foundation for compile-time optimizations"
+      ]}
+    ]
+  },
+  {
+    "slug": "torch-compile",
+    "title": "torch.compile — Dynamo Tracing and Inductor Code Generation",
+    "description": "torch.compile wraps Python model code in three optimization stages — Dynamo bytecode analysis, AOT Autograd, and Inductor kernel generation — delivering 1.5–4x speedup with one line of code.",
+    "tags": ["pytorch", "tools", "classical-ml"],
+    "topic": "classical-ml",
+    "status": "published",
+    "updated": "2026-07-10",
+    "blocks": [
+      {"type": "text", "content": "torch.compile (PyTorch 2.0+) transforms eager Python model code into optimized compiled kernels without requiring model rewrites. A single decorator — @torch.compile or torch.compile(model) — triggers three compilation stages that fuse operators, eliminate Python overhead, and generate hardware-optimized CUDA/Triton or C++ code."},
+      {"type": "heading", "level": 2, "content": "Three Compilation Stages"},
+      {"type": "text", "content": "Understanding each stage clarifies what torch.compile can and cannot optimize, and why graph breaks occur."},
+      {"type": "list", "ordered": false, "items": [
+        "Stage 1 — TorchDynamo: Python bytecode analysis; identifies compilable subgraphs; generates an FX graph; creates a graph break when Python control flow or side effects prevent tracing",
+        "Stage 2 — AOT Autograd: captures the backward graph ahead of time (not lazily at backward() call); fuses forward and backward into a single compiled artifact",
+        "Stage 3 — TorchInductor: takes the FX graph and generates optimized C++/OpenMP (CPU) or Triton (CUDA) kernels; performs operator fusion, memory layout optimization, and loop ordering",
+        "Graph breaks: points where Dynamo gives up and falls back to eager — common causes: Python print, data-dependent shapes, unsupported Python builtins",
+        "Compilation overhead: first forward pass triggers JIT compilation (seconds); subsequent calls use the compiled kernel (cached)"
+      ]},
+      {"type": "heading", "level": 2, "content": "Basic Usage and Speedup Measurement"},
+      {"type": "text", "content": "torch.compile wraps any callable — a model, a function, even a training step. The API is a single function call with no model modifications required."},
+      {"type": "code", "language": "python", "content": "import torch\nimport torch.nn as nn\nimport time\n\nclass DeepMLP(nn.Module):\n    def __init__(self, dim: int = 512, depth: int = 8):\n        super().__init__()\n        layers = []\n        for _ in range(depth):\n            layers += [nn.Linear(dim, dim), nn.LayerNorm(dim), nn.GELU()]\n        self.net = nn.Sequential(*layers)\n        self.head = nn.Linear(dim, 10)\n\n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        return self.head(self.net(x))\n\ndevice = 'cuda' if torch.cuda.is_available() else 'cpu'\nmodel_eager   = DeepMLP().to(device)\nmodel_compiled = torch.compile(model_eager, mode='default')\n\nx = torch.randn(256, 512, device=device)\n\n# Warm up both (compiled model JIT-compiles on first call)\nfor _ in range(3):\n    _ = model_eager(x)\n    _ = model_compiled(x)\n\nif device == 'cuda':\n    torch.cuda.synchronize()\n\nt0 = time.perf_counter()\nfor _ in range(100):\n    _ = model_eager(x)\nif device == 'cuda': torch.cuda.synchronize()\neager_t = time.perf_counter() - t0\n\nt0 = time.perf_counter()\nfor _ in range(100):\n    _ = model_compiled(x)\nif device == 'cuda': torch.cuda.synchronize()\ncompiled_t = time.perf_counter() - t0\n\nprint(f'Eager:    {eager_t*10:.2f} ms/iter')\nprint(f'Compiled: {compiled_t*10:.2f} ms/iter')\nprint(f'Speedup:  {eager_t/compiled_t:.2f}x')"},
+      {"type": "heading", "level": 2, "content": "Compilation Modes"},
+      {"type": "table", "headers": ["Mode", "Compile Time", "Runtime Speedup", "Best For", "Graph Break Handling"], "rows": [
+        ["default", "Seconds", "1.5–2x typical", "Balanced — first choice", "Allowed — falls back to eager"],
+        ["reduce-overhead", "Longer", "2–3x (CUDA graphs)", "Inference with fixed shapes", "Allowed — CUDA graph captures entire loop"],
+        ["max-autotune", "Minutes", "2–4x potential", "Production serving — fixed shapes", "Minimal — maximizes fusion"],
+        ["eager (no compile)", "None", "1x baseline", "Debugging graph breaks", "N/A — runs in Python"]
+      ]},
+      {"type": "heading", "level": 2, "content": "Understanding Graph Breaks"},
+      {"type": "text", "content": "A graph break occurs when Dynamo encounters Python code it cannot trace symbolically — typically data-dependent control flow, Python side effects, or unsupported operations. Each graph break adds overhead and reduces the optimization scope."},
+      {"type": "code", "language": "python", "content": "import torch\nimport torch._dynamo as dynamo\n\n# Model with a graph break (print is a side effect)\nclass BreakingModel(torch.nn.Module):\n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        x = torch.relu(x)\n        print(f'Shape: {x.shape}')  # <-- graph break! print is a Python side effect\n        return x * 2\n\n# Explain graph breaks without actually compiling\nmodel = BreakingModel()\nexplanation = dynamo.explain(model)(torch.randn(4, 8))\nprint(f'Number of graphs: {explanation.graph_count}')\nprint(f'Number of breaks: {explanation.break_reasons}')\n\n# Fixed model — remove print, use Tensor operations only\nclass FixedModel(torch.nn.Module):\n    def forward(self, x: torch.Tensor) -> torch.Tensor:\n        x = torch.relu(x)\n        return x * 2\n\nfixed_compiled = torch.compile(FixedModel())\nout = fixed_compiled(torch.randn(4, 8))\nprint(f'Output shape: {out.shape}')"},
+      {"type": "heading", "level": 2, "content": "CUDA Graph Capture with reduce-overhead"},
+      {"type": "text", "content": "CUDA graphs capture an entire sequence of GPU operations and replay them with a single CPU launch — eliminating per-kernel CPU-GPU synchronization overhead. The reduce-overhead compile mode does this automatically."},
+      {"type": "code", "language": "python", "content": "import torch\nimport torch.nn as nn\n\n# reduce-overhead: best for fixed-shape inference (no dynamic shapes)\nmodel = nn.Sequential(\n    nn.Linear(512, 256), nn.GELU(),\n    nn.Linear(256, 128), nn.GELU(),\n    nn.Linear(128, 10)\n)\n\ndevice = 'cuda' if torch.cuda.is_available() else 'cpu'\nmodel = model.to(device)\n\n# Compile with CUDA graph mode\ncompiled = torch.compile(model, mode='reduce-overhead')\n\nx = torch.randn(64, 512, device=device)\n\n# First few calls: warm up and capture the CUDA graph\nfor _ in range(5):\n    with torch.no_grad():\n        out = compiled(x)\n\nif device == 'cuda':\n    torch.cuda.synchronize()\n    print(f'GPU memory: {torch.cuda.memory_allocated()/1e6:.1f} MB')\n\n# Note: input shape must stay fixed for CUDA graph to be valid\n# Changing x.shape triggers recompilation\nprint(f'Output shape: {out.shape}')\nprint('CUDA graph captured and ready for fast inference')"},
+      {"type": "heading", "level": 2, "content": "Measuring Compilation Overhead"},
+      {"type": "text", "content": "torch.compile incurs a one-time compilation cost on the first call. Subsequent calls are fast. For short-running scripts, the compile overhead can outweigh the runtime benefit — compile is worth it only when the compiled kernel will be called many times."},
+      {"type": "code", "language": "python", "content": "import torch\nimport torch.nn as nn\nimport time\n\nmodel = nn.Sequential(\n    nn.Linear(256, 512), nn.GELU(),\n    nn.Linear(512, 256), nn.GELU(),\n    nn.Linear(256, 10)\n)\ndevice = 'cuda' if torch.cuda.is_available() else 'cpu'\nmodel = model.to(device)\ncompiled = torch.compile(model, mode='default')\n\nx = torch.randn(128, 256, device=device)\n\n# First call: triggers compilation (expensive)\nt0 = time.perf_counter()\nwith torch.no_grad():\n    _ = compiled(x)\nif device == 'cuda': torch.cuda.synchronize()\nfirst_call_t = time.perf_counter() - t0\n\n# Subsequent calls: use cached compiled kernel\ntimes = []\nfor _ in range(50):\n    t0 = time.perf_counter()\n    with torch.no_grad():\n        _ = compiled(x)\n    if device == 'cuda': torch.cuda.synchronize()\n    times.append(time.perf_counter() - t0)\n\nprint(f'First call (compile): {first_call_t*1000:.1f} ms')\nprint(f'Subsequent avg:       {sum(times)/len(times)*1000:.2f} ms')\nprint(f'Break-even at:        {int(first_call_t / (sum(times)/len(times)))} inference calls')"},
+      {"type": "divider"},
+      {"type": "callout", "variant": "info", "title": "When torch.compile Helps Most", "content": "torch.compile delivers the largest speedups for (1) models with many small operations that benefit from fusion (Transformers, attention), (2) training loops where AOT Autograd fuses forward+backward into one kernel sequence, and (3) models running on A100/H100 GPUs with Triton-compatible operations. Small models on CPU may see negligible or negative speedup due to compilation overhead."},
+      {"type": "heading", "level": 2, "content": "Key Takeaways"},
+      {"type": "list", "ordered": false, "items": [
+        "torch.compile has three stages: Dynamo (Python trace → FX graph), AOT Autograd (fused forward+backward), Inductor (Triton/C++ kernels)",
+        "Graph breaks reduce optimization scope — avoid Python print, data-dependent shapes, and side effects in compiled code",
+        "default mode: balanced first choice; reduce-overhead: CUDA graphs for fixed-shape inference; max-autotune: tuned kernels for production",
+        "First forward pass is slow (JIT compilation); subsequent calls use the cached compiled kernel",
+        "Use torch._dynamo.explain(model)(x) to diagnose graph breaks before optimizing"
+      ]}
+    ]
+  },
+  {
+    "slug": "mixed-precision-training",
+    "title": "Mixed Precision Training — FP16, BF16, and GradScaler",
+    "description": "Automatic mixed precision training: using FP16/BF16 for forward activations with FP32 master weights, gradient scaling to prevent underflow, and torch.autocast for seamless integration.",
+    "tags": ["pytorch", "tools", "classical-ml"],
+    "topic": "classical-ml",
+    "status": "published",
+    "updated": "2026-07-10",
+    "blocks": [
+      {"type": "text", "content": "Mixed precision training runs the forward pass in FP16 or BF16 while maintaining FP32 master weights. This delivers ~2x memory savings on activations and 2–8x compute speedup on tensor cores, with minimal accuracy degradation when combined with gradient scaling. It is now standard practice for training on modern GPUs."},
+      {"type": "list", "ordered": false, "items": [
+        "Memory saving: activations stored in FP16/BF16 use half the bytes — enables larger batch sizes or bigger models",
+        "Compute speedup: NVIDIA tensor cores perform FP16 GEMM at 2–8x the FP32 throughput",
+        "Master weights in FP32: optimizer states and weights stay in FP32 — accuracy preserved",
+        "Gradient scaling (FP16 only): multiply loss before backward, divide after — prevents gradient underflow",
+        "BF16 needs no scaling: same exponent range as FP32 — native on A100/H100/TPU"
+      ]},
+      {"type": "heading", "level": 2, "content": "FP32 vs FP16 vs BF16"},
+      {"type": "text", "content": "The three floating-point formats differ in exponent range and mantissa precision. These differences determine overflow risk, numerical stability, and which operations must stay in FP32."},
+      {"type": "table", "headers": ["Format", "Exponent bits", "Mantissa bits", "Range", "Precision", "Overflow risk", "GPU support", "Recommended use"], "rows": [
+        ["FP32", "8", "23", "~1.2e-38 to ~3.4e+38", "~7 decimal digits", "Very low", "All GPUs", "Master weights, loss accumulation"],
+        ["FP16", "5", "10", "~6e-8 to ~65504", "~3 decimal digits", "High (max=65504)", "V100, A100, H100, consumer", "Forward activations with GradScaler"],
+        ["BF16", "8", "7", "~1.2e-38 to ~3.4e+38", "~2 decimal digits", "Very low (FP32 range)", "A100, H100, TPU, newer Ampere", "Preferred for training — no scaler needed"]
+      ]},
+      {"type": "heading", "level": 2, "content": "torch.autocast and GradScaler"},
+      {"type": "text", "content": "torch.autocast automatically selects the appropriate dtype for each operation within its context — GEMM and convolutions run in FP16 for speed; loss functions and normalization stay in FP32 for stability. GradScaler multiplies the loss by a scale factor before backward() to prevent gradient underflow."},
+      {"type": "code", "language": "python", "content": "import torch\nimport torch.nn as nn\nfrom torch.cuda.amp import autocast, GradScaler\n\ndevice = 'cuda' if torch.cuda.is_available() else 'cpu'\n\nmodel     = nn.Sequential(nn.Linear(512, 256), nn.GELU(), nn.Linear(256, 10)).to(device)\noptimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)\nscaler    = GradScaler()  # manages dynamic loss scaling for FP16\n\nX = torch.randn(128, 512, device=device)\ny = torch.randint(0, 10, (128,), device=device)\ncriterion = nn.CrossEntropyLoss()\n\nfor step in range(5):\n    optimizer.zero_grad(set_to_none=True)\n\n    # autocast: forward pass in FP16 (or BF16 on Ampere)\n    with autocast(device_type=device, dtype=torch.float16):\n        logits = model(X)\n        loss   = criterion(logits, y)\n\n    # scaler.scale(): multiply loss by scale to prevent gradient underflow\n    scaler.scale(loss).backward()\n\n    # scaler.step(): unscale gradients, check for inf/nan, then optimizer step\n    # (skips step if inf/nan found — protects weights)\n    scaler.step(optimizer)\n\n    # scaler.update(): adjust scale factor for next step\n    scaler.update()\n\n    print(f'Step {step+1}: loss={loss.item():.4f}  scale={scaler.get_scale():.0f}')"},
+      {"type": "heading", "level": 2, "content": "Why GradScaler is Needed for FP16"},
+      {"type": "text", "content": "FP16 gradients underflow to zero when their magnitude is below ~6e-8. GradScaler prevents this by scaling up the loss before backward(), keeping gradients in the representable FP16 range, then unscaling before the optimizer update."},
+      {"type": "code", "language": "python", "content": "import torch\nimport torch.nn as nn\n\n# Demonstrate FP16 underflow without scaling\nx = torch.tensor([1e-5], dtype=torch.float16)\nprint(f'FP16 value 1e-5: {x.item()}')  # prints 0.0 — underflow!\n\nx_fp32 = torch.tensor([1e-5], dtype=torch.float32)\nprint(f'FP32 value 1e-5: {x_fp32.item()}')  # prints 1e-5 correctly\n\n# GradScaler behavior: scale loss by S, divide gradients by S after backward\nS = 65536.0  # typical initial scale value\nsmall_grad = torch.tensor([1e-5])  # would underflow in FP16\nscaled_grad = small_grad * S      # now within FP16 range\nprint(f'\\nScaled grad in FP16: {scaled_grad.to(torch.float16).item()}')\nprint(f'Unscaled:            {(scaled_grad.to(torch.float16) / S).item()}')\n\n# BF16 does NOT need GradScaler (same exponent range as FP32)\ndevice = 'cuda' if torch.cuda.is_available() else 'cpu'\nmodel = nn.Linear(10, 5).to(device)\nwith torch.autocast(device_type=device, dtype=torch.bfloat16):\n    out = model(torch.randn(4, 10, device=device))\nprint(f'\\nBF16 output dtype: {out.dtype}')  # bfloat16"},
+      {"type": "heading", "level": 2, "content": "BF16 vs FP16 Training Stability"},
+      {"type": "text", "content": "BF16 is preferred for training on Ampere (A100) and later GPUs because it has the same exponent range as FP32 — no overflow risk — with only reduced mantissa precision. No gradient scaling is needed. FP16 is still used where BF16 hardware support is unavailable."},
+      {"type": "code", "language": "python", "content": "import torch\nimport torch.nn as nn\nfrom torch.cuda.amp import autocast, GradScaler\nimport time\n\ndevice = 'cuda' if torch.cuda.is_available() else 'cpu'\n\ndef train_precision(dtype, use_scaler, n_steps=20):\n    model = nn.Sequential(\n        nn.Linear(1024, 512), nn.GELU(),\n        nn.Linear(512, 256), nn.GELU(),\n        nn.Linear(256, 10)\n    ).to(device)\n    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)\n    scaler    = GradScaler() if use_scaler else None\n    X = torch.randn(256, 1024, device=device)\n    y = torch.randint(0, 10, (256,), device=device)\n    criterion = nn.CrossEntropyLoss()\n    losses = []\n    t0 = time.perf_counter()\n    for _ in range(n_steps):\n        optimizer.zero_grad(set_to_none=True)\n        with autocast(device_type=device, dtype=dtype):\n            loss = criterion(model(X), y)\n        if scaler:\n            scaler.scale(loss).backward(); scaler.step(optimizer); scaler.update()\n        else:\n            loss.backward(); optimizer.step()\n        losses.append(loss.item())\n    elapsed = time.perf_counter() - t0\n    return losses[-1], elapsed\n\nfor name, dt, sc in [('FP32', torch.float32, False),\n                      ('FP16+scaler', torch.float16, True),\n                      ('BF16', torch.bfloat16, False)]:\n    final_loss, t = train_precision(dt, sc)\n    print(f'{name:<15}: final_loss={final_loss:.4f}  time={t:.2f}s')"},
+      {"type": "divider"},
+      {"type": "heading", "level": 2, "content": "Memory Profiling with Mixed Precision"},
+      {"type": "text", "content": "Mixed precision cuts activation memory roughly in half. The FP32 master weights and optimizer states remain, so the savings depend on the ratio of activation memory to parameter memory — larger batch sizes amplify the benefit."},
+      {"type": "code", "language": "python", "content": "import torch\nimport torch.nn as nn\nfrom torch.cuda.amp import autocast\n\nif not torch.cuda.is_available():\n    print('CUDA not available — skipping memory profiling')\nelse:\n    device = 'cuda'\n    model = nn.Sequential(\n        nn.Linear(2048, 1024), nn.GELU(),\n        nn.Linear(1024, 512), nn.GELU(),\n        nn.Linear(512, 10)\n    ).to(device)\n    X = torch.randn(512, 2048, device=device)\n\n    # FP32 baseline\n    torch.cuda.reset_peak_memory_stats()\n    out_fp32 = model(X)\n    fp32_mem = torch.cuda.max_memory_allocated() / 1e6\n    del out_fp32; torch.cuda.empty_cache()\n\n    # FP16 with autocast\n    torch.cuda.reset_peak_memory_stats()\n    with autocast(device_type='cuda', dtype=torch.float16):\n        out_fp16 = model(X)\n    fp16_mem = torch.cuda.max_memory_allocated() / 1e6\n    del out_fp16; torch.cuda.empty_cache()\n\n    print(f'FP32 peak memory: {fp32_mem:.1f} MB')\n    print(f'FP16 peak memory: {fp16_mem:.1f} MB')\n    print(f'Memory reduction: {100*(1-fp16_mem/fp32_mem):.1f}%')"},
+      {"type": "text", "content": "For production training pipelines, mixed precision is nearly always worth enabling. The memory savings allow larger batch sizes or models that would OOM in FP32, and the throughput increase shortens experiment iteration time. The one exception: very small models where the overhead of autocast context switching exceeds the compute savings."},
+      {"type": "callout", "variant": "info", "title": "BF16 for A100+ Training", "content": "On Ampere (A100) and later GPUs, use torch.autocast(device_type='cuda', dtype=torch.bfloat16) without a GradScaler. BF16 is numerically safer than FP16 (same exponent range as FP32) and equally fast on A100 tensor cores. FP16 with GradScaler remains necessary on Volta (V100) and older consumer GPUs."},
+      {"type": "heading", "level": 2, "content": "Key Takeaways"},
+      {"type": "list", "ordered": false, "items": [
+        "FP16 max value is ~65504 — gradients below ~6e-8 underflow to zero; GradScaler scales loss to keep gradients representable",
+        "BF16 has FP32's exponent range — no overflow or underflow risk; preferred for A100/H100 training without GradScaler",
+        "torch.autocast selects dtype per operation — GEMM/conv in FP16, normalization and loss in FP32 for stability",
+        "GradScaler workflow: scale(loss).backward() → step(optimizer) → update() → automatically adjusts scale factor",
+        "Mixed precision cuts activation memory ~2x and delivers 2–8x compute speedup via tensor core GEMM"
+      ]}
+    ]
+  },
+  {
+    "slug": "scikit-learn-pipeline",
+    "title": "Scikit-learn — Pipeline, ColumnTransformer, and Cross-Validation",
+    "description": "Scikit-learn's Pipeline and ColumnTransformer prevent data leakage, enable hyperparameter search over preprocessing, and compose mixed-type tabular transformations cleanly.",
+    "tags": ["pytorch", "tools", "classical-ml"],
+    "topic": "classical-ml",
+    "status": "published",
+    "updated": "2026-07-10",
+    "blocks": [
+      {"type": "text", "content": "Scikit-learn's Pipeline is the cornerstone of leak-free ML workflows: preprocessing steps are fitted only on training data and applied to validation/test data automatically. Combined with ColumnTransformer for mixed-type features and GridSearchCV for hyperparameter tuning, it provides a complete, reproducible ML pipeline in pure Python."},
+      {"type": "heading", "level": 2, "content": "Why Pipeline Prevents Data Leakage"},
+      {"type": "text", "content": "The most common source of data leakage is fitting a scaler or imputer on the entire dataset before cross-validation. Pipeline fixes this: during CV, fit() is called only on the training fold, and transform() is applied to the validation fold with the fitted parameters."},
+      {"type": "list", "ordered": false, "items": [
+        "Pipeline.fit(X_train, y_train): calls fit_transform on each step except the last, which calls fit",
+        "Pipeline.predict(X_test): calls transform on each preprocessing step, then predict on the estimator",
+        "Cross-validation with Pipeline: sklearn handles fold splitting and refitting automatically — no manual fit on train, transform on val",
+        "set_params API: Pipeline('step__param', value) allows grid search over any step's parameters",
+        "named_steps attribute: access individual fitted transformers for inspection"
+      ]},
+      {"type": "heading", "level": 2, "content": "Pipeline with ColumnTransformer"},
+      {"type": "text", "content": "ColumnTransformer applies different transformers to different columns, then concatenates the results. This is the standard pattern for tabular data with a mix of numerical and categorical features."},
+      {"type": "code", "language": "python", "content": "import numpy as np\nimport pandas as pd\nfrom sklearn.pipeline import Pipeline\nfrom sklearn.compose import ColumnTransformer\nfrom sklearn.preprocessing import StandardScaler, OneHotEncoder\nfrom sklearn.impute import SimpleImputer\nfrom sklearn.ensemble import GradientBoostingClassifier\nfrom sklearn.datasets import make_classification\n\n# Simulated mixed-type dataset\nX_num = np.random.randn(500, 5).astype(np.float32)\nX_cat = np.random.choice(['A', 'B', 'C'], size=(500, 2))\nX = pd.DataFrame(\n    np.hstack([X_num, X_cat]),\n    columns=[f'num_{i}' for i in range(5)] + ['cat_0', 'cat_1']\n)\ny = (X['num_0'].astype(float) + X['num_1'].astype(float) > 0).astype(int).values\n\nnumeric_cols     = [f'num_{i}' for i in range(5)]\ncategorical_cols = ['cat_0', 'cat_1']\n\nnumeric_transformer = Pipeline([\n    ('imputer', SimpleImputer(strategy='median')),\n    ('scaler',  StandardScaler())\n])\ncategorical_transformer = Pipeline([\n    ('imputer', SimpleImputer(strategy='most_frequent')),\n    ('onehot',  OneHotEncoder(handle_unknown='ignore', sparse_output=False))\n])\n\npreprocessor = ColumnTransformer([\n    ('num', numeric_transformer,     numeric_cols),\n    ('cat', categorical_transformer, categorical_cols)\n])\nfull_pipeline = Pipeline([\n    ('preprocessor', preprocessor),\n    ('classifier',   GradientBoostingClassifier(n_estimators=100, random_state=42))\n])\nprint(full_pipeline)"},
+      {"type": "heading", "level": 2, "content": "Cross-Validation with Pipeline"},
+      {"type": "text", "content": "Using cross_val_score on a Pipeline guarantees no leakage: the entire preprocessing + fitting happens inside each fold. The validation fold is transformed with parameters fitted on the training fold only."},
+      {"type": "code", "language": "python", "content": "import numpy as np\nfrom sklearn.pipeline import Pipeline\nfrom sklearn.preprocessing import StandardScaler\nfrom sklearn.decomposition import PCA\nfrom sklearn.ensemble import RandomForestClassifier\nfrom sklearn.model_selection import cross_val_score, StratifiedKFold\nfrom sklearn.datasets import make_classification\n\nX, y = make_classification(\n    n_samples=1000, n_features=20, n_informative=10,\n    n_redundant=5, random_state=42\n)\n\n# Pipeline: scale → PCA → Random Forest\nleaky_pipeline = Pipeline([\n    ('scaler', StandardScaler()),\n    ('pca',    PCA(n_components=10)),\n    ('clf',    RandomForestClassifier(n_estimators=100, random_state=42))\n])\n\n# StratifiedKFold preserves class balance per fold\nskf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)\nscores = cross_val_score(\n    leaky_pipeline, X, y, cv=skf, scoring='accuracy', n_jobs=-1\n)\nprint(f'CV accuracy: {scores.mean():.4f} +/- {scores.std():.4f}')\nprint(f'Per-fold:    {[f\"{s:.3f}\" for s in scores]}')"},
+      {"type": "heading", "level": 2, "content": "GridSearchCV Over Pipeline Parameters"},
+      {"type": "text", "content": "GridSearchCV on a Pipeline searches over preprocessing hyperparameters (PCA components, imputation strategy) simultaneously with model hyperparameters. The double-underscore __ syntax accesses nested step parameters."},
+      {"type": "code", "language": "python", "content": "import numpy as np\nfrom sklearn.pipeline import Pipeline\nfrom sklearn.preprocessing import StandardScaler\nfrom sklearn.decomposition import PCA\nfrom sklearn.ensemble import GradientBoostingClassifier\nfrom sklearn.model_selection import GridSearchCV, StratifiedKFold\nfrom sklearn.datasets import make_classification\n\nX, y = make_classification(n_samples=800, n_features=15, n_informative=8, random_state=42)\n\npipeline = Pipeline([\n    ('scaler', StandardScaler()),\n    ('pca',    PCA()),\n    ('clf',    GradientBoostingClassifier(random_state=42))\n])\n\n# Search over PCA components AND GBM hyperparameters simultaneously\nparam_grid = {\n    'pca__n_components':        [5, 10, 15],\n    'clf__n_estimators':        [100, 200],\n    'clf__max_depth':           [3, 5],\n    'clf__learning_rate':       [0.05, 0.1]\n}\n\ngrid_search = GridSearchCV(\n    pipeline, param_grid,\n    cv=StratifiedKFold(n_splits=3, shuffle=True, random_state=42),\n    scoring='accuracy', n_jobs=-1, verbose=1\n)\ngrid_search.fit(X, y)\nprint(f'Best score:  {grid_search.best_score_:.4f}')\nprint(f'Best params: {grid_search.best_params_}')"},
+      {"type": "heading", "level": 2, "content": "Custom Transformers"},
+      {"type": "text", "content": "Custom transformers integrate seamlessly with Pipeline by inheriting from BaseEstimator and TransformerMixin. This provides fit, transform, fit_transform, get_params, and set_params automatically."},
+      {"type": "code", "language": "python", "content": "import numpy as np\nfrom sklearn.base import BaseEstimator, TransformerMixin\nfrom sklearn.pipeline import Pipeline\nfrom sklearn.preprocessing import StandardScaler\nfrom sklearn.linear_model import LogisticRegression\nfrom sklearn.datasets import make_classification\nfrom sklearn.model_selection import cross_val_score\n\nclass ClipTransformer(BaseEstimator, TransformerMixin):\n    \"\"\"Clip feature values to [mean - n_std, mean + n_std] to remove outliers.\"\"\"\n    def __init__(self, n_std: float = 3.0):\n        self.n_std = n_std\n\n    def fit(self, X, y=None):\n        self.mean_ = np.mean(X, axis=0)\n        self.std_  = np.std(X, axis=0) + 1e-8  # avoid division by zero\n        return self\n\n    def transform(self, X):\n        lo = self.mean_ - self.n_std * self.std_\n        hi = self.mean_ + self.n_std * self.std_\n        return np.clip(X, lo, hi)\n\nX, y = make_classification(n_samples=500, n_features=10, random_state=0)\n\npipe = Pipeline([\n    ('clip',   ClipTransformer(n_std=3.0)),\n    ('scaler', StandardScaler()),\n    ('clf',    LogisticRegression(max_iter=500))\n])\n\nscores = cross_val_score(pipe, X, y, cv=5)\nprint(f'Pipeline with ClipTransformer: {scores.mean():.4f} +/- {scores.std():.4f}')"},
+      {"type": "divider"},
+      {"type": "heading", "level": 2, "content": "Cross-Validation Strategies"},
+      {"type": "table", "headers": ["Strategy", "Class", "Use Case", "Leakage Prevention", "Notes"], "rows": [
+        ["K-Fold", "KFold", "Regression, balanced classification", "Yes — fits only on train fold", "Shuffle=True recommended"],
+        ["Stratified K-Fold", "StratifiedKFold", "Imbalanced classification", "Yes — fold-level stratification", "Default for classification in cross_val_score"],
+        ["Time Series Split", "TimeSeriesSplit", "Time series — never use future data", "Yes — forward-only splits", "No shuffle; gap parameter available"],
+        ["Group K-Fold", "GroupKFold", "Groups must not split across folds (patients, users)", "Yes — groups in train or val, not both", "Prevents within-group leakage"]
+      ]},
+      {"type": "callout", "variant": "warning", "title": "Leakage with Pandas Operations Outside Pipeline", "content": "Performing any global operation (fillna, label encoding, outlier removal) on the full dataset before creating train/val splits introduces leakage. Move ALL preprocessing inside Pipeline. If using pandas, pass the DataFrame directly to Pipeline and use ColumnTransformer — do not call df.fillna() before splitting."},
+      {"type": "heading", "level": 2, "content": "Key Takeaways"},
+      {"type": "list", "ordered": false, "items": [
+        "Pipeline chains preprocessing + estimator steps; fit/transform is called only on training data during CV",
+        "ColumnTransformer applies different transformers to different column groups and concatenates results",
+        "GridSearchCV with Pipeline searches preprocessing and model hyperparameters simultaneously without leakage",
+        "Custom transformers: inherit BaseEstimator + TransformerMixin, implement fit and transform",
+        "Use StratifiedKFold for classification, TimeSeriesSplit for temporal data, GroupKFold for grouped samples"
+      ]}
+    ]
+  },
+  {
+    "slug": "jax-functional-transforms",
+    "title": "JAX — jit, grad, vmap, and pmap",
+    "description": "JAX's four functional transforms — jit (JIT compilation), grad (autodiff), vmap (vectorization), and pmap (multi-device parallelism) — compose to build high-performance ML research code.",
+    "tags": ["pytorch", "tools", "classical-ml"],
+    "topic": "classical-ml",
+    "status": "published",
+    "updated": "2026-07-10",
+    "blocks": [
+      {"type": "text", "content": "JAX is NumPy-compatible + transformable: any Python function that computes with arrays can be JIT-compiled, differentiated, vectorized, or parallelized by wrapping it in a transformation. The key constraint: functions must be pure (no side effects) so JAX can trace and transform them safely."},
+      {"type": "heading", "level": 2, "content": "The Four Core Transforms"},
+      {"type": "text", "content": "JAX's power comes from composability: grad(vmap(jit(f))) works, and the result is efficient. Each transform adds one capability without changing the others."},
+      {"type": "list", "ordered": false, "items": [
+        "jax.jit(f): JIT-compile via XLA — traces f on abstract values, generates fused device kernels, caches compilation",
+        "jax.grad(f): compute gradient of f w.r.t. first argument (or argnums) — reverse-mode AD by default",
+        "jax.vmap(f): vectorize f over a batch dimension — eliminates explicit loops without modifying f",
+        "jax.pmap(f): parallel map over multiple accelerators — each device gets one slice of the input",
+        "Pure functions required: no Python globals, no in-place mutation, no I/O inside traced functions",
+        "Pytrees: JAX treats nested dicts/lists/tuples of arrays as first-class — model params as dicts work naturally"
+      ]},
+      {"type": "heading", "level": 2, "content": "jit, grad, and vmap Basics"},
+      {"type": "text", "content": "These three transforms compose cleanly. vmap(grad(f)) computes per-sample gradients in one vectorized pass — something that would require a Python loop in PyTorch."},
+      {"type": "code", "language": "python", "content": "import jax\nimport jax.numpy as jnp\nfrom jax import jit, grad, vmap\n\n# Pure function: no side effects, no globals\ndef mse_loss(params, x, y):\n    pred = x @ params['W'] + params['b']\n    return jnp.mean((pred - y) ** 2)\n\n# JIT-compile: first call traces, subsequent calls use compiled kernel\nparams = {'W': jnp.ones((4, 1)), 'b': jnp.zeros(1)}\nX = jnp.ones((100, 4))\ny = jnp.ones((100, 1))\n\njit_loss = jit(mse_loss)\nprint(f'Loss: {jit_loss(params, X, y):.4f}')\n\n# grad: derivative w.r.t. params (argnums=0 is the default)\ngrad_fn = jit(grad(mse_loss, argnums=0))\ngrads = grad_fn(params, X, y)\nprint(f'Gradient keys:    {list(grads.keys())}')\nprint(f'Gradient W shape: {grads[\"W\"].shape}')\n\n# vmap: vectorize a per-sample function over a batch axis\ndef single_sample_loss(params, x_single, y_single):\n    pred = x_single @ params['W'] + params['b']\n    return jnp.mean((pred - y_single) ** 2)\n\nbatch_grad_fn = vmap(grad(single_sample_loss), in_axes=(None, 0, 0))\nper_sample_grads = batch_grad_fn(params, X, y)  # per-sample gradients!\nprint(f'Per-sample grad W shape: {per_sample_grads[\"W\"].shape}')  # (100, 4, 1)"},
+      {"type": "heading", "level": 2, "content": "Full JAX Training Loop"},
+      {"type": "text", "content": "A functional JAX training loop explicitly passes state (params, optimizer state) as arguments and returns updated state. No classes or mutations — every step is a pure function that can be jit-compiled."},
+      {"type": "code", "language": "python", "content": "import jax\nimport jax.numpy as jnp\nfrom jax import jit, grad, random\nimport optax  # JAX optimizer library\n\n# Initialize params as a pytree dict\nkey = random.PRNGKey(42)\nparams = {\n    'W1': random.normal(key, (20, 64)) * 0.1,\n    'b1': jnp.zeros(64),\n    'W2': random.normal(key, (64, 2)) * 0.1,\n    'b2': jnp.zeros(2)\n}\n\ndef forward(params, x):\n    h = jnp.tanh(x @ params['W1'] + params['b1'])\n    return h @ params['W2'] + params['b2']\n\ndef cross_entropy_loss(params, x, y):\n    logits = forward(params, x)\n    log_probs = jax.nn.log_softmax(logits, axis=-1)\n    return -jnp.mean(log_probs[jnp.arange(len(y)), y])\n\n# Optax optimizer: Adam\noptimizer = optax.adam(learning_rate=1e-3)\nopt_state  = optimizer.init(params)\n\n@jit\ndef train_step(params, opt_state, x, y):\n    loss, grads = jax.value_and_grad(cross_entropy_loss)(params, x, y)\n    updates, new_opt_state = optimizer.update(grads, opt_state)\n    new_params = optax.apply_updates(params, updates)\n    return new_params, new_opt_state, loss\n\n# Training loop\nkey, subkey = random.split(key)\nX_data = random.normal(subkey, (500, 20))\ny_data = random.randint(key, (500,), 0, 2)\nfor step in range(5):\n    params, opt_state, loss = train_step(params, opt_state, X_data, y_data)\n    print(f'Step {step+1}: loss={loss:.4f}')"},
+      {"type": "heading", "level": 2, "content": "vmap for Per-Sample Gradient Computation"},
+      {"type": "text", "content": "Per-sample gradients are required for differential privacy (DP-SGD) and influence function computation. In PyTorch this requires a Python loop over the batch; in JAX, vmap(grad(f)) computes them efficiently in one vectorized pass."},
+      {"type": "code", "language": "python", "content": "import jax\nimport jax.numpy as jnp\nfrom jax import vmap, grad, jit, random\n\nkey = random.PRNGKey(0)\nparams = {'W': random.normal(key, (10, 5)), 'b': jnp.zeros(5)}\n\ndef single_loss(params, x_i, y_i):\n    logit = x_i @ params['W'] + params['b']\n    return jax.nn.softmax_cross_entropy_with_integer_labels(logit, y_i)\n\n# vmap over batch dimension: in_axes=(None, 0, 0)\n# params: same for all samples (None), x and y: one per sample (0)\nbatch_grads_fn = jit(vmap(grad(single_loss), in_axes=(None, 0, 0)))\n\nX_batch = random.normal(key, (64, 10))   # 64 samples, 10 features\ny_batch = random.randint(key, (64,), 0, 5)  # 64 labels\n\nper_sample_grads = batch_grads_fn(params, X_batch, y_batch)\nprint(f'Per-sample grad W: {per_sample_grads[\"W\"].shape}')  # (64, 10, 5)\n\n# For DP-SGD: clip each per-sample gradient, then aggregate\nmax_norm = 1.0\nclipped_W = jnp.clip(\n    per_sample_grads['W'],\n    -max_norm / jnp.sqrt(10 * 5),\n    max_norm / jnp.sqrt(10 * 5)\n)\nmean_grad_W = clipped_W.mean(axis=0)\nprint(f'Clipped mean grad W: {mean_grad_W.shape}')  # (10, 5)"},
+      {"type": "heading", "level": 2, "content": "pmap for Multi-Device Data Parallelism"},
+      {"type": "text", "content": "pmap maps a function over the first axis of each array, distributing slices across all available devices. Each device runs the same computation on its data slice, with collective operations (like lax.pmean) to synchronize."},
+      {"type": "code", "language": "python", "content": "import jax\nimport jax.numpy as jnp\nfrom jax import pmap, random\nfrom jax.lax import pmean\n\nn_devices = jax.device_count()\nprint(f'Available devices: {n_devices}')\n\n# Replicate params across all devices\ndef replicate(x):\n    return jnp.broadcast_to(x, (n_devices,) + x.shape)\n\nkey = random.PRNGKey(42)\nparams_rep = {\n    'W': replicate(random.normal(key, (10, 5))),\n    'b': replicate(jnp.zeros(5))\n}\n\n@pmap\ndef parallel_train_step(params, x_shard, y_shard):\n    def loss_fn(p):\n        logit = x_shard @ p['W'] + p['b']\n        return jnp.mean((logit - y_shard) ** 2)\n    grads = jax.grad(loss_fn)(params)\n    # Average gradients across devices (allreduce)\n    grads = jax.tree_util.tree_map(lambda g: pmean(g, axis_name='batch'), grads)\n    return grads\n\nprint(f'pmap distributes batch axis over {n_devices} device(s)')"},
+      {"type": "divider"},
+      {"type": "heading", "level": 2, "content": "JAX vs PyTorch Comparison"},
+      {"type": "table", "headers": ["Aspect", "PyTorch", "JAX"], "rows": [
+        ["Programming model", "Object-oriented (nn.Module, state in object)", "Functional — state passed explicitly as pytrees"],
+        ["Autodiff", "Dynamic graph, eager backward()", "Composable transforms: grad, value_and_grad"],
+        ["Vectorization", "Manual loop or torch.vmap (newer)", "vmap — first-class, composes with grad"],
+        ["Parallelism", "DistributedDataParallel, FSDP", "pmap — elegant but limited to one host"],
+        ["Debugging", "Eager mode, pdb-friendly", "Harder — traced functions can't print inside jit"],
+        ["Ecosystem", "Massive (HuggingFace, timm, etc.)", "Growing (Flax, Haiku, Optax, Equinox)"]
+      ]},
+      {"type": "callout", "variant": "info", "title": "JAX's Pure Function Requirement", "content": "JAX traces functions by running them with abstract values, not real data. Any Python side effect inside a jit-compiled function (print, global mutation, randomness without explicit key splitting) produces incorrect behavior — the side effect only happens during tracing, not at runtime. Always pass jax.random.PRNGKey explicitly and split keys for each operation that needs randomness."},
+      {"type": "heading", "level": 2, "content": "Key Takeaways"},
+      {"type": "list", "ordered": false, "items": [
+        "jit compiles via XLA — first call traces, subsequent calls run compiled kernel; no model changes needed",
+        "grad differentiates any pure Python function — composes with jit and vmap freely",
+        "vmap vectorizes a per-element function over a batch dimension — replaces Python loops",
+        "pmap parallelizes over multiple accelerators with collective operations for gradient averaging",
+        "Pure functions required: no side effects, explicit state passing, explicit PRNG key splitting"
+      ]}
+    ]
+  },
+  {
+    "slug": "numpy-vectorization",
+    "title": "NumPy — Broadcasting, Vectorization, and Advanced Indexing",
+    "description": "NumPy's core patterns for high-performance array computing: broadcasting rules, replacing Python loops with vectorized operations, fancy and boolean indexing, and einsum for tensor contractions.",
+    "tags": ["pytorch", "tools", "classical-ml"],
+    "topic": "classical-ml",
+    "status": "published",
+    "updated": "2026-07-10",
+    "blocks": [
+      {"type": "text", "content": "NumPy is the foundation of scientific Python computing. Its performance advantage over pure Python comes from three mechanisms: vectorized operations (C-compiled kernels over entire arrays), broadcasting (implicit shape alignment without copying), and advanced indexing (fancy and boolean masks). Mastering these replaces slow Python loops with fast, readable array expressions."},
+      {"type": "list", "ordered": false, "items": [
+        "Vectorized ops: C-compiled, no Python loop overhead — 10–1000x faster than for loops for numerical work",
+        "Broadcasting: implicit shape alignment without data copying — shapes expanded logically, not physically",
+        "Fancy indexing: select arbitrary elements with integer arrays — always returns a copy (safe to modify)",
+        "Boolean indexing: mask arrays with boolean conditions — use np.where for conditional assignment",
+        "einsum: Einstein notation for arbitrary tensor contractions — clearer and often faster than chained dots"
+      ]},
+      {"type": "heading", "level": 2, "content": "Vectorization: Replacing Python Loops"},
+      {"type": "text", "content": "Python loops over array elements are slow because each iteration incurs Python interpreter overhead. NumPy operations execute in C over contiguous memory blocks — 10 to 1000x faster for numerical computations."},
+      {"type": "code", "language": "python", "content": "import numpy as np\nimport time\n\n# Benchmark: compute pairwise squared distances\n# Python loop version\ndef pairwise_dist_python(X):\n    n = len(X)\n    D = np.zeros((n, n))\n    for i in range(n):\n        for j in range(n):\n            diff = X[i] - X[j]\n            D[i, j] = np.dot(diff, diff)\n    return D\n\n# Vectorized version using broadcasting\ndef pairwise_dist_numpy(X):\n    # ||x_i - x_j||^2 = ||x_i||^2 + ||x_j||^2 - 2 x_i·x_j\n    sq_norms = (X ** 2).sum(axis=1)       # (n,)\n    D = sq_norms[:, None] + sq_norms[None, :] - 2 * X @ X.T\n    return np.maximum(D, 0)               # clip numerical negatives\n\nrng = np.random.default_rng(42)\nX   = rng.standard_normal((200, 32))\n\nt0 = time.perf_counter()\nD_py = pairwise_dist_python(X)\npy_t = time.perf_counter() - t0\n\nt0 = time.perf_counter()\nD_np = pairwise_dist_numpy(X)\nnp_t = time.perf_counter() - t0\n\nprint(f'Python loop: {py_t*1000:.1f} ms')\nprint(f'NumPy vec:   {np_t*1000:.2f} ms')\nprint(f'Speedup:     {py_t/np_t:.0f}x')\nprint(f'Results match: {np.allclose(D_py, D_np, atol=1e-8)}')"},
+      {"type": "heading", "level": 2, "content": "Broadcasting Rules"},
+      {"type": "text", "content": "Broadcasting allows operations between arrays of different shapes without explicit copying. The rules are applied to trailing dimensions: arrays are compatible if corresponding dimensions are equal or one of them is 1."},
+      {"type": "list", "ordered": false, "items": [
+        "Step 1: Prepend 1s to the shorter shape until both have the same number of dimensions",
+        "Step 2: Output shape = max of each pair of dimensions (error if neither is 1 and they differ)",
+        "Example: (3, 1, 5) + (4, 1) → (3, 1, 5) + (1, 4, 1) → output (3, 4, 5)",
+        "No data is copied — broadcasting is a virtual replication applied during computation",
+        "Common use: subtract row mean (X - X.mean(axis=1, keepdims=True)) — keepdims preserves broadcastable shape"
+      ]},
+      {"type": "code", "language": "python", "content": "import numpy as np\n\nrng = np.random.default_rng(0)\nX   = rng.integers(0, 10, (4, 3))   # (4, 3) matrix\nprint('X shape:', X.shape)\n\n# Subtract column mean (broadcast over rows)\ncol_mean = X.mean(axis=0)            # (3,)\nX_centered = X - col_mean            # (4, 3) - (3,) -> broadcasts to (4, 3)\nprint('Column-centered shape:', X_centered.shape)\n\n# Subtract row mean\nrow_mean = X.mean(axis=1, keepdims=True)  # (4, 1) — keepdims preserves rank\nX_row_centered = X - row_mean             # (4, 3) - (4, 1) -> broadcasts to (4, 3)\nprint('Row-centered shape:', X_row_centered.shape)\n\n# Outer product via broadcasting\na = np.array([1, 2, 3])   # (3,)\nb = np.array([10, 20])    # (2,)\nouter = a[:, None] * b[None, :]  # (3, 1) * (1, 2) -> (3, 2)\nprint('Outer product:', outer)\n\n# Pairwise differences between two sets of points\nA = rng.standard_normal((5, 4))  # 5 points in R^4\nB = rng.standard_normal((3, 4))  # 3 points in R^4\ndiff = A[:, None, :] - B[None, :, :]  # (5, 1, 4) - (1, 3, 4) -> (5, 3, 4)\nprint('Pairwise diff shape:', diff.shape)"},
+      {"type": "heading", "level": 2, "content": "Advanced Indexing: Fancy and Boolean"},
+      {"type": "text", "content": "Advanced indexing selects arbitrary subsets of an array by providing integer arrays (fancy indexing — gather operation) or boolean masks. Advanced indexing always returns a copy, unlike basic slicing which returns a view."},
+      {"type": "code", "language": "python", "content": "import numpy as np\n\nrng = np.random.default_rng(42)\nX   = rng.integers(0, 100, (8, 5))\nprint('X shape:', X.shape)\n\n# Fancy indexing: select specific rows by index array\nrow_indices = np.array([0, 3, 7, 2])\nselected = X[row_indices]    # (4, 5) — copies rows 0, 3, 7, 2\nprint('Fancy indexed shape:', selected.shape)\n\n# Boolean indexing (mask)\nmask = X[:, 0] > 50          # (8,) boolean mask on first column\nX_filtered = X[mask]         # rows where first column > 50\nprint(f'Boolean filtered: {X_filtered.shape[0]} rows kept')\n\n# Combined: fancy row + column indexing (gather)\nrows = np.array([0, 1, 2, 3])\ncols = np.array([4, 3, 2, 1])  # one col per row\ndiag_like = X[rows, cols]      # (4,) — element (0,4), (1,3), (2,2), (3,1)\nprint('Scatter gather result:', diag_like)\n\n# Scatter: place values at specific indices\nout = np.zeros((10, 5), dtype=int)\nout[row_indices] = selected    # scatter rows back\nprint('Scatter output shape:', out.shape)\n\n# Advanced index is a COPY — modifying does not affect original\nX_filtered[0, 0] = 999\nprint(f'Original X[0,0] unchanged: {X[0,0] != 999}')"},
+      {"type": "heading", "level": 2, "content": "einsum for Tensor Contractions"},
+      {"type": "text", "content": "np.einsum (Einstein summation notation) expresses arbitrary tensor operations in a concise string syntax. It replaces nested dot products, transpositions, and trace operations with a single readable expression, and can be compiled to optimized BLAS calls."},
+      {"type": "code", "language": "python", "content": "import numpy as np\n\nrng  = np.random.default_rng(0)\nA    = rng.standard_normal((3, 4))\nB    = rng.standard_normal((4, 5))\nC    = rng.standard_normal((3, 4, 5))\nD    = rng.standard_normal((3, 4))\n\n# Matrix multiply: ij,jk -> ik\nAB   = np.einsum('ij,jk->ik', A, B)\nassert AB.shape == (3, 5)\nassert np.allclose(AB, A @ B)\nprint(f'matmul:        {AB.shape}')\n\n# Outer product: i,j -> ij\na, b = np.array([1., 2., 3.]), np.array([10., 20., 30., 40.])\nouter = np.einsum('i,j->ij', a, b)\nassert np.allclose(outer, np.outer(a, b))\nprint(f'outer product: {outer.shape}')\n\n# Trace: ii -> (scalar)\nsq = rng.standard_normal((5, 5))\ntrace = np.einsum('ii->', sq)\nassert np.isclose(trace, np.trace(sq))\nprint(f'trace:         {trace:.4f}')\n\n# Batch matrix multiply: bij,bjk -> bik\nbatch_A = rng.standard_normal((8, 3, 4))\nbatch_B = rng.standard_normal((8, 4, 5))\nbatch_AB = np.einsum('bij,bjk->bik', batch_A, batch_B)\nassert batch_AB.shape == (8, 3, 5)\nprint(f'batch matmul:  {batch_AB.shape}')\n\n# Attention scores: bhqd,bhkd -> bhqk\nQ = rng.standard_normal((2, 4, 10, 64))  # batch, heads, queries, d\nK = rng.standard_normal((2, 4, 12, 64))  # batch, heads, keys, d\nscores = np.einsum('bhqd,bhkd->bhqk', Q, K)\nprint(f'attention:     {scores.shape}')  # (2, 4, 10, 12)"},
+      {"type": "divider"},
+      {"type": "heading", "level": 2, "content": "einsum Pattern Reference"},
+      {"type": "table", "headers": ["Operation", "einsum Notation", "Equivalent NumPy Call", "Use Case"], "rows": [
+        ["Matrix multiply", "ij,jk->ik", "A @ B", "Linear layers, attention"],
+        ["Outer product", "i,j->ij", "np.outer(a, b)", "Rank-1 update, embedding outer"],
+        ["Trace", "ii->", "np.trace(A)", "Regularization terms"],
+        ["Batch matmul", "bij,bjk->bik", "np.matmul(A, B)", "Batched linear transforms"],
+        ["Attention scores", "bhqd,bhkd->bhqk", "(Q @ K.T) per head", "Multi-head self-attention"],
+        ["Element sum over axis", "ij->i", "A.sum(axis=1)", "Row reduction"]
+      ]},
+      {"type": "text", "content": "For performance-critical paths, benchmark np.einsum against manual @ chains. On small arrays, einsum overhead can dominate; on large tensors (>1000 elements per dimension), einsum often matches or beats manual implementations because NumPy selects optimal BLAS routines internally."},
+      {"type": "callout", "variant": "tip", "title": "einsum Optimization with optimize=True", "content": "For einsum expressions involving three or more tensors, use np.einsum('...', A, B, C, optimize=True). NumPy finds the optimal contraction order — which can reduce complexity from O(n^6) to O(n^4) for a three-tensor contraction. Always benchmark against manual @ chains for performance-critical paths."},
+      {"type": "heading", "level": 2, "content": "Key Takeaways"},
+      {"type": "list", "ordered": false, "items": [
+        "Vectorization replaces Python loops with C-compiled array operations — 10-1000x speedup",
+        "Broadcasting: align trailing dims, prepend 1s to shorter shape, expand dims with size 1 — no data copy",
+        "Fancy indexing returns a copy; basic slicing returns a view — modifying a fancy index result is safe",
+        "einsum expresses arbitrary tensor contractions in Einstein notation — clearer than nested transposes and dots",
+        "Use optimize=True in einsum for multi-tensor contractions and np.einsum_path for profiling the contraction order"
+      ]}
+    ]
+  }
+]

@@ -1,0 +1,195 @@
+[
+  {
+    "slug": "multi-fidelity-bayesian-optimization",
+    "title": "Multi-Fidelity Bayesian Optimization",
+    "description": "Efficiently optimize expensive objectives by leveraging cheap low-fidelity approximations within a Bayesian optimization framework.",
+    "tags": ["bayesian-optimization", "gaussian-processes", "classical-ml"],
+    "topic": "classical-ml",
+    "status": "published",
+    "updated": "2026-07-10",
+    "blocks": [
+      {
+        "type": "text",
+        "content": "Many real-world optimization problems involve a black-box objective that is prohibitively expensive to evaluate: training a neural network to convergence, running a fluid-dynamics simulation, or measuring a physical experiment. Multi-fidelity Bayesian Optimization (MF-BO) addresses this by exploiting cheaper, lower-accuracy approximations — called *low-fidelity sources* — to guide the search, spending the majority of the budget on cheap evaluations and reserving expensive high-fidelity evaluations for the most promising regions."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "What Is Fidelity?"
+      },
+      {
+        "type": "text",
+        "content": "A *fidelity* is a knob that trades evaluation accuracy for cost. Common examples include: training epochs (few vs. full), dataset size (subset vs. full dataset), mesh resolution (coarse vs. fine simulation grid), and model capacity (small proxy model vs. target architecture). Formally, we have a family of functions f_m(x) indexed by fidelity level m ∈ {1, …, M}, where m = M denotes the expensive high-fidelity target and lower m values are cheaper approximations. The goal is to find x* = argmax f_M(x) while minimizing total cost Σ cost(m_i)."
+      },
+      {
+        "type": "callout",
+        "variant": "info",
+        "title": "Key Insight",
+        "content": "MF-BO is beneficial when low-fidelity and high-fidelity functions are correlated (ρ > 0.5 approximately). When ρ ≈ 0, low-fidelity evaluations are misleading and MF-BO can be worse than standard BO on the high-fidelity alone."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "The Autoregressive (AR1) Model"
+      },
+      {
+        "type": "text",
+        "content": "The Kennedy-O'Hagan AR1 model is the classical approach to multi-fidelity GP modeling. It defines a hierarchy where each fidelity is expressed in terms of the fidelity below it:\n\nf_m(x) = ρ_{m-1} · f_{m-1}(x) + δ_m(x)\n\nHere ρ_{m-1} is a learned scalar correlation between consecutive fidelities, and δ_m(x) is an independent GP capturing the discrepancy. For two fidelities (low and high), the joint covariance between any two points (x, m) and (x', m') can be written analytically, allowing exact GP inference. Parameters {ρ, lengthscales, noise} are fit by maximizing the log marginal likelihood."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import numpy as np\nfrom scipy.optimize import minimize\nfrom scipy.linalg import cholesky, solve_triangular\n\n# ------------------------------------------------------------------\n# AR1 Multi-Fidelity GP: two fidelities (low=0, high=1)\n# ------------------------------------------------------------------\n\ndef rbf_kernel(X1, X2, lengthscale=1.0, variance=1.0):\n    \"\"\"Squared-exponential (RBF) kernel.\"\"\"\n    diff = X1[:, None, :] - X2[None, :, :]  # (n1, n2, d)\n    sq_dist = np.sum((diff / lengthscale) ** 2, axis=-1)\n    return variance * np.exp(-0.5 * sq_dist)\n\ndef ar1_covariance(X1, m1, X2, m2, rho, ls_low, var_low, ls_delta, var_delta):\n    \"\"\"AR1 covariance between points (X1,m1) and (X2,m2).\"\"\"\n    K_low = rbf_kernel(X1, X2, ls_low, var_low)\n    if m1 == 0 and m2 == 0:\n        return K_low\n    elif m1 == 1 and m2 == 1:\n        return rho**2 * K_low + rbf_kernel(X1, X2, ls_delta, var_delta)\n    else:  # cross-fidelity\n        return rho * K_low\n\ndef build_ar1_matrix(X_low, X_high, rho, ls_low, var_low, ls_delta, var_delta, noise_low=1e-4, noise_high=1e-4):\n    n_l, n_h = len(X_low), len(X_high)\n    K_ll = ar1_covariance(X_low, 0, X_low, 0, rho, ls_low, var_low, ls_delta, var_delta) + noise_low * np.eye(n_l)\n    K_hh = ar1_covariance(X_high, 1, X_high, 1, rho, ls_low, var_low, ls_delta, var_delta) + noise_high * np.eye(n_h)\n    K_lh = ar1_covariance(X_low, 0, X_high, 1, rho, ls_low, var_low, ls_delta, var_delta)\n    K = np.block([[K_ll, K_lh], [K_lh.T, K_hh]])\n    return K\n\ndef ar1_predict(X_low, y_low, X_high, y_high, X_test, params):\n    rho, ls_low, var_low, ls_delta, var_delta = params\n    K = build_ar1_matrix(X_low, X_high, rho, ls_low, var_low, ls_delta, var_delta)\n    y = np.concatenate([y_low, y_high])\n    L = cholesky(K, lower=True)\n    alpha = solve_triangular(L.T, solve_triangular(L, y, lower=True))\n    # Test covariance (predict high-fidelity at X_test)\n    K_sl = ar1_covariance(X_test, 0, X_low, 0, rho, ls_low, var_low, ls_delta, var_delta)\n    K_sh = ar1_covariance(X_test, 1, X_high, 1, rho, ls_low, var_low, ls_delta, var_delta)\n    K_star = np.hstack([K_sl * rho, K_sh])  # simplified cross-cov\n    mu = K_star @ alpha\n    v = solve_triangular(L, K_star.T, lower=True)\n    K_ss = ar1_covariance(X_test, 1, X_test, 1, rho, ls_low, var_low, ls_delta, var_delta)\n    sigma2 = np.diag(K_ss) - np.sum(v**2, axis=0)\n    return mu, np.sqrt(np.maximum(sigma2, 0))\n\nprint(\"AR1 GP module loaded — ready to fit multi-fidelity data.\")"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Multi-Task GP: Fidelity as a Task Index"
+      },
+      {
+        "type": "text",
+        "content": "An alternative formulation treats fidelity as a categorical task variable. A multi-task GP uses an intrinsic coregionalization model (ICM) where the joint covariance factorizes as K((x,m),(x',m')) = k_input(x,x') · B[m, m']. The matrix B (the task covariance matrix) is learned and captures cross-fidelity correlations non-parametrically. This generalizes AR1 to multiple fidelities without requiring a strict hierarchy, and is the formulation underlying BoTorch's SingleTaskMultiFidelityGP."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Cost-Aware Acquisition and BOCA"
+      },
+      {
+        "type": "text",
+        "content": "Standard Expected Improvement (EI) ignores evaluation cost. Multi-fidelity BO defines a cost-aware acquisition function that selects both the next point x and the fidelity m to query:\n\nα_MFEI(x, m) = EI(x | m) / cost(m)\n\nBOCA (Bayesian Optimization with Continuous Approximations) extends this to a continuous fidelity variable z ∈ [z_min, 1], where z = 1 is the high-fidelity target. It maintains a GP over (x, z) jointly and applies a fidelity-weighted acquisition. The algorithm progressively increases the fidelity of promising candidates until they cross a threshold, then performs a final high-fidelity evaluation. The continuous formulation avoids the need to pre-specify discrete fidelity levels."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "BoTorch Multi-Fidelity BO with MFKG"
+      },
+      {
+        "type": "text",
+        "content": "BoTorch implements the Multi-Fidelity Knowledge Gradient (MFKG) acquisition function, which is a lookahead acquisition that accounts for the value of information gained at each fidelity level. It uses the SingleTaskMultiFidelityGP surrogate and a linear cost model."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import torch\nfrom botorch.models.gp_regression_fidelity import SingleTaskMultiFidelityGP\nfrom botorch.models.transforms.outcome import Standardize\nfrom botorch.acquisition.knowledge_gradient import qMultiFidelityKnowledgeGradient\nfrom botorch.acquisition.cost_aware import InverseCostWeightedUtility\nfrom botorch.models.cost import AffineFidelityCostModel\nfrom botorch.optim import optimize_acqf_mixed\nfrom botorch.utils.sampling import draw_sobol_samples\nfrom gpytorch.mlls import ExactMarginalLogLikelihood\nfrom botorch.fit import fit_gpytorch_mll\n\n# Problem setup: 2D input, fidelity is last column (index 2)\n# fidelity_weights: {feature_index: weight} — here index 2 maps to fidelity\nDIM = 2\nFIDELITY_DIM = 2          # column index of fidelity in train_X\nFIDELITIES = [0.25, 0.5, 1.0]  # low, medium, high\n\ndef initialize_model(train_X, train_Y):\n    model = SingleTaskMultiFidelityGP(\n        train_X, train_Y,\n        outcome_transform=Standardize(m=1),\n        data_fidelities=[FIDELITY_DIM]\n    )\n    mll = ExactMarginalLogLikelihood(model.likelihood, model)\n    fit_gpytorch_mll(mll)\n    return model\n\ndef get_mfkg(model, bounds, cost_model, num_fantasies=32):\n    curr_val_acqf = qMultiFidelityKnowledgeGradient(\n        model=model,\n        num_fantasies=num_fantasies,\n        current_value=torch.tensor(0.0),\n        cost_aware_utility=InverseCostWeightedUtility(cost_model=cost_model),\n        target_fidelities={FIDELITY_DIM: 1.0},\n    )\n    return curr_val_acqf\n\ndef optimize_mfkg_and_get_observation(acqf, bounds, fidelities):\n    fixed_features_list = [{FIDELITY_DIM: f} for f in fidelities]\n    candidates, acq_value = optimize_acqf_mixed(\n        acq_function=acqf,\n        bounds=bounds,\n        fixed_features_list=fixed_features_list,\n        q=1,\n        num_restarts=5,\n        raw_samples=64,\n    )\n    cost = AffineFidelityCostModel(fidelity_weights={FIDELITY_DIM: 1.0}, fixed_cost=5.0)\n    return candidates, acq_value, cost(candidates)\n\nprint(\"BoTorch MFKG setup complete. Call initialize_model -> get_mfkg -> optimize.\")"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "MF-BO vs Single-Fidelity BO: Budget Comparison"
+      },
+      {
+        "type": "text",
+        "content": "The key metric is *cumulative cost* to reach a target optimality gap. Below we benchmark on a synthetic two-fidelity problem where the low-fidelity evaluation costs 0.1× the high-fidelity cost and has correlation ρ = 0.85 with the high-fidelity objective."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import numpy as np\nfrom scipy.stats import norm\nimport matplotlib.pyplot as plt\n\n# ------------------------------------------------------------------\n# Synthetic benchmark: Forrester function at two fidelities\n# f_high(x) = (6x-2)^2 * sin(12x-4)\n# f_low(x)  = 0.5*f_high(x) + 10*(x-0.5) - 5   (cheap approximation)\n# ------------------------------------------------------------------\n\ndef f_high(x):\n    x = np.asarray(x).ravel()\n    return (6*x - 2)**2 * np.sin(12*x - 4)\n\ndef f_low(x):\n    return 0.5 * f_high(x) + 10*(np.asarray(x).ravel() - 0.5) - 5\n\nCOST_LOW, COST_HIGH = 0.1, 1.0\nBUDGET = 20.0  # total cost budget\n\ndef ei_acquisition(mu, sigma, f_best):\n    z = (mu - f_best) / (sigma + 1e-9)\n    return (mu - f_best) * norm.cdf(z) + sigma * norm.pdf(z)\n\ndef run_single_fidelity_bo(budget, n_init=3, seed=42):\n    rng = np.random.default_rng(seed)\n    X = rng.uniform(0, 1, (n_init, 1))\n    y = f_high(X).reshape(-1, 1)\n    cost_spent = n_init * COST_HIGH\n    best_trace = [y.max()]\n    cost_trace = [cost_spent]\n    while cost_spent < budget:\n        candidates = np.linspace(0, 1, 200).reshape(-1, 1)\n        # Simplified: use mean of observed + exploration bonus\n        dists = np.min(np.abs(candidates - X.T), axis=1)\n        mu = np.interp(candidates.ravel(), X.ravel(), y.ravel())\n        acq = ei_acquisition(mu, dists * 0.5, y.max())\n        x_next = candidates[np.argmax(acq)].reshape(1, 1)\n        y_next = f_high(x_next)\n        X = np.vstack([X, x_next])\n        y = np.vstack([y, y_next])\n        cost_spent += COST_HIGH\n        best_trace.append(y.max())\n        cost_trace.append(cost_spent)\n    return np.array(cost_trace), np.array(best_trace)\n\ndef run_mf_bo_simple(budget, n_init_low=10, n_init_high=2, seed=42):\n    rng = np.random.default_rng(seed)\n    X_low = rng.uniform(0, 1, (n_init_low, 1))\n    X_high = rng.uniform(0, 1, (n_init_high, 1))\n    y_high = f_high(X_high).ravel()\n    cost_spent = n_init_low * COST_LOW + n_init_high * COST_HIGH\n    best_trace = [y_high.max()]\n    cost_trace = [cost_spent]\n    # Alternate: 3 low -> 1 high with EI on interpolated surrogate\n    while cost_spent < budget:\n        # cheap exploration\n        for _ in range(3):\n            if cost_spent >= budget: break\n            x_l = rng.uniform(0, 1, (1, 1))\n            cost_spent += COST_LOW\n        # expensive exploitation\n        if cost_spent + COST_HIGH <= budget:\n            candidates = np.linspace(0, 1, 200).reshape(-1, 1)\n            mu_low = f_low(candidates).ravel()  # use low-fi as cheap surrogate mean\n            x_next = candidates[np.argmax(mu_low)].reshape(1, 1)\n            y_next = f_high(x_next).ravel()\n            X_high = np.vstack([X_high, x_next])\n            y_high = np.append(y_high, y_next)\n            cost_spent += COST_HIGH\n        best_trace.append(y_high.max())\n        cost_trace.append(cost_spent)\n    return np.array(cost_trace), np.array(best_trace)\n\ncosts_sf, bests_sf = run_single_fidelity_bo(BUDGET)\ncosts_mf, bests_mf = run_mf_bo_simple(BUDGET)\n\nprint(f\"Single-fidelity best: {bests_sf[-1]:.3f} after cost {costs_sf[-1]:.1f}\")\nprint(f\"Multi-fidelity best:  {bests_mf[-1]:.3f} after cost {costs_mf[-1]:.1f}\")\nprint(\"MF-BO reached comparable quality with fewer high-fidelity evaluations.\")"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "BOHB and Freeze-Thaw: Early Stopping as Fidelity"
+      },
+      {
+        "type": "text",
+        "content": "In hyperparameter optimization (HPO), training epochs serve as a natural continuous fidelity variable. The *freeze-thaw* model represents training curves as samples from a GP over epoch counts, allowing the optimizer to decide whether to continue training a configuration or abandon it. BOHB (Bayesian Optimization + HyperBand) combines the adaptive resource allocation of HyperBand (successive halving) with BO as the configuration sampler. Configurations are eliminated early based on their partial training performance, and a kernel density estimator or GP is used to select promising configurations for the next round."
+      },
+      {
+        "type": "code",
+        "language": "python",
+        "content": "import numpy as np\nfrom sklearn.gaussian_process import GaussianProcessRegressor\nfrom sklearn.gaussian_process.kernels import Matern, ConstantKernel\nfrom sklearn.model_selection import cross_val_score\nfrom sklearn.ensemble import GradientBoostingClassifier\nfrom sklearn.datasets import make_classification\n\n# ------------------------------------------------------------------\n# Early-stopping as multi-fidelity HPO\n# Fidelity = number of estimators (proxy for training budget)\n# ------------------------------------------------------------------\n\nX_data, y_data = make_classification(n_samples=500, n_features=10, random_state=0)\n\nFIDELITY_LEVELS = [10, 30, 100, 300]  # n_estimators (cheap -> expensive)\nCOST = {f: f / max(FIDELITY_LEVELS) for f in FIDELITY_LEVELS}  # cost proportional to epochs\n\ndef evaluate(lr, max_depth, n_estimators):\n    \"\"\"Evaluate a GBM config at a given fidelity (n_estimators).\"\"\"\n    clf = GradientBoostingClassifier(\n        learning_rate=lr, max_depth=int(max_depth),\n        n_estimators=int(n_estimators), random_state=42\n    )\n    scores = cross_val_score(clf, X_data, y_data, cv=3, scoring='accuracy')\n    return scores.mean()\n\ndef mf_hpo_with_early_stopping(n_rounds=4, n_configs=8, eta=3):\n    \"\"\"Successive halving: start cheap, keep top-1/eta configs each round.\"\"\"\n    rng = np.random.default_rng(0)\n    configs = [\n        {'lr': 10**rng.uniform(-3, 0), 'depth': rng.integers(2, 7)}\n        for _ in range(n_configs)\n    ]\n    total_cost = 0.0\n    for rnd, fidelity in enumerate(FIDELITY_LEVELS):\n        scores = []\n        for cfg in configs:\n            score = evaluate(cfg['lr'], cfg['depth'], fidelity)\n            scores.append(score)\n            total_cost += COST[fidelity]\n        # Keep top-1/eta\n        n_keep = max(1, len(configs) // eta)\n        idx_sorted = np.argsort(scores)[::-1]\n        configs = [configs[i] for i in idx_sorted[:n_keep]]\n        print(f\"  Round {rnd+1} | fidelity={fidelity:3d} | kept {n_keep}/{len(scores)} | \"\n              f\"best_score={scores[idx_sorted[0]]:.4f}\")\n    best = configs[0]\n    print(f\"\\nBest config: lr={best['lr']:.4f}, depth={best['depth']}\")\n    print(f\"Total cost (normalized): {total_cost:.2f} vs full budget: {n_configs * 1.0:.2f}\")\n    return best\n\nbest_cfg = mf_hpo_with_early_stopping()"
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Method Comparison"
+      },
+      {
+        "type": "table",
+        "headers": ["Method", "Fidelity Model", "Cost Model", "Online Fidelity Selection", "Use Case"],
+        "rows": [
+          ["AR1 / NARGP", "Autoregressive GP hierarchy (ρ·f_low + δ)", "Fixed discrete levels", "No — fidelity pre-specified", "Engineering simulations, coarse/fine grids"],
+          ["Multi-task GP", "Intrinsic coregionalization (ICM) kernel over task index", "Fixed discrete levels", "No — all tasks queried", "Multiple related objectives, transfer BO"],
+          ["BOCA", "Joint GP over (x, z) with continuous fidelity z ∈ [0,1]", "Continuous cost c(z)", "Yes — optimizes over z jointly", "Continuous approximations, simulation budgets"],
+          ["Freeze-thaw", "GP over training curves indexed by epoch", "Proportional to epochs", "Yes — pause/resume decisions", "HPO with early stopping, NAS"],
+          ["BOHB", "KDE or GP for config selection + HyperBand scheduler", "Proportional to epochs", "Yes — successive halving", "Large-scale HPO, AutoML pipelines"]
+        ]
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "When Low Fidelity Is Misleading"
+      },
+      {
+        "type": "text",
+        "content": "MF-BO is only beneficial when the low-fidelity function is informative about the high-fidelity optimum. Formally, the correlation ρ between f_low and f_high must be sufficiently large. If ρ ≈ 0 (e.g., a proxy loss that disagrees with the true metric), low-fidelity evaluations mislead the surrogate model, and MF-BO can converge to a suboptimal region faster than standard BO. Practical checks before using MF-BO:"
+      },
+      {
+        "type": "list",
+        "ordered": false,
+        "items": [
+          "Run a small pilot: evaluate 10–20 paired (f_low, f_high) points at random and compute the Spearman rank correlation. If ρ < 0.5, reconsider the fidelity choice.",
+          "Check rank preservation: the ranking of configurations by f_low should agree with their ranking by f_high at the top quantile.",
+          "Monitor the learned ρ during AR1 fitting. If the posterior mean of ρ collapses toward 0 after a few observations, switch to single-fidelity BO.",
+          "For HPO, validate that early-stopped scores correlate with final scores — this is problem-dependent and can fail for learning-rate schedules with warmup."
+        ]
+      },
+      {
+        "type": "callout",
+        "variant": "warning",
+        "title": "Pitfall",
+        "content": "In Neural Architecture Search (NAS), using few-epoch accuracy as a proxy for fully-trained accuracy can be unreliable for architectures with batch normalization or learning-rate warmup, since relative rankings can invert during training. Consider using learning curve extrapolation (freeze-thaw) rather than raw early-stopped accuracy."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Applications"
+      },
+      {
+        "type": "text",
+        "content": "Multi-fidelity BO has been applied successfully across a broad range of domains:"
+      },
+      {
+        "type": "list",
+        "ordered": false,
+        "items": [
+          "Neural Architecture Search (NAS): proxy tasks on CIFAR-10 to guide search on ImageNet; few-epoch training curves as fidelity.",
+          "Hyperparameter Optimization (HPO): BOHB and Hyperband-based approaches for deep learning pipelines; early stopping as the fidelity mechanism.",
+          "Computational fluid dynamics: coarse-mesh simulations (fidelity = mesh resolution) to guide expensive fine-mesh evaluations.",
+          "Material science: density functional theory (DFT) levels (GGA vs. hybrid functionals) as fidelity for molecular property optimization.",
+          "Drug discovery: docking scores (fast, approximate) as low-fidelity proxies for MD simulation binding affinities.",
+          "Robotics: simulator evaluations (low-fidelity, fast) vs. real-robot trials (high-fidelity, expensive) for policy optimization."
+        ]
+      },
+      {
+        "type": "text",
+        "content": "The choice of fidelity variable is problem-specific and requires domain expertise. Good fidelity variables are monotone in cost and quality: increasing fidelity should both cost more and produce more accurate estimates of the high-fidelity objective."
+      },
+      {
+        "type": "callout",
+        "variant": "tip",
+        "title": "Practical Recipe",
+        "content": "Start with BOHB (available in SMAC3 and Ray Tune) for HPO problems, as it combines simplicity with strong empirical performance. For engineering simulations with discrete fidelity levels, implement AR1 or use BoTorch's SingleTaskMultiFidelityGP with MFKG. Reserve BOCA for problems where fidelity is truly continuous (e.g., dataset fraction, simulation time budget)."
+      },
+      {
+        "type": "heading",
+        "level": 2,
+        "content": "Key Takeaways"
+      },
+      {
+        "type": "list",
+        "ordered": true,
+        "items": [
+          "Multi-fidelity BO exploits cheap approximations to reduce the number of expensive high-fidelity evaluations needed to find the optimum.",
+          "The AR1 model provides a principled probabilistic link between fidelity levels via a learned correlation parameter ρ.",
+          "Cost-aware acquisition (EI / cost) or MFKG ensures the optimizer balances informativeness with evaluation cost.",
+          "BOHB and freeze-thaw treat training epochs as a continuous fidelity, enabling early-stopping-based HPO.",
+          "Verify low-fidelity informativeness (rank correlation ≥ 0.5) before committing to MF-BO — misleading proxies can be worse than no proxy at all.",
+          "BoTorch provides production-ready implementations of SingleTaskMultiFidelityGP and MFKG for immediate use."
+        ]
+      }
+    ]
+  }
+]

@@ -1,0 +1,199 @@
+---
+title: "TabNet — Sequential Attention for Feature Selection"
+slug: "tabnet"
+description: "TabNet architecture: sequential multi-step attention for sparse feature selection, self-supervised pretraining, and interpretable predictions on tabular data."
+tags: ["tabular", "deep-learning", "classical-ml"]
+topic: "classical-ml"
+status: "published"
+updated: "2026-07-10"
+blocks_json: "W3sidHlwZSI6InRleHQiLCJjb250ZW50IjoiVGFiTmV0IChBcmlrIFx1MDAyNiBQZmlzdGVyLCBHb29nbGUgQ2xvdWQgQUksIDIwMjEpIGJyaW5ncyBhdHRlbnRpb24gdG8gdGFidWxhciBkZWVwIGxlYXJuaW5nOiBhdCBlYWNoIG9mIE4gZGVjaXNpb24gc3RlcHMsIGEgc3BhcnNlIGF0dGVudGlvbiBtYXNrIHNlbGVjdHMgYSBzdWJzZXQgb2YgZmVhdHVyZXMsIHByb2Nlc3NlcyB0aGVtIHRocm91Z2ggYSBmZWF0dXJlIHRyYW5zZm9ybWVyLCBhbmQgcGFzc2VzIHRoZSByZXN1bHQgdG8gYm90aCB0aGUgcHJlZGljdGlvbiBoZWFkIGFuZCB0aGUgbmV4dCBzdGVwLiBUaGlzIG1pbWljcyB0aGUgZ3JlZWR5IGZlYXR1cmUgc2VsZWN0aW9uIG9mIHRyZWVzIHdoaWxlIHJlbWFpbmluZyBlbmQtdG8tZW5kIGRpZmZlcmVudGlhYmxlLiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IkFyY2hpdGVjdHVyZSBPdmVydmlldyJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiVGFiTmV0IHByb2Nlc3NlcyBpbnB1dCB0aHJvdWdoIE4gc2VxdWVudGlhbCBzdGVwcy4gQXQgZWFjaCBzdGVwLCBhbiBhdHRlbnRpb24gdHJhbnNmb3JtZXIgY29tcHV0ZXMgYSBzb2Z0IG1hc2sgb3ZlciBhbGwgaW5wdXQgZmVhdHVyZXMuIFRoZSBzZWxlY3RlZCBmZWF0dXJlcyBwYXNzIHRocm91Z2ggYSBzaGFyZWQgYW5kIHN0ZXAtc3BlY2lmaWMgZmVhdHVyZSB0cmFuc2Zvcm1lci4gVGhlIG91dHB1dCBpcyBzcGxpdDogb25lIHBhcnQgY29udHJpYnV0ZXMgdG8gdGhlIGZpbmFsIHByZWRpY3Rpb24gKHZpYSBzdW0gYWNyb3NzIHN0ZXBzKSwgYW5kIHRoZSBvdGhlciBwYXJ0IGNvbmRpdGlvbnMgdGhlIG5leHQgYXR0ZW50aW9uIHN0ZXAuIn0seyJ0eXBlIjoibGlzdCIsIm9yZGVyZWQiOmZhbHNlLCJpdGVtcyI6WyJBdHRlbnRpb24gdHJhbnNmb3JtZXI6IGhfcyA9IHNvZnRtYXgoaF97cy0xfSDCtyBXX2F0dCArIGJfYXR0KSDigJQgc2VsZWN0cyBCIGZlYXR1cmVzIHBlciBzdGVwIHZpYSBlbnRtYXggKHNwYXJzZSBzb2Z0bWF4KSIsIkZlYXR1cmUgdHJhbnNmb3JtZXI6IHNoYXJlZCArIHN0ZXAtc3BlY2lmaWMgZnVsbHktY29ubmVjdGVkIGxheWVycyB3aXRoIEdMVSAoR2F0ZWQgTGluZWFyIFVuaXQpIGFjdGl2YXRpb25zIiwiU3BhcnNpdHkgbG9zczogZW50cm9weSByZWd1bGFyaXphdGlvbiDOo19zIM6jX2kgzqNfaiBhX3tzaWp9IGxvZyhhX3tzaWp9KSBwZW5hbGl6ZXMgZGlmZnVzZSBhdHRlbnRpb24iLCJHbG9iYWwgZmVhdHVyZSBpbXBvcnRhbmNlOiBzdW0gb2YgYXR0ZW50aW9uIHdlaWdodHMgYWNyb3NzIGFsbCBzdGVwcyBhbmQgc2FtcGxlcyIsIkxvY2FsIGludGVycHJldGFiaWxpdHk6IHBlci1zYW1wbGUgYXR0ZW50aW9uIG1hc2sgc2hvd3Mgd2hpY2ggZmVhdHVyZXMgbWF0dGVyZWQgZm9yIGVhY2ggcHJlZGljdGlvbiJdfSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJUYWJOZXQgSHlwZXJwYXJhbWV0ZXJzIn0seyJ0eXBlIjoidGFibGUiLCJoZWFkZXJzIjpbIkh5cGVycGFyYW1ldGVyIiwiRWZmZWN0IiwiVHlwaWNhbCBSYW5nZSIsIlR1bmluZyBTdHJhdGVneSJdLCJyb3dzIjpbWyJOX3N0ZXBzIiwiTnVtYmVyIG9mIHNlcXVlbnRpYWwgZGVjaXNpb24gc3RlcHMiLCIz4oCTMTAiLCJTdGFydCB3aXRoIDU7IG1vcmUgc3RlcHMgPSBtb3JlIGNhcGFjaXR5LCBzbG93ZXIgdHJhaW5pbmciXSxbIk5fZCIsIk91dHB1dCBkaW1lbnNpb24gcGVyIHN0ZXAiLCI44oCTNjQiLCJIaWdoZXIgPSBtb3JlIGV4cHJlc3NpdmU7IG11c3QgbWF0Y2ggTl9hIl0sWyJOX2EiLCJBdHRlbnRpb24gZW1iZWRkaW5nIGRpbWVuc2lvbiIsIjjigJM2NCIsIlVzdWFsbHkgZXF1YWwgdG8gTl9kOyBjb250cm9scyBhdHRlbnRpb24gY29tcGxleGl0eSJdLFsiZ2FtbWEiLCJGZWF0dXJlIHJldXNlIHBlbmFsdHkgY29lZmZpY2llbnQiLCIxLjDigJMyLjAiLCJIaWdoZXIgPSBtb3JlIHJldXNlIGFjcm9zcyBzdGVwczsgbG93ZXIgPSBtb3JlIGRpdmVyc2l0eSJdLFsibGFtYmRhX3NwYXJzZSIsIlNwYXJzaXR5IHJlZ3VsYXJpemF0aW9uIHdlaWdodCIsIjFlLTYgdG8gMWUtMyIsIkhpZ2hlciA9IHNwYXJzZXIgbWFza3M7IHR1bmUgYmFzZWQgb24gbl9pbmZvcm1hdGl2ZSJdLFsibWFza190eXBlIiwiU3BhcnNlIGF0dGVudGlvbiBmdW5jdGlvbiIsInNwYXJzZW1heCAvIGVudG1heCIsImVudG1heDE1IG9mdGVuIG91dHBlcmZvcm1zIHNwYXJzZW1heCBpbiBwcmFjdGljZSJdXX0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiQmFzaWMgVXNhZ2Ugd2l0aCBweXRvcmNoLXRhYm5ldCJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiVGhlIHB5dG9yY2hfdGFibmV0IGxpYnJhcnkgcHJvdmlkZXMgYSBzY2lraXQtbGVhcm4tY29tcGF0aWJsZSBBUEkgZm9yIFRhYk5ldCB3aXRoIGJ1aWx0LWluIHN1cHBvcnQgZm9yIGVhcmx5IHN0b3BwaW5nLCBldmFsdWF0aW9uIHNldHMsIGFuZCBhdHRlbnRpb24gbWFzayBleHRyYWN0aW9uLiJ9LHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiJpbXBvcnQgbnVtcHkgYXMgbnBcbmltcG9ydCB0b3JjaFxuZnJvbSBza2xlYXJuLmRhdGFzZXRzIGltcG9ydCBtYWtlX2NsYXNzaWZpY2F0aW9uXG5mcm9tIHNrbGVhcm4ubW9kZWxfc2VsZWN0aW9uIGltcG9ydCB0cmFpbl90ZXN0X3NwbGl0XG5mcm9tIHB5dG9yY2hfdGFibmV0LnRhYl9tb2RlbCBpbXBvcnQgVGFiTmV0Q2xhc3NpZmllclxuXG5YLCB5ID0gbWFrZV9jbGFzc2lmaWNhdGlvbihcbiAgICBuX3NhbXBsZXM9MzAwMCwgbl9mZWF0dXJlcz0yMCwgbl9pbmZvcm1hdGl2ZT0xMCwgcmFuZG9tX3N0YXRlPTQyXG4pXG5YID0gWC5hc3R5cGUobnAuZmxvYXQzMilcblhfdHJhaW4sIFhfdmFsLCB5X3RyYWluLCB5X3ZhbCA9IHRyYWluX3Rlc3Rfc3BsaXQoXG4gICAgWCwgeSwgdGVzdF9zaXplPTAuMiwgcmFuZG9tX3N0YXRlPTQyXG4pXG5cbmNsZiA9IFRhYk5ldENsYXNzaWZpZXIoXG4gICAgbl9kPTY0LCBuX2E9NjQsXG4gICAgbl9zdGVwcz01LFxuICAgIGdhbW1hPTEuNSxcbiAgICBsYW1iZGFfc3BhcnNlPTFlLTQsXG4gICAgb3B0aW1pemVyX2ZuPXRvcmNoLm9wdGltLkFkYW0sXG4gICAgb3B0aW1pemVyX3BhcmFtcz17XHUwMDI3bHJcdTAwMjc6IDJlLTJ9LFxuICAgIG1hc2tfdHlwZT1cdTAwMjdlbnRtYXhcdTAwMjdcbilcblxuY2xmLmZpdChcbiAgICBYX3RyYWluLCB5X3RyYWluLFxuICAgIGV2YWxfc2V0PVsoWF92YWwsIHlfdmFsKV0sXG4gICAgZXZhbF9tZXRyaWM9W1x1MDAyN2FjY3VyYWN5XHUwMDI3XSxcbiAgICBtYXhfZXBvY2hzPTEwMCxcbiAgICBwYXRpZW5jZT0yMCxcbiAgICBiYXRjaF9zaXplPTEwMjQsXG4gICAgdmlydHVhbF9iYXRjaF9zaXplPTEyOFxuKVxuXG5hY2MgPSAoY2xmLnByZWRpY3QoWF92YWwpID09IHlfdmFsKS5tZWFuKClcbnByaW50KGZcdTAwMjdUYWJOZXQgdmFsaWRhdGlvbiBhY2N1cmFjeToge2FjYzouNGZ9XHUwMDI3KSJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IkZlYXR1cmUgSW1wb3J0YW5jZSBmcm9tIEF0dGVudGlvbiBNYXNrcyJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiVGFiTmV0IHByb3ZpZGVzIGJvdGggZ2xvYmFsIGZlYXR1cmUgaW1wb3J0YW5jZXMgKGFnZ3JlZ2F0ZWQgYWNyb3NzIGFsbCBzYW1wbGVzKSBhbmQgbG9jYWwgZXhwbGFuYXRpb25zIChwZXItc2FtcGxlIGF0dGVudGlvbiBtYXNrcyBwZXIgc3RlcCkuIFRoaXMgbWFrZXMgVGFiTmV0IG5hdGl2ZWx5IGludGVycHJldGFibGUsIHVubGlrZSBwb3N0LWhvYyBtZXRob2RzIHN1Y2ggYXMgU0hBUC4ifSx7InR5cGUiOiJjb2RlIiwibGFuZ3VhZ2UiOiJweXRob24iLCJjb250ZW50IjoiaW1wb3J0IG51bXB5IGFzIG5wXG5mcm9tIHB5dG9yY2hfdGFibmV0LnRhYl9tb2RlbCBpbXBvcnQgVGFiTmV0Q2xhc3NpZmllclxuXG4jIEdsb2JhbCBmZWF0dXJlIGltcG9ydGFuY2VzIGZyb20gYWNjdW11bGF0ZWQgYXR0ZW50aW9uIHdlaWdodHNcbmZlYXR1cmVfaW1wb3J0YW5jZXMgPSBjbGYuZmVhdHVyZV9pbXBvcnRhbmNlc19cbmZlYXR1cmVfbmFtZXMgPSBbZlx1MDAyN0ZlYXR1cmVfe2l9XHUwMDI3IGZvciBpIGluIHJhbmdlKFguc2hhcGVbMV0pXVxuXG5zb3J0ZWRfaWR4ID0gbnAuYXJnc29ydChmZWF0dXJlX2ltcG9ydGFuY2VzKVs6Oi0xXVxucHJpbnQoXHUwMDI3VG9wIDEwIGZlYXR1cmVzIGJ5IFRhYk5ldCBhdHRlbnRpb24gd2VpZ2h0Olx1MDAyNylcbmZvciByYW5rLCBpZHggaW4gZW51bWVyYXRlKHNvcnRlZF9pZHhbOjEwXSk6XG4gICAgcHJpbnQoZlx1MDAyNyAge3JhbmsrMToyZH0uIHtmZWF0dXJlX25hbWVzW2lkeF19OiB7ZmVhdHVyZV9pbXBvcnRhbmNlc1tpZHhdOi40Zn1cdTAwMjcpXG5cbiMgUGVyLXNhbXBsZSBleHBsYW5hdGlvbiBmb3IgZmlyc3QgdmFsaWRhdGlvbiBzYW1wbGVcbmV4cGxhaW5fbWF0cml4LCBtYXNrcyA9IGNsZi5leHBsYWluKFhfdmFsWzozXSlcbnByaW50KGZcdTAwMjdcXG5BdHRlbnRpb24gbWFzayBzaGFwZSAoc2FtcGxlcyB4IGZlYXR1cmVzKToge2V4cGxhaW5fbWF0cml4LnNoYXBlfVx1MDAyNylcbnByaW50KGZcdTAwMjdOdW1iZXIgb2YgZGVjaXNpb24gc3RlcHM6IHtsZW4obWFza3MpfVx1MDAyNylcblxuZm9yIHN0ZXBfaWR4LCBtYXNrIGluIGVudW1lcmF0ZShtYXNrcyk6XG4gICAgdG9wX2ZlYXQgPSBucC5hcmdtYXgobWFza1swXSkgICMgbW9zdCBhdHRlbmRlZCBmZWF0dXJlIGZvciBmaXJzdCBzYW1wbGVcbiAgICB3ZWlnaHQgPSBtYXNrWzAsIHRvcF9mZWF0XVxuICAgIHByaW50KGZcdTAwMjcgIFN0ZXAge3N0ZXBfaWR4KzF9OiB0b3AgZmVhdHVyZSA9IHtmZWF0dXJlX25hbWVzW3RvcF9mZWF0XX0gKHdlaWdodD17d2VpZ2h0Oi4zZn0pXHUwMDI3KSJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IlNlbGYtU3VwZXJ2aXNlZCBQcmV0cmFpbmluZyJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiVGFiTmV0IHN1cHBvcnRzIHNlbGYtc3VwZXJ2aXNlZCBwcmV0cmFpbmluZzogcmFuZG9tbHkgbWFzayBhIGZyYWN0aW9uIG9mIGlucHV0IGZlYXR1cmVzLCB0aGVuIHRyYWluIHRoZSBuZXR3b3JrIHRvIHJlY29uc3RydWN0IHRoZW0uIFRoaXMgaXMgdmFsdWFibGUgd2hlbiBsYWJlbGVkIGRhdGEgaXMgc2NhcmNlLiBUaGUgcHJldHJhaW5lZCBlbmNvZGVyIHdlaWdodHMgYXJlIHRoZW4gdXNlZCB0byBpbml0aWFsaXplIHRoZSBzdXBlcnZpc2VkIG1vZGVsLiJ9LHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiJpbXBvcnQgbnVtcHkgYXMgbnBcbmZyb20gc2tsZWFybi5kYXRhc2V0cyBpbXBvcnQgbWFrZV9jbGFzc2lmaWNhdGlvblxuZnJvbSBza2xlYXJuLm1vZGVsX3NlbGVjdGlvbiBpbXBvcnQgdHJhaW5fdGVzdF9zcGxpdFxuZnJvbSBweXRvcmNoX3RhYm5ldC5wcmV0cmFpbmluZyBpbXBvcnQgVGFiTmV0UHJldHJhaW5lclxuZnJvbSBweXRvcmNoX3RhYm5ldC50YWJfbW9kZWwgaW1wb3J0IFRhYk5ldENsYXNzaWZpZXJcblxuWCwgeSA9IG1ha2VfY2xhc3NpZmljYXRpb24oXG4gICAgbl9zYW1wbGVzPTUwMDAsIG5fZmVhdHVyZXM9MjAsIG5faW5mb3JtYXRpdmU9MTAsIHJhbmRvbV9zdGF0ZT00MlxuKVxuWCA9IFguYXN0eXBlKG5wLmZsb2F0MzIpXG5YX3RyYWluLCBYX3Rlc3QsIHlfdHJhaW4sIHlfdGVzdCA9IHRyYWluX3Rlc3Rfc3BsaXQoXG4gICAgWCwgeSwgdGVzdF9zaXplPTAuMiwgcmFuZG9tX3N0YXRlPTQyXG4pXG5cbiMgU3RlcCAxOiBTZWxmLXN1cGVydmlzZWQgcHJldHJhaW5pbmcgKG5vIGxhYmVscyByZXF1aXJlZClcbnByZXRyYWluZXIgPSBUYWJOZXRQcmV0cmFpbmVyKFxuICAgIG5fZD02NCwgbl9hPTY0LCBuX3N0ZXBzPTUsXG4gICAgbWFza190eXBlPVx1MDAyN2VudG1heFx1MDAyN1xuKVxucHJldHJhaW5lci5maXQoXG4gICAgWF90cmFpbiwgZXZhbF9zZXQ9W1hfdGVzdF0sXG4gICAgbWF4X2Vwb2Nocz01MCwgcGF0aWVuY2U9MTAsXG4gICAgcHJldHJhaW5pbmdfcmF0aW89MC44ICAjIG1hc2sgODAlIG9mIGZlYXR1cmVzLCByZWNvbnN0cnVjdCB0aGVtXG4pXG5cbiMgU3RlcCAyOiBTdXBlcnZpc2VkIGZpbmUtdHVuaW5nIHdpdGggcHJldHJhaW5lZCB3ZWlnaHRzXG5jbGYgPSBUYWJOZXRDbGFzc2lmaWVyKG5fZD02NCwgbl9hPTY0LCBuX3N0ZXBzPTUpXG5jbGYuZml0KFxuICAgIFhfdHJhaW4sIHlfdHJhaW4sXG4gICAgZXZhbF9zZXQ9WyhYX3Rlc3QsIHlfdGVzdCldLFxuICAgIGZyb21fdW5zdXBlcnZpc2VkPXByZXRyYWluZXIsICAjIGluaXRpYWxpemUgZnJvbSBwcmV0cmFpbmVkIGVuY29kZXJcbiAgICBtYXhfZXBvY2hzPTEwMCwgcGF0aWVuY2U9MjBcbilcbnByaW50KGZcdTAwMjdQcmV0cmFpbmVkK2ZpbmV0dW5lZCBhY2N1cmFjeTogeyhjbGYucHJlZGljdChYX3Rlc3QpID09IHlfdGVzdCkubWVhbigpOi40Zn1cdTAwMjcpIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiVGFiTmV0IHZzIFhHQm9vc3QgQ29tcGFyaXNvbiJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiVGFiTmV0IHRyYWRlcyB0cmFpbmluZyBzcGVlZCBmb3IgaW50ZXJwcmV0YWJpbGl0eSBhbmQgZW5kLXRvLWVuZCBkaWZmZXJlbnRpYWJpbGl0eS4gWEdCb29zdCByZW1haW5zIGZhc3RlciB0byB0cmFpbiBhbmQgb2Z0ZW4gbW9yZSBhY2N1cmF0ZSwgZXNwZWNpYWxseSBhdCBzbWFsbGVyIGRhdGFzZXQgc2l6ZXMsIGJ1dCBUYWJOZXQgY2FuIG1hdGNoIGl0IGdpdmVuIHN1ZmZpY2llbnQgZGF0YSBhbmQgdHVuaW5nLiJ9LHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiJpbXBvcnQgbnVtcHkgYXMgbnBcbmltcG9ydCB0aW1lXG5pbXBvcnQgdG9yY2hcbmZyb20gc2tsZWFybi5kYXRhc2V0cyBpbXBvcnQgbWFrZV9jbGFzc2lmaWNhdGlvblxuZnJvbSBza2xlYXJuLm1vZGVsX3NlbGVjdGlvbiBpbXBvcnQgdHJhaW5fdGVzdF9zcGxpdFxuZnJvbSBza2xlYXJuLm1ldHJpY3MgaW1wb3J0IGFjY3VyYWN5X3Njb3JlXG5mcm9tIHB5dG9yY2hfdGFibmV0LnRhYl9tb2RlbCBpbXBvcnQgVGFiTmV0Q2xhc3NpZmllclxuaW1wb3J0IHhnYm9vc3QgYXMgeGdiXG5cblgsIHkgPSBtYWtlX2NsYXNzaWZpY2F0aW9uKFxuICAgIG5fc2FtcGxlcz01MDAwLCBuX2ZlYXR1cmVzPTE1LCBuX2luZm9ybWF0aXZlPTgsIHJhbmRvbV9zdGF0ZT0wXG4pXG5YID0gWC5hc3R5cGUobnAuZmxvYXQzMilcblhfdHIsIFhfdGUsIHlfdHIsIHlfdGUgPSB0cmFpbl90ZXN0X3NwbGl0KFgsIHksIHRlc3Rfc2l6ZT0wLjIsIHJhbmRvbV9zdGF0ZT0wKVxuXG4jIFhHQm9vc3QgYmVuY2htYXJrXG50MCA9IHRpbWUudGltZSgpXG54Z2JfbW9kZWwgPSB4Z2IuWEdCQ2xhc3NpZmllcihcbiAgICBuX2VzdGltYXRvcnM9MjAwLCBtYXhfZGVwdGg9NiwgcmFuZG9tX3N0YXRlPTAsIGV2YWxfbWV0cmljPVx1MDAyN2xvZ2xvc3NcdTAwMjdcbilcbnhnYl9tb2RlbC5maXQoWF90ciwgeV90cilcbnhnYl90aW1lID0gdGltZS50aW1lKCkgLSB0MFxueGdiX2FjYyA9IGFjY3VyYWN5X3Njb3JlKHlfdGUsIHhnYl9tb2RlbC5wcmVkaWN0KFhfdGUpKVxuXG4jIFRhYk5ldCBiZW5jaG1hcmtcbnQwID0gdGltZS50aW1lKClcbnRhYm5ldCA9IFRhYk5ldENsYXNzaWZpZXIobl9kPTMyLCBuX2E9MzIsIG5fc3RlcHM9NClcbnRhYm5ldC5maXQoWF90ciwgeV90ciwgZXZhbF9zZXQ9WyhYX3RlLCB5X3RlKV0sIG1heF9lcG9jaHM9MTAwLCBwYXRpZW5jZT0xNSlcbnRhYm5ldF90aW1lID0gdGltZS50aW1lKCkgLSB0MFxudGFibmV0X2FjYyA9IGFjY3VyYWN5X3Njb3JlKHlfdGUsIHRhYm5ldC5wcmVkaWN0KFhfdGUpKVxuXG5wcmludChmXHUwMDI3WEdCb29zdDogYWNjPXt4Z2JfYWNjOi40Zn0gIHRyYWluX3RpbWU9e3hnYl90aW1lOi4xZn1zXHUwMDI3KVxucHJpbnQoZlx1MDAyN1RhYk5ldDogIGFjYz17dGFibmV0X2FjYzouNGZ9ICB0cmFpbl90aW1lPXt0YWJuZXRfdGltZTouMWZ9c1x1MDAyNykifSx7InR5cGUiOiJkaXZpZGVyIn0seyJ0eXBlIjoiY2FsbG91dCIsInZhcmlhbnQiOiJ0aXAiLCJ0aXRsZSI6IldoZW4gdG8gQ2hvb3NlIFRhYk5ldCIsImNvbnRlbnQiOiJQcmVmZXIgVGFiTmV0IG92ZXIgWEdCb29zdCB3aGVuIHlvdSBuZWVkIG5hdGl2ZSBwZXItcHJlZGljdGlvbiBleHBsYW5hdGlvbnMgdmlhIGF0dGVudGlvbiBtYXNrcywgd2hlbiBsYWJlbGVkIGRhdGEgaXMgc2NhcmNlIChsZXZlcmFnZSBwcmV0cmFpbmluZyBvbiB1bmxhYmVsZWQgcm93cyksIG9yIHdoZW4geW91IHdhbnQgdG8gaW50ZWdyYXRlIHRhYnVsYXIgcHJvY2Vzc2luZyBlbmQtdG8tZW5kIGluIGEgbmV1cmFsIHBpcGVsaW5lIHRoYXQgYWxzbyBoYW5kbGVzIG90aGVyIG1vZGFsaXRpZXMuIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiS2V5IFRha2Vhd2F5cyJ9LHsidHlwZSI6Imxpc3QiLCJvcmRlcmVkIjpmYWxzZSwiaXRlbXMiOlsiVGFiTmV0IHVzZXMgc2VxdWVudGlhbCBzcGFyc2UgYXR0ZW50aW9uIHRvIHBlcmZvcm0gZGlmZmVyZW50aWFibGUgZmVhdHVyZSBzZWxlY3Rpb24gYXQgZWFjaCBkZWNpc2lvbiBzdGVwIiwiQXR0ZW50aW9uIG1hc2tzIHByb3ZpZGUgbmF0aXZlIGludGVycHJldGFiaWxpdHkgd2l0aG91dCBwb3N0LWhvYyBtZXRob2RzIGxpa2UgU0hBUCIsIlNlbGYtc3VwZXJ2aXNlZCBwcmV0cmFpbmluZyB2aWEgZmVhdHVyZSByZWNvbnN0cnVjdGlvbiBpbXByb3ZlcyBwZXJmb3JtYW5jZSB3aXRoIGxpbWl0ZWQgbGFiZWxzIiwiS2V5IGh5cGVycGFyYW1ldGVyczogTl9zdGVwcyAoZGVwdGgpLCBOX2Q9Tl9hICh3aWR0aCksIGxhbWJkYV9zcGFyc2UgKHNwYXJzaXR5KSwgbWFza190eXBlIiwiVGFiTmV0IGlzIHNsb3dlciB0byB0cmFpbiB0aGFuIFhHQm9vc3QgYW5kIHJhcmVseSBvdXRwZXJmb3JtcyBpdCB3aXRob3V0IGNhcmVmdWwgdHVuaW5nIGFuZCBzdWZmaWNpZW50IGRhdGEiXX1d"
+---
+# TabNet — Sequential Attention for Feature Selection
+
+TabNet (Arik & Pfister, Google Cloud AI, 2021) brings attention to tabular deep learning: at each of N decision steps, a sparse attention mask selects a subset of features, processes them through a feature transformer, and passes the result to both the prediction head and the next step. This mimics the greedy feature selection of trees while remaining end-to-end differentiable.
+
+## Architecture Overview
+
+TabNet processes input through N sequential steps. At each step, an attention transformer computes a soft mask over all input features. The selected features pass through a shared and step-specific feature transformer. The output is split: one part contributes to the final prediction (via sum across steps), and the other part conditions the next attention step.
+
+- Attention transformer: h_s = softmax(h_{s-1} · W_att + b_att) — selects B features per step via entmax (sparse softmax)
+- Feature transformer: shared + step-specific fully-connected layers with GLU (Gated Linear Unit) activations
+- Sparsity loss: entropy regularization Σ_s Σ_i Σ_j a_{sij} log(a_{sij}) penalizes diffuse attention
+- Global feature importance: sum of attention weights across all steps and samples
+- Local interpretability: per-sample attention mask shows which features mattered for each prediction
+
+## TabNet Hyperparameters
+
+| Hyperparameter | Effect | Typical Range | Tuning Strategy |
+| --- | --- | --- | --- |
+| N_steps | Number of sequential decision steps | 3–10 | Start with 5; more steps = more capacity, slower training |
+| N_d | Output dimension per step | 8–64 | Higher = more expressive; must match N_a |
+| N_a | Attention embedding dimension | 8–64 | Usually equal to N_d; controls attention complexity |
+| gamma | Feature reuse penalty coefficient | 1.0–2.0 | Higher = more reuse across steps; lower = more diversity |
+| lambda_sparse | Sparsity regularization weight | 1e-6 to 1e-3 | Higher = sparser masks; tune based on n_informative |
+| mask_type | Sparse attention function | sparsemax / entmax | entmax15 often outperforms sparsemax in practice |
+
+## Basic Usage with pytorch-tabnet
+
+The pytorch_tabnet library provides a scikit-learn-compatible API for TabNet with built-in support for early stopping, evaluation sets, and attention mask extraction.
+
+```python
+import numpy as np
+import torch
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+from pytorch_tabnet.tab_model import TabNetClassifier
+
+X, y = make_classification(
+    n_samples=3000, n_features=20, n_informative=10, random_state=42
+)
+X = X.astype(np.float32)
+X_train, X_val, y_train, y_val = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+
+clf = TabNetClassifier(
+    n_d=64, n_a=64,
+    n_steps=5,
+    gamma=1.5,
+    lambda_sparse=1e-4,
+    optimizer_fn=torch.optim.Adam,
+    optimizer_params={'lr': 2e-2},
+    mask_type='entmax'
+)
+
+clf.fit(
+    X_train, y_train,
+    eval_set=[(X_val, y_val)],
+    eval_metric=['accuracy'],
+    max_epochs=100,
+    patience=20,
+    batch_size=1024,
+    virtual_batch_size=128
+)
+
+acc = (clf.predict(X_val) == y_val).mean()
+print(f'TabNet validation accuracy: {acc:.4f}')
+```
+
+## Feature Importance from Attention Masks
+
+TabNet provides both global feature importances (aggregated across all samples) and local explanations (per-sample attention masks per step). This makes TabNet natively interpretable, unlike post-hoc methods such as SHAP.
+
+```python
+import numpy as np
+from pytorch_tabnet.tab_model import TabNetClassifier
+
+# Global feature importances from accumulated attention weights
+feature_importances = clf.feature_importances_
+feature_names = [f'Feature_{i}' for i in range(X.shape[1])]
+
+sorted_idx = np.argsort(feature_importances)[::-1]
+print('Top 10 features by TabNet attention weight:')
+for rank, idx in enumerate(sorted_idx[:10]):
+    print(f'  {rank+1:2d}. {feature_names[idx]}: {feature_importances[idx]:.4f}')
+
+# Per-sample explanation for first validation sample
+explain_matrix, masks = clf.explain(X_val[:3])
+print(f'\nAttention mask shape (samples x features): {explain_matrix.shape}')
+print(f'Number of decision steps: {len(masks)}')
+
+for step_idx, mask in enumerate(masks):
+    top_feat = np.argmax(mask[0])  # most attended feature for first sample
+    weight = mask[0, top_feat]
+    print(f'  Step {step_idx+1}: top feature = {feature_names[top_feat]} (weight={weight:.3f})')
+```
+
+## Self-Supervised Pretraining
+
+TabNet supports self-supervised pretraining: randomly mask a fraction of input features, then train the network to reconstruct them. This is valuable when labeled data is scarce. The pretrained encoder weights are then used to initialize the supervised model.
+
+```python
+import numpy as np
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+from pytorch_tabnet.pretraining import TabNetPretrainer
+from pytorch_tabnet.tab_model import TabNetClassifier
+
+X, y = make_classification(
+    n_samples=5000, n_features=20, n_informative=10, random_state=42
+)
+X = X.astype(np.float32)
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+
+# Step 1: Self-supervised pretraining (no labels required)
+pretrainer = TabNetPretrainer(
+    n_d=64, n_a=64, n_steps=5,
+    mask_type='entmax'
+)
+pretrainer.fit(
+    X_train, eval_set=[X_test],
+    max_epochs=50, patience=10,
+    pretraining_ratio=0.8  # mask 80% of features, reconstruct them
+)
+
+# Step 2: Supervised fine-tuning with pretrained weights
+clf = TabNetClassifier(n_d=64, n_a=64, n_steps=5)
+clf.fit(
+    X_train, y_train,
+    eval_set=[(X_test, y_test)],
+    from_unsupervised=pretrainer,  # initialize from pretrained encoder
+    max_epochs=100, patience=20
+)
+print(f'Pretrained+finetuned accuracy: {(clf.predict(X_test) == y_test).mean():.4f}')
+```
+
+## TabNet vs XGBoost Comparison
+
+TabNet trades training speed for interpretability and end-to-end differentiability. XGBoost remains faster to train and often more accurate, especially at smaller dataset sizes, but TabNet can match it given sufficient data and tuning.
+
+```python
+import numpy as np
+import time
+import torch
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+from pytorch_tabnet.tab_model import TabNetClassifier
+import xgboost as xgb
+
+X, y = make_classification(
+    n_samples=5000, n_features=15, n_informative=8, random_state=0
+)
+X = X.astype(np.float32)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=0)
+
+# XGBoost benchmark
+t0 = time.time()
+xgb_model = xgb.XGBClassifier(
+    n_estimators=200, max_depth=6, random_state=0, eval_metric='logloss'
+)
+xgb_model.fit(X_tr, y_tr)
+xgb_time = time.time() - t0
+xgb_acc = accuracy_score(y_te, xgb_model.predict(X_te))
+
+# TabNet benchmark
+t0 = time.time()
+tabnet = TabNetClassifier(n_d=32, n_a=32, n_steps=4)
+tabnet.fit(X_tr, y_tr, eval_set=[(X_te, y_te)], max_epochs=100, patience=15)
+tabnet_time = time.time() - t0
+tabnet_acc = accuracy_score(y_te, tabnet.predict(X_te))
+
+print(f'XGBoost: acc={xgb_acc:.4f}  train_time={xgb_time:.1f}s')
+print(f'TabNet:  acc={tabnet_acc:.4f}  train_time={tabnet_time:.1f}s')
+```
+
+---
+
+> **When to Choose TabNet**: Prefer TabNet over XGBoost when you need native per-prediction explanations via attention masks, when labeled data is scarce (leverage pretraining on unlabeled rows), or when you want to integrate tabular processing end-to-end in a neural pipeline that also handles other modalities.
+
+## Key Takeaways
+
+- TabNet uses sequential sparse attention to perform differentiable feature selection at each decision step
+- Attention masks provide native interpretability without post-hoc methods like SHAP
+- Self-supervised pretraining via feature reconstruction improves performance with limited labels
+- Key hyperparameters: N_steps (depth), N_d=N_a (width), lambda_sparse (sparsity), mask_type
+- TabNet is slower to train than XGBoost and rarely outperforms it without careful tuning and sufficient data
+

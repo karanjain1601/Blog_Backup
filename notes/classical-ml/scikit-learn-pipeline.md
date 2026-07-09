@@ -1,0 +1,204 @@
+---
+title: "Scikit-learn — Pipeline, ColumnTransformer, and Cross-Validation"
+slug: "scikit-learn-pipeline"
+description: "Scikit-learn's Pipeline and ColumnTransformer prevent data leakage, enable hyperparameter search over preprocessing, and compose mixed-type tabular transformations cleanly."
+tags: ["pytorch", "tools", "classical-ml"]
+topic: "classical-ml"
+status: "published"
+updated: "2026-07-10"
+blocks_json: "W3sidHlwZSI6InRleHQiLCJjb250ZW50IjoiU2Npa2l0LWxlYXJuXHUwMDI3cyBQaXBlbGluZSBpcyB0aGUgY29ybmVyc3RvbmUgb2YgbGVhay1mcmVlIE1MIHdvcmtmbG93czogcHJlcHJvY2Vzc2luZyBzdGVwcyBhcmUgZml0dGVkIG9ubHkgb24gdHJhaW5pbmcgZGF0YSBhbmQgYXBwbGllZCB0byB2YWxpZGF0aW9uL3Rlc3QgZGF0YSBhdXRvbWF0aWNhbGx5LiBDb21iaW5lZCB3aXRoIENvbHVtblRyYW5zZm9ybWVyIGZvciBtaXhlZC10eXBlIGZlYXR1cmVzIGFuZCBHcmlkU2VhcmNoQ1YgZm9yIGh5cGVycGFyYW1ldGVyIHR1bmluZywgaXQgcHJvdmlkZXMgYSBjb21wbGV0ZSwgcmVwcm9kdWNpYmxlIE1MIHBpcGVsaW5lIGluIHB1cmUgUHl0aG9uLiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IldoeSBQaXBlbGluZSBQcmV2ZW50cyBEYXRhIExlYWthZ2UifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IlRoZSBtb3N0IGNvbW1vbiBzb3VyY2Ugb2YgZGF0YSBsZWFrYWdlIGlzIGZpdHRpbmcgYSBzY2FsZXIgb3IgaW1wdXRlciBvbiB0aGUgZW50aXJlIGRhdGFzZXQgYmVmb3JlIGNyb3NzLXZhbGlkYXRpb24uIFBpcGVsaW5lIGZpeGVzIHRoaXM6IGR1cmluZyBDViwgZml0KCkgaXMgY2FsbGVkIG9ubHkgb24gdGhlIHRyYWluaW5nIGZvbGQsIGFuZCB0cmFuc2Zvcm0oKSBpcyBhcHBsaWVkIHRvIHRoZSB2YWxpZGF0aW9uIGZvbGQgd2l0aCB0aGUgZml0dGVkIHBhcmFtZXRlcnMuIn0seyJ0eXBlIjoibGlzdCIsIm9yZGVyZWQiOmZhbHNlLCJpdGVtcyI6WyJQaXBlbGluZS5maXQoWF90cmFpbiwgeV90cmFpbik6IGNhbGxzIGZpdF90cmFuc2Zvcm0gb24gZWFjaCBzdGVwIGV4Y2VwdCB0aGUgbGFzdCwgd2hpY2ggY2FsbHMgZml0IiwiUGlwZWxpbmUucHJlZGljdChYX3Rlc3QpOiBjYWxscyB0cmFuc2Zvcm0gb24gZWFjaCBwcmVwcm9jZXNzaW5nIHN0ZXAsIHRoZW4gcHJlZGljdCBvbiB0aGUgZXN0aW1hdG9yIiwiQ3Jvc3MtdmFsaWRhdGlvbiB3aXRoIFBpcGVsaW5lOiBza2xlYXJuIGhhbmRsZXMgZm9sZCBzcGxpdHRpbmcgYW5kIHJlZml0dGluZyBhdXRvbWF0aWNhbGx5IOKAlCBubyBtYW51YWwgZml0IG9uIHRyYWluLCB0cmFuc2Zvcm0gb24gdmFsIiwic2V0X3BhcmFtcyBBUEk6IFBpcGVsaW5lKFx1MDAyN3N0ZXBfX3BhcmFtXHUwMDI3LCB2YWx1ZSkgYWxsb3dzIGdyaWQgc2VhcmNoIG92ZXIgYW55IHN0ZXBcdTAwMjdzIHBhcmFtZXRlcnMiLCJuYW1lZF9zdGVwcyBhdHRyaWJ1dGU6IGFjY2VzcyBpbmRpdmlkdWFsIGZpdHRlZCB0cmFuc2Zvcm1lcnMgZm9yIGluc3BlY3Rpb24iXX0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiUGlwZWxpbmUgd2l0aCBDb2x1bW5UcmFuc2Zvcm1lciJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiQ29sdW1uVHJhbnNmb3JtZXIgYXBwbGllcyBkaWZmZXJlbnQgdHJhbnNmb3JtZXJzIHRvIGRpZmZlcmVudCBjb2x1bW5zLCB0aGVuIGNvbmNhdGVuYXRlcyB0aGUgcmVzdWx0cy4gVGhpcyBpcyB0aGUgc3RhbmRhcmQgcGF0dGVybiBmb3IgdGFidWxhciBkYXRhIHdpdGggYSBtaXggb2YgbnVtZXJpY2FsIGFuZCBjYXRlZ29yaWNhbCBmZWF0dXJlcy4ifSx7InR5cGUiOiJjb2RlIiwibGFuZ3VhZ2UiOiJweXRob24iLCJjb250ZW50IjoiaW1wb3J0IG51bXB5IGFzIG5wXG5pbXBvcnQgcGFuZGFzIGFzIHBkXG5mcm9tIHNrbGVhcm4ucGlwZWxpbmUgaW1wb3J0IFBpcGVsaW5lXG5mcm9tIHNrbGVhcm4uY29tcG9zZSBpbXBvcnQgQ29sdW1uVHJhbnNmb3JtZXJcbmZyb20gc2tsZWFybi5wcmVwcm9jZXNzaW5nIGltcG9ydCBTdGFuZGFyZFNjYWxlciwgT25lSG90RW5jb2RlclxuZnJvbSBza2xlYXJuLmltcHV0ZSBpbXBvcnQgU2ltcGxlSW1wdXRlclxuZnJvbSBza2xlYXJuLmVuc2VtYmxlIGltcG9ydCBHcmFkaWVudEJvb3N0aW5nQ2xhc3NpZmllclxuZnJvbSBza2xlYXJuLmRhdGFzZXRzIGltcG9ydCBtYWtlX2NsYXNzaWZpY2F0aW9uXG5cbiMgU2ltdWxhdGVkIG1peGVkLXR5cGUgZGF0YXNldFxuWF9udW0gPSBucC5yYW5kb20ucmFuZG4oNTAwLCA1KS5hc3R5cGUobnAuZmxvYXQzMilcblhfY2F0ID0gbnAucmFuZG9tLmNob2ljZShbXHUwMDI3QVx1MDAyNywgXHUwMDI3Qlx1MDAyNywgXHUwMDI3Q1x1MDAyN10sIHNpemU9KDUwMCwgMikpXG5YID0gcGQuRGF0YUZyYW1lKFxuICAgIG5wLmhzdGFjayhbWF9udW0sIFhfY2F0XSksXG4gICAgY29sdW1ucz1bZlx1MDAyN251bV97aX1cdTAwMjcgZm9yIGkgaW4gcmFuZ2UoNSldICsgW1x1MDAyN2NhdF8wXHUwMDI3LCBcdTAwMjdjYXRfMVx1MDAyN11cbilcbnkgPSAoWFtcdTAwMjdudW1fMFx1MDAyN10uYXN0eXBlKGZsb2F0KSArIFhbXHUwMDI3bnVtXzFcdTAwMjddLmFzdHlwZShmbG9hdCkgXHUwMDNlIDApLmFzdHlwZShpbnQpLnZhbHVlc1xuXG5udW1lcmljX2NvbHMgICAgID0gW2ZcdTAwMjdudW1fe2l9XHUwMDI3IGZvciBpIGluIHJhbmdlKDUpXVxuY2F0ZWdvcmljYWxfY29scyA9IFtcdTAwMjdjYXRfMFx1MDAyNywgXHUwMDI3Y2F0XzFcdTAwMjddXG5cbm51bWVyaWNfdHJhbnNmb3JtZXIgPSBQaXBlbGluZShbXG4gICAgKFx1MDAyN2ltcHV0ZXJcdTAwMjcsIFNpbXBsZUltcHV0ZXIoc3RyYXRlZ3k9XHUwMDI3bWVkaWFuXHUwMDI3KSksXG4gICAgKFx1MDAyN3NjYWxlclx1MDAyNywgIFN0YW5kYXJkU2NhbGVyKCkpXG5dKVxuY2F0ZWdvcmljYWxfdHJhbnNmb3JtZXIgPSBQaXBlbGluZShbXG4gICAgKFx1MDAyN2ltcHV0ZXJcdTAwMjcsIFNpbXBsZUltcHV0ZXIoc3RyYXRlZ3k9XHUwMDI3bW9zdF9mcmVxdWVudFx1MDAyNykpLFxuICAgIChcdTAwMjdvbmVob3RcdTAwMjcsICBPbmVIb3RFbmNvZGVyKGhhbmRsZV91bmtub3duPVx1MDAyN2lnbm9yZVx1MDAyNywgc3BhcnNlX291dHB1dD1GYWxzZSkpXG5dKVxuXG5wcmVwcm9jZXNzb3IgPSBDb2x1bW5UcmFuc2Zvcm1lcihbXG4gICAgKFx1MDAyN251bVx1MDAyNywgbnVtZXJpY190cmFuc2Zvcm1lciwgICAgIG51bWVyaWNfY29scyksXG4gICAgKFx1MDAyN2NhdFx1MDAyNywgY2F0ZWdvcmljYWxfdHJhbnNmb3JtZXIsIGNhdGVnb3JpY2FsX2NvbHMpXG5dKVxuZnVsbF9waXBlbGluZSA9IFBpcGVsaW5lKFtcbiAgICAoXHUwMDI3cHJlcHJvY2Vzc29yXHUwMDI3LCBwcmVwcm9jZXNzb3IpLFxuICAgIChcdTAwMjdjbGFzc2lmaWVyXHUwMDI3LCAgIEdyYWRpZW50Qm9vc3RpbmdDbGFzc2lmaWVyKG5fZXN0aW1hdG9ycz0xMDAsIHJhbmRvbV9zdGF0ZT00MikpXG5dKVxucHJpbnQoZnVsbF9waXBlbGluZSkifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJDcm9zcy1WYWxpZGF0aW9uIHdpdGggUGlwZWxpbmUifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IlVzaW5nIGNyb3NzX3ZhbF9zY29yZSBvbiBhIFBpcGVsaW5lIGd1YXJhbnRlZXMgbm8gbGVha2FnZTogdGhlIGVudGlyZSBwcmVwcm9jZXNzaW5nICsgZml0dGluZyBoYXBwZW5zIGluc2lkZSBlYWNoIGZvbGQuIFRoZSB2YWxpZGF0aW9uIGZvbGQgaXMgdHJhbnNmb3JtZWQgd2l0aCBwYXJhbWV0ZXJzIGZpdHRlZCBvbiB0aGUgdHJhaW5pbmcgZm9sZCBvbmx5LiJ9LHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiJpbXBvcnQgbnVtcHkgYXMgbnBcbmZyb20gc2tsZWFybi5waXBlbGluZSBpbXBvcnQgUGlwZWxpbmVcbmZyb20gc2tsZWFybi5wcmVwcm9jZXNzaW5nIGltcG9ydCBTdGFuZGFyZFNjYWxlclxuZnJvbSBza2xlYXJuLmRlY29tcG9zaXRpb24gaW1wb3J0IFBDQVxuZnJvbSBza2xlYXJuLmVuc2VtYmxlIGltcG9ydCBSYW5kb21Gb3Jlc3RDbGFzc2lmaWVyXG5mcm9tIHNrbGVhcm4ubW9kZWxfc2VsZWN0aW9uIGltcG9ydCBjcm9zc192YWxfc2NvcmUsIFN0cmF0aWZpZWRLRm9sZFxuZnJvbSBza2xlYXJuLmRhdGFzZXRzIGltcG9ydCBtYWtlX2NsYXNzaWZpY2F0aW9uXG5cblgsIHkgPSBtYWtlX2NsYXNzaWZpY2F0aW9uKFxuICAgIG5fc2FtcGxlcz0xMDAwLCBuX2ZlYXR1cmVzPTIwLCBuX2luZm9ybWF0aXZlPTEwLFxuICAgIG5fcmVkdW5kYW50PTUsIHJhbmRvbV9zdGF0ZT00MlxuKVxuXG4jIFBpcGVsaW5lOiBzY2FsZSDihpIgUENBIOKGkiBSYW5kb20gRm9yZXN0XG5sZWFreV9waXBlbGluZSA9IFBpcGVsaW5lKFtcbiAgICAoXHUwMDI3c2NhbGVyXHUwMDI3LCBTdGFuZGFyZFNjYWxlcigpKSxcbiAgICAoXHUwMDI3cGNhXHUwMDI3LCAgICBQQ0Eobl9jb21wb25lbnRzPTEwKSksXG4gICAgKFx1MDAyN2NsZlx1MDAyNywgICAgUmFuZG9tRm9yZXN0Q2xhc3NpZmllcihuX2VzdGltYXRvcnM9MTAwLCByYW5kb21fc3RhdGU9NDIpKVxuXSlcblxuIyBTdHJhdGlmaWVkS0ZvbGQgcHJlc2VydmVzIGNsYXNzIGJhbGFuY2UgcGVyIGZvbGRcbnNrZiA9IFN0cmF0aWZpZWRLRm9sZChuX3NwbGl0cz01LCBzaHVmZmxlPVRydWUsIHJhbmRvbV9zdGF0ZT00MilcbnNjb3JlcyA9IGNyb3NzX3ZhbF9zY29yZShcbiAgICBsZWFreV9waXBlbGluZSwgWCwgeSwgY3Y9c2tmLCBzY29yaW5nPVx1MDAyN2FjY3VyYWN5XHUwMDI3LCBuX2pvYnM9LTFcbilcbnByaW50KGZcdTAwMjdDViBhY2N1cmFjeToge3Njb3Jlcy5tZWFuKCk6LjRmfSArLy0ge3Njb3Jlcy5zdGQoKTouNGZ9XHUwMDI3KVxucHJpbnQoZlx1MDAyN1Blci1mb2xkOiAgICB7W2ZcIntzOi4zZn1cIiBmb3IgcyBpbiBzY29yZXNdfVx1MDAyNykifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJHcmlkU2VhcmNoQ1YgT3ZlciBQaXBlbGluZSBQYXJhbWV0ZXJzIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJHcmlkU2VhcmNoQ1Ygb24gYSBQaXBlbGluZSBzZWFyY2hlcyBvdmVyIHByZXByb2Nlc3NpbmcgaHlwZXJwYXJhbWV0ZXJzIChQQ0EgY29tcG9uZW50cywgaW1wdXRhdGlvbiBzdHJhdGVneSkgc2ltdWx0YW5lb3VzbHkgd2l0aCBtb2RlbCBoeXBlcnBhcmFtZXRlcnMuIFRoZSBkb3VibGUtdW5kZXJzY29yZSBfXyBzeW50YXggYWNjZXNzZXMgbmVzdGVkIHN0ZXAgcGFyYW1ldGVycy4ifSx7InR5cGUiOiJjb2RlIiwibGFuZ3VhZ2UiOiJweXRob24iLCJjb250ZW50IjoiaW1wb3J0IG51bXB5IGFzIG5wXG5mcm9tIHNrbGVhcm4ucGlwZWxpbmUgaW1wb3J0IFBpcGVsaW5lXG5mcm9tIHNrbGVhcm4ucHJlcHJvY2Vzc2luZyBpbXBvcnQgU3RhbmRhcmRTY2FsZXJcbmZyb20gc2tsZWFybi5kZWNvbXBvc2l0aW9uIGltcG9ydCBQQ0FcbmZyb20gc2tsZWFybi5lbnNlbWJsZSBpbXBvcnQgR3JhZGllbnRCb29zdGluZ0NsYXNzaWZpZXJcbmZyb20gc2tsZWFybi5tb2RlbF9zZWxlY3Rpb24gaW1wb3J0IEdyaWRTZWFyY2hDViwgU3RyYXRpZmllZEtGb2xkXG5mcm9tIHNrbGVhcm4uZGF0YXNldHMgaW1wb3J0IG1ha2VfY2xhc3NpZmljYXRpb25cblxuWCwgeSA9IG1ha2VfY2xhc3NpZmljYXRpb24obl9zYW1wbGVzPTgwMCwgbl9mZWF0dXJlcz0xNSwgbl9pbmZvcm1hdGl2ZT04LCByYW5kb21fc3RhdGU9NDIpXG5cbnBpcGVsaW5lID0gUGlwZWxpbmUoW1xuICAgIChcdTAwMjdzY2FsZXJcdTAwMjcsIFN0YW5kYXJkU2NhbGVyKCkpLFxuICAgIChcdTAwMjdwY2FcdTAwMjcsICAgIFBDQSgpKSxcbiAgICAoXHUwMDI3Y2xmXHUwMDI3LCAgICBHcmFkaWVudEJvb3N0aW5nQ2xhc3NpZmllcihyYW5kb21fc3RhdGU9NDIpKVxuXSlcblxuIyBTZWFyY2ggb3ZlciBQQ0EgY29tcG9uZW50cyBBTkQgR0JNIGh5cGVycGFyYW1ldGVycyBzaW11bHRhbmVvdXNseVxucGFyYW1fZ3JpZCA9IHtcbiAgICBcdTAwMjdwY2FfX25fY29tcG9uZW50c1x1MDAyNzogICAgICAgIFs1LCAxMCwgMTVdLFxuICAgIFx1MDAyN2NsZl9fbl9lc3RpbWF0b3JzXHUwMDI3OiAgICAgICAgWzEwMCwgMjAwXSxcbiAgICBcdTAwMjdjbGZfX21heF9kZXB0aFx1MDAyNzogICAgICAgICAgIFszLCA1XSxcbiAgICBcdTAwMjdjbGZfX2xlYXJuaW5nX3JhdGVcdTAwMjc6ICAgICAgIFswLjA1LCAwLjFdXG59XG5cbmdyaWRfc2VhcmNoID0gR3JpZFNlYXJjaENWKFxuICAgIHBpcGVsaW5lLCBwYXJhbV9ncmlkLFxuICAgIGN2PVN0cmF0aWZpZWRLRm9sZChuX3NwbGl0cz0zLCBzaHVmZmxlPVRydWUsIHJhbmRvbV9zdGF0ZT00MiksXG4gICAgc2NvcmluZz1cdTAwMjdhY2N1cmFjeVx1MDAyNywgbl9qb2JzPS0xLCB2ZXJib3NlPTFcbilcbmdyaWRfc2VhcmNoLmZpdChYLCB5KVxucHJpbnQoZlx1MDAyN0Jlc3Qgc2NvcmU6ICB7Z3JpZF9zZWFyY2guYmVzdF9zY29yZV86LjRmfVx1MDAyNylcbnByaW50KGZcdTAwMjdCZXN0IHBhcmFtczoge2dyaWRfc2VhcmNoLmJlc3RfcGFyYW1zX31cdTAwMjcpIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiQ3VzdG9tIFRyYW5zZm9ybWVycyJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiQ3VzdG9tIHRyYW5zZm9ybWVycyBpbnRlZ3JhdGUgc2VhbWxlc3NseSB3aXRoIFBpcGVsaW5lIGJ5IGluaGVyaXRpbmcgZnJvbSBCYXNlRXN0aW1hdG9yIGFuZCBUcmFuc2Zvcm1lck1peGluLiBUaGlzIHByb3ZpZGVzIGZpdCwgdHJhbnNmb3JtLCBmaXRfdHJhbnNmb3JtLCBnZXRfcGFyYW1zLCBhbmQgc2V0X3BhcmFtcyBhdXRvbWF0aWNhbGx5LiJ9LHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiJpbXBvcnQgbnVtcHkgYXMgbnBcbmZyb20gc2tsZWFybi5iYXNlIGltcG9ydCBCYXNlRXN0aW1hdG9yLCBUcmFuc2Zvcm1lck1peGluXG5mcm9tIHNrbGVhcm4ucGlwZWxpbmUgaW1wb3J0IFBpcGVsaW5lXG5mcm9tIHNrbGVhcm4ucHJlcHJvY2Vzc2luZyBpbXBvcnQgU3RhbmRhcmRTY2FsZXJcbmZyb20gc2tsZWFybi5saW5lYXJfbW9kZWwgaW1wb3J0IExvZ2lzdGljUmVncmVzc2lvblxuZnJvbSBza2xlYXJuLmRhdGFzZXRzIGltcG9ydCBtYWtlX2NsYXNzaWZpY2F0aW9uXG5mcm9tIHNrbGVhcm4ubW9kZWxfc2VsZWN0aW9uIGltcG9ydCBjcm9zc192YWxfc2NvcmVcblxuY2xhc3MgQ2xpcFRyYW5zZm9ybWVyKEJhc2VFc3RpbWF0b3IsIFRyYW5zZm9ybWVyTWl4aW4pOlxuICAgIFwiXCJcIkNsaXAgZmVhdHVyZSB2YWx1ZXMgdG8gW21lYW4gLSBuX3N0ZCwgbWVhbiArIG5fc3RkXSB0byByZW1vdmUgb3V0bGllcnMuXCJcIlwiXG4gICAgZGVmIF9faW5pdF9fKHNlbGYsIG5fc3RkOiBmbG9hdCA9IDMuMCk6XG4gICAgICAgIHNlbGYubl9zdGQgPSBuX3N0ZFxuXG4gICAgZGVmIGZpdChzZWxmLCBYLCB5PU5vbmUpOlxuICAgICAgICBzZWxmLm1lYW5fID0gbnAubWVhbihYLCBheGlzPTApXG4gICAgICAgIHNlbGYuc3RkXyAgPSBucC5zdGQoWCwgYXhpcz0wKSArIDFlLTggICMgYXZvaWQgZGl2aXNpb24gYnkgemVyb1xuICAgICAgICByZXR1cm4gc2VsZlxuXG4gICAgZGVmIHRyYW5zZm9ybShzZWxmLCBYKTpcbiAgICAgICAgbG8gPSBzZWxmLm1lYW5fIC0gc2VsZi5uX3N0ZCAqIHNlbGYuc3RkX1xuICAgICAgICBoaSA9IHNlbGYubWVhbl8gKyBzZWxmLm5fc3RkICogc2VsZi5zdGRfXG4gICAgICAgIHJldHVybiBucC5jbGlwKFgsIGxvLCBoaSlcblxuWCwgeSA9IG1ha2VfY2xhc3NpZmljYXRpb24obl9zYW1wbGVzPTUwMCwgbl9mZWF0dXJlcz0xMCwgcmFuZG9tX3N0YXRlPTApXG5cbnBpcGUgPSBQaXBlbGluZShbXG4gICAgKFx1MDAyN2NsaXBcdTAwMjcsICAgQ2xpcFRyYW5zZm9ybWVyKG5fc3RkPTMuMCkpLFxuICAgIChcdTAwMjdzY2FsZXJcdTAwMjcsIFN0YW5kYXJkU2NhbGVyKCkpLFxuICAgIChcdTAwMjdjbGZcdTAwMjcsICAgIExvZ2lzdGljUmVncmVzc2lvbihtYXhfaXRlcj01MDApKVxuXSlcblxuc2NvcmVzID0gY3Jvc3NfdmFsX3Njb3JlKHBpcGUsIFgsIHksIGN2PTUpXG5wcmludChmXHUwMDI3UGlwZWxpbmUgd2l0aCBDbGlwVHJhbnNmb3JtZXI6IHtzY29yZXMubWVhbigpOi40Zn0gKy8tIHtzY29yZXMuc3RkKCk6LjRmfVx1MDAyNykifSx7InR5cGUiOiJkaXZpZGVyIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiQ3Jvc3MtVmFsaWRhdGlvbiBTdHJhdGVnaWVzIn0seyJ0eXBlIjoidGFibGUiLCJoZWFkZXJzIjpbIlN0cmF0ZWd5IiwiQ2xhc3MiLCJVc2UgQ2FzZSIsIkxlYWthZ2UgUHJldmVudGlvbiIsIk5vdGVzIl0sInJvd3MiOltbIkstRm9sZCIsIktGb2xkIiwiUmVncmVzc2lvbiwgYmFsYW5jZWQgY2xhc3NpZmljYXRpb24iLCJZZXMg4oCUIGZpdHMgb25seSBvbiB0cmFpbiBmb2xkIiwiU2h1ZmZsZT1UcnVlIHJlY29tbWVuZGVkIl0sWyJTdHJhdGlmaWVkIEstRm9sZCIsIlN0cmF0aWZpZWRLRm9sZCIsIkltYmFsYW5jZWQgY2xhc3NpZmljYXRpb24iLCJZZXMg4oCUIGZvbGQtbGV2ZWwgc3RyYXRpZmljYXRpb24iLCJEZWZhdWx0IGZvciBjbGFzc2lmaWNhdGlvbiBpbiBjcm9zc192YWxfc2NvcmUiXSxbIlRpbWUgU2VyaWVzIFNwbGl0IiwiVGltZVNlcmllc1NwbGl0IiwiVGltZSBzZXJpZXMg4oCUIG5ldmVyIHVzZSBmdXR1cmUgZGF0YSIsIlllcyDigJQgZm9yd2FyZC1vbmx5IHNwbGl0cyIsIk5vIHNodWZmbGU7IGdhcCBwYXJhbWV0ZXIgYXZhaWxhYmxlIl0sWyJHcm91cCBLLUZvbGQiLCJHcm91cEtGb2xkIiwiR3JvdXBzIG11c3Qgbm90IHNwbGl0IGFjcm9zcyBmb2xkcyAocGF0aWVudHMsIHVzZXJzKSIsIlllcyDigJQgZ3JvdXBzIGluIHRyYWluIG9yIHZhbCwgbm90IGJvdGgiLCJQcmV2ZW50cyB3aXRoaW4tZ3JvdXAgbGVha2FnZSJdXX0seyJ0eXBlIjoiY2FsbG91dCIsInZhcmlhbnQiOiJ3YXJuaW5nIiwidGl0bGUiOiJMZWFrYWdlIHdpdGggUGFuZGFzIE9wZXJhdGlvbnMgT3V0c2lkZSBQaXBlbGluZSIsImNvbnRlbnQiOiJQZXJmb3JtaW5nIGFueSBnbG9iYWwgb3BlcmF0aW9uIChmaWxsbmEsIGxhYmVsIGVuY29kaW5nLCBvdXRsaWVyIHJlbW92YWwpIG9uIHRoZSBmdWxsIGRhdGFzZXQgYmVmb3JlIGNyZWF0aW5nIHRyYWluL3ZhbCBzcGxpdHMgaW50cm9kdWNlcyBsZWFrYWdlLiBNb3ZlIEFMTCBwcmVwcm9jZXNzaW5nIGluc2lkZSBQaXBlbGluZS4gSWYgdXNpbmcgcGFuZGFzLCBwYXNzIHRoZSBEYXRhRnJhbWUgZGlyZWN0bHkgdG8gUGlwZWxpbmUgYW5kIHVzZSBDb2x1bW5UcmFuc2Zvcm1lciDigJQgZG8gbm90IGNhbGwgZGYuZmlsbG5hKCkgYmVmb3JlIHNwbGl0dGluZy4ifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJLZXkgVGFrZWF3YXlzIn0seyJ0eXBlIjoibGlzdCIsIm9yZGVyZWQiOmZhbHNlLCJpdGVtcyI6WyJQaXBlbGluZSBjaGFpbnMgcHJlcHJvY2Vzc2luZyArIGVzdGltYXRvciBzdGVwczsgZml0L3RyYW5zZm9ybSBpcyBjYWxsZWQgb25seSBvbiB0cmFpbmluZyBkYXRhIGR1cmluZyBDViIsIkNvbHVtblRyYW5zZm9ybWVyIGFwcGxpZXMgZGlmZmVyZW50IHRyYW5zZm9ybWVycyB0byBkaWZmZXJlbnQgY29sdW1uIGdyb3VwcyBhbmQgY29uY2F0ZW5hdGVzIHJlc3VsdHMiLCJHcmlkU2VhcmNoQ1Ygd2l0aCBQaXBlbGluZSBzZWFyY2hlcyBwcmVwcm9jZXNzaW5nIGFuZCBtb2RlbCBoeXBlcnBhcmFtZXRlcnMgc2ltdWx0YW5lb3VzbHkgd2l0aG91dCBsZWFrYWdlIiwiQ3VzdG9tIHRyYW5zZm9ybWVyczogaW5oZXJpdCBCYXNlRXN0aW1hdG9yICsgVHJhbnNmb3JtZXJNaXhpbiwgaW1wbGVtZW50IGZpdCBhbmQgdHJhbnNmb3JtIiwiVXNlIFN0cmF0aWZpZWRLRm9sZCBmb3IgY2xhc3NpZmljYXRpb24sIFRpbWVTZXJpZXNTcGxpdCBmb3IgdGVtcG9yYWwgZGF0YSwgR3JvdXBLRm9sZCBmb3IgZ3JvdXBlZCBzYW1wbGVzIl19XQ=="
+---
+# Scikit-learn — Pipeline, ColumnTransformer, and Cross-Validation
+
+Scikit-learn's Pipeline is the cornerstone of leak-free ML workflows: preprocessing steps are fitted only on training data and applied to validation/test data automatically. Combined with ColumnTransformer for mixed-type features and GridSearchCV for hyperparameter tuning, it provides a complete, reproducible ML pipeline in pure Python.
+
+## Why Pipeline Prevents Data Leakage
+
+The most common source of data leakage is fitting a scaler or imputer on the entire dataset before cross-validation. Pipeline fixes this: during CV, fit() is called only on the training fold, and transform() is applied to the validation fold with the fitted parameters.
+
+- Pipeline.fit(X_train, y_train): calls fit_transform on each step except the last, which calls fit
+- Pipeline.predict(X_test): calls transform on each preprocessing step, then predict on the estimator
+- Cross-validation with Pipeline: sklearn handles fold splitting and refitting automatically — no manual fit on train, transform on val
+- set_params API: Pipeline('step__param', value) allows grid search over any step's parameters
+- named_steps attribute: access individual fitted transformers for inspection
+
+## Pipeline with ColumnTransformer
+
+ColumnTransformer applies different transformers to different columns, then concatenates the results. This is the standard pattern for tabular data with a mix of numerical and categorical features.
+
+```python
+import numpy as np
+import pandas as pd
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.impute import SimpleImputer
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.datasets import make_classification
+
+# Simulated mixed-type dataset
+X_num = np.random.randn(500, 5).astype(np.float32)
+X_cat = np.random.choice(['A', 'B', 'C'], size=(500, 2))
+X = pd.DataFrame(
+    np.hstack([X_num, X_cat]),
+    columns=[f'num_{i}' for i in range(5)] + ['cat_0', 'cat_1']
+)
+y = (X['num_0'].astype(float) + X['num_1'].astype(float) > 0).astype(int).values
+
+numeric_cols     = [f'num_{i}' for i in range(5)]
+categorical_cols = ['cat_0', 'cat_1']
+
+numeric_transformer = Pipeline([
+    ('imputer', SimpleImputer(strategy='median')),
+    ('scaler',  StandardScaler())
+])
+categorical_transformer = Pipeline([
+    ('imputer', SimpleImputer(strategy='most_frequent')),
+    ('onehot',  OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+])
+
+preprocessor = ColumnTransformer([
+    ('num', numeric_transformer,     numeric_cols),
+    ('cat', categorical_transformer, categorical_cols)
+])
+full_pipeline = Pipeline([
+    ('preprocessor', preprocessor),
+    ('classifier',   GradientBoostingClassifier(n_estimators=100, random_state=42))
+])
+print(full_pipeline)
+```
+
+## Cross-Validation with Pipeline
+
+Using cross_val_score on a Pipeline guarantees no leakage: the entire preprocessing + fitting happens inside each fold. The validation fold is transformed with parameters fitted on the training fold only.
+
+```python
+import numpy as np
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import cross_val_score, StratifiedKFold
+from sklearn.datasets import make_classification
+
+X, y = make_classification(
+    n_samples=1000, n_features=20, n_informative=10,
+    n_redundant=5, random_state=42
+)
+
+# Pipeline: scale → PCA → Random Forest
+leaky_pipeline = Pipeline([
+    ('scaler', StandardScaler()),
+    ('pca',    PCA(n_components=10)),
+    ('clf',    RandomForestClassifier(n_estimators=100, random_state=42))
+])
+
+# StratifiedKFold preserves class balance per fold
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+scores = cross_val_score(
+    leaky_pipeline, X, y, cv=skf, scoring='accuracy', n_jobs=-1
+)
+print(f'CV accuracy: {scores.mean():.4f} +/- {scores.std():.4f}')
+print(f'Per-fold:    {[f"{s:.3f}" for s in scores]}')
+```
+
+## GridSearchCV Over Pipeline Parameters
+
+GridSearchCV on a Pipeline searches over preprocessing hyperparameters (PCA components, imputation strategy) simultaneously with model hyperparameters. The double-underscore __ syntax accesses nested step parameters.
+
+```python
+import numpy as np
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.model_selection import GridSearchCV, StratifiedKFold
+from sklearn.datasets import make_classification
+
+X, y = make_classification(n_samples=800, n_features=15, n_informative=8, random_state=42)
+
+pipeline = Pipeline([
+    ('scaler', StandardScaler()),
+    ('pca',    PCA()),
+    ('clf',    GradientBoostingClassifier(random_state=42))
+])
+
+# Search over PCA components AND GBM hyperparameters simultaneously
+param_grid = {
+    'pca__n_components':        [5, 10, 15],
+    'clf__n_estimators':        [100, 200],
+    'clf__max_depth':           [3, 5],
+    'clf__learning_rate':       [0.05, 0.1]
+}
+
+grid_search = GridSearchCV(
+    pipeline, param_grid,
+    cv=StratifiedKFold(n_splits=3, shuffle=True, random_state=42),
+    scoring='accuracy', n_jobs=-1, verbose=1
+)
+grid_search.fit(X, y)
+print(f'Best score:  {grid_search.best_score_:.4f}')
+print(f'Best params: {grid_search.best_params_}')
+```
+
+## Custom Transformers
+
+Custom transformers integrate seamlessly with Pipeline by inheriting from BaseEstimator and TransformerMixin. This provides fit, transform, fit_transform, get_params, and set_params automatically.
+
+```python
+import numpy as np
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.datasets import make_classification
+from sklearn.model_selection import cross_val_score
+
+class ClipTransformer(BaseEstimator, TransformerMixin):
+    """Clip feature values to [mean - n_std, mean + n_std] to remove outliers."""
+    def __init__(self, n_std: float = 3.0):
+        self.n_std = n_std
+
+    def fit(self, X, y=None):
+        self.mean_ = np.mean(X, axis=0)
+        self.std_  = np.std(X, axis=0) + 1e-8  # avoid division by zero
+        return self
+
+    def transform(self, X):
+        lo = self.mean_ - self.n_std * self.std_
+        hi = self.mean_ + self.n_std * self.std_
+        return np.clip(X, lo, hi)
+
+X, y = make_classification(n_samples=500, n_features=10, random_state=0)
+
+pipe = Pipeline([
+    ('clip',   ClipTransformer(n_std=3.0)),
+    ('scaler', StandardScaler()),
+    ('clf',    LogisticRegression(max_iter=500))
+])
+
+scores = cross_val_score(pipe, X, y, cv=5)
+print(f'Pipeline with ClipTransformer: {scores.mean():.4f} +/- {scores.std():.4f}')
+```
+
+---
+
+## Cross-Validation Strategies
+
+| Strategy | Class | Use Case | Leakage Prevention | Notes |
+| --- | --- | --- | --- | --- |
+| K-Fold | KFold | Regression, balanced classification | Yes — fits only on train fold | Shuffle=True recommended |
+| Stratified K-Fold | StratifiedKFold | Imbalanced classification | Yes — fold-level stratification | Default for classification in cross_val_score |
+| Time Series Split | TimeSeriesSplit | Time series — never use future data | Yes — forward-only splits | No shuffle; gap parameter available |
+| Group K-Fold | GroupKFold | Groups must not split across folds (patients, users) | Yes — groups in train or val, not both | Prevents within-group leakage |
+
+> **Leakage with Pandas Operations Outside Pipeline**: Performing any global operation (fillna, label encoding, outlier removal) on the full dataset before creating train/val splits introduces leakage. Move ALL preprocessing inside Pipeline. If using pandas, pass the DataFrame directly to Pipeline and use ColumnTransformer — do not call df.fillna() before splitting.
+
+## Key Takeaways
+
+- Pipeline chains preprocessing + estimator steps; fit/transform is called only on training data during CV
+- ColumnTransformer applies different transformers to different column groups and concatenates results
+- GridSearchCV with Pipeline searches preprocessing and model hyperparameters simultaneously without leakage
+- Custom transformers: inherit BaseEstimator + TransformerMixin, implement fit and transform
+- Use StratifiedKFold for classification, TimeSeriesSplit for temporal data, GroupKFold for grouped samples
+

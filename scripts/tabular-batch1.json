@@ -1,0 +1,375 @@
+[
+  {
+    "slug": "tabular-tree-dominance",
+    "title": "Why Tree Models Dominate Tabular Data",
+    "description": "Why gradient-boosted trees consistently outperform deep learning on tabular benchmarks — inductive biases, irregular functions, and scaling behavior.",
+    "tags": ["tabular", "deep-learning", "classical-ml"],
+    "topic": "classical-ml",
+    "status": "published",
+    "updated": "2026-07-10",
+    "blocks": [
+      {"type": "text", "content": "On virtually every tabular benchmark, gradient-boosted trees (XGBoost, LightGBM, CatBoost) outperform deep learning models. This is not a matter of insufficient tuning — the gap persists across dataset sizes, feature types, and HPO budgets. Understanding why trees win reveals the structural properties of tabular data that neural networks struggle to exploit."},
+      {"type": "heading", "level": 2, "content": "The Empirical Finding"},
+      {"type": "text", "content": "The landmark paper by Grinsztajn et al. (2022) benchmarked 45 tabular datasets across multiple NN architectures. Trees won on a majority of benchmarks, and the gap was largest on datasets with irregular target functions, rotational variance, and sparse informative features."},
+      {"type": "list", "ordered": false, "items": [
+        "Grinsztajn et al. 2022: trees win on 32/45 datasets vs best NN architecture",
+        "Kadra et al. 2021: well-tuned MLPs (Regularization Cocktail) close the gap but rarely surpass trees",
+        "Gorishniy et al. 2021: FT-Transformer competitive but not dominant overall",
+        "Hollmann et al. 2022 (TabPFN): DL wins on very small n (<1000) with proper priors"
+      ]},
+      {"type": "heading", "level": 2, "content": "Inductive Biases That Fit Tabular Data"},
+      {"type": "text", "content": "Trees have structural properties that happen to match common tabular data characteristics. Neural networks, designed primarily for vision and language, lack these properties and can actively hurt performance on tabular tasks."},
+      {"type": "list", "ordered": false, "items": [
+        "Non-smooth functions: trees produce piecewise-constant outputs naturally; NNs prefer smooth functions via implicit regularization (neural tangent kernel)",
+        "Rotational variance: trees use axis-aligned splits, appropriate when features are independent; NNs treat all rotations of the feature space equivalently",
+        "Irrelevant features: trees ignore them via greedy feature selection at each split; NNs propagate noise gradients from all features",
+        "Automatic interactions: trees find them by design (split A then B = interaction); NNs need sufficient depth and data to discover the same interactions",
+        "Small datasets: trees generalize from n=500; NNs require substantially more data to overcome parameter count"
+      ]},
+      {"type": "heading", "level": 2, "content": "Benchmarking XGBoost vs Deep MLP"},
+      {"type": "text", "content": "A direct five-fold cross-validation comparison demonstrates the consistent advantage of gradient boosting over a deep MLP across synthetic tabular data with mixed feature relevance."},
+      {"type": "code", "language": "python", "content": "import numpy as np\nfrom sklearn.datasets import make_classification\nfrom sklearn.model_selection import cross_val_score\nfrom sklearn.neural_network import MLPClassifier\nfrom sklearn.preprocessing import StandardScaler\nfrom sklearn.pipeline import Pipeline\nimport xgboost as xgb\n\n# Tabular dataset: 30 features, only 10 informative\nX, y = make_classification(\n    n_samples=2000, n_features=30, n_informative=10,\n    n_redundant=5, n_clusters_per_class=3, random_state=42\n)\n\n# XGBoost — no scaling needed\nxgb_clf = xgb.XGBClassifier(\n    n_estimators=300, max_depth=6, learning_rate=0.05,\n    subsample=0.8, colsample_bytree=0.8,\n    random_state=42, eval_metric='logloss'\n)\n\n# Deep MLP — requires standardization\nmlp = Pipeline([\n    ('scaler', StandardScaler()),\n    ('net', MLPClassifier(\n        hidden_layer_sizes=(256, 128, 64),\n        max_iter=500, early_stopping=True, random_state=42\n    ))\n])\n\nfor name, model in [('XGBoost', xgb_clf), ('Deep MLP', mlp)]:\n    scores = cross_val_score(model, X, y, cv=5, scoring='accuracy')\n    print(f'{name}: {scores.mean():.4f} +/- {scores.std():.4f}')"},
+      {"type": "heading", "level": 2, "content": "Irregular Target Functions"},
+      {"type": "text", "content": "Neural networks prefer smooth target functions because gradient descent with weight decay implicitly regularizes toward smooth solutions. Tabular data often has irregular, discontinuous functions — sharp decision boundaries, threshold effects — that trees handle naturally via piecewise-constant output."},
+      {"type": "code", "language": "python", "content": "import numpy as np\nfrom sklearn.ensemble import RandomForestClassifier\nfrom sklearn.neural_network import MLPClassifier\nfrom sklearn.model_selection import train_test_split\nfrom sklearn.metrics import accuracy_score\n\nrng = np.random.default_rng(42)\nn, d = 2000, 20\nX = rng.uniform(0, 1, (n, d))\n\n# Irregular target: random threshold per feature — non-smooth function\nthresholds = rng.uniform(0.2, 0.8, d)\ny = ((X > thresholds).sum(axis=1) > d // 2).astype(int)\n\nX_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)\n\nrf = RandomForestClassifier(n_estimators=200, random_state=42)\nmlp = MLPClassifier(hidden_layer_sizes=(256, 128), max_iter=500, random_state=42)\n\nrf.fit(X_tr, y_tr)\nmlp.fit(X_tr, y_tr)\n\nprint(f'Random Forest (irregular target): {accuracy_score(y_te, rf.predict(X_te)):.4f}')\nprint(f'MLP           (irregular target): {accuracy_score(y_te, mlp.predict(X_te)):.4f}')"},
+      {"type": "heading", "level": 2, "content": "Sparse Informative Features"},
+      {"type": "text", "content": "When only a few features carry signal and the rest are noise, trees isolate informative features via greedy splitting. Neural networks propagate gradients through all input weights, and without strong regularization they struggle to suppress the many noisy features."},
+      {"type": "code", "language": "python", "content": "import numpy as np\nfrom sklearn.ensemble import GradientBoostingClassifier\nfrom sklearn.neural_network import MLPClassifier\nfrom sklearn.preprocessing import StandardScaler\nfrom sklearn.pipeline import Pipeline\nfrom sklearn.model_selection import cross_val_score\n\nrng = np.random.default_rng(0)\nn, d_total, d_info = 1500, 50, 3  # 3 informative out of 50 total features\n\nX_info = rng.standard_normal((n, d_info))\nX_noise = rng.standard_normal((n, d_total - d_info))\nX = np.hstack([X_info, X_noise])\n\n# True label depends only on first 3 features\ny = (X_info[:, 0] + 2 * X_info[:, 1] - X_info[:, 2] > 0).astype(int)\n\ngbm = GradientBoostingClassifier(n_estimators=200, max_depth=4, random_state=42)\nmlp = Pipeline([\n    ('sc', StandardScaler()),\n    ('net', MLPClassifier(hidden_layer_sizes=(128, 64), max_iter=300, random_state=42))\n])\n\nfor name, model in [('GBM (3/50 informative)', gbm), ('MLP (3/50 informative)', mlp)]:\n    s = cross_val_score(model, X, y, cv=5)\n    print(f'{name}: {s.mean():.4f} +/- {s.std():.4f}')"},
+      {"type": "heading", "level": 2, "content": "Scaling Behavior: Trees vs Neural Networks"},
+      {"type": "text", "content": "At small n, trees win decisively. Neural networks begin to close the gap as n grows into the hundreds of thousands. The crossover point depends on feature complexity, but practically, trees remain competitive even at n=100k."},
+      {"type": "code", "language": "python", "content": "import numpy as np\nfrom sklearn.datasets import make_classification\nfrom sklearn.ensemble import GradientBoostingClassifier\nfrom sklearn.neural_network import MLPClassifier\nfrom sklearn.preprocessing import StandardScaler\nfrom sklearn.pipeline import Pipeline\nfrom sklearn.model_selection import cross_val_score\n\nsizes = [200, 500, 1000, 5000, 10000]\nprint(f'{\"n\":>8}  {\"GBM\":>8}  {\"MLP\":>8}')\nprint('-' * 30)\n\nfor n in sizes:\n    X, y = make_classification(\n        n_samples=n, n_features=20, n_informative=8, random_state=42\n    )\n    gbm = GradientBoostingClassifier(n_estimators=100, random_state=42)\n    mlp = Pipeline([\n        ('sc', StandardScaler()),\n        ('net', MLPClassifier(\n            hidden_layer_sizes=(128, 64), max_iter=300, random_state=42\n        ))\n    ])\n    cv = max(2, min(5, n // 100))\n    gbm_score = cross_val_score(gbm, X, y, cv=cv).mean()\n    mlp_score = cross_val_score(mlp, X, y, cv=cv).mean()\n    print(f'{n:>8}  {gbm_score:>8.3f}  {mlp_score:>8.3f}')"},
+      {"type": "divider"},
+      {"type": "heading", "level": 2, "content": "Conditions: Trees Win vs Deep Learning Wins"},
+      {"type": "table", "headers": ["Condition", "Tree-Based Models", "Deep Learning"], "rows": [
+        ["Dataset size", "Any (especially n < 10k)", "Large preferred (n > 100k)"],
+        ["Feature type", "Tabular numeric + categorical", "Images, text, audio, graphs"],
+        ["Missing values", "Native support (XGBoost/LightGBM)", "Requires imputation step"],
+        ["Categorical features", "Native (CatBoost, LightGBM)", "Needs encoding or learned embedding"],
+        ["Target function", "Irregular, non-smooth, threshold-based", "Smooth, continuous"],
+        ["Multi-modal inputs", "Not supported natively", "Yes — NN handles all modalities"],
+        ["Online learning", "Difficult — full rebuild required", "Easy — SGD updates incrementally"],
+        ["Transfer learning", "Not applicable", "Strong — pre-trained tabular transformers"]
+      ]},
+      {"type": "callout", "variant": "info", "title": "Grinsztajn et al. 2022 Key Experiment", "content": "Removing uninformative features and applying a random rotation to the data significantly reduces the tree advantage — confirming that rotational variance and irrelevant features are the primary structural drivers of tree dominance on tabular benchmarks, not dataset size alone."},
+      {"type": "heading", "level": 2, "content": "Key Takeaways"},
+      {"type": "list", "ordered": false, "items": [
+        "Always start with gradient-boosted trees (XGBoost or LightGBM) as the baseline for any tabular task",
+        "Trees outperform NNs primarily because of inductive biases that match tabular data structure",
+        "The gap is largest with irregular target functions, sparse informative features, and small n",
+        "Neural networks (FT-Transformer, SAINT) compete on large, clean, low-cardinality tabular datasets",
+        "For n < 1000, consider TabPFN; for very large n where DL is needed, prefer FT-Transformer or TabNet"
+      ]}
+    ]
+  },
+  {
+    "slug": "tabnet",
+    "title": "TabNet — Sequential Attention for Feature Selection",
+    "description": "TabNet architecture: sequential multi-step attention for sparse feature selection, self-supervised pretraining, and interpretable predictions on tabular data.",
+    "tags": ["tabular", "deep-learning", "classical-ml"],
+    "topic": "classical-ml",
+    "status": "published",
+    "updated": "2026-07-10",
+    "blocks": [
+      {"type": "text", "content": "TabNet (Arik & Pfister, Google Cloud AI, 2021) brings attention to tabular deep learning: at each of N decision steps, a sparse attention mask selects a subset of features, processes them through a feature transformer, and passes the result to both the prediction head and the next step. This mimics the greedy feature selection of trees while remaining end-to-end differentiable."},
+      {"type": "heading", "level": 2, "content": "Architecture Overview"},
+      {"type": "text", "content": "TabNet processes input through N sequential steps. At each step, an attention transformer computes a soft mask over all input features. The selected features pass through a shared and step-specific feature transformer. The output is split: one part contributes to the final prediction (via sum across steps), and the other part conditions the next attention step."},
+      {"type": "list", "ordered": false, "items": [
+        "Attention transformer: h_s = softmax(h_{s-1} · W_att + b_att) — selects B features per step via entmax (sparse softmax)",
+        "Feature transformer: shared + step-specific fully-connected layers with GLU (Gated Linear Unit) activations",
+        "Sparsity loss: entropy regularization Σ_s Σ_i Σ_j a_{sij} log(a_{sij}) penalizes diffuse attention",
+        "Global feature importance: sum of attention weights across all steps and samples",
+        "Local interpretability: per-sample attention mask shows which features mattered for each prediction"
+      ]},
+      {"type": "heading", "level": 2, "content": "TabNet Hyperparameters"},
+      {"type": "table", "headers": ["Hyperparameter", "Effect", "Typical Range", "Tuning Strategy"], "rows": [
+        ["N_steps", "Number of sequential decision steps", "3–10", "Start with 5; more steps = more capacity, slower training"],
+        ["N_d", "Output dimension per step", "8–64", "Higher = more expressive; must match N_a"],
+        ["N_a", "Attention embedding dimension", "8–64", "Usually equal to N_d; controls attention complexity"],
+        ["gamma", "Feature reuse penalty coefficient", "1.0–2.0", "Higher = more reuse across steps; lower = more diversity"],
+        ["lambda_sparse", "Sparsity regularization weight", "1e-6 to 1e-3", "Higher = sparser masks; tune based on n_informative"],
+        ["mask_type", "Sparse attention function", "sparsemax / entmax", "entmax15 often outperforms sparsemax in practice"]
+      ]},
+      {"type": "heading", "level": 2, "content": "Basic Usage with pytorch-tabnet"},
+      {"type": "text", "content": "The pytorch_tabnet library provides a scikit-learn-compatible API for TabNet with built-in support for early stopping, evaluation sets, and attention mask extraction."},
+      {"type": "code", "language": "python", "content": "import numpy as np\nimport torch\nfrom sklearn.datasets import make_classification\nfrom sklearn.model_selection import train_test_split\nfrom pytorch_tabnet.tab_model import TabNetClassifier\n\nX, y = make_classification(\n    n_samples=3000, n_features=20, n_informative=10, random_state=42\n)\nX = X.astype(np.float32)\nX_train, X_val, y_train, y_val = train_test_split(\n    X, y, test_size=0.2, random_state=42\n)\n\nclf = TabNetClassifier(\n    n_d=64, n_a=64,\n    n_steps=5,\n    gamma=1.5,\n    lambda_sparse=1e-4,\n    optimizer_fn=torch.optim.Adam,\n    optimizer_params={'lr': 2e-2},\n    mask_type='entmax'\n)\n\nclf.fit(\n    X_train, y_train,\n    eval_set=[(X_val, y_val)],\n    eval_metric=['accuracy'],\n    max_epochs=100,\n    patience=20,\n    batch_size=1024,\n    virtual_batch_size=128\n)\n\nacc = (clf.predict(X_val) == y_val).mean()\nprint(f'TabNet validation accuracy: {acc:.4f}')"},
+      {"type": "heading", "level": 2, "content": "Feature Importance from Attention Masks"},
+      {"type": "text", "content": "TabNet provides both global feature importances (aggregated across all samples) and local explanations (per-sample attention masks per step). This makes TabNet natively interpretable, unlike post-hoc methods such as SHAP."},
+      {"type": "code", "language": "python", "content": "import numpy as np\nfrom pytorch_tabnet.tab_model import TabNetClassifier\n\n# Global feature importances from accumulated attention weights\nfeature_importances = clf.feature_importances_\nfeature_names = [f'Feature_{i}' for i in range(X.shape[1])]\n\nsorted_idx = np.argsort(feature_importances)[::-1]\nprint('Top 10 features by TabNet attention weight:')\nfor rank, idx in enumerate(sorted_idx[:10]):\n    print(f'  {rank+1:2d}. {feature_names[idx]}: {feature_importances[idx]:.4f}')\n\n# Per-sample explanation for first validation sample\nexplain_matrix, masks = clf.explain(X_val[:3])\nprint(f'\\nAttention mask shape (samples x features): {explain_matrix.shape}')\nprint(f'Number of decision steps: {len(masks)}')\n\nfor step_idx, mask in enumerate(masks):\n    top_feat = np.argmax(mask[0])  # most attended feature for first sample\n    weight = mask[0, top_feat]\n    print(f'  Step {step_idx+1}: top feature = {feature_names[top_feat]} (weight={weight:.3f})')"},
+      {"type": "heading", "level": 2, "content": "Self-Supervised Pretraining"},
+      {"type": "text", "content": "TabNet supports self-supervised pretraining: randomly mask a fraction of input features, then train the network to reconstruct them. This is valuable when labeled data is scarce. The pretrained encoder weights are then used to initialize the supervised model."},
+      {"type": "code", "language": "python", "content": "import numpy as np\nfrom sklearn.datasets import make_classification\nfrom sklearn.model_selection import train_test_split\nfrom pytorch_tabnet.pretraining import TabNetPretrainer\nfrom pytorch_tabnet.tab_model import TabNetClassifier\n\nX, y = make_classification(\n    n_samples=5000, n_features=20, n_informative=10, random_state=42\n)\nX = X.astype(np.float32)\nX_train, X_test, y_train, y_test = train_test_split(\n    X, y, test_size=0.2, random_state=42\n)\n\n# Step 1: Self-supervised pretraining (no labels required)\npretrainer = TabNetPretrainer(\n    n_d=64, n_a=64, n_steps=5,\n    mask_type='entmax'\n)\npretrainer.fit(\n    X_train, eval_set=[X_test],\n    max_epochs=50, patience=10,\n    pretraining_ratio=0.8  # mask 80% of features, reconstruct them\n)\n\n# Step 2: Supervised fine-tuning with pretrained weights\nclf = TabNetClassifier(n_d=64, n_a=64, n_steps=5)\nclf.fit(\n    X_train, y_train,\n    eval_set=[(X_test, y_test)],\n    from_unsupervised=pretrainer,  # initialize from pretrained encoder\n    max_epochs=100, patience=20\n)\nprint(f'Pretrained+finetuned accuracy: {(clf.predict(X_test) == y_test).mean():.4f}')"},
+      {"type": "heading", "level": 2, "content": "TabNet vs XGBoost Comparison"},
+      {"type": "text", "content": "TabNet trades training speed for interpretability and end-to-end differentiability. XGBoost remains faster to train and often more accurate, especially at smaller dataset sizes, but TabNet can match it given sufficient data and tuning."},
+      {"type": "code", "language": "python", "content": "import numpy as np\nimport time\nimport torch\nfrom sklearn.datasets import make_classification\nfrom sklearn.model_selection import train_test_split\nfrom sklearn.metrics import accuracy_score\nfrom pytorch_tabnet.tab_model import TabNetClassifier\nimport xgboost as xgb\n\nX, y = make_classification(\n    n_samples=5000, n_features=15, n_informative=8, random_state=0\n)\nX = X.astype(np.float32)\nX_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=0)\n\n# XGBoost benchmark\nt0 = time.time()\nxgb_model = xgb.XGBClassifier(\n    n_estimators=200, max_depth=6, random_state=0, eval_metric='logloss'\n)\nxgb_model.fit(X_tr, y_tr)\nxgb_time = time.time() - t0\nxgb_acc = accuracy_score(y_te, xgb_model.predict(X_te))\n\n# TabNet benchmark\nt0 = time.time()\ntabnet = TabNetClassifier(n_d=32, n_a=32, n_steps=4)\ntabnet.fit(X_tr, y_tr, eval_set=[(X_te, y_te)], max_epochs=100, patience=15)\ntabnet_time = time.time() - t0\ntabnet_acc = accuracy_score(y_te, tabnet.predict(X_te))\n\nprint(f'XGBoost: acc={xgb_acc:.4f}  train_time={xgb_time:.1f}s')\nprint(f'TabNet:  acc={tabnet_acc:.4f}  train_time={tabnet_time:.1f}s')"},
+      {"type": "divider"},
+      {"type": "callout", "variant": "tip", "title": "When to Choose TabNet", "content": "Prefer TabNet over XGBoost when you need native per-prediction explanations via attention masks, when labeled data is scarce (leverage pretraining on unlabeled rows), or when you want to integrate tabular processing end-to-end in a neural pipeline that also handles other modalities."},
+      {"type": "heading", "level": 2, "content": "Key Takeaways"},
+      {"type": "list", "ordered": false, "items": [
+        "TabNet uses sequential sparse attention to perform differentiable feature selection at each decision step",
+        "Attention masks provide native interpretability without post-hoc methods like SHAP",
+        "Self-supervised pretraining via feature reconstruction improves performance with limited labels",
+        "Key hyperparameters: N_steps (depth), N_d=N_a (width), lambda_sparse (sparsity), mask_type",
+        "TabNet is slower to train than XGBoost and rarely outperforms it without careful tuning and sufficient data"
+      ]}
+    ]
+  },
+  {
+    "slug": "ft-transformer-tabular",
+    "title": "FT-Transformer — Feature Tokenization for Tabular Data",
+    "description": "FT-Transformer converts each tabular feature into an embedding token and processes them with a standard Transformer encoder, enabling explicit pairwise feature interactions via self-attention.",
+    "tags": ["tabular", "deep-learning", "classical-ml"],
+    "topic": "classical-ml",
+    "status": "published",
+    "updated": "2026-07-10",
+    "blocks": [
+      {"type": "text", "content": "FT-Transformer (Gorishniy et al., Yandex Research, 2021) applies the Transformer architecture to tabular data by treating each feature as a token. A standard MLP operates on concatenated raw features and lacks explicit feature-interaction modeling; FT-Transformer's self-attention lets any feature attend to any other, capturing interaction effects directly."},
+      {"type": "heading", "level": 2, "content": "Feature Tokenization"},
+      {"type": "text", "content": "Each feature is projected to a d-dimensional embedding before being processed by the Transformer encoder. Numerical and categorical features are tokenized differently, but the result is the same shape: one vector of dimension d per feature per sample."},
+      {"type": "list", "ordered": false, "items": [
+        "Numerical feature i: embed_i = W_i · x_i + b_i  (scalar × d-vector + bias = unique embedding per feature value)",
+        "Categorical feature j: standard embedding lookup table, one vector per category",
+        "Special [CLS] token prepended to the sequence — its output is used for the final prediction",
+        "Sequence length = number of features + 1 ([CLS])",
+        "Transformer encoder with multi-head self-attention processes the full feature token sequence"
+      ]},
+      {"type": "heading", "level": 2, "content": "FT-Transformer Implementation"},
+      {"type": "text", "content": "Below is a minimal FT-Transformer for numerical features. The key module is NumericalTokenizer, which gives each feature its own linear projection."},
+      {"type": "code", "language": "python", "content": "import torch\nimport torch.nn as nn\nfrom torch import Tensor\n\nclass NumericalTokenizer(nn.Module):\n    \"\"\"Project each numerical feature to a d-dim embedding.\"\"\"\n    def __init__(self, n_features: int, d_token: int):\n        super().__init__()\n        # One weight vector per feature (not shared)\n        self.weight = nn.Parameter(torch.empty(n_features, d_token))\n        self.bias   = nn.Parameter(torch.zeros(n_features, d_token))\n        nn.init.kaiming_uniform_(self.weight)\n\n    def forward(self, x: Tensor) -> Tensor:  # x: (B, F)\n        # Outer product: each scalar x_i multiplies its own weight vector\n        return x.unsqueeze(-1) * self.weight.unsqueeze(0) + self.bias.unsqueeze(0)\n        # Output shape: (B, F, d_token)\n\nclass FTTransformer(nn.Module):\n    def __init__(self, n_features: int, d_token: int, n_heads: int,\n                 n_layers: int, d_ffn: int, n_classes: int):\n        super().__init__()\n        self.tokenizer = NumericalTokenizer(n_features, d_token)\n        self.cls_token = nn.Parameter(torch.zeros(1, 1, d_token))\n        encoder_layer  = nn.TransformerEncoderLayer(\n            d_model=d_token, nhead=n_heads,\n            dim_feedforward=d_ffn, batch_first=True\n        )\n        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)\n        self.head    = nn.Linear(d_token, n_classes)\n\n    def forward(self, x: Tensor) -> Tensor:  # x: (B, F)\n        tokens = self.tokenizer(x)                       # (B, F, d)\n        cls    = self.cls_token.expand(x.size(0), -1, -1)  # (B, 1, d)\n        tokens = torch.cat([cls, tokens], dim=1)         # (B, F+1, d)\n        out    = self.encoder(tokens)                    # (B, F+1, d)\n        return self.head(out[:, 0])                      # (B, n_classes)"},
+      {"type": "heading", "level": 2, "content": "Visualizing Attention Patterns"},
+      {"type": "text", "content": "Self-attention weights reveal which feature pairs the model treats as interacting. Extracting attention maps from a trained FT-Transformer provides interpretable feature-interaction heatmaps."},
+      {"type": "code", "language": "python", "content": "import torch\nimport numpy as np\nimport matplotlib.pyplot as plt\n\ndef extract_attention_weights(model, x_sample):\n    \"\"\"Extract attention weights from each Transformer layer.\"\"\"\n    model.eval()\n    attention_maps = []\n\n    def hook_fn(module, input, output):\n        # TransformerEncoderLayer stores attn_output_weights when need_weights=True\n        pass  # hook approach varies by PyTorch version\n\n    with torch.no_grad():\n        tokens = model.tokenizer(x_sample)\n        cls    = model.cls_token.expand(x_sample.size(0), -1, -1)\n        tokens = torch.cat([cls, tokens], dim=1)\n        # Access attention weights via forward with output_attentions\n        for layer in model.encoder.layers:\n            attn_out, attn_weights = layer.self_attn(\n                tokens, tokens, tokens, need_weights=True, average_attn_weights=True\n            )\n            attention_maps.append(attn_weights.detach().cpu().numpy())\n            tokens = layer(tokens)  # continue forward pass\n    return attention_maps\n\n# Plot average attention for first sample (feature vs feature)\nfeature_names = [f'F{i}' for i in range(10)]\nattn = np.random.rand(11, 11)  # placeholder — replace with actual weights\nplt.figure(figsize=(8, 6))\nplt.imshow(attn, cmap='Blues', vmin=0, vmax=attn.max())\nplt.colorbar(label='Attention weight')\nplt.title('FT-Transformer Feature Attention (layer 1)')\nplt.tight_layout()\nplt.savefig('ft_attention.png', dpi=150)"},
+      {"type": "heading", "level": 2, "content": "FT-Transformer vs MLP vs XGBoost"},
+      {"type": "text", "content": "On a controlled benchmark, FT-Transformer outperforms a plain MLP on datasets with rich feature interactions, and can match XGBoost on larger tabular datasets. The advantage over MLP comes from explicit pairwise attention; the gap versus XGBoost shrinks with increasing n."},
+      {"type": "code", "language": "python", "content": "import numpy as np\nimport torch\nimport torch.nn as nn\nfrom sklearn.datasets import make_classification\nfrom sklearn.model_selection import train_test_split\nfrom sklearn.metrics import accuracy_score\nfrom sklearn.neural_network import MLPClassifier\nfrom sklearn.preprocessing import StandardScaler\nfrom sklearn.pipeline import Pipeline\nimport xgboost as xgb\n\n# Dataset with interaction effects\nX, y = make_classification(\n    n_samples=5000, n_features=10, n_informative=8,\n    n_redundant=0, n_clusters_per_class=2, random_state=42\n)\nX_tr, X_te, y_tr, y_te = train_test_split(\n    X.astype(np.float32), y, test_size=0.2, random_state=42\n)\n\n# XGBoost baseline\nxgb_model = xgb.XGBClassifier(n_estimators=200, max_depth=6, random_state=42)\nxgb_model.fit(X_tr, y_tr)\nprint(f'XGBoost:       {accuracy_score(y_te, xgb_model.predict(X_te)):.4f}')\n\n# MLP baseline\nmlp = Pipeline([('sc', StandardScaler()),\n                ('net', MLPClassifier(hidden_layer_sizes=(128, 64), max_iter=300))])\nmlp.fit(X_tr, y_tr)\nprint(f'MLP:           {accuracy_score(y_te, mlp.predict(X_te)):.4f}')\n\n# FT-Transformer (simplified training loop)\nmodel = FTTransformer(n_features=10, d_token=64, n_heads=4,\n                      n_layers=3, d_ffn=128, n_classes=2)\nprint(f'FT-Transformer params: {sum(p.numel() for p in model.parameters()):,}')"},
+      {"type": "heading", "level": 2, "content": "Numerical vs Categorical Tokenization"},
+      {"type": "text", "content": "The key design decision in FT-Transformer is how to tokenize heterogeneous feature types. Numerical features use a unique linear projection per feature; categoricals use learned embedding tables."},
+      {"type": "code", "language": "python", "content": "import torch\nimport torch.nn as nn\n\nclass CategoricalTokenizer(nn.Module):\n    def __init__(self, cardinalities: list, d_token: int):\n        super().__init__()\n        # One embedding table per categorical column\n        self.embeddings = nn.ModuleList([\n            nn.Embedding(n_cats, d_token) for n_cats in cardinalities\n        ])\n\n    def forward(self, x_cat: torch.Tensor) -> torch.Tensor:\n        # x_cat: (B, n_cat_features) — integer indices\n        tokens = [emb(x_cat[:, i]) for i, emb in enumerate(self.embeddings)]\n        return torch.stack(tokens, dim=1)  # (B, n_cat_features, d_token)\n\nclass MixedTokenizer(nn.Module):\n    def __init__(self, n_num: int, cardinalities: list, d_token: int):\n        super().__init__()\n        self.num_tokenizer = NumericalTokenizer(n_num, d_token)\n        self.cat_tokenizer = CategoricalTokenizer(cardinalities, d_token)\n\n    def forward(self, x_num: torch.Tensor, x_cat: torch.Tensor) -> torch.Tensor:\n        num_tokens = self.num_tokenizer(x_num)  # (B, n_num, d)\n        cat_tokens = self.cat_tokenizer(x_cat)  # (B, n_cat, d)\n        return torch.cat([num_tokens, cat_tokens], dim=1)  # (B, n_num+n_cat, d)\n\n# Test\ntokenizer = MixedTokenizer(n_num=5, cardinalities=[10, 50, 200], d_token=64)\nx_num = torch.randn(32, 5)\nx_cat = torch.randint(0, 10, (32, 3))\ntokens = tokenizer(x_num, x_cat)\nprint(f'Token sequence shape: {tokens.shape}')  # (32, 8, 64)"},
+      {"type": "divider"},
+      {"type": "heading", "level": 2, "content": "Architecture Comparison"},
+      {"type": "table", "headers": ["Architecture", "Feature Interactions", "Attention", "Pretraining", "Benchmark", "Scalability"], "rows": [
+        ["Plain MLP", "Implicit (all layers)", "None", "None", "Weaker on interaction-heavy data", "Fast training"],
+        ["FT-Transformer", "Explicit pairwise (self-attention)", "Feature-to-feature", "MLM-style possible", "Competitive with XGBoost at large n", "O(F²) per layer"],
+        ["TabNet", "Sequential sparse (attention mask)", "Step-wise feature selection", "Reconstruction pretraining", "Competitive, often behind FT-Transformer", "O(F) per step"],
+        ["XGBoost", "Explicit (split hierarchy)", "None — greedy splitting", "None", "State-of-the-art on most benchmarks", "Scales to millions of rows"]
+      ]},
+      {"type": "callout", "variant": "info", "title": "FT-Transformer Best Use Cases", "content": "FT-Transformer is most effective when (1) your dataset is large enough (n > 10k) to train deep attention layers, (2) features have meaningful pairwise interactions that axis-aligned splits miss, and (3) you want a single neural backbone for tabular + other modalities in an end-to-end system."},
+      {"type": "heading", "level": 2, "content": "Key Takeaways"},
+      {"type": "list", "ordered": false, "items": [
+        "FT-Transformer tokenizes each feature into a d-dim vector — numerical via unique linear projection, categorical via embedding lookup",
+        "A [CLS] token aggregates information from all feature tokens; its output drives the prediction head",
+        "Self-attention enables explicit, learnable pairwise feature interactions — unlike MLP which relies on implicit interactions",
+        "FT-Transformer competes with XGBoost on large tabular datasets but rarely outperforms it on small n",
+        "Mixed numerical-categorical inputs are handled cleanly with different tokenizer heads"
+      ]}
+    ]
+  },
+  {
+    "slug": "saint-tabular",
+    "title": "SAINT — Self-Attention and Intersample Attention for Tabular Data",
+    "description": "SAINT alternates between row-wise self-attention (over features) and intersample attention (over other training rows) to combine feature interaction modeling with instance-based learning.",
+    "tags": ["tabular", "deep-learning", "classical-ml"],
+    "topic": "classical-ml",
+    "status": "published",
+    "updated": "2026-07-10",
+    "blocks": [
+      {"type": "text", "content": "SAINT (Self-Attention and Intersample Attention Transformer, Somepalli et al. 2021) addresses a key limitation of FT-Transformer: attention is computed only across features of a single row, ignoring relationships between training samples. SAINT adds a second attention axis — across rows — effectively combining a feature-interaction Transformer with a learned k-NN in embedding space."},
+      {"type": "heading", "level": 2, "content": "Two Types of Attention"},
+      {"type": "text", "content": "Each SAINT block contains two sequential sub-blocks. Row attention (identical to FT-Transformer) processes features within a single sample. Intersample attention processes the representation of the same feature across a batch of samples."},
+      {"type": "list", "ordered": false, "items": [
+        "Row attention: for one sample, attend over F feature tokens — captures feature interactions within a row",
+        "Intersample attention: for a mini-batch of B samples, attend over B sample representations of the same feature position",
+        "Alternating pattern: [Row Attn → Intersample Attn] × N_layers",
+        "Intersample attention lets the model ask: which other training samples are most informative for predicting the current sample?",
+        "Computational cost: O(B²) per intersample attention — quadratic in batch size, not dataset size",
+        "At inference time, the batch acts as the context — similar samples in the batch reinforce predictions"
+      ]},
+      {"type": "heading", "level": 2, "content": "Row Attention Block"},
+      {"type": "text", "content": "The row attention block is a standard Transformer encoder layer applied to the F feature tokens of a single sample. It is identical in design to one FT-Transformer layer."},
+      {"type": "code", "language": "python", "content": "import torch\nimport torch.nn as nn\nfrom torch import Tensor\n\nclass RowAttentionBlock(nn.Module):\n    \"\"\"Self-attention over features within each row (identical to FT-Transformer layer).\"\"\"\n    def __init__(self, d_token: int, n_heads: int, d_ffn: int, dropout: float = 0.1):\n        super().__init__()\n        self.attn = nn.MultiheadAttention(\n            embed_dim=d_token, num_heads=n_heads,\n            dropout=dropout, batch_first=True\n        )\n        self.ff = nn.Sequential(\n            nn.LayerNorm(d_token),\n            nn.Linear(d_token, d_ffn),\n            nn.GELU(),\n            nn.Dropout(dropout),\n            nn.Linear(d_ffn, d_token),\n            nn.Dropout(dropout)\n        )\n        self.norm1 = nn.LayerNorm(d_token)\n        self.norm2 = nn.LayerNorm(d_token)\n\n    def forward(self, x: Tensor) -> Tensor:  # x: (B, F, d)\n        # Self-attention over features (F tokens)\n        attn_out, _ = self.attn(x, x, x)\n        x = self.norm1(x + attn_out)\n        # Feed-forward\n        x = self.norm2(x + self.ff(x))\n        return x  # (B, F, d)"},
+      {"type": "heading", "level": 2, "content": "Intersample Attention Block"},
+      {"type": "text", "content": "Intersample attention transposes the batch and feature dimensions: for each feature position, all B sample representations attend to each other. This produces a B×B attention matrix per feature — the model learns which samples are relevant for predicting each other."},
+      {"type": "code", "language": "python", "content": "import torch\nimport torch.nn as nn\nfrom torch import Tensor\n\nclass IntersampleAttentionBlock(nn.Module):\n    \"\"\"Self-attention over samples for each feature position.\"\"\"\n    def __init__(self, d_token: int, n_heads: int, d_ffn: int, dropout: float = 0.1):\n        super().__init__()\n        self.attn  = nn.MultiheadAttention(\n            embed_dim=d_token, num_heads=n_heads,\n            dropout=dropout, batch_first=True\n        )\n        self.norm1 = nn.LayerNorm(d_token)\n        self.norm2 = nn.LayerNorm(d_token)\n        self.ff    = nn.Sequential(\n            nn.Linear(d_token, d_ffn), nn.GELU(),\n            nn.Dropout(dropout),\n            nn.Linear(d_ffn, d_token), nn.Dropout(dropout)\n        )\n\n    def forward(self, x: Tensor) -> Tensor:  # x: (B, F, d)\n        B, F, d = x.shape\n        # Transpose: treat each feature position as a sequence of B samples\n        x_t = x.permute(1, 0, 2)          # (F, B, d)\n        attn_out, _ = self.attn(x_t, x_t, x_t)  # attend over B samples\n        x_t = self.norm1(x_t + attn_out)\n        x_t = self.norm2(x_t + self.ff(x_t))\n        return x_t.permute(1, 0, 2)        # back to (B, F, d)"},
+      {"type": "heading", "level": 2, "content": "SAINT Full Forward Pass"},
+      {"type": "text", "content": "SAINT stacks alternating row and intersample attention blocks. The [CLS] token (prepended to the feature sequence) aggregates global information and drives the prediction."},
+      {"type": "code", "language": "python", "content": "import torch\nimport torch.nn as nn\nfrom torch import Tensor\n\nclass SAINT(nn.Module):\n    def __init__(self, n_features: int, d_token: int, n_heads: int,\n                 d_ffn: int, n_layers: int, n_classes: int):\n        super().__init__()\n        # Feature tokenization (numerical, same as FT-Transformer)\n        self.tokenizer = nn.Linear(1, d_token)  # simplified: shared projection\n        self.cls_token  = nn.Parameter(torch.zeros(1, 1, d_token))\n\n        self.row_blocks = nn.ModuleList([\n            RowAttentionBlock(d_token, n_heads, d_ffn) for _ in range(n_layers)\n        ])\n        self.isample_blocks = nn.ModuleList([\n            IntersampleAttentionBlock(d_token, n_heads, d_ffn) for _ in range(n_layers)\n        ])\n        self.head = nn.Sequential(\n            nn.LayerNorm(d_token),\n            nn.Linear(d_token, n_classes)\n        )\n\n    def forward(self, x: Tensor) -> Tensor:  # x: (B, F)\n        # Tokenize each feature independently\n        tokens = self.tokenizer(x.unsqueeze(-1))           # (B, F, d)\n        cls    = self.cls_token.expand(x.size(0), -1, -1)  # (B, 1, d)\n        tokens = torch.cat([cls, tokens], dim=1)            # (B, F+1, d)\n\n        # Alternate row and intersample attention\n        for row_blk, isample_blk in zip(self.row_blocks, self.isample_blocks):\n            tokens = row_blk(tokens)\n            tokens = isample_blk(tokens)\n\n        return self.head(tokens[:, 0])  # CLS token → prediction"},
+      {"type": "heading", "level": 2, "content": "SCARF-Style Pretraining"},
+      {"type": "text", "content": "SAINT uses SCARF (Self-supervised Contrastive learning using random Feature Corruption) for pretraining: randomly replace each feature value with a value sampled from the empirical marginal distribution of that feature. The model learns to produce similar representations for clean and corrupted views of the same row (contrastive loss)."},
+      {"type": "code", "language": "python", "content": "import torch\nimport torch.nn as nn\nimport torch.nn.functional as F\nfrom torch import Tensor\n\ndef scarf_corrupt(x: Tensor, corruption_rate: float = 0.6) -> Tensor:\n    \"\"\"Replace each feature with a random value from its empirical marginal.\"\"\"\n    B, F = x.shape\n    mask = torch.bernoulli(torch.full((B, F), corruption_rate)).bool()\n    # Sample random row indices for each position to use as replacement\n    random_rows = torch.randint(0, B, (B, F))\n    x_corrupt   = x.clone()\n    for j in range(F):\n        x_corrupt[mask[:, j], j] = x[random_rows[mask[:, j], j], j]\n    return x_corrupt\n\nclass SCARFLoss(nn.Module):\n    def __init__(self, temperature: float = 0.07):\n        super().__init__()\n        self.temperature = temperature\n\n    def forward(self, z_clean: Tensor, z_corrupt: Tensor) -> Tensor:\n        z1 = F.normalize(z_clean,   dim=-1)  # (B, d)\n        z2 = F.normalize(z_corrupt, dim=-1)  # (B, d)\n        logits = z1 @ z2.T / self.temperature  # (B, B)\n        labels = torch.arange(z1.size(0), device=z1.device)\n        return F.cross_entropy(logits, labels)  # InfoNCE loss"},
+      {"type": "divider"},
+      {"type": "heading", "level": 2, "content": "SAINT vs Other Tabular Models"},
+      {"type": "table", "headers": ["Model", "Attention Type", "Pretraining", "Complexity", "Benchmark Performance"], "rows": [
+        ["FT-Transformer", "Row only (feature × feature)", "MLM-style optional", "O(F²) per layer", "Competitive with XGBoost on large datasets"],
+        ["SAINT", "Row + Intersample", "SCARF contrastive", "O(F²) + O(B²) per layer", "Generally outperforms FT-Transformer"],
+        ["TabNet", "Sequential sparse feature selection", "Reconstruction pretraining", "O(N_steps × F)", "Often behind FT-Transformer and SAINT"],
+        ["XGBoost", "None (greedy splits)", "None", "O(n log n) per tree", "State-of-the-art on most tabular benchmarks"]
+      ]},
+      {"type": "callout", "variant": "warning", "title": "Intersample Attention Cost", "content": "Intersample attention is quadratic in batch size O(B²). For B=512, this means 262,144 attention score computations per feature position per layer. Keep batch sizes moderate (128–512) and monitor GPU memory. At inference, predictions improve when the batch contains diverse, representative samples from the training distribution."},
+      {"type": "heading", "level": 2, "content": "Key Takeaways"},
+      {"type": "list", "ordered": false, "items": [
+        "SAINT combines row attention (feature interactions) with intersample attention (sample similarity) in alternating blocks",
+        "Intersample attention is analogous to a learned soft k-NN: similar training samples attend to each other",
+        "SCARF pretraining uses marginal-distribution feature corruption with contrastive InfoNCE loss",
+        "SAINT generally outperforms FT-Transformer and TabNet but at higher computational cost",
+        "O(B²) intersample attention cost requires careful batch size selection to avoid memory issues"
+      ]}
+    ]
+  },
+  {
+    "slug": "tabpfn",
+    "title": "TabPFN — In-Context Learning for Tabular Data",
+    "description": "TabPFN performs Bayesian inference on small tabular datasets in a single forward pass by treating the entire training set as context — no gradient updates at inference time.",
+    "tags": ["tabular", "deep-learning", "classical-ml"],
+    "topic": "classical-ml",
+    "status": "published",
+    "updated": "2026-07-10",
+    "blocks": [
+      {"type": "text", "content": "TabPFN (Hollmann et al. 2022) is a Prior-Fitted Network: a Transformer trained offline on millions of synthetic datasets drawn from a causal generative prior. At inference time, the entire training set (X_train, y_train) is appended as context tokens, and the model predicts y_test in a single forward pass — no fine-tuning, no training loop, no hyperparameter search."},
+      {"type": "heading", "level": 2, "content": "Prior-Fitted Networks and In-Context Learning"},
+      {"type": "text", "content": "The key insight: if you train a meta-learner on diverse synthetic datasets sampled from a prior p(D), it learns to approximate Bayesian posterior inference for any new dataset from that prior. At test time, it conditions on the observed (X_train, y_train) pairs to predict y_test — the same mechanism as GPT few-shot learning."},
+      {"type": "list", "ordered": false, "items": [
+        "Prior: synthetic datasets drawn from a causal Bayesian network (random graph, random CPT parameters)",
+        "Meta-training: given (X_train, y_train, X_test), predict y_test — trained on millions of synthetic tasks",
+        "Inference: [X_train; y_train; X_test] → y_test in one Transformer forward pass",
+        "No gradient updates at inference — the 'learning' happens by reading context, not weight updates",
+        "Output: class probabilities (calibrated) from softmax — not just argmax",
+        "Complexity: O(n²) in context length (n = number of training samples)"
+      ]},
+      {"type": "heading", "level": 2, "content": "TabPFN Inference — One Line of Code"},
+      {"type": "text", "content": "TabPFN's API is intentionally minimal. Installation and inference require no configuration — the pre-trained model weights are downloaded once and cached locally."},
+      {"type": "code", "language": "python", "content": "# pip install tabpfn\nimport numpy as np\nfrom sklearn.datasets import load_breast_cancer, make_classification\nfrom sklearn.model_selection import train_test_split\nfrom sklearn.metrics import accuracy_score, roc_auc_score\nfrom tabpfn import TabPFNClassifier\n\n# Small tabular dataset (TabPFN designed for n < 1000)\nX, y = make_classification(\n    n_samples=500, n_features=20, n_informative=10, random_state=42\n)\nX_train, X_test, y_train, y_test = train_test_split(\n    X, y, test_size=0.2, random_state=42\n)\n\n# TabPFN: no hyperparameters, no training loop\nclf = TabPFNClassifier(device='cpu', N_ensemble_configurations=32)\nclf.fit(X_train, y_train)   # stores training data — no gradient updates\n\nproba  = clf.predict_proba(X_test)\npreds  = proba.argmax(axis=1)\nacc    = accuracy_score(y_test, preds)\nauc    = roc_auc_score(y_test, proba[:, 1])\nprint(f'Accuracy: {acc:.4f}  AUC: {auc:.4f}')"},
+      {"type": "heading", "level": 2, "content": "Comparing TabPFN with Classical Baselines"},
+      {"type": "text", "content": "On small tabular datasets (n < 1000), TabPFN's in-context Bayesian inference frequently outperforms XGBoost with default hyperparameters and competes with well-tuned random forests, all without any hyperparameter search."},
+      {"type": "code", "language": "python", "content": "import numpy as np\nfrom sklearn.datasets import make_classification\nfrom sklearn.model_selection import StratifiedKFold\nfrom sklearn.metrics import accuracy_score\nfrom sklearn.ensemble import RandomForestClassifier\nfrom tabpfn import TabPFNClassifier\nimport xgboost as xgb\n\nX, y = make_classification(\n    n_samples=400, n_features=15, n_informative=8, random_state=0\n)\n\nskf = StratifiedKFold(n_splits=5, shuffle=True, random_state=0)\nmodels = {\n    'TabPFN':   TabPFNClassifier(device='cpu', N_ensemble_configurations=16),\n    'XGBoost':  xgb.XGBClassifier(n_estimators=100, random_state=0, eval_metric='logloss'),\n    'RF':       RandomForestClassifier(n_estimators=200, random_state=0),\n}\n\nfor name, model in models.items():\n    scores = []\n    for tr, te in skf.split(X, y):\n        model.fit(X[tr], y[tr])\n        scores.append(accuracy_score(y[te], model.predict(X[te])))\n    print(f'{name:<10}: {np.mean(scores):.4f} +/- {np.std(scores):.4f}')"},
+      {"type": "heading", "level": 2, "content": "Calibration and Uncertainty"},
+      {"type": "text", "content": "Because TabPFN approximates Bayesian posterior inference, its probability outputs are well-calibrated out of the box. This makes it useful for risk-sensitive applications where overconfident classifiers are problematic."},
+      {"type": "code", "language": "python", "content": "import numpy as np\nimport matplotlib.pyplot as plt\nfrom sklearn.datasets import make_classification\nfrom sklearn.model_selection import train_test_split\nfrom sklearn.calibration import calibration_curve\nfrom sklearn.metrics import brier_score_loss\nfrom tabpfn import TabPFNClassifier\nimport xgboost as xgb\n\nX, y = make_classification(n_samples=400, n_features=10, random_state=42)\nX_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.3, random_state=42)\n\nmodels = {\n    'TabPFN':  TabPFNClassifier(device='cpu'),\n    'XGBoost': xgb.XGBClassifier(n_estimators=100, eval_metric='logloss')\n}\n\nfig, ax = plt.subplots(1, 1, figsize=(6, 5))\nax.plot([0, 1], [0, 1], 'k--', label='Perfect calibration')\n\nfor name, model in models.items():\n    model.fit(X_tr, y_tr)\n    proba = model.predict_proba(X_te)[:, 1]\n    prob_true, prob_pred = calibration_curve(y_te, proba, n_bins=10)\n    brier = brier_score_loss(y_te, proba)\n    ax.plot(prob_pred, prob_true, marker='o', label=f'{name} (Brier={brier:.3f})')\n\nax.set_xlabel('Mean predicted probability')\nax.set_ylabel('Fraction of positives')\nax.legend()\nplt.tight_layout()\nplt.savefig('calibration.png', dpi=150)"},
+      {"type": "heading", "level": 2, "content": "Scaling Behavior: When TabPFN Degrades"},
+      {"type": "text", "content": "TabPFN's context length is limited (training supports up to ~1024 rows). Performance degrades beyond this limit, and the O(n²) attention cost makes inference slow. Understanding this crossover is essential for deciding when to use TabPFN."},
+      {"type": "code", "language": "python", "content": "import numpy as np\nfrom sklearn.datasets import make_classification\nfrom sklearn.model_selection import train_test_split\nfrom sklearn.metrics import accuracy_score\nfrom tabpfn import TabPFNClassifier\nimport xgboost as xgb\nimport time\n\ntrain_sizes = [100, 250, 500, 800, 1000]\nprint(f'{\"n_train\":>8}  {\"TabPFN\":>10}  {\"XGBoost\":>10}  {\"TabPFN_t\":>10}')\n\nfor n in train_sizes:\n    X, y = make_classification(\n        n_samples=n + 200, n_features=15, n_informative=8, random_state=42\n    )\n    X_tr, X_te, y_tr, y_te = train_test_split(\n        X, y, test_size=200, random_state=42\n    )\n    # TabPFN\n    t0 = time.time()\n    tabpfn = TabPFNClassifier(device='cpu', N_ensemble_configurations=8)\n    tabpfn.fit(X_tr[:n], y_tr[:n])\n    tabpfn_acc = accuracy_score(y_te, tabpfn.predict(X_te))\n    tabpfn_t   = time.time() - t0\n    # XGBoost\n    xgb_model = xgb.XGBClassifier(n_estimators=100, random_state=42, eval_metric='logloss')\n    xgb_model.fit(X_tr[:n], y_tr[:n])\n    xgb_acc = accuracy_score(y_te, xgb_model.predict(X_te))\n    print(f'{n:>8}  {tabpfn_acc:>10.4f}  {xgb_acc:>10.4f}  {tabpfn_t:>9.1f}s')"},
+      {"type": "divider"},
+      {"type": "heading", "level": 2, "content": "TabPFN vs Classical Methods"},
+      {"type": "table", "headers": ["Method", "n limit", "Training time", "Inference time", "Acc (small n)", "Acc (large n)", "HPO needed"], "rows": [
+        ["TabPFN", "~1000 (context)", "None (zero-shot)", "Seconds (O(n²))", "Excellent", "N/A — not applicable", "No"],
+        ["XGBoost", "Millions", "Seconds to minutes", "Milliseconds", "Good", "Excellent", "Yes"],
+        ["Random Forest", "Millions", "Seconds", "Milliseconds", "Good", "Good", "Moderate"],
+        ["MLP", "Tens of millions", "Minutes to hours", "Milliseconds", "Poor", "Moderate", "Yes (heavy)"]
+      ]},
+      {"type": "callout", "variant": "info", "title": "TabPFN Zero-Shot Performance", "content": "TabPFN with no hyperparameter tuning outperforms XGBoost with default settings on the majority of OpenML-CC18 benchmark datasets with fewer than 1000 training samples. It is the best first-try model for small tabular classification problems."},
+      {"type": "heading", "level": 2, "content": "Key Takeaways"},
+      {"type": "list", "ordered": false, "items": [
+        "TabPFN performs in-context Bayesian inference: entire training set as context, predictions in one forward pass",
+        "Meta-trained on millions of synthetic datasets from a causal generative prior — no task-specific training",
+        "Best performance at n < 1000, d < 100 — outside this range, XGBoost typically wins",
+        "Well-calibrated probability outputs without post-hoc calibration (Platt scaling, isotonic regression)",
+        "O(n²) inference complexity — practical limit is around 1000 training samples"
+      ]}
+    ]
+  },
+  {
+    "slug": "entity-embeddings",
+    "title": "Entity Embeddings — Learning Representations for Categorical Variables",
+    "description": "Entity embeddings learn dense vector representations for high-cardinality categorical features — capturing similarity structure and dramatically outperforming one-hot encoding.",
+    "tags": ["tabular", "deep-learning", "classical-ml"],
+    "topic": "classical-ml",
+    "status": "published",
+    "updated": "2026-07-10",
+    "blocks": [
+      {"type": "text", "content": "One-hot encoding for high-cardinality categorical columns (cities, products, users) produces extremely high-dimensional, sparse representations with no similarity structure. Entity embeddings (Guo & Berkhahn 2016, popularized by the Rossman Kaggle competition winner) learn dense vector representations that encode semantic similarity — Paris and London end up nearby in embedding space."},
+      {"type": "heading", "level": 2, "content": "The Problem with One-Hot Encoding"},
+      {"type": "text", "content": "For a categorical column with 10,000 unique values (e.g., ZIP codes), one-hot encoding creates 10,000 binary features. The representation is (1) sparse, wasting memory and compute; (2) equally distant — ZIP code 90210 is exactly as distant from 90211 as from 10001, despite being geographically adjacent; (3) not learnable — there is no mechanism to push similar categories closer together."},
+      {"type": "list", "ordered": false, "items": [
+        "Dimensionality: |vocab| features per column — grows linearly with cardinality",
+        "No similarity structure: all category pairs are equidistant in Hamming distance",
+        "Sparse gradients: each training sample updates only one position of each one-hot column",
+        "Heuristic embedding dim: k = ceil(|vocab|^0.25) or k = min(50, |vocab| // 2) are common choices",
+        "End-to-end training: embeddings are learned jointly with the model, capturing task-relevant similarity"
+      ]},
+      {"type": "heading", "level": 2, "content": "Entity Embedding Layer in PyTorch"},
+      {"type": "text", "content": "An entity embedding is simply an nn.Embedding lookup table. Given an integer category index, it returns the corresponding dense vector. All embedding vectors are trained jointly with the rest of the neural network via backpropagation."},
+      {"type": "code", "language": "python", "content": "import torch\nimport torch.nn as nn\nimport numpy as np\n\nclass TabularModel(nn.Module):\n    \"\"\"Mixed model: entity embeddings for categoricals + MLP for numerics.\"\"\"\n    def __init__(self, cat_dims: list, emb_dims: list, n_cont: int,\n                 hidden_sizes: list, n_out: int, dropout: float = 0.3):\n        super().__init__()\n        # Entity embedding tables: one per categorical column\n        self.embeddings = nn.ModuleList([\n            nn.Embedding(n_cats, emb_dim)\n            for n_cats, emb_dim in zip(cat_dims, emb_dims)\n        ])\n        emb_total = sum(emb_dims)\n        in_dim = emb_total + n_cont  # concat embeddings + numeric features\n\n        # MLP on top of concatenated representation\n        layers = []\n        for h in hidden_sizes:\n            layers += [nn.Linear(in_dim, h), nn.BatchNorm1d(h),\n                       nn.ReLU(), nn.Dropout(dropout)]\n            in_dim = h\n        layers.append(nn.Linear(in_dim, n_out))\n        self.mlp = nn.Sequential(*layers)\n\n    def forward(self, x_cat: torch.Tensor, x_cont: torch.Tensor) -> torch.Tensor:\n        cat_embs = [emb(x_cat[:, i]) for i, emb in enumerate(self.embeddings)]\n        x = torch.cat(cat_embs + [x_cont], dim=1)\n        return self.mlp(x)\n\n# Heuristic: embedding dim = min(50, ceil(vocab_size^0.25 * 6))\ndef get_emb_dim(vocab_size: int) -> int:\n    return min(50, int(np.ceil(vocab_size ** 0.25 * 6)))"},
+      {"type": "heading", "level": 2, "content": "Visualizing Learned Embeddings"},
+      {"type": "text", "content": "After training, t-SNE or UMAP projection of entity embeddings reveals the learned similarity structure. Similar categories cluster together in 2D — a visual sanity check that the embeddings are capturing meaningful relationships."},
+      {"type": "code", "language": "python", "content": "import numpy as np\nimport matplotlib.pyplot as plt\nfrom sklearn.manifold import TSNE\nimport torch\n\ndef visualize_embeddings(embedding_layer, category_labels, title='Entity Embeddings'):\n    \"\"\"Project entity embeddings to 2D via t-SNE and plot.\"\"\"\n    weights = embedding_layer.weight.detach().cpu().numpy()  # (vocab_size, emb_dim)\n\n    if weights.shape[1] > 2:\n        tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(weights)//3))\n        coords = tsne.fit_transform(weights)\n    else:\n        coords = weights  # already 2D\n\n    fig, ax = plt.subplots(figsize=(10, 8))\n    ax.scatter(coords[:, 0], coords[:, 1], alpha=0.6, s=30)\n\n    for i, label in enumerate(category_labels[:30]):  # label top 30\n        ax.annotate(label, (coords[i, 0], coords[i, 1]),\n                    fontsize=8, alpha=0.8)\n\n    ax.set_title(title)\n    ax.set_xlabel('t-SNE dim 1')\n    ax.set_ylabel('t-SNE dim 2')\n    plt.tight_layout()\n    plt.savefig('embeddings_tsne.png', dpi=150)\n    return coords"},
+      {"type": "heading", "level": 2, "content": "Hybrid: Embeddings as Features for XGBoost"},
+      {"type": "text", "content": "A powerful pattern (used by the Rossman Kaggle winner): train an entity embedding network first, extract embeddings, then feed them as dense features to XGBoost. This gives tree models the benefit of learned categorical representations without end-to-end neural training."},
+      {"type": "code", "language": "python", "content": "import numpy as np\nimport torch\nimport torch.nn as nn\nfrom torch.utils.data import DataLoader, TensorDataset\nfrom sklearn.preprocessing import LabelEncoder\nimport xgboost as xgb\n\n# Step 1: Encode categoricals as integers\ncity_le = LabelEncoder()\ncity_ids = city_le.fit_transform(['Paris', 'London', 'Paris', 'Berlin', 'London'])\n\n# Step 2: Train embedding network\nembedding = nn.Embedding(num_embeddings=len(city_le.classes_), embedding_dim=8)\noptimizer = torch.optim.Adam(embedding.parameters(), lr=1e-3)\n\n# (Normally: train within a larger model with backprop from task loss)\n# Here we simulate by using random targets as a stand-in\ncity_tensor = torch.LongTensor(city_ids)\nfor _ in range(100):\n    emb_out = embedding(city_tensor).mean(dim=0)  # aggregate\n    loss = -emb_out.sum()  # dummy loss for illustration\n    optimizer.zero_grad()\n    loss.backward()\n    optimizer.step()\n\n# Step 3: Extract learned embeddings\nwith torch.no_grad():\n    city_embs = embedding.weight.numpy()  # (n_cities, 8)\n\nprint(f'Embedding matrix shape: {city_embs.shape}')\nprint('Now use city_embs[city_id] as dense features for XGBoost')"},
+      {"type": "heading", "level": 2, "content": "Comparing Encoding Methods on High-Cardinality Features"},
+      {"type": "text", "content": "On a high-cardinality column (1000 unique categories), one-hot encoding creates a 1000-column sparse matrix that overwhelms any model with noise. Target encoding leaks if not done within cross-validation folds. Entity embeddings outperform both when trained end-to-end."},
+      {"type": "code", "language": "python", "content": "import numpy as np\nfrom sklearn.preprocessing import OneHotEncoder\nfrom sklearn.linear_model import LogisticRegression\nfrom sklearn.pipeline import Pipeline\nfrom sklearn.model_selection import cross_val_score\nimport torch\nimport torch.nn as nn\n\nrng = np.random.default_rng(42)\nn, n_cats = 2000, 200  # high-cardinality: 200 unique categories\n\n# Simulate: category correlates with target\ncat_ids = rng.integers(0, n_cats, n)             # integer category column\ncat_effect = rng.normal(0, 1, n_cats)            # per-category effect\ny = (cat_effect[cat_ids] + rng.normal(0, 0.5, n) > 0).astype(int)\n\nX_cat = cat_ids.reshape(-1, 1)  # (n, 1) integer column\n\n# Method 1: One-hot encoding\none_hot = OneHotEncoder(sparse_output=False, handle_unknown='ignore')\npipe_ohe = Pipeline([('enc', one_hot),\n                      ('clf', LogisticRegression(max_iter=500, C=0.1))])\nscores_ohe = cross_val_score(pipe_ohe, X_cat, y, cv=5).mean()\nprint(f'One-hot (200 cats): {scores_ohe:.4f}')\n\n# Method 2: Ordinal encoding (treats categories as numbers — wrong!)\nX_ord = cat_ids.reshape(-1, 1).astype(float)\npipe_ord = Pipeline([('clf', LogisticRegression(max_iter=300))])\nscores_ord = cross_val_score(pipe_ord, X_ord, y, cv=5).mean()\nprint(f'Ordinal (wrong):    {scores_ord:.4f}')\nprint('Entity embeddings trained end-to-end typically outperform both')"},
+      {"type": "divider"},
+      {"type": "heading", "level": 2, "content": "Categorical Encoding Methods Comparison"},
+      {"type": "table", "headers": ["Encoding", "Max Cardinality", "Similarity", "Leakage Risk", "Best Use Case"], "rows": [
+        ["One-hot", "Low-medium (<50)", "None", "None", "Low-cardinality nominals, tree models"],
+        ["Ordinal", "Any", "None (arbitrary)", "None", "Ordered categories only"],
+        ["Target encoding", "Any", "Via target correlation", "High (needs CV)", "High-cardinality with strong target signal"],
+        ["Entity embedding", "High (1k–1M)", "Learned, task-relevant", "None", "High-cardinality in neural models"],
+        ["CatBoost native", "Very high", "Ordered target stats", "Low (ordered encoding)", "CatBoost-based pipelines"]
+      ]},
+      {"type": "callout", "variant": "tip", "title": "Embedding Dimension Heuristic", "content": "A reliable rule of thumb: emb_dim = min(50, ceil(vocab_size^0.25 * 6)). This gives 6 for vocab=10, 15 for vocab=100, 37 for vocab=1000, 50 for vocab >= 5000. Never use a dimension larger than the vocabulary size — that is wasteful and adds no expressive power."},
+      {"type": "heading", "level": 2, "content": "Key Takeaways"},
+      {"type": "list", "ordered": false, "items": [
+        "Entity embeddings replace sparse one-hot vectors with dense learned representations for categorical features",
+        "Similar categories cluster together in embedding space — capturing geographic, semantic, or behavioral similarity",
+        "Recommended dim: min(50, ceil(vocab^0.25 × 6)) balances expressivity and parameter efficiency",
+        "Embeddings trained end-to-end are task-specific; they can also be pre-transferred to tree models as dense features",
+        "CatBoost's native categorical handling is competitive with entity embeddings for tree-based models"
+      ]}
+    ]
+  },
+  {
+    "slug": "when-dl-beats-gbm-tabular",
+    "title": "When Deep Learning Beats Gradient Boosting on Tabular Data",
+    "description": "Conditions where neural networks outperform gradient-boosted trees on tabular data: large datasets, multi-modal inputs, smooth functions, online learning, and multi-task scenarios.",
+    "tags": ["tabular", "deep-learning", "classical-ml"],
+    "topic": "classical-ml",
+    "status": "published",
+    "updated": "2026-07-10",
+    "blocks": [
+      {"type": "text", "content": "Gradient-boosted trees win on most tabular benchmarks — but not all. Neural networks have structural advantages in specific scenarios: very large datasets, multi-modal inputs, streaming data, multi-task learning, and smooth target functions. Knowing these conditions helps you choose the right tool rather than defaulting to XGBoost everywhere."},
+      {"type": "heading", "level": 2, "content": "Conditions Favoring Deep Learning"},
+      {"type": "text", "content": "Seven conditions where DL outperforms GBM on tabular data, each rooted in a structural advantage of neural networks over decision trees:"},
+      {"type": "list", "ordered": false, "items": [
+        "Very large n (>1M): tree inference is linear in n_estimators × tree depth; NN inference is O(1) in n",
+        "Multi-modal inputs: NN handles tabular + images + text in one model; trees cannot process raw pixels or token sequences",
+        "Smooth target functions: physical simulations, financial pricing models — NN implicit regularization fits smooth functions better",
+        "Online/streaming learning: NN with SGD updates incrementally from new samples; trees need full rebuilds",
+        "Multi-task learning: shared NN representations generalize across related tasks; separate trees per task don't share capacity",
+        "Transfer learning: pre-trained tabular transformers (TabPFN, prior work) can be fine-tuned; no tree equivalent",
+        "End-to-end systems: recommendation, ranking — NN integrates user embedding + item features + context jointly"
+      ]},
+      {"type": "heading", "level": 2, "content": "DL vs GBM Across Dataset Sizes"},
+      {"type": "text", "content": "The crossover between GBM and DL accuracy depends on dataset size. Trees dominate at small n; the gap narrows as n grows. This benchmark illustrates the trend across five orders of magnitude."},
+      {"type": "code", "language": "python", "content": "import numpy as np\nfrom sklearn.datasets import make_classification\nfrom sklearn.model_selection import cross_val_score\nfrom sklearn.neural_network import MLPClassifier\nfrom sklearn.preprocessing import StandardScaler\nfrom sklearn.pipeline import Pipeline\nimport xgboost as xgb\nimport time\n\nsizes = [100, 500, 1000, 5000, 10000, 50000]\nresults = []\n\nfor n in sizes:\n    X, y = make_classification(\n        n_samples=n, n_features=20, n_informative=10, random_state=42\n    )\n    gbm = xgb.XGBClassifier(n_estimators=200, max_depth=6, learning_rate=0.05,\n                             random_state=42, eval_metric='logloss')\n    mlp = Pipeline([\n        ('sc', StandardScaler()),\n        ('net', MLPClassifier(\n            hidden_layer_sizes=(256, 128, 64), max_iter=400,\n            early_stopping=True, random_state=42\n        ))\n    ])\n    cv = max(3, min(5, n // 500))\n    t0 = time.time()\n    gbm_score = cross_val_score(gbm, X, y, cv=cv).mean()\n    gbm_time  = time.time() - t0\n    t0 = time.time()\n    mlp_score = cross_val_score(mlp, X, y, cv=cv).mean()\n    mlp_time  = time.time() - t0\n    print(f'n={n:>6}: GBM={gbm_score:.3f}({gbm_time:.1f}s)  MLP={mlp_score:.3f}({mlp_time:.1f}s)')"},
+      {"type": "heading", "level": 2, "content": "Multi-Task Learning with Shared Representations"},
+      {"type": "text", "content": "Neural networks learn shared feature representations across related tasks. A single backbone trained on multiple tabular targets simultaneously often outperforms per-task trees, especially when tasks share underlying structure."},
+      {"type": "code", "language": "python", "content": "import torch\nimport torch.nn as nn\nfrom torch.utils.data import DataLoader, TensorDataset\nimport numpy as np\nfrom sklearn.datasets import make_classification\n\nclass MultiTaskTabular(nn.Module):\n    def __init__(self, n_features: int, hidden: int, n_tasks: int):\n        super().__init__()\n        # Shared encoder — learns representations useful across all tasks\n        self.backbone = nn.Sequential(\n            nn.Linear(n_features, hidden), nn.LayerNorm(hidden), nn.ReLU(),\n            nn.Linear(hidden, hidden // 2), nn.LayerNorm(hidden // 2), nn.ReLU()\n        )\n        # Task-specific heads\n        self.heads = nn.ModuleList([\n            nn.Linear(hidden // 2, 1) for _ in range(n_tasks)\n        ])\n\n    def forward(self, x: torch.Tensor) -> list:\n        shared = self.backbone(x)\n        return [head(shared).squeeze(-1) for head in self.heads]\n\n# Multi-task dataset: 3 correlated binary targets\nnp.random.seed(42)\nX = np.random.randn(2000, 20).astype(np.float32)\ny1 = (X[:, 0] + X[:, 1] > 0).astype(np.float32)\ny2 = (X[:, 0] - X[:, 2] > 0).astype(np.float32)\ny3 = (X[:, 1] + X[:, 3] > 0).astype(np.float32)\n\nmodel  = MultiTaskTabular(n_features=20, hidden=128, n_tasks=3)\ncriterion = nn.BCEWithLogitsLoss()\noptimizer = torch.optim.Adam(model.parameters(), lr=1e-3)\nprint(f'Shared backbone params: {sum(p.numel() for p in model.backbone.parameters()):,}')"},
+      {"type": "heading", "level": 2, "content": "Online Learning: Incremental NN vs Rebuilding Trees"},
+      {"type": "text", "content": "For streaming data, neural networks update naturally from each new batch via SGD. Tree models require full retraining when new data arrives, making them impractical for high-velocity streams."},
+      {"type": "code", "language": "python", "content": "import numpy as np\nimport torch\nimport torch.nn as nn\nfrom sklearn.linear_model import SGDClassifier\nfrom sklearn.ensemble import RandomForestClassifier\nfrom sklearn.metrics import accuracy_score\nfrom sklearn.preprocessing import StandardScaler\n\nrng  = np.random.default_rng(42)\nn_total, n_init, batch_size = 5000, 1000, 100\n\nX_all = rng.standard_normal((n_total, 10)).astype(np.float32)\ny_all = (X_all[:, 0] + X_all[:, 1] > 0).astype(int)\n\nsc = StandardScaler().fit(X_all[:n_init])\nX_all_sc = sc.transform(X_all)\n\n# Online learner: SGDClassifier supports partial_fit\nsgd = SGDClassifier(loss='log_loss', random_state=42)\nsgd.partial_fit(X_all_sc[:n_init], y_all[:n_init], classes=[0, 1])\n\n# Batch learner: RandomForest requires full refit\nrf = RandomForestClassifier(n_estimators=50, random_state=42)\nrf.fit(X_all_sc[:n_init], y_all[:n_init])\n\n# Stream new batches\nfor start in range(n_init, n_total, batch_size):\n    end = start + batch_size\n    X_batch, y_batch = X_all_sc[start:end], y_all[start:end]\n    sgd.partial_fit(X_batch, y_batch)  # O(batch) update\n    # RF: would need rf.fit(X_all_sc[:end], y_all[:end]) — O(n) rebuild\n\nprint(f'SGD online accuracy: {accuracy_score(y_all[n_init:], sgd.predict(X_all_sc[n_init:])):.4f}')"},
+      {"type": "heading", "level": 2, "content": "Multi-Modal: Tabular + Text Feature Fusion"},
+      {"type": "text", "content": "When tabular rows include a free-text column (product description, customer review), neural networks can fuse the text encoding with tabular features in a single model. Trees require a hand-crafted text-to-numeric pipeline."},
+      {"type": "code", "language": "python", "content": "import torch\nimport torch.nn as nn\nfrom transformers import AutoTokenizer, AutoModel\nimport numpy as np\n\nclass MultiModalTabularText(nn.Module):\n    \"\"\"Fuse tabular numeric features with BERT text embeddings.\"\"\"\n    def __init__(self, n_tabular: int, text_dim: int, hidden: int, n_classes: int):\n        super().__init__()\n        self.text_encoder = AutoModel.from_pretrained('distilbert-base-uncased')\n        self.text_proj    = nn.Linear(text_dim, hidden)\n        self.tab_proj     = nn.Linear(n_tabular, hidden)\n        self.fusion = nn.Sequential(\n            nn.LayerNorm(hidden * 2),\n            nn.Linear(hidden * 2, hidden),\n            nn.GELU(),\n            nn.Dropout(0.2),\n            nn.Linear(hidden, n_classes)\n        )\n\n    def forward(self, x_tab: torch.Tensor, input_ids: torch.Tensor,\n                attention_mask: torch.Tensor) -> torch.Tensor:\n        # Encode text with DistilBERT\n        text_out   = self.text_encoder(input_ids, attention_mask).last_hidden_state\n        text_cls   = text_out[:, 0]           # CLS token: (B, 768)\n        text_feat  = self.text_proj(text_cls)  # (B, hidden)\n        # Encode tabular features\n        tab_feat   = self.tab_proj(x_tab)      # (B, hidden)\n        # Fuse and classify\n        fused = torch.cat([text_feat, tab_feat], dim=1)\n        return self.fusion(fused)\n\nmodel = MultiModalTabularText(n_tabular=10, text_dim=768, hidden=128, n_classes=2)\nprint(f'Total parameters: {sum(p.numel() for p in model.parameters()):,}')"},
+      {"type": "divider"},
+      {"type": "heading", "level": 2, "content": "DL vs GBM Decision Framework"},
+      {"type": "table", "headers": ["Condition", "Dataset Size", "Winner", "Recommendation"], "rows": [
+        ["Small tabular, n<1k", "Small", "GBM / TabPFN", "Use TabPFN or XGBoost with HPO"],
+        ["Medium tabular, n=1k-100k", "Medium", "GBM", "XGBoost/LightGBM with Optuna tuning"],
+        ["Large tabular, n>1M", "Large", "Competitive", "FT-Transformer or LightGBM; benchmark both"],
+        ["Multi-modal (tabular+text/image)", "Any", "DL", "Neural fusion model required"],
+        ["Streaming / online updates", "Any", "DL", "SGD-based NN; trees need full rebuild"],
+        ["Multi-task (shared representation)", "Any", "DL", "Shared backbone NN with task-specific heads"],
+        ["Smooth target function", "Any", "DL", "MLP or FT-Transformer; less regularization"],
+        ["Need native interpretability", "Any", "Depends", "SHAP for GBM; attention maps for TabNet/SAINT"]
+      ]},
+      {"type": "callout", "variant": "tip", "title": "HPO Budget Matters", "content": "XGBoost with default hyperparameters sometimes loses to well-tuned deep learning. Always compare under equal HPO budgets: if you spend 100 Optuna trials on XGBoost and 100 on FT-Transformer, the DL gap often narrows significantly — especially on datasets with n > 10k."},
+      {"type": "heading", "level": 2, "content": "Key Takeaways"},
+      {"type": "list", "ordered": false, "items": [
+        "DL wins on multi-modal inputs, online learning, multi-task learning, and very large datasets",
+        "The n-threshold for DL competitiveness is roughly 10k-100k depending on feature complexity",
+        "FT-Transformer and SAINT are the strongest tabular DL models at large n",
+        "Multi-task shared backbones are a natural fit for related prediction problems that GBM cannot handle jointly",
+        "Always benchmark under equal HPO effort — XGBoost default often loses to well-tuned DL on larger datasets"
+      ]}
+    ]
+  }
+]

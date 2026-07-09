@@ -1,0 +1,190 @@
+---
+title: "LightGBM — Leaf-Wise Growth and Histogram Splits"
+slug: "lightgbm"
+description: "LightGBM's algorithmic innovations: leaf-wise best-first tree growth, histogram binning, Gradient-based One-Side Sampling (GOSS), Exclusive Feature Bundling (EFB), and native categorical support."
+tags: ["supervised-learning", "classical-ml"]
+topic: "classical-ml"
+status: "published"
+updated: "2026-07-10"
+blocks_json: "W3sidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IkxlYWYtV2lzZSB2cyBMZXZlbC1XaXNlIFRyZWUgR3Jvd3RoIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJYR0Jvb3N0IGFuZCBza2xlYXJuXHUwMDI3cyBHQk0gdXNlIGxldmVsLXdpc2UgKGJyZWFkdGgtZmlyc3QpIGdyb3d0aDogYWxsIGxlYXZlcyBhdCB0aGUgY3VycmVudCBkZXB0aCBhcmUgc3BsaXQgYmVmb3JlIGdvaW5nIGRlZXBlci4gTGlnaHRHQk0gdXNlcyBsZWFmLXdpc2UgKGJlc3QtZmlyc3QpIGdyb3d0aDogYXQgZWFjaCBzdGVwIGl0IHNlbGVjdHMgdGhlIHNpbmdsZSBsZWFmIHdpdGggdGhlIGhpZ2hlc3Qgc3BsaXQgZ2FpbiBhbmQgc3BsaXRzIG9ubHkgdGhhdCBsZWFmLCByZWdhcmRsZXNzIG9mIGRlcHRoLiBUaGlzIG1lYW5zIExpZ2h0R0JNIGFjaGlldmVzIGEgbG93ZXIgbG9zcyBmb3IgdGhlIHNhbWUgbnVtYmVyIG9mIGxlYXZlcyBidXQgY2FuIHByb2R1Y2UgYXN5bW1ldHJpYywgZGVlcCB0cmVlcy4gSXQgaXMgbW9yZSBlZmZpY2llbnQgd2hlbiB0aGUgYmVzdCBzcGxpdHMgYXJlIGNvbmNlbnRyYXRlZCBpbiBhIGZldyBicmFuY2hlcy4ifSx7InR5cGUiOiJjYWxsb3V0IiwidmFyaWFudCI6Indhcm5pbmciLCJ0aXRsZSI6IkxlYWYtV2lzZSBHcm93dGggUmlza3MgT3ZlcmZpdHRpbmcgb24gU21hbGwgRGF0YSIsImNvbnRlbnQiOiJMZWFmLXdpc2UgZ3Jvd3RoIGNhbiBjcmVhdGUgdmVyeSBkZWVwIHBhdGhzIGluIG9uZSBicmFuY2guIE9uIHNtYWxsIGRhdGFzZXRzIChcdTAwM2MgMTAsMDAwIHNhbXBsZXMpIHRoaXMgbGVhZHMgdG8gb3ZlcmZpdHRpbmcuIEFsd2F5cyBzZXQgbnVtX2xlYXZlcyBhbmQgbWluX2RhdGFfaW5fbGVhZiB0byBjb25zdHJhaW4gZ3Jvd3RoLiBBIGdvb2Qgc3RhcnRpbmcgcG9pbnQ6IG51bV9sZWF2ZXMgPSAzMSwgbWluX2RhdGFfaW5fbGVhZiA9IDIwLiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6Ikhpc3RvZ3JhbSBBbGdvcml0aG0gZm9yIEZhc3QgU3BsaXRzIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJUcmFkaXRpb25hbCBHQkRUIGV2YWx1YXRlcyBzcGxpdHMgYnkgc29ydGluZyBmZWF0dXJlIHZhbHVlcyDigJQgTyhuIGxvZyBuKSBwZXIgZmVhdHVyZSBwZXIgdHJlZS4gTGlnaHRHQk0gaW5zdGVhZCBiaW5zIGNvbnRpbnVvdXMgZmVhdHVyZXMgaW50byBhdCBtb3N0IDI1NSBkaXNjcmV0ZSBidWNrZXRzIChoaXN0b2dyYW0gYWxnb3JpdGhtKSwgcmVkdWNpbmcgc3BsaXQgc2VhcmNoIHRvIE8obl9iaW5zIMOXIG5fZmVhdHVyZXMpIHBlciB0cmVlLiBCdWlsZGluZyBoaXN0b2dyYW1zIHRha2VzIE8obiDDlyBuX2ZlYXR1cmVzKSBidXQgaGlzdG9ncmFtcyBjYW4gYmUgc3VidHJhY3RlZDogaGlzdChyaWdodCkgPSBoaXN0KHBhcmVudCkg4oiSIGhpc3QobGVmdCksIGhhbHZpbmcgdGhlIHdvcmsuIFRoaXMgdHlwaWNhbGx5IHlpZWxkcyBhIDEwLTIweCBzcGVlZHVwIG92ZXIgZXhhY3Qgc3BsaXQgYWxnb3JpdGhtcyBvbiBsYXJnZSBkYXRhc2V0cy4ifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJHT1NTIOKAlCBHcmFkaWVudC1CYXNlZCBPbmUtU2lkZSBTYW1wbGluZyJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiR09TUyAoR3JhZGllbnQtYmFzZWQgT25lLVNpZGUgU2FtcGxpbmcpIGV4cGxvaXRzIHRoZSBpbnNpZ2h0IHRoYXQgaW5zdGFuY2VzIHdpdGggbGFyZ2UgZ3JhZGllbnRzIGNvbnRyaWJ1dGUgbW9yZSB0byB0aGUgaW5mb3JtYXRpb24gZ2FpbiBlc3RpbWF0ZSB0aGFuIHRob3NlIHdpdGggc21hbGwgZ3JhZGllbnRzLiBHT1NTIHJldGFpbnMgYWxsIGluc3RhbmNlcyB3aXRoIGxhcmdlIGdyYWRpZW50cyAodG9wX3JhdGUgZnJhY3Rpb24pIGFuZCByYW5kb21seSBzYW1wbGVzIG9ubHkgYSBzbWFsbCBmcmFjdGlvbiAob3RoZXJfcmF0ZSkgb2Ygc21hbGwtZ3JhZGllbnQgaW5zdGFuY2VzLiBUaGUgc21hbGwtZ3JhZGllbnQgc2FtcGxlIGlzIHVwd2VpZ2h0ZWQgYnkgKDEg4oiSIHRvcF9yYXRlKSAvIG90aGVyX3JhdGUgdG8gY29ycmVjdCBmb3Igc2FtcGxpbmcgYmlhcy4gVGhpcyBkcmFtYXRpY2FsbHkgcmVkdWNlcyB0aGUgZWZmZWN0aXZlIGRhdGFzZXQgc2l6ZSBmb3IgaGlzdG9ncmFtIGNvbnN0cnVjdGlvbiB3aXRob3V0IGxvc2luZyBtdWNoIGluZm9ybWF0aW9uLiJ9LHsidHlwZSI6ImNhbGxvdXQiLCJ2YXJpYW50IjoiaW5mbyIsInRpdGxlIjoiV2h5IExhcmdlIEdyYWRpZW50cyBNYXR0ZXIgTW9yZSIsImNvbnRlbnQiOiJBbiBpbnN0YW5jZSB3aXRoIGEgbGFyZ2UgZ3JhZGllbnQgaXMgb25lIHRoZSBjdXJyZW50IG1vZGVsIHByZWRpY3RzIHBvb3JseSDigJQgaXQgY2FycmllcyBtb3JlIGluZm9ybWF0aW9uIGZvciB0aGUgbmV4dCB0cmVlLiBTbWFsbC1ncmFkaWVudCBpbnN0YW5jZXMgYXJlIGFscmVhZHkgd2VsbC1maXR0ZWQgYW5kIGNvbnRyaWJ1dGUgbGl0dGxlIHRvIHNwbGl0IGdhaW4uIEdPU1MgZm9jdXNlcyBjb21wdXRhdGlvbiB3aGVyZSBpdCBtYXR0ZXJzIG1vc3QsIHJlZHVjaW5nIGRhdGEgc2l6ZSBieSA1MC05MCUgd2l0aCBtaW5pbWFsIGFjY3VyYWN5IGxvc3MuIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiRUZCIOKAlCBFeGNsdXNpdmUgRmVhdHVyZSBCdW5kbGluZyJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiSGlnaC1kaW1lbnNpb25hbCBkYXRhIG9mdGVuIGhhcyBtYW55IHNwYXJzZSBmZWF0dXJlcyB0aGF0IGFyZSBtdXR1YWxseSBleGNsdXNpdmUgKHRoZXkgcmFyZWx5IHRha2Ugbm9uLXplcm8gdmFsdWVzIHNpbXVsdGFuZW91c2x5IOKAlCBjb21tb24gaW4gb25lLWhvdCBlbmNvZGVkIGNhdGVnb3JpY2FscykuIEVGQiBidW5kbGVzIHN1Y2ggZmVhdHVyZXMgaW50byBhIHNpbmdsZSBmZWF0dXJlLCByZWR1Y2luZyB0aGUgZWZmZWN0aXZlIGZlYXR1cmUgY291bnQuIEZpbmRpbmcgdGhlIG9wdGltYWwgYnVuZGxlIGlzIE5QLWhhcmQsIHNvIExpZ2h0R0JNIHVzZXMgYSBncmVlZHkgZ3JhcGggY29sb3VyaW5nIGFwcHJveGltYXRpb24uIEVGQiBjYW4gcmVkdWNlIGZlYXR1cmUgY291bnQgYnkgNDAtNjAlIG9uIHNwYXJzZSBkYXRhc2V0cywgc3BlZWRpbmcgdXAgaGlzdG9ncmFtIGNvbnN0cnVjdGlvbiBwcm9wb3J0aW9uYWxseS4ifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJMaWdodEdCTSB2cyBYR0Jvb3N0IFNwZWVkIENvbXBhcmlzb24ifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkxpZ2h0R0JNIGlzIHR5cGljYWxseSA1LTIweCBmYXN0ZXIgdGhhbiBYR0Jvb3N0IG9uIGxhcmdlIGRhdGFzZXRzIGR1ZSB0byB0aGUgaGlzdG9ncmFtIGFsZ29yaXRobSwgR09TUywgYW5kIEVGQi4gQWNjdXJhY3kgaXMgY29tcGFyYWJsZS4gVGhlIGdhcCB3aWRlbnMgd2l0aCBtb3JlIGZlYXR1cmVzIGFuZCBsYXJnZXIgZGF0YXNldHMuIE9uIHNtYWxsIGRhdGFzZXRzIChcdTAwM2MgNSwwMDAgc2FtcGxlcykgdGhlIGRpZmZlcmVuY2UgaXMgbmVnbGlnaWJsZS4ifSx7InR5cGUiOiJjb2RlIiwibGFuZ3VhZ2UiOiJweXRob24iLCJjb250ZW50IjoiaW1wb3J0IGxpZ2h0Z2JtIGFzIGxnYlxuaW1wb3J0IHhnYm9vc3QgYXMgeGdiXG5pbXBvcnQgbnVtcHkgYXMgbnBcbmltcG9ydCB0aW1lXG5mcm9tIHNrbGVhcm4uZGF0YXNldHMgaW1wb3J0IG1ha2VfY2xhc3NpZmljYXRpb25cbmZyb20gc2tsZWFybi5tb2RlbF9zZWxlY3Rpb24gaW1wb3J0IHRyYWluX3Rlc3Rfc3BsaXRcbmZyb20gc2tsZWFybi5tZXRyaWNzIGltcG9ydCByb2NfYXVjX3Njb3JlXG5cblgsIHkgPSBtYWtlX2NsYXNzaWZpY2F0aW9uKG5fc2FtcGxlcz01MDAwMCwgbl9mZWF0dXJlcz01MCwgbl9pbmZvcm1hdGl2ZT0yMCxcbiAgICAgICAgICAgICAgICAgICAgICAgICAgICBuX3JlZHVuZGFudD0xMCwgcmFuZG9tX3N0YXRlPTQyKVxuWF90ciwgWF90ZSwgeV90ciwgeV90ZSA9IHRyYWluX3Rlc3Rfc3BsaXQoWCwgeSwgdGVzdF9zaXplPTAuMiwgcmFuZG9tX3N0YXRlPTQyKVxuXG50MCA9IHRpbWUudGltZSgpXG5sZ2JfbW9kZWwgPSBsZ2IuTEdCTUNsYXNzaWZpZXIoXG4gICAgbl9lc3RpbWF0b3JzPTIwMCwgbGVhcm5pbmdfcmF0ZT0wLjA1LFxuICAgIG51bV9sZWF2ZXM9MzEsIHJhbmRvbV9zdGF0ZT00Miwgbl9qb2JzPS0xLCB2ZXJib3NlPS0xKVxubGdiX21vZGVsLmZpdChYX3RyLCB5X3RyKVxubGdiX3RpbWUgPSB0aW1lLnRpbWUoKSAtIHQwXG5sZ2JfYXVjID0gcm9jX2F1Y19zY29yZSh5X3RlLCBsZ2JfbW9kZWwucHJlZGljdF9wcm9iYShYX3RlKVs6LCAxXSlcblxudDAgPSB0aW1lLnRpbWUoKVxueGdiX21vZGVsID0geGdiLlhHQkNsYXNzaWZpZXIoXG4gICAgbl9lc3RpbWF0b3JzPTIwMCwgbGVhcm5pbmdfcmF0ZT0wLjA1LFxuICAgIG1heF9kZXB0aD02LCBldmFsX21ldHJpYz1cdTAwMjdsb2dsb3NzXHUwMDI3LCByYW5kb21fc3RhdGU9NDIsIHZlcmJvc2l0eT0wKVxueGdiX21vZGVsLmZpdChYX3RyLCB5X3RyKVxueGdiX3RpbWUgPSB0aW1lLnRpbWUoKSAtIHQwXG54Z2JfYXVjID0gcm9jX2F1Y19zY29yZSh5X3RlLCB4Z2JfbW9kZWwucHJlZGljdF9wcm9iYShYX3RlKVs6LCAxXSlcblxucHJpbnQoZlx1MDAyN0xpZ2h0R0JNOiBBVUM9e2xnYl9hdWM6LjRmfSAgdGltZT17bGdiX3RpbWU6LjJmfXNcdTAwMjcpXG5wcmludChmXHUwMDI3WEdCb29zdDogIEFVQz17eGdiX2F1YzouNGZ9ICB0aW1lPXt4Z2JfdGltZTouMmZ9c1x1MDAyNylcbnByaW50KGZcdTAwMjdMaWdodEdCTSBzcGVlZHVwOiB7eGdiX3RpbWUvbGdiX3RpbWU6LjFmfXhcdTAwMjcpIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiTmF0aXZlIENhdGVnb3JpY2FsIEZlYXR1cmUgU3VwcG9ydCJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiTGlnaHRHQk0gaGFuZGxlcyBjYXRlZ29yaWNhbCBmZWF0dXJlcyBuYXRpdmVseSB3aXRob3V0IG9uZS1ob3QgZW5jb2RpbmcuIEl0IGZpbmRzIG9wdGltYWwgYmluYXJ5IHNwbGl0cyBieSBzb3J0aW5nIGNhdGVnb3JpZXMgYnkgdGhlaXIgbWVhbiB0YXJnZXQgdmFsdWUgKGZvciByZWdyZXNzaW9uL2JpbmFyeSBjbGFzc2lmaWNhdGlvbikgYW5kIGV2YWx1YXRpbmcgdGhlIHNwbGl0IGF0IGVhY2ggYm91bmRhcnkg4oCUIE8oSyBsb2cgSykgcGVyIGZlYXR1cmUuIFRoaXMgaXMgZXhhY3QgZm9yIGJpbmFyeSB0YXJnZXRzIGFuZCBhcHByb3hpbWF0ZXMgb3B0aW1hbCBmb3IgbXVsdGktY2xhc3MuIFBhc3MgY2F0ZWdvcmljYWwgZmVhdHVyZSBuYW1lcyB0byB0aGUgZml0KCkgY2FsbCDigJQgbm8gbGFiZWwgZW5jb2RpbmcgcmVxdWlyZWQuIn0seyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6ImltcG9ydCBsaWdodGdibSBhcyBsZ2JcbmltcG9ydCBwYW5kYXMgYXMgcGRcbmltcG9ydCBudW1weSBhcyBucFxuZnJvbSBza2xlYXJuLm1vZGVsX3NlbGVjdGlvbiBpbXBvcnQgdHJhaW5fdGVzdF9zcGxpdFxuZnJvbSBza2xlYXJuLm1ldHJpY3MgaW1wb3J0IHJvY19hdWNfc2NvcmVcblxubnAucmFuZG9tLnNlZWQoNDIpXG5uID0gODAwMFxuZGYgPSBwZC5EYXRhRnJhbWUoe1xuICAgIFx1MDAyN2FnZVx1MDAyNzogICAgICAgbnAucmFuZG9tLnJhbmRpbnQoMTgsIDgwLCBuKSxcbiAgICBcdTAwMjdpbmNvbWVcdTAwMjc6ICAgIG5wLnJhbmRvbS5leHBvbmVudGlhbCg1MDAwMCwgbiksXG4gICAgXHUwMDI3ZWR1Y2F0aW9uXHUwMDI3OiBucC5yYW5kb20uY2hvaWNlKFtcdTAwMjdoaWdoX3NjaG9vbFx1MDAyNyxcdTAwMjdiYWNoZWxvclx1MDAyNyxcdTAwMjdtYXN0ZXJcdTAwMjcsXHUwMDI3cGhkXHUwMDI3XSwgbiksXG4gICAgXHUwMDI3Y2l0eVx1MDAyNzogICAgICBucC5yYW5kb20uY2hvaWNlKFtcdTAwMjdOWUNcdTAwMjcsXHUwMDI3TEFcdTAwMjcsXHUwMDI3Q2hpY2Fnb1x1MDAyNyxcdTAwMjdIb3VzdG9uXHUwMDI3LFx1MDAyN1Bob2VuaXhcdTAwMjddLCBuKSxcbiAgICBcdTAwMjdzY29yZVx1MDAyNzogICAgIG5wLnJhbmRvbS5ub3JtYWwoNjAwLCAxMDAsIG4pXG59KVxuZGZbXHUwMDI3ZWR1Y2F0aW9uXHUwMDI3XSA9IGRmW1x1MDAyN2VkdWNhdGlvblx1MDAyN10uYXN0eXBlKFx1MDAyN2NhdGVnb3J5XHUwMDI3KVxuZGZbXHUwMDI3Y2l0eVx1MDAyN10gICAgICA9IGRmW1x1MDAyN2NpdHlcdTAwMjddLmFzdHlwZShcdTAwMjdjYXRlZ29yeVx1MDAyNylcbnkgPSAoZGZbXHUwMDI3aW5jb21lXHUwMDI3XSBcdTAwM2UgZGZbXHUwMDI3aW5jb21lXHUwMDI3XS5tZWRpYW4oKSkuYXN0eXBlKGludClcblxuWF90ciwgWF90ZSwgeV90ciwgeV90ZSA9IHRyYWluX3Rlc3Rfc3BsaXQoZGYsIHksIHRlc3Rfc2l6ZT0wLjIsIHJhbmRvbV9zdGF0ZT00MilcblxubW9kZWwgPSBsZ2IuTEdCTUNsYXNzaWZpZXIobl9lc3RpbWF0b3JzPTEwMCwgcmFuZG9tX3N0YXRlPTQyLCB2ZXJib3NlPS0xKVxubW9kZWwuZml0KFhfdHIsIHlfdHIsIGNhdGVnb3JpY2FsX2ZlYXR1cmU9W1x1MDAyN2VkdWNhdGlvblx1MDAyNywgXHUwMDI3Y2l0eVx1MDAyN10pXG5hdWMgPSByb2NfYXVjX3Njb3JlKHlfdGUsIG1vZGVsLnByZWRpY3RfcHJvYmEoWF90ZSlbOiwgMV0pXG5wcmludChmXHUwMDI3QVVDIHdpdGggbmF0aXZlIGNhdGVnb3JpY2Fsczoge2F1YzouNGZ9XHUwMDI3KSJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IkdPU1MgYW5kIEVGQiBQYXJhbWV0ZXJzIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJHT1NTIGlzIGFjdGl2YXRlZCB2aWEgZGF0YV9zYW1wbGVfc3RyYXRlZ3k9XHUwMDI3Z29zc1x1MDAyNyAoTGlnaHRHQk0gXHUwMDNlPSA0LjApIG9yIGJvb3N0aW5nX3R5cGU9XHUwMDI3Z29zc1x1MDAyNyAob2xkZXIpLiB0b3BfcmF0ZSBpcyB0aGUgZnJhY3Rpb24gb2YgbGFyZ2UtZ3JhZGllbnQgaW5zdGFuY2VzIGFsd2F5cyBrZXB0OyBvdGhlcl9yYXRlIGlzIHRoZSBzYW1wbGUgcmF0ZSBmb3Igc21hbGwtZ3JhZGllbnQgaW5zdGFuY2VzLiBFRkIgaXMgY29udHJvbGxlZCBieSBtYXhfYmluIChoaXN0b2dyYW0gYmlucywgZGVmYXVsdCAyNTUpIGFuZCBtaW5fZGF0YV9pbl9iaW4uIFJlZHVjaW5nIG1heF9iaW4gc3BlZWRzIHVwIHRyYWluaW5nIGF0IHRoZSBjb3N0IG9mIHNwbGl0IHByZWNpc2lvbi4ifSx7InR5cGUiOiJjb2RlIiwibGFuZ3VhZ2UiOiJweXRob24iLCJjb250ZW50IjoiaW1wb3J0IGxpZ2h0Z2JtIGFzIGxnYlxuaW1wb3J0IHRpbWVcbmZyb20gc2tsZWFybi5kYXRhc2V0cyBpbXBvcnQgbWFrZV9jbGFzc2lmaWNhdGlvblxuZnJvbSBza2xlYXJuLm1vZGVsX3NlbGVjdGlvbiBpbXBvcnQgdHJhaW5fdGVzdF9zcGxpdFxuZnJvbSBza2xlYXJuLm1ldHJpY3MgaW1wb3J0IHJvY19hdWNfc2NvcmVcblxuWCwgeSA9IG1ha2VfY2xhc3NpZmljYXRpb24obl9zYW1wbGVzPTMwMDAwLCBuX2ZlYXR1cmVzPTEwMCwgbl9pbmZvcm1hdGl2ZT0yMCxcbiAgICAgICAgICAgICAgICAgICAgICAgICAgICBuX3JlZHVuZGFudD0zMCwgcmFuZG9tX3N0YXRlPTQyKVxuWF90ciwgWF90ZSwgeV90ciwgeV90ZSA9IHRyYWluX3Rlc3Rfc3BsaXQoWCwgeSwgdGVzdF9zaXplPTAuMiwgcmFuZG9tX3N0YXRlPTQyKVxuXG5jb25maWdzID0gW1xuICAgIChcdTAwMjdHT1NTIHNhbXBsaW5nXHUwMDI3LCAgIHtcdTAwMjdkYXRhX3NhbXBsZV9zdHJhdGVneVx1MDAyNzogXHUwMDI3Z29zc1x1MDAyNywgXHUwMDI3dG9wX3JhdGVcdTAwMjc6IDAuMiwgXHUwMDI3b3RoZXJfcmF0ZVx1MDAyNzogMC4xfSksXG4gICAgKFx1MDAyN0Z1bGwgZGF0YSAoYmFnZ2luZylcdTAwMjcsIHtcdTAwMjdkYXRhX3NhbXBsZV9zdHJhdGVneVx1MDAyNzogXHUwMDI3YmFnZ2luZ1x1MDAyNywgXHUwMDI3YmFnZ2luZ19mcmFjdGlvblx1MDAyNzogMS4wLCBcdTAwMjdiYWdnaW5nX2ZyZXFcdTAwMjc6IDB9KSxcbl1cblxuZm9yIG5hbWUsIGV4dHJhIGluIGNvbmZpZ3M6XG4gICAgcGFyYW1zID0ge1x1MDAyN25fZXN0aW1hdG9yc1x1MDAyNzogMTUwLCBcdTAwMjdsZWFybmluZ19yYXRlXHUwMDI3OiAwLjA1LCBcdTAwMjdudW1fbGVhdmVzXHUwMDI3OiAzMSxcbiAgICAgICAgICAgICAgXHUwMDI3cmFuZG9tX3N0YXRlXHUwMDI3OiA0MiwgXHUwMDI3dmVyYm9zZVx1MDAyNzogLTEsICoqZXh0cmF9XG4gICAgbW9kZWwgPSBsZ2IuTEdCTUNsYXNzaWZpZXIoKipwYXJhbXMpXG4gICAgdDAgPSB0aW1lLnRpbWUoKVxuICAgIG1vZGVsLmZpdChYX3RyLCB5X3RyKVxuICAgIGVsYXBzZWQgPSB0aW1lLnRpbWUoKSAtIHQwXG4gICAgYXVjID0gcm9jX2F1Y19zY29yZSh5X3RlLCBtb2RlbC5wcmVkaWN0X3Byb2JhKFhfdGUpWzosIDFdKVxuICAgIHByaW50KGZcdTAwMjd7bmFtZTpcdTAwM2MyNX0gQVVDPXthdWM6LjRmfSAgdGltZT17ZWxhcHNlZDouMmZ9c1x1MDAyNykifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJMaWdodEdCTSB3aXRoIFNIQVAgVmFsdWVzIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJMaWdodEdCTSBpbnRlZ3JhdGVzIGRpcmVjdGx5IHdpdGggU0hBUFx1MDAyN3MgVHJlZUV4cGxhaW5lciwgcHJvdmlkaW5nIGV4YWN0IFNoYXBsZXkgdmFsdWVzIGF0IE8oVExEwrIpIGNvc3QuIEZvciBiaW5hcnkgY2xhc3NpZmljYXRpb24sIHNoYXBfdmFsdWVzIGlzIGEgbGlzdCBvZiB0d28gYXJyYXlzIFtuZWdfY2xhc3MsIHBvc19jbGFzc107IGluZGV4IFsxXSBnaXZlcyB0aGUgcG9zaXRpdmUgY2xhc3MgU0hBUCB2YWx1ZXMuIExpZ2h0R0JNIGFsc28gZXhwb3NlcyBwcmVkaWN0KFgsIHByZWRfY29udHJpYj1UcnVlKSBmb3IgcmF3IFNIQVAgY29udHJpYnV0aW9ucyB3aXRob3V0IHRoZSBzaGFwIHBhY2thZ2UuIn0seyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6ImltcG9ydCBsaWdodGdibSBhcyBsZ2JcbmltcG9ydCBzaGFwXG5pbXBvcnQgbnVtcHkgYXMgbnBcbmZyb20gc2tsZWFybi5kYXRhc2V0cyBpbXBvcnQgbG9hZF9icmVhc3RfY2FuY2VyXG5mcm9tIHNrbGVhcm4ubW9kZWxfc2VsZWN0aW9uIGltcG9ydCB0cmFpbl90ZXN0X3NwbGl0XG5cbmRhdGEgPSBsb2FkX2JyZWFzdF9jYW5jZXIoKVxuWCwgeSA9IGRhdGEuZGF0YSwgZGF0YS50YXJnZXRcblhfdHIsIFhfdGUsIHlfdHIsIHlfdGUgPSB0cmFpbl90ZXN0X3NwbGl0KFgsIHksIHRlc3Rfc2l6ZT0wLjIsIHJhbmRvbV9zdGF0ZT00MilcblxubW9kZWwgPSBsZ2IuTEdCTUNsYXNzaWZpZXIoXG4gICAgbl9lc3RpbWF0b3JzPTEwMCwgbGVhcm5pbmdfcmF0ZT0wLjA1LCBudW1fbGVhdmVzPTMxLFxuICAgIHJhbmRvbV9zdGF0ZT00MiwgdmVyYm9zZT0tMSlcbm1vZGVsLmZpdChYX3RyLCB5X3RyKVxucHJpbnQoZlx1MDAyN1Rlc3QgYWNjdXJhY3k6IHttb2RlbC5zY29yZShYX3RlLCB5X3RlKTouNGZ9XHUwMDI3KVxuXG5leHBsYWluZXIgPSBzaGFwLlRyZWVFeHBsYWluZXIobW9kZWwpXG5zaGFwX3ZhbHVlcyA9IGV4cGxhaW5lci5zaGFwX3ZhbHVlcyhYX3RlKVxuXG4jIEJpbmFyeSBjbGFzc2lmaWNhdGlvbiByZXR1cm5zIFtuZWdfY2xhc3Nfc2hhcCwgcG9zX2NsYXNzX3NoYXBdXG5zdiA9IHNoYXBfdmFsdWVzWzFdIGlmIGlzaW5zdGFuY2Uoc2hhcF92YWx1ZXMsIGxpc3QpIGVsc2Ugc2hhcF92YWx1ZXNcbnByaW50KFx1MDAyN1Bvc2l0aXZlLWNsYXNzIFNIQVAgc2hhcGU6XHUwMDI3LCBzdi5zaGFwZSlcbm1lYW5fYWJzID0gbnAuYWJzKHN2KS5tZWFuKDApXG50b3A1ID0gbnAuYXJnc29ydChtZWFuX2FicylbOjotMV1bOjVdXG5mb3IgaSBpbiB0b3A1OlxuICAgIHByaW50KGZcdTAwMjcgIHtkYXRhLmZlYXR1cmVfbmFtZXNbaV06XHUwMDNjMzVzfSB7bWVhbl9hYnNbaV06LjRmfVx1MDAyNylcbnNoYXAuc3VtbWFyeV9wbG90KHN2LCBYX3RlLCBmZWF0dXJlX25hbWVzPWRhdGEuZmVhdHVyZV9uYW1lcywgc2hvdz1UcnVlKSJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IkZyYW1ld29yayBDb21wYXJpc29uIn0seyJ0eXBlIjoidGFibGUiLCJoZWFkZXJzIjpbIkFzcGVjdCIsIkxpZ2h0R0JNIiwiWEdCb29zdCIsIkNhdEJvb3N0Il0sInJvd3MiOltbIlNwZWVkIiwiRmFzdGVzdCAoR09TUyArIEVGQiArIGhpc3RvZ3JhbSkiLCJNb2RlcmF0ZSAoaGlzdG9ncmFtIGluIHJlY2VudCB2ZXJzaW9ucykiLCJNb2RlcmF0ZSAob3JkZXJlZCBib29zdGluZyBvdmVyaGVhZCkiXSxbIkNhdGVnb3JpY2FsIHN1cHBvcnQiLCJOYXRpdmUg4oCUIG9wdGltYWwgYmluYXJ5IHNwbGl0cyIsIk1hbnVhbCBlbmNvZGluZyByZXF1aXJlZCIsIk5hdGl2ZSDigJQgb3JkZXJlZCB0YXJnZXQgc3RhdGlzdGljcywgbm8gbGVha2FnZSJdLFsiTWVtb3J5IHVzYWdlIiwiTG93IChoaXN0b2dyYW0gYmlucywgbm90IHJhdyB2YWx1ZXMpIiwiTW9kZXJhdGUiLCJNb2RlcmF0ZSJdLFsiQWNjdXJhY3kgKHRhYnVsYXIpIiwiRXhjZWxsZW50IiwiRXhjZWxsZW50IiwiRXhjZWxsZW50IOKAlCBlc3BlY2lhbGx5IHN0cm9uZyBvbiBjYXRlZ29yaWNhbHMiXSxbIktleSBpbm5vdmF0aW9uIiwiTGVhZi13aXNlIGdyb3d0aCArIEdPU1MgKyBFRkIiLCJTZWNvbmQtb3JkZXIgVGF5bG9yICsgTDEvTDIgcmVndWxhcmlzYXRpb24iLCJPcmRlcmVkIGJvb3N0aW5nIHRvIHByZXZlbnQgdGFyZ2V0IGxlYWthZ2UiXSxbIk92ZXJmaXR0aW5nIHJpc2sgKHNtYWxsIGRhdGEpIiwiSGlnaGVyIChsZWFmLXdpc2UgZGVwdGgpIiwiTWVkaXVtIiwiTG93ZXIgKG9yZGVyZWQgYm9vc3RpbmcgcmVndWxhcmlzZXMpIl0sWyJUeXBpY2FsIG51bV9sZWF2ZXMgLyBtYXhfZGVwdGgiLCJudW1fbGVhdmVzPTMxLTI1NSIsIm1heF9kZXB0aD00LTgiLCJkZXB0aD00LTEwIl1dfSx7InR5cGUiOiJsaXN0Iiwib3JkZXJlZCI6ZmFsc2UsIml0ZW1zIjpbIkxpZ2h0R0JNIGlzIHR5cGljYWxseSA1LTIweCBmYXN0ZXIgdGhhbiBYR0Jvb3N0IG9uIGxhcmdlIGRhdGFzZXRzIOKAlCBkZWZhdWx0IGNob2ljZSBmb3Igc3BlZWQiLCJVc2UgQ2F0Qm9vc3Qgd2hlbiBkYXRhc2V0IGhhcyBtYW55IGhpZ2gtY2FyZGluYWxpdHkgY2F0ZWdvcmljYWxzIGFuZCB5b3Ugd2FudCB0byBhdm9pZCBlbmNvZGluZyIsIlhHQm9vc3QgaGFzIHRoZSBtb3N0IG1hdHVyZSBlY29zeXN0ZW0gYW5kIGJlc3QgZG9jdW1lbnRhdGlvbiDigJQgdXNlIGl0IHdoZW4gaW4gZG91YnQiLCJBbGwgdGhyZWUgc3VwcG9ydCBTSEFQIG5hdGl2ZWx5IHZpYSBUcmVlRXhwbGFpbmVyIiwiR09TUyArIEVGQiBjYW4gYmUgZGlzYWJsZWQgZm9yIG1heGltdW0gYWNjdXJhY3kgb24gc21hbGwgZGF0YXNldHMiLCJudW1fbGVhdmVzIGlzIG1vcmUgaW1wb3J0YW50IHRoYW4gbWF4X2RlcHRoIGluIExpZ2h0R0JNIOKAlCBjb250cm9sIGJvdGggdmlhIG51bV9sZWF2ZXMgKyBtaW5fZGF0YV9pbl9sZWFmIl19LHsidHlwZSI6ImNhbGxvdXQiLCJ2YXJpYW50IjoidGlwIiwidGl0bGUiOiJMaWdodEdCTSBRdWljay1TdGFydCBDb25maWd1cmF0aW9uIiwiY29udGVudCI6ImxnYi5MR0JNQ2xhc3NpZmllcihuX2VzdGltYXRvcnM9MTAwMCwgbGVhcm5pbmdfcmF0ZT0wLjA1LCBudW1fbGVhdmVzPTYzLCBtaW5fY2hpbGRfc2FtcGxlcz0yMCwgc3Vic2FtcGxlPTAuOCwgY29sc2FtcGxlX2J5dHJlZT0wLjgsIHJhbmRvbV9zdGF0ZT00Mikgd2l0aCBlYXJseSBzdG9wcGluZyBvbiBhIHZhbGlkYXRpb24gc2V0LiBUaGlzIGJlYXRzIGRlZmF1bHQgY29uZmlncyBvbiBtb3N0IHN0cnVjdHVyZWQgZGF0YXNldHMgYW5kIHRyYWlucyBmYXN0IGVub3VnaCBmb3IgcmFwaWQgaXRlcmF0aW9uLiJ9LHsidHlwZSI6ImRpdmlkZXIifV0="
+---
+# LightGBM — Leaf-Wise Growth and Histogram Splits
+
+## Leaf-Wise vs Level-Wise Tree Growth
+
+XGBoost and sklearn's GBM use level-wise (breadth-first) growth: all leaves at the current depth are split before going deeper. LightGBM uses leaf-wise (best-first) growth: at each step it selects the single leaf with the highest split gain and splits only that leaf, regardless of depth. This means LightGBM achieves a lower loss for the same number of leaves but can produce asymmetric, deep trees. It is more efficient when the best splits are concentrated in a few branches.
+
+> **Leaf-Wise Growth Risks Overfitting on Small Data**: Leaf-wise growth can create very deep paths in one branch. On small datasets (< 10,000 samples) this leads to overfitting. Always set num_leaves and min_data_in_leaf to constrain growth. A good starting point: num_leaves = 31, min_data_in_leaf = 20.
+
+## Histogram Algorithm for Fast Splits
+
+Traditional GBDT evaluates splits by sorting feature values — O(n log n) per feature per tree. LightGBM instead bins continuous features into at most 255 discrete buckets (histogram algorithm), reducing split search to O(n_bins × n_features) per tree. Building histograms takes O(n × n_features) but histograms can be subtracted: hist(right) = hist(parent) − hist(left), halving the work. This typically yields a 10-20x speedup over exact split algorithms on large datasets.
+
+## GOSS — Gradient-Based One-Side Sampling
+
+GOSS (Gradient-based One-Side Sampling) exploits the insight that instances with large gradients contribute more to the information gain estimate than those with small gradients. GOSS retains all instances with large gradients (top_rate fraction) and randomly samples only a small fraction (other_rate) of small-gradient instances. The small-gradient sample is upweighted by (1 − top_rate) / other_rate to correct for sampling bias. This dramatically reduces the effective dataset size for histogram construction without losing much information.
+
+> **Why Large Gradients Matter More**: An instance with a large gradient is one the current model predicts poorly — it carries more information for the next tree. Small-gradient instances are already well-fitted and contribute little to split gain. GOSS focuses computation where it matters most, reducing data size by 50-90% with minimal accuracy loss.
+
+## EFB — Exclusive Feature Bundling
+
+High-dimensional data often has many sparse features that are mutually exclusive (they rarely take non-zero values simultaneously — common in one-hot encoded categoricals). EFB bundles such features into a single feature, reducing the effective feature count. Finding the optimal bundle is NP-hard, so LightGBM uses a greedy graph colouring approximation. EFB can reduce feature count by 40-60% on sparse datasets, speeding up histogram construction proportionally.
+
+## LightGBM vs XGBoost Speed Comparison
+
+LightGBM is typically 5-20x faster than XGBoost on large datasets due to the histogram algorithm, GOSS, and EFB. Accuracy is comparable. The gap widens with more features and larger datasets. On small datasets (< 5,000 samples) the difference is negligible.
+
+```python
+import lightgbm as lgb
+import xgboost as xgb
+import numpy as np
+import time
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+
+X, y = make_classification(n_samples=50000, n_features=50, n_informative=20,
+                            n_redundant=10, random_state=42)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
+
+t0 = time.time()
+lgb_model = lgb.LGBMClassifier(
+    n_estimators=200, learning_rate=0.05,
+    num_leaves=31, random_state=42, n_jobs=-1, verbose=-1)
+lgb_model.fit(X_tr, y_tr)
+lgb_time = time.time() - t0
+lgb_auc = roc_auc_score(y_te, lgb_model.predict_proba(X_te)[:, 1])
+
+t0 = time.time()
+xgb_model = xgb.XGBClassifier(
+    n_estimators=200, learning_rate=0.05,
+    max_depth=6, eval_metric='logloss', random_state=42, verbosity=0)
+xgb_model.fit(X_tr, y_tr)
+xgb_time = time.time() - t0
+xgb_auc = roc_auc_score(y_te, xgb_model.predict_proba(X_te)[:, 1])
+
+print(f'LightGBM: AUC={lgb_auc:.4f}  time={lgb_time:.2f}s')
+print(f'XGBoost:  AUC={xgb_auc:.4f}  time={xgb_time:.2f}s')
+print(f'LightGBM speedup: {xgb_time/lgb_time:.1f}x')
+```
+
+## Native Categorical Feature Support
+
+LightGBM handles categorical features natively without one-hot encoding. It finds optimal binary splits by sorting categories by their mean target value (for regression/binary classification) and evaluating the split at each boundary — O(K log K) per feature. This is exact for binary targets and approximates optimal for multi-class. Pass categorical feature names to the fit() call — no label encoding required.
+
+```python
+import lightgbm as lgb
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+
+np.random.seed(42)
+n = 8000
+df = pd.DataFrame({
+    'age':       np.random.randint(18, 80, n),
+    'income':    np.random.exponential(50000, n),
+    'education': np.random.choice(['high_school','bachelor','master','phd'], n),
+    'city':      np.random.choice(['NYC','LA','Chicago','Houston','Phoenix'], n),
+    'score':     np.random.normal(600, 100, n)
+})
+df['education'] = df['education'].astype('category')
+df['city']      = df['city'].astype('category')
+y = (df['income'] > df['income'].median()).astype(int)
+
+X_tr, X_te, y_tr, y_te = train_test_split(df, y, test_size=0.2, random_state=42)
+
+model = lgb.LGBMClassifier(n_estimators=100, random_state=42, verbose=-1)
+model.fit(X_tr, y_tr, categorical_feature=['education', 'city'])
+auc = roc_auc_score(y_te, model.predict_proba(X_te)[:, 1])
+print(f'AUC with native categoricals: {auc:.4f}')
+```
+
+## GOSS and EFB Parameters
+
+GOSS is activated via data_sample_strategy='goss' (LightGBM >= 4.0) or boosting_type='goss' (older). top_rate is the fraction of large-gradient instances always kept; other_rate is the sample rate for small-gradient instances. EFB is controlled by max_bin (histogram bins, default 255) and min_data_in_bin. Reducing max_bin speeds up training at the cost of split precision.
+
+```python
+import lightgbm as lgb
+import time
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+
+X, y = make_classification(n_samples=30000, n_features=100, n_informative=20,
+                            n_redundant=30, random_state=42)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
+
+configs = [
+    ('GOSS sampling',   {'data_sample_strategy': 'goss', 'top_rate': 0.2, 'other_rate': 0.1}),
+    ('Full data (bagging)', {'data_sample_strategy': 'bagging', 'bagging_fraction': 1.0, 'bagging_freq': 0}),
+]
+
+for name, extra in configs:
+    params = {'n_estimators': 150, 'learning_rate': 0.05, 'num_leaves': 31,
+              'random_state': 42, 'verbose': -1, **extra}
+    model = lgb.LGBMClassifier(**params)
+    t0 = time.time()
+    model.fit(X_tr, y_tr)
+    elapsed = time.time() - t0
+    auc = roc_auc_score(y_te, model.predict_proba(X_te)[:, 1])
+    print(f'{name:<25} AUC={auc:.4f}  time={elapsed:.2f}s')
+```
+
+## LightGBM with SHAP Values
+
+LightGBM integrates directly with SHAP's TreeExplainer, providing exact Shapley values at O(TLD²) cost. For binary classification, shap_values is a list of two arrays [neg_class, pos_class]; index [1] gives the positive class SHAP values. LightGBM also exposes predict(X, pred_contrib=True) for raw SHAP contributions without the shap package.
+
+```python
+import lightgbm as lgb
+import shap
+import numpy as np
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split
+
+data = load_breast_cancer()
+X, y = data.data, data.target
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
+
+model = lgb.LGBMClassifier(
+    n_estimators=100, learning_rate=0.05, num_leaves=31,
+    random_state=42, verbose=-1)
+model.fit(X_tr, y_tr)
+print(f'Test accuracy: {model.score(X_te, y_te):.4f}')
+
+explainer = shap.TreeExplainer(model)
+shap_values = explainer.shap_values(X_te)
+
+# Binary classification returns [neg_class_shap, pos_class_shap]
+sv = shap_values[1] if isinstance(shap_values, list) else shap_values
+print('Positive-class SHAP shape:', sv.shape)
+mean_abs = np.abs(sv).mean(0)
+top5 = np.argsort(mean_abs)[::-1][:5]
+for i in top5:
+    print(f'  {data.feature_names[i]:<35s} {mean_abs[i]:.4f}')
+shap.summary_plot(sv, X_te, feature_names=data.feature_names, show=True)
+```
+
+## Framework Comparison
+
+| Aspect | LightGBM | XGBoost | CatBoost |
+| --- | --- | --- | --- |
+| Speed | Fastest (GOSS + EFB + histogram) | Moderate (histogram in recent versions) | Moderate (ordered boosting overhead) |
+| Categorical support | Native — optimal binary splits | Manual encoding required | Native — ordered target statistics, no leakage |
+| Memory usage | Low (histogram bins, not raw values) | Moderate | Moderate |
+| Accuracy (tabular) | Excellent | Excellent | Excellent — especially strong on categoricals |
+| Key innovation | Leaf-wise growth + GOSS + EFB | Second-order Taylor + L1/L2 regularisation | Ordered boosting to prevent target leakage |
+| Overfitting risk (small data) | Higher (leaf-wise depth) | Medium | Lower (ordered boosting regularises) |
+| Typical num_leaves / max_depth | num_leaves=31-255 | max_depth=4-8 | depth=4-10 |
+
+- LightGBM is typically 5-20x faster than XGBoost on large datasets — default choice for speed
+- Use CatBoost when dataset has many high-cardinality categoricals and you want to avoid encoding
+- XGBoost has the most mature ecosystem and best documentation — use it when in doubt
+- All three support SHAP natively via TreeExplainer
+- GOSS + EFB can be disabled for maximum accuracy on small datasets
+- num_leaves is more important than max_depth in LightGBM — control both via num_leaves + min_data_in_leaf
+
+> **LightGBM Quick-Start Configuration**: lgb.LGBMClassifier(n_estimators=1000, learning_rate=0.05, num_leaves=63, min_child_samples=20, subsample=0.8, colsample_bytree=0.8, random_state=42) with early stopping on a validation set. This beats default configs on most structured datasets and trains fast enough for rapid iteration.
+
+---
+

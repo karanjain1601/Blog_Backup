@@ -1,0 +1,196 @@
+---
+title: "Why Tree Models Dominate Tabular Data"
+slug: "tabular-tree-dominance"
+description: "Why gradient-boosted trees consistently outperform deep learning on tabular benchmarks — inductive biases, irregular functions, and scaling behavior."
+tags: ["tabular", "deep-learning", "classical-ml"]
+topic: "classical-ml"
+status: "published"
+updated: "2026-07-10"
+blocks_json: "W3sidHlwZSI6InRleHQiLCJjb250ZW50IjoiT24gdmlydHVhbGx5IGV2ZXJ5IHRhYnVsYXIgYmVuY2htYXJrLCBncmFkaWVudC1ib29zdGVkIHRyZWVzIChYR0Jvb3N0LCBMaWdodEdCTSwgQ2F0Qm9vc3QpIG91dHBlcmZvcm0gZGVlcCBsZWFybmluZyBtb2RlbHMuIFRoaXMgaXMgbm90IGEgbWF0dGVyIG9mIGluc3VmZmljaWVudCB0dW5pbmcg4oCUIHRoZSBnYXAgcGVyc2lzdHMgYWNyb3NzIGRhdGFzZXQgc2l6ZXMsIGZlYXR1cmUgdHlwZXMsIGFuZCBIUE8gYnVkZ2V0cy4gVW5kZXJzdGFuZGluZyB3aHkgdHJlZXMgd2luIHJldmVhbHMgdGhlIHN0cnVjdHVyYWwgcHJvcGVydGllcyBvZiB0YWJ1bGFyIGRhdGEgdGhhdCBuZXVyYWwgbmV0d29ya3Mgc3RydWdnbGUgdG8gZXhwbG9pdC4ifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJUaGUgRW1waXJpY2FsIEZpbmRpbmcifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IlRoZSBsYW5kbWFyayBwYXBlciBieSBHcmluc3p0YWpuIGV0IGFsLiAoMjAyMikgYmVuY2htYXJrZWQgNDUgdGFidWxhciBkYXRhc2V0cyBhY3Jvc3MgbXVsdGlwbGUgTk4gYXJjaGl0ZWN0dXJlcy4gVHJlZXMgd29uIG9uIGEgbWFqb3JpdHkgb2YgYmVuY2htYXJrcywgYW5kIHRoZSBnYXAgd2FzIGxhcmdlc3Qgb24gZGF0YXNldHMgd2l0aCBpcnJlZ3VsYXIgdGFyZ2V0IGZ1bmN0aW9ucywgcm90YXRpb25hbCB2YXJpYW5jZSwgYW5kIHNwYXJzZSBpbmZvcm1hdGl2ZSBmZWF0dXJlcy4ifSx7InR5cGUiOiJsaXN0Iiwib3JkZXJlZCI6ZmFsc2UsIml0ZW1zIjpbIkdyaW5zenRham4gZXQgYWwuIDIwMjI6IHRyZWVzIHdpbiBvbiAzMi80NSBkYXRhc2V0cyB2cyBiZXN0IE5OIGFyY2hpdGVjdHVyZSIsIkthZHJhIGV0IGFsLiAyMDIxOiB3ZWxsLXR1bmVkIE1MUHMgKFJlZ3VsYXJpemF0aW9uIENvY2t0YWlsKSBjbG9zZSB0aGUgZ2FwIGJ1dCByYXJlbHkgc3VycGFzcyB0cmVlcyIsIkdvcmlzaG5peSBldCBhbC4gMjAyMTogRlQtVHJhbnNmb3JtZXIgY29tcGV0aXRpdmUgYnV0IG5vdCBkb21pbmFudCBvdmVyYWxsIiwiSG9sbG1hbm4gZXQgYWwuIDIwMjIgKFRhYlBGTik6IERMIHdpbnMgb24gdmVyeSBzbWFsbCBuIChcdTAwM2MxMDAwKSB3aXRoIHByb3BlciBwcmlvcnMiXX0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiSW5kdWN0aXZlIEJpYXNlcyBUaGF0IEZpdCBUYWJ1bGFyIERhdGEifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IlRyZWVzIGhhdmUgc3RydWN0dXJhbCBwcm9wZXJ0aWVzIHRoYXQgaGFwcGVuIHRvIG1hdGNoIGNvbW1vbiB0YWJ1bGFyIGRhdGEgY2hhcmFjdGVyaXN0aWNzLiBOZXVyYWwgbmV0d29ya3MsIGRlc2lnbmVkIHByaW1hcmlseSBmb3IgdmlzaW9uIGFuZCBsYW5ndWFnZSwgbGFjayB0aGVzZSBwcm9wZXJ0aWVzIGFuZCBjYW4gYWN0aXZlbHkgaHVydCBwZXJmb3JtYW5jZSBvbiB0YWJ1bGFyIHRhc2tzLiJ9LHsidHlwZSI6Imxpc3QiLCJvcmRlcmVkIjpmYWxzZSwiaXRlbXMiOlsiTm9uLXNtb290aCBmdW5jdGlvbnM6IHRyZWVzIHByb2R1Y2UgcGllY2V3aXNlLWNvbnN0YW50IG91dHB1dHMgbmF0dXJhbGx5OyBOTnMgcHJlZmVyIHNtb290aCBmdW5jdGlvbnMgdmlhIGltcGxpY2l0IHJlZ3VsYXJpemF0aW9uIChuZXVyYWwgdGFuZ2VudCBrZXJuZWwpIiwiUm90YXRpb25hbCB2YXJpYW5jZTogdHJlZXMgdXNlIGF4aXMtYWxpZ25lZCBzcGxpdHMsIGFwcHJvcHJpYXRlIHdoZW4gZmVhdHVyZXMgYXJlIGluZGVwZW5kZW50OyBOTnMgdHJlYXQgYWxsIHJvdGF0aW9ucyBvZiB0aGUgZmVhdHVyZSBzcGFjZSBlcXVpdmFsZW50bHkiLCJJcnJlbGV2YW50IGZlYXR1cmVzOiB0cmVlcyBpZ25vcmUgdGhlbSB2aWEgZ3JlZWR5IGZlYXR1cmUgc2VsZWN0aW9uIGF0IGVhY2ggc3BsaXQ7IE5OcyBwcm9wYWdhdGUgbm9pc2UgZ3JhZGllbnRzIGZyb20gYWxsIGZlYXR1cmVzIiwiQXV0b21hdGljIGludGVyYWN0aW9uczogdHJlZXMgZmluZCB0aGVtIGJ5IGRlc2lnbiAoc3BsaXQgQSB0aGVuIEIgPSBpbnRlcmFjdGlvbik7IE5OcyBuZWVkIHN1ZmZpY2llbnQgZGVwdGggYW5kIGRhdGEgdG8gZGlzY292ZXIgdGhlIHNhbWUgaW50ZXJhY3Rpb25zIiwiU21hbGwgZGF0YXNldHM6IHRyZWVzIGdlbmVyYWxpemUgZnJvbSBuPTUwMDsgTk5zIHJlcXVpcmUgc3Vic3RhbnRpYWxseSBtb3JlIGRhdGEgdG8gb3ZlcmNvbWUgcGFyYW1ldGVyIGNvdW50Il19LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IkJlbmNobWFya2luZyBYR0Jvb3N0IHZzIERlZXAgTUxQIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJBIGRpcmVjdCBmaXZlLWZvbGQgY3Jvc3MtdmFsaWRhdGlvbiBjb21wYXJpc29uIGRlbW9uc3RyYXRlcyB0aGUgY29uc2lzdGVudCBhZHZhbnRhZ2Ugb2YgZ3JhZGllbnQgYm9vc3Rpbmcgb3ZlciBhIGRlZXAgTUxQIGFjcm9zcyBzeW50aGV0aWMgdGFidWxhciBkYXRhIHdpdGggbWl4ZWQgZmVhdHVyZSByZWxldmFuY2UuIn0seyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6ImltcG9ydCBudW1weSBhcyBucFxuZnJvbSBza2xlYXJuLmRhdGFzZXRzIGltcG9ydCBtYWtlX2NsYXNzaWZpY2F0aW9uXG5mcm9tIHNrbGVhcm4ubW9kZWxfc2VsZWN0aW9uIGltcG9ydCBjcm9zc192YWxfc2NvcmVcbmZyb20gc2tsZWFybi5uZXVyYWxfbmV0d29yayBpbXBvcnQgTUxQQ2xhc3NpZmllclxuZnJvbSBza2xlYXJuLnByZXByb2Nlc3NpbmcgaW1wb3J0IFN0YW5kYXJkU2NhbGVyXG5mcm9tIHNrbGVhcm4ucGlwZWxpbmUgaW1wb3J0IFBpcGVsaW5lXG5pbXBvcnQgeGdib29zdCBhcyB4Z2JcblxuIyBUYWJ1bGFyIGRhdGFzZXQ6IDMwIGZlYXR1cmVzLCBvbmx5IDEwIGluZm9ybWF0aXZlXG5YLCB5ID0gbWFrZV9jbGFzc2lmaWNhdGlvbihcbiAgICBuX3NhbXBsZXM9MjAwMCwgbl9mZWF0dXJlcz0zMCwgbl9pbmZvcm1hdGl2ZT0xMCxcbiAgICBuX3JlZHVuZGFudD01LCBuX2NsdXN0ZXJzX3Blcl9jbGFzcz0zLCByYW5kb21fc3RhdGU9NDJcbilcblxuIyBYR0Jvb3N0IOKAlCBubyBzY2FsaW5nIG5lZWRlZFxueGdiX2NsZiA9IHhnYi5YR0JDbGFzc2lmaWVyKFxuICAgIG5fZXN0aW1hdG9ycz0zMDAsIG1heF9kZXB0aD02LCBsZWFybmluZ19yYXRlPTAuMDUsXG4gICAgc3Vic2FtcGxlPTAuOCwgY29sc2FtcGxlX2J5dHJlZT0wLjgsXG4gICAgcmFuZG9tX3N0YXRlPTQyLCBldmFsX21ldHJpYz1cdTAwMjdsb2dsb3NzXHUwMDI3XG4pXG5cbiMgRGVlcCBNTFAg4oCUIHJlcXVpcmVzIHN0YW5kYXJkaXphdGlvblxubWxwID0gUGlwZWxpbmUoW1xuICAgIChcdTAwMjdzY2FsZXJcdTAwMjcsIFN0YW5kYXJkU2NhbGVyKCkpLFxuICAgIChcdTAwMjduZXRcdTAwMjcsIE1MUENsYXNzaWZpZXIoXG4gICAgICAgIGhpZGRlbl9sYXllcl9zaXplcz0oMjU2LCAxMjgsIDY0KSxcbiAgICAgICAgbWF4X2l0ZXI9NTAwLCBlYXJseV9zdG9wcGluZz1UcnVlLCByYW5kb21fc3RhdGU9NDJcbiAgICApKVxuXSlcblxuZm9yIG5hbWUsIG1vZGVsIGluIFsoXHUwMDI3WEdCb29zdFx1MDAyNywgeGdiX2NsZiksIChcdTAwMjdEZWVwIE1MUFx1MDAyNywgbWxwKV06XG4gICAgc2NvcmVzID0gY3Jvc3NfdmFsX3Njb3JlKG1vZGVsLCBYLCB5LCBjdj01LCBzY29yaW5nPVx1MDAyN2FjY3VyYWN5XHUwMDI3KVxuICAgIHByaW50KGZcdTAwMjd7bmFtZX06IHtzY29yZXMubWVhbigpOi40Zn0gKy8tIHtzY29yZXMuc3RkKCk6LjRmfVx1MDAyNykifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJJcnJlZ3VsYXIgVGFyZ2V0IEZ1bmN0aW9ucyJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiTmV1cmFsIG5ldHdvcmtzIHByZWZlciBzbW9vdGggdGFyZ2V0IGZ1bmN0aW9ucyBiZWNhdXNlIGdyYWRpZW50IGRlc2NlbnQgd2l0aCB3ZWlnaHQgZGVjYXkgaW1wbGljaXRseSByZWd1bGFyaXplcyB0b3dhcmQgc21vb3RoIHNvbHV0aW9ucy4gVGFidWxhciBkYXRhIG9mdGVuIGhhcyBpcnJlZ3VsYXIsIGRpc2NvbnRpbnVvdXMgZnVuY3Rpb25zIOKAlCBzaGFycCBkZWNpc2lvbiBib3VuZGFyaWVzLCB0aHJlc2hvbGQgZWZmZWN0cyDigJQgdGhhdCB0cmVlcyBoYW5kbGUgbmF0dXJhbGx5IHZpYSBwaWVjZXdpc2UtY29uc3RhbnQgb3V0cHV0LiJ9LHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiJpbXBvcnQgbnVtcHkgYXMgbnBcbmZyb20gc2tsZWFybi5lbnNlbWJsZSBpbXBvcnQgUmFuZG9tRm9yZXN0Q2xhc3NpZmllclxuZnJvbSBza2xlYXJuLm5ldXJhbF9uZXR3b3JrIGltcG9ydCBNTFBDbGFzc2lmaWVyXG5mcm9tIHNrbGVhcm4ubW9kZWxfc2VsZWN0aW9uIGltcG9ydCB0cmFpbl90ZXN0X3NwbGl0XG5mcm9tIHNrbGVhcm4ubWV0cmljcyBpbXBvcnQgYWNjdXJhY3lfc2NvcmVcblxucm5nID0gbnAucmFuZG9tLmRlZmF1bHRfcm5nKDQyKVxubiwgZCA9IDIwMDAsIDIwXG5YID0gcm5nLnVuaWZvcm0oMCwgMSwgKG4sIGQpKVxuXG4jIElycmVndWxhciB0YXJnZXQ6IHJhbmRvbSB0aHJlc2hvbGQgcGVyIGZlYXR1cmUg4oCUIG5vbi1zbW9vdGggZnVuY3Rpb25cbnRocmVzaG9sZHMgPSBybmcudW5pZm9ybSgwLjIsIDAuOCwgZClcbnkgPSAoKFggXHUwMDNlIHRocmVzaG9sZHMpLnN1bShheGlzPTEpIFx1MDAzZSBkIC8vIDIpLmFzdHlwZShpbnQpXG5cblhfdHIsIFhfdGUsIHlfdHIsIHlfdGUgPSB0cmFpbl90ZXN0X3NwbGl0KFgsIHksIHRlc3Rfc2l6ZT0wLjIsIHJhbmRvbV9zdGF0ZT00MilcblxucmYgPSBSYW5kb21Gb3Jlc3RDbGFzc2lmaWVyKG5fZXN0aW1hdG9ycz0yMDAsIHJhbmRvbV9zdGF0ZT00Milcbm1scCA9IE1MUENsYXNzaWZpZXIoaGlkZGVuX2xheWVyX3NpemVzPSgyNTYsIDEyOCksIG1heF9pdGVyPTUwMCwgcmFuZG9tX3N0YXRlPTQyKVxuXG5yZi5maXQoWF90ciwgeV90cilcbm1scC5maXQoWF90ciwgeV90cilcblxucHJpbnQoZlx1MDAyN1JhbmRvbSBGb3Jlc3QgKGlycmVndWxhciB0YXJnZXQpOiB7YWNjdXJhY3lfc2NvcmUoeV90ZSwgcmYucHJlZGljdChYX3RlKSk6LjRmfVx1MDAyNylcbnByaW50KGZcdTAwMjdNTFAgICAgICAgICAgIChpcnJlZ3VsYXIgdGFyZ2V0KToge2FjY3VyYWN5X3Njb3JlKHlfdGUsIG1scC5wcmVkaWN0KFhfdGUpKTouNGZ9XHUwMDI3KSJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IlNwYXJzZSBJbmZvcm1hdGl2ZSBGZWF0dXJlcyJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiV2hlbiBvbmx5IGEgZmV3IGZlYXR1cmVzIGNhcnJ5IHNpZ25hbCBhbmQgdGhlIHJlc3QgYXJlIG5vaXNlLCB0cmVlcyBpc29sYXRlIGluZm9ybWF0aXZlIGZlYXR1cmVzIHZpYSBncmVlZHkgc3BsaXR0aW5nLiBOZXVyYWwgbmV0d29ya3MgcHJvcGFnYXRlIGdyYWRpZW50cyB0aHJvdWdoIGFsbCBpbnB1dCB3ZWlnaHRzLCBhbmQgd2l0aG91dCBzdHJvbmcgcmVndWxhcml6YXRpb24gdGhleSBzdHJ1Z2dsZSB0byBzdXBwcmVzcyB0aGUgbWFueSBub2lzeSBmZWF0dXJlcy4ifSx7InR5cGUiOiJjb2RlIiwibGFuZ3VhZ2UiOiJweXRob24iLCJjb250ZW50IjoiaW1wb3J0IG51bXB5IGFzIG5wXG5mcm9tIHNrbGVhcm4uZW5zZW1ibGUgaW1wb3J0IEdyYWRpZW50Qm9vc3RpbmdDbGFzc2lmaWVyXG5mcm9tIHNrbGVhcm4ubmV1cmFsX25ldHdvcmsgaW1wb3J0IE1MUENsYXNzaWZpZXJcbmZyb20gc2tsZWFybi5wcmVwcm9jZXNzaW5nIGltcG9ydCBTdGFuZGFyZFNjYWxlclxuZnJvbSBza2xlYXJuLnBpcGVsaW5lIGltcG9ydCBQaXBlbGluZVxuZnJvbSBza2xlYXJuLm1vZGVsX3NlbGVjdGlvbiBpbXBvcnQgY3Jvc3NfdmFsX3Njb3JlXG5cbnJuZyA9IG5wLnJhbmRvbS5kZWZhdWx0X3JuZygwKVxubiwgZF90b3RhbCwgZF9pbmZvID0gMTUwMCwgNTAsIDMgICMgMyBpbmZvcm1hdGl2ZSBvdXQgb2YgNTAgdG90YWwgZmVhdHVyZXNcblxuWF9pbmZvID0gcm5nLnN0YW5kYXJkX25vcm1hbCgobiwgZF9pbmZvKSlcblhfbm9pc2UgPSBybmcuc3RhbmRhcmRfbm9ybWFsKChuLCBkX3RvdGFsIC0gZF9pbmZvKSlcblggPSBucC5oc3RhY2soW1hfaW5mbywgWF9ub2lzZV0pXG5cbiMgVHJ1ZSBsYWJlbCBkZXBlbmRzIG9ubHkgb24gZmlyc3QgMyBmZWF0dXJlc1xueSA9IChYX2luZm9bOiwgMF0gKyAyICogWF9pbmZvWzosIDFdIC0gWF9pbmZvWzosIDJdIFx1MDAzZSAwKS5hc3R5cGUoaW50KVxuXG5nYm0gPSBHcmFkaWVudEJvb3N0aW5nQ2xhc3NpZmllcihuX2VzdGltYXRvcnM9MjAwLCBtYXhfZGVwdGg9NCwgcmFuZG9tX3N0YXRlPTQyKVxubWxwID0gUGlwZWxpbmUoW1xuICAgIChcdTAwMjdzY1x1MDAyNywgU3RhbmRhcmRTY2FsZXIoKSksXG4gICAgKFx1MDAyN25ldFx1MDAyNywgTUxQQ2xhc3NpZmllcihoaWRkZW5fbGF5ZXJfc2l6ZXM9KDEyOCwgNjQpLCBtYXhfaXRlcj0zMDAsIHJhbmRvbV9zdGF0ZT00MikpXG5dKVxuXG5mb3IgbmFtZSwgbW9kZWwgaW4gWyhcdTAwMjdHQk0gKDMvNTAgaW5mb3JtYXRpdmUpXHUwMDI3LCBnYm0pLCAoXHUwMDI3TUxQICgzLzUwIGluZm9ybWF0aXZlKVx1MDAyNywgbWxwKV06XG4gICAgcyA9IGNyb3NzX3ZhbF9zY29yZShtb2RlbCwgWCwgeSwgY3Y9NSlcbiAgICBwcmludChmXHUwMDI3e25hbWV9OiB7cy5tZWFuKCk6LjRmfSArLy0ge3Muc3RkKCk6LjRmfVx1MDAyNykifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJTY2FsaW5nIEJlaGF2aW9yOiBUcmVlcyB2cyBOZXVyYWwgTmV0d29ya3MifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkF0IHNtYWxsIG4sIHRyZWVzIHdpbiBkZWNpc2l2ZWx5LiBOZXVyYWwgbmV0d29ya3MgYmVnaW4gdG8gY2xvc2UgdGhlIGdhcCBhcyBuIGdyb3dzIGludG8gdGhlIGh1bmRyZWRzIG9mIHRob3VzYW5kcy4gVGhlIGNyb3Nzb3ZlciBwb2ludCBkZXBlbmRzIG9uIGZlYXR1cmUgY29tcGxleGl0eSwgYnV0IHByYWN0aWNhbGx5LCB0cmVlcyByZW1haW4gY29tcGV0aXRpdmUgZXZlbiBhdCBuPTEwMGsuIn0seyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6ImltcG9ydCBudW1weSBhcyBucFxuZnJvbSBza2xlYXJuLmRhdGFzZXRzIGltcG9ydCBtYWtlX2NsYXNzaWZpY2F0aW9uXG5mcm9tIHNrbGVhcm4uZW5zZW1ibGUgaW1wb3J0IEdyYWRpZW50Qm9vc3RpbmdDbGFzc2lmaWVyXG5mcm9tIHNrbGVhcm4ubmV1cmFsX25ldHdvcmsgaW1wb3J0IE1MUENsYXNzaWZpZXJcbmZyb20gc2tsZWFybi5wcmVwcm9jZXNzaW5nIGltcG9ydCBTdGFuZGFyZFNjYWxlclxuZnJvbSBza2xlYXJuLnBpcGVsaW5lIGltcG9ydCBQaXBlbGluZVxuZnJvbSBza2xlYXJuLm1vZGVsX3NlbGVjdGlvbiBpbXBvcnQgY3Jvc3NfdmFsX3Njb3JlXG5cbnNpemVzID0gWzIwMCwgNTAwLCAxMDAwLCA1MDAwLCAxMDAwMF1cbnByaW50KGZcdTAwMjd7XCJuXCI6XHUwMDNlOH0gIHtcIkdCTVwiOlx1MDAzZTh9ICB7XCJNTFBcIjpcdTAwM2U4fVx1MDAyNylcbnByaW50KFx1MDAyNy1cdTAwMjcgKiAzMClcblxuZm9yIG4gaW4gc2l6ZXM6XG4gICAgWCwgeSA9IG1ha2VfY2xhc3NpZmljYXRpb24oXG4gICAgICAgIG5fc2FtcGxlcz1uLCBuX2ZlYXR1cmVzPTIwLCBuX2luZm9ybWF0aXZlPTgsIHJhbmRvbV9zdGF0ZT00MlxuICAgIClcbiAgICBnYm0gPSBHcmFkaWVudEJvb3N0aW5nQ2xhc3NpZmllcihuX2VzdGltYXRvcnM9MTAwLCByYW5kb21fc3RhdGU9NDIpXG4gICAgbWxwID0gUGlwZWxpbmUoW1xuICAgICAgICAoXHUwMDI3c2NcdTAwMjcsIFN0YW5kYXJkU2NhbGVyKCkpLFxuICAgICAgICAoXHUwMDI3bmV0XHUwMDI3LCBNTFBDbGFzc2lmaWVyKFxuICAgICAgICAgICAgaGlkZGVuX2xheWVyX3NpemVzPSgxMjgsIDY0KSwgbWF4X2l0ZXI9MzAwLCByYW5kb21fc3RhdGU9NDJcbiAgICAgICAgKSlcbiAgICBdKVxuICAgIGN2ID0gbWF4KDIsIG1pbig1LCBuIC8vIDEwMCkpXG4gICAgZ2JtX3Njb3JlID0gY3Jvc3NfdmFsX3Njb3JlKGdibSwgWCwgeSwgY3Y9Y3YpLm1lYW4oKVxuICAgIG1scF9zY29yZSA9IGNyb3NzX3ZhbF9zY29yZShtbHAsIFgsIHksIGN2PWN2KS5tZWFuKClcbiAgICBwcmludChmXHUwMDI3e246XHUwMDNlOH0gIHtnYm1fc2NvcmU6XHUwMDNlOC4zZn0gIHttbHBfc2NvcmU6XHUwMDNlOC4zZn1cdTAwMjcpIn0seyJ0eXBlIjoiZGl2aWRlciJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IkNvbmRpdGlvbnM6IFRyZWVzIFdpbiB2cyBEZWVwIExlYXJuaW5nIFdpbnMifSx7InR5cGUiOiJ0YWJsZSIsImhlYWRlcnMiOlsiQ29uZGl0aW9uIiwiVHJlZS1CYXNlZCBNb2RlbHMiLCJEZWVwIExlYXJuaW5nIl0sInJvd3MiOltbIkRhdGFzZXQgc2l6ZSIsIkFueSAoZXNwZWNpYWxseSBuIFx1MDAzYyAxMGspIiwiTGFyZ2UgcHJlZmVycmVkIChuIFx1MDAzZSAxMDBrKSJdLFsiRmVhdHVyZSB0eXBlIiwiVGFidWxhciBudW1lcmljICsgY2F0ZWdvcmljYWwiLCJJbWFnZXMsIHRleHQsIGF1ZGlvLCBncmFwaHMiXSxbIk1pc3NpbmcgdmFsdWVzIiwiTmF0aXZlIHN1cHBvcnQgKFhHQm9vc3QvTGlnaHRHQk0pIiwiUmVxdWlyZXMgaW1wdXRhdGlvbiBzdGVwIl0sWyJDYXRlZ29yaWNhbCBmZWF0dXJlcyIsIk5hdGl2ZSAoQ2F0Qm9vc3QsIExpZ2h0R0JNKSIsIk5lZWRzIGVuY29kaW5nIG9yIGxlYXJuZWQgZW1iZWRkaW5nIl0sWyJUYXJnZXQgZnVuY3Rpb24iLCJJcnJlZ3VsYXIsIG5vbi1zbW9vdGgsIHRocmVzaG9sZC1iYXNlZCIsIlNtb290aCwgY29udGludW91cyJdLFsiTXVsdGktbW9kYWwgaW5wdXRzIiwiTm90IHN1cHBvcnRlZCBuYXRpdmVseSIsIlllcyDigJQgTk4gaGFuZGxlcyBhbGwgbW9kYWxpdGllcyJdLFsiT25saW5lIGxlYXJuaW5nIiwiRGlmZmljdWx0IOKAlCBmdWxsIHJlYnVpbGQgcmVxdWlyZWQiLCJFYXN5IOKAlCBTR0QgdXBkYXRlcyBpbmNyZW1lbnRhbGx5Il0sWyJUcmFuc2ZlciBsZWFybmluZyIsIk5vdCBhcHBsaWNhYmxlIiwiU3Ryb25nIOKAlCBwcmUtdHJhaW5lZCB0YWJ1bGFyIHRyYW5zZm9ybWVycyJdXX0seyJ0eXBlIjoiY2FsbG91dCIsInZhcmlhbnQiOiJpbmZvIiwidGl0bGUiOiJHcmluc3p0YWpuIGV0IGFsLiAyMDIyIEtleSBFeHBlcmltZW50IiwiY29udGVudCI6IlJlbW92aW5nIHVuaW5mb3JtYXRpdmUgZmVhdHVyZXMgYW5kIGFwcGx5aW5nIGEgcmFuZG9tIHJvdGF0aW9uIHRvIHRoZSBkYXRhIHNpZ25pZmljYW50bHkgcmVkdWNlcyB0aGUgdHJlZSBhZHZhbnRhZ2Ug4oCUIGNvbmZpcm1pbmcgdGhhdCByb3RhdGlvbmFsIHZhcmlhbmNlIGFuZCBpcnJlbGV2YW50IGZlYXR1cmVzIGFyZSB0aGUgcHJpbWFyeSBzdHJ1Y3R1cmFsIGRyaXZlcnMgb2YgdHJlZSBkb21pbmFuY2Ugb24gdGFidWxhciBiZW5jaG1hcmtzLCBub3QgZGF0YXNldCBzaXplIGFsb25lLiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IktleSBUYWtlYXdheXMifSx7InR5cGUiOiJsaXN0Iiwib3JkZXJlZCI6ZmFsc2UsIml0ZW1zIjpbIkFsd2F5cyBzdGFydCB3aXRoIGdyYWRpZW50LWJvb3N0ZWQgdHJlZXMgKFhHQm9vc3Qgb3IgTGlnaHRHQk0pIGFzIHRoZSBiYXNlbGluZSBmb3IgYW55IHRhYnVsYXIgdGFzayIsIlRyZWVzIG91dHBlcmZvcm0gTk5zIHByaW1hcmlseSBiZWNhdXNlIG9mIGluZHVjdGl2ZSBiaWFzZXMgdGhhdCBtYXRjaCB0YWJ1bGFyIGRhdGEgc3RydWN0dXJlIiwiVGhlIGdhcCBpcyBsYXJnZXN0IHdpdGggaXJyZWd1bGFyIHRhcmdldCBmdW5jdGlvbnMsIHNwYXJzZSBpbmZvcm1hdGl2ZSBmZWF0dXJlcywgYW5kIHNtYWxsIG4iLCJOZXVyYWwgbmV0d29ya3MgKEZULVRyYW5zZm9ybWVyLCBTQUlOVCkgY29tcGV0ZSBvbiBsYXJnZSwgY2xlYW4sIGxvdy1jYXJkaW5hbGl0eSB0YWJ1bGFyIGRhdGFzZXRzIiwiRm9yIG4gXHUwMDNjIDEwMDAsIGNvbnNpZGVyIFRhYlBGTjsgZm9yIHZlcnkgbGFyZ2UgbiB3aGVyZSBETCBpcyBuZWVkZWQsIHByZWZlciBGVC1UcmFuc2Zvcm1lciBvciBUYWJOZXQiXX1d"
+---
+# Why Tree Models Dominate Tabular Data
+
+On virtually every tabular benchmark, gradient-boosted trees (XGBoost, LightGBM, CatBoost) outperform deep learning models. This is not a matter of insufficient tuning — the gap persists across dataset sizes, feature types, and HPO budgets. Understanding why trees win reveals the structural properties of tabular data that neural networks struggle to exploit.
+
+## The Empirical Finding
+
+The landmark paper by Grinsztajn et al. (2022) benchmarked 45 tabular datasets across multiple NN architectures. Trees won on a majority of benchmarks, and the gap was largest on datasets with irregular target functions, rotational variance, and sparse informative features.
+
+- Grinsztajn et al. 2022: trees win on 32/45 datasets vs best NN architecture
+- Kadra et al. 2021: well-tuned MLPs (Regularization Cocktail) close the gap but rarely surpass trees
+- Gorishniy et al. 2021: FT-Transformer competitive but not dominant overall
+- Hollmann et al. 2022 (TabPFN): DL wins on very small n (<1000) with proper priors
+
+## Inductive Biases That Fit Tabular Data
+
+Trees have structural properties that happen to match common tabular data characteristics. Neural networks, designed primarily for vision and language, lack these properties and can actively hurt performance on tabular tasks.
+
+- Non-smooth functions: trees produce piecewise-constant outputs naturally; NNs prefer smooth functions via implicit regularization (neural tangent kernel)
+- Rotational variance: trees use axis-aligned splits, appropriate when features are independent; NNs treat all rotations of the feature space equivalently
+- Irrelevant features: trees ignore them via greedy feature selection at each split; NNs propagate noise gradients from all features
+- Automatic interactions: trees find them by design (split A then B = interaction); NNs need sufficient depth and data to discover the same interactions
+- Small datasets: trees generalize from n=500; NNs require substantially more data to overcome parameter count
+
+## Benchmarking XGBoost vs Deep MLP
+
+A direct five-fold cross-validation comparison demonstrates the consistent advantage of gradient boosting over a deep MLP across synthetic tabular data with mixed feature relevance.
+
+```python
+import numpy as np
+from sklearn.datasets import make_classification
+from sklearn.model_selection import cross_val_score
+from sklearn.neural_network import MLPClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+import xgboost as xgb
+
+# Tabular dataset: 30 features, only 10 informative
+X, y = make_classification(
+    n_samples=2000, n_features=30, n_informative=10,
+    n_redundant=5, n_clusters_per_class=3, random_state=42
+)
+
+# XGBoost — no scaling needed
+xgb_clf = xgb.XGBClassifier(
+    n_estimators=300, max_depth=6, learning_rate=0.05,
+    subsample=0.8, colsample_bytree=0.8,
+    random_state=42, eval_metric='logloss'
+)
+
+# Deep MLP — requires standardization
+mlp = Pipeline([
+    ('scaler', StandardScaler()),
+    ('net', MLPClassifier(
+        hidden_layer_sizes=(256, 128, 64),
+        max_iter=500, early_stopping=True, random_state=42
+    ))
+])
+
+for name, model in [('XGBoost', xgb_clf), ('Deep MLP', mlp)]:
+    scores = cross_val_score(model, X, y, cv=5, scoring='accuracy')
+    print(f'{name}: {scores.mean():.4f} +/- {scores.std():.4f}')
+```
+
+## Irregular Target Functions
+
+Neural networks prefer smooth target functions because gradient descent with weight decay implicitly regularizes toward smooth solutions. Tabular data often has irregular, discontinuous functions — sharp decision boundaries, threshold effects — that trees handle naturally via piecewise-constant output.
+
+```python
+import numpy as np
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.neural_network import MLPClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+
+rng = np.random.default_rng(42)
+n, d = 2000, 20
+X = rng.uniform(0, 1, (n, d))
+
+# Irregular target: random threshold per feature — non-smooth function
+thresholds = rng.uniform(0.2, 0.8, d)
+y = ((X > thresholds).sum(axis=1) > d // 2).astype(int)
+
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
+
+rf = RandomForestClassifier(n_estimators=200, random_state=42)
+mlp = MLPClassifier(hidden_layer_sizes=(256, 128), max_iter=500, random_state=42)
+
+rf.fit(X_tr, y_tr)
+mlp.fit(X_tr, y_tr)
+
+print(f'Random Forest (irregular target): {accuracy_score(y_te, rf.predict(X_te)):.4f}')
+print(f'MLP           (irregular target): {accuracy_score(y_te, mlp.predict(X_te)):.4f}')
+```
+
+## Sparse Informative Features
+
+When only a few features carry signal and the rest are noise, trees isolate informative features via greedy splitting. Neural networks propagate gradients through all input weights, and without strong regularization they struggle to suppress the many noisy features.
+
+```python
+import numpy as np
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.neural_network import MLPClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import cross_val_score
+
+rng = np.random.default_rng(0)
+n, d_total, d_info = 1500, 50, 3  # 3 informative out of 50 total features
+
+X_info = rng.standard_normal((n, d_info))
+X_noise = rng.standard_normal((n, d_total - d_info))
+X = np.hstack([X_info, X_noise])
+
+# True label depends only on first 3 features
+y = (X_info[:, 0] + 2 * X_info[:, 1] - X_info[:, 2] > 0).astype(int)
+
+gbm = GradientBoostingClassifier(n_estimators=200, max_depth=4, random_state=42)
+mlp = Pipeline([
+    ('sc', StandardScaler()),
+    ('net', MLPClassifier(hidden_layer_sizes=(128, 64), max_iter=300, random_state=42))
+])
+
+for name, model in [('GBM (3/50 informative)', gbm), ('MLP (3/50 informative)', mlp)]:
+    s = cross_val_score(model, X, y, cv=5)
+    print(f'{name}: {s.mean():.4f} +/- {s.std():.4f}')
+```
+
+## Scaling Behavior: Trees vs Neural Networks
+
+At small n, trees win decisively. Neural networks begin to close the gap as n grows into the hundreds of thousands. The crossover point depends on feature complexity, but practically, trees remain competitive even at n=100k.
+
+```python
+import numpy as np
+from sklearn.datasets import make_classification
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.neural_network import MLPClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import cross_val_score
+
+sizes = [200, 500, 1000, 5000, 10000]
+print(f'{"n":>8}  {"GBM":>8}  {"MLP":>8}')
+print('-' * 30)
+
+for n in sizes:
+    X, y = make_classification(
+        n_samples=n, n_features=20, n_informative=8, random_state=42
+    )
+    gbm = GradientBoostingClassifier(n_estimators=100, random_state=42)
+    mlp = Pipeline([
+        ('sc', StandardScaler()),
+        ('net', MLPClassifier(
+            hidden_layer_sizes=(128, 64), max_iter=300, random_state=42
+        ))
+    ])
+    cv = max(2, min(5, n // 100))
+    gbm_score = cross_val_score(gbm, X, y, cv=cv).mean()
+    mlp_score = cross_val_score(mlp, X, y, cv=cv).mean()
+    print(f'{n:>8}  {gbm_score:>8.3f}  {mlp_score:>8.3f}')
+```
+
+---
+
+## Conditions: Trees Win vs Deep Learning Wins
+
+| Condition | Tree-Based Models | Deep Learning |
+| --- | --- | --- |
+| Dataset size | Any (especially n < 10k) | Large preferred (n > 100k) |
+| Feature type | Tabular numeric + categorical | Images, text, audio, graphs |
+| Missing values | Native support (XGBoost/LightGBM) | Requires imputation step |
+| Categorical features | Native (CatBoost, LightGBM) | Needs encoding or learned embedding |
+| Target function | Irregular, non-smooth, threshold-based | Smooth, continuous |
+| Multi-modal inputs | Not supported natively | Yes — NN handles all modalities |
+| Online learning | Difficult — full rebuild required | Easy — SGD updates incrementally |
+| Transfer learning | Not applicable | Strong — pre-trained tabular transformers |
+
+> **Grinsztajn et al. 2022 Key Experiment**: Removing uninformative features and applying a random rotation to the data significantly reduces the tree advantage — confirming that rotational variance and irrelevant features are the primary structural drivers of tree dominance on tabular benchmarks, not dataset size alone.
+
+## Key Takeaways
+
+- Always start with gradient-boosted trees (XGBoost or LightGBM) as the baseline for any tabular task
+- Trees outperform NNs primarily because of inductive biases that match tabular data structure
+- The gap is largest with irregular target functions, sparse informative features, and small n
+- Neural networks (FT-Transformer, SAINT) compete on large, clean, low-cardinality tabular datasets
+- For n < 1000, consider TabPFN; for very large n where DL is needed, prefer FT-Transformer or TabNet
+
