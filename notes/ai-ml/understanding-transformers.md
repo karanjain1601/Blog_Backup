@@ -1,18 +1,174 @@
 ---
 title: "Understanding Transformers"
 slug: "understanding-transformers"
-description: "A breakdown of how the transformer architecture works and why it replaced RNNs."
+description: "A comprehensive block-type test note — one of every block in the schema."
 tags: ["ai", "nlp", "transformers", "deep-learning"]
 topic: "ai-ml"
 status: "published"
-updated: "2026-07-01"
-blocks_json: "W3sidHlwZSI6InRleHQiLCJjb250ZW50IjoiVHJhbnNmb3JtZXJzIHJldm9sdXRpb25pemVkIE5MUCBieSByZXBsYWNpbmcgcmVjdXJyZW50IGFyY2hpdGVjdHVyZXMgd2l0aCBzZWxmLWF0dGVudGlvbiBtZWNoYW5pc21zLiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IlNlbGYtQXR0ZW50aW9uIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJUaGUga2V5IGluc2lnaHQgaXMgdGhhdCBldmVyeSB0b2tlbiBjYW4gYXR0ZW5kIHRvIGV2ZXJ5IG90aGVyIHRva2VuIGluIHRoZSBzZXF1ZW5jZSBzaW11bHRhbmVvdXNseSwgcmF0aGVyIHRoYW4gc2VxdWVudGlhbGx5LiJ9XQ=="
+updated: "2026-07-09"
+blocks_json: "WwogIHsidHlwZSI6InRvYyJ9LAogIHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiVGhpcyBub3RlIGV4ZXJjaXNlcyBldmVyeSBibG9jayB0eXBlIGluIHRoZSBzY2hlbWEg4oCUIG9uZSBvZiBlYWNoLCBpbmNsdWRpbmcgYWxsIGNvbnRhaW5lciBibG9ja3MgYW5kIGNhbGxvdXQgdmFyaWFudHMuIn0sCiAgeyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiSGVhZGluZ3MifSwKICB7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjMsImNvbnRlbnQiOiJMZXZlbCAzIEhlYWRpbmcifSwKICB7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjQsImNvbnRlbnQiOiJMZXZlbCA0IEhlYWRpbmcifSwKICB7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjUsImNvbnRlbnQiOiJMZXZlbCA1IEhlYWRpbmcifSwKICB7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjYsImNvbnRlbnQiOiJMZXZlbCA2IEhlYWRpbmcifSwKICB7InR5cGUiOiJkaXZpZGVyIn0sCiAgeyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiQ29kZSJ9LAogIHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InR5cGVzY3JpcHQiLCJmaWxlbmFtZSI6InRyYW5zZm9ybWVyLnRzIiwiaGlnaGxpZ2h0IjpbMyw0XSwiY29udGVudCI6ImZ1bmN0aW9uIGF0dGVuZChxdWVyeTogbnVtYmVyW10sIGtleXM6IG51bWJlcltdW10pOiBudW1iZXJbXSB7XG4gIC8vIFNjYWxlZCBkb3QtcHJvZHVjdCBhdHRlbnRpb25cbiAgY29uc3Qgc2NvcmVzID0ga2V5cy5tYXAoayA9PiBkb3QocXVlcnksIGspIC8gTWF0aC5zcXJ0KHF1ZXJ5Lmxlbmd0aCkpO1xuICByZXR1cm4gc29mdG1heChzY29yZXMpO1xufSJ9LAogIHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6Ik1hdGgifSwKICB7InR5cGUiOiJtYXRoIiwiY29udGVudCI6IlxcdGV4dHtBdHRlbnRpb259KFEsIEssIFYpID0gXFx0ZXh0e3NvZnRtYXh9XFxsZWZ0KFxcZnJhY3tRS15UfXtcXHNxcnR7ZF9rfX1cXHJpZ2h0KVYiLCJkaXNwbGF5Ijp0cnVlfSwKICB7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJDYWxsb3V0cyJ9LAogIHsidHlwZSI6ImNhbGxvdXQiLCJ2YXJpYW50IjoiaW5mbyIsInRpdGxlIjoiSW5mbyIsImNvbnRlbnQiOiJUaGlzIGlzIGFuICoqaW5mbyoqIGNhbGxvdXQuIFVzZWZ1bCBmb3Igc3VwcGxlbWVudGFyeSBpbmZvcm1hdGlvbi4ifSwKICB7InR5cGUiOiJjYWxsb3V0IiwidmFyaWFudCI6Indhcm5pbmciLCJ0aXRsZSI6Ildhcm5pbmciLCJjb250ZW50IjoiVGhpcyBpcyBhICoqd2FybmluZyoqIGNhbGxvdXQuIFNvbWV0aGluZyBtaWdodCBnbyB3cm9uZy4ifSwKICB7InR5cGUiOiJjYWxsb3V0IiwidmFyaWFudCI6ImVycm9yIiwidGl0bGUiOiJFcnJvciIsImNvbnRlbnQiOiJUaGlzIGlzIGFuICoqZXJyb3IqKiBjYWxsb3V0LiBTb21ldGhpbmcgaGFzIGdvbmUgd3JvbmcuIn0sCiAgeyJ0eXBlIjoiY2FsbG91dCIsInZhcmlhbnQiOiJ0aXAiLCJ0aXRsZSI6IlRpcCIsImNvbnRlbnQiOiJUaGlzIGlzIGEgKip0aXAqKiBjYWxsb3V0LiBBIGhlbHBmdWwgc2hvcnRjdXQgb3IgdHJpY2suIn0sCiAgeyJ0eXBlIjoiY2FsbG91dCIsInZhcmlhbnQiOiJub3RlIiwiY29udGVudCI6IkEgKipub3RlKiogY2FsbG91dCB3aXRoIG5vIGN1c3RvbSB0aXRsZSDigJQgdGhlIHZhcmlhbnQgbmFtZSBpcyB1c2VkIGluc3RlYWQuIn0sCiAgeyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiUXVvdGUifSwKICB7InR5cGUiOiJxdW90ZSIsImNvbnRlbnQiOiJUaGUgdHJhbnNmb3JtZXIgYXJjaGl0ZWN0dXJlIHJlcGxhY2VzIHJlY3VycmVuY2Ugd2l0aCBhdHRlbnRpb24sIGVuYWJsaW5nIHBhcmFsbGVsaXNtIGFjcm9zcyBzZXF1ZW5jZSBwb3NpdGlvbnMuIiwiY2l0ZSI6IlZhc3dhbmkgZXQgYWwuLCAyMDE3In0sCiAgeyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiTGlzdHMifSwKICB7InR5cGUiOiJsaXN0Iiwib3JkZXJlZCI6ZmFsc2UsIml0ZW1zIjpbIlNlbGYtYXR0ZW50aW9uIG9wZXJhdGVzIG92ZXIgdGhlIGZ1bGwgc2VxdWVuY2UgaW4gcGFyYWxsZWwiLCJNdWx0aS1oZWFkIGF0dGVudGlvbiBjYXB0dXJlcyBkaWZmZXJlbnQgcmVsYXRpb25zaGlwIHR5cGVzIiwiUG9zaXRpb25hbCBlbmNvZGluZyBpbmplY3RzIHNlcXVlbmNlIG9yZGVyIGluZm9ybWF0aW9uIl19LAogIHsidHlwZSI6Imxpc3QiLCJvcmRlcmVkIjp0cnVlLCJpdGVtcyI6WyJUb2tlbmlzZSB0aGUgaW5wdXQgc2VxdWVuY2UiLCJDb21wdXRlIHF1ZXJ5LCBrZXksIGFuZCB2YWx1ZSBwcm9qZWN0aW9ucyIsIkFwcGx5IHNjYWxlZCBkb3QtcHJvZHVjdCBhdHRlbnRpb24iLCJGZWVkIHRocm91Z2ggcG9zaXRpb24td2lzZSBGRk4iXX0sCiAgeyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiVG9kbyJ9LAogIHsidHlwZSI6InRvZG8iLCJpdGVtcyI6W3sidGV4dCI6IlJlYWQgdGhlIG9yaWdpbmFsIEF0dGVudGlvbiBJcyBBbGwgWW91IE5lZWQgcGFwZXIiLCJjaGVja2VkIjp0cnVlfSx7InRleHQiOiJJbXBsZW1lbnQgYSBzaW5nbGUgYXR0ZW50aW9uIGhlYWQgZnJvbSBzY3JhdGNoIiwiY2hlY2tlZCI6dHJ1ZX0seyJ0ZXh0IjoiQmVuY2htYXJrIGFnYWluc3QgYW4gUk5OIGJhc2VsaW5lIiwiY2hlY2tlZCI6ZmFsc2V9LHsidGV4dCI6IldyaXRlIHVwIGZpbmRpbmdzIGluIGEgbm90ZSIsImNoZWNrZWQiOmZhbHNlfV19LAogIHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IlRhYmxlIn0sCiAgeyJ0eXBlIjoidGFibGUiLCJoZWFkZXJzIjpbIkJsb2NrIFR5cGUiLCJDYXRlZ29yeSIsIk5lc3RzIEJsb2NrcyJdLCJyb3dzIjpbWyJ0ZXh0IiwibGVhZiIsIm5vIl0sWyJoZWFkaW5nIiwibGVhZiIsIm5vIl0sWyJjb2RlIiwibGVhZiIsIm5vIl0sWyJjYWxsb3V0IiwibGVhZiIsIm5vIl0sWyJkZXRhaWxzIiwiY29udGFpbmVyIiwieWVzIl0sWyJ0YWJzIiwiY29udGFpbmVyIiwieWVzIl0sWyJjb2x1bW5zIiwiY29udGFpbmVyIiwieWVzIl1dfSwKICB7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJJbWFnZSJ9LAogIHsidHlwZSI6ImltYWdlIiwic3JjIjoiaHR0cHM6Ly9wbGFjZWhvbGQuY28vODAweDQwMC8wZjE3MmEvOTRhM2I4P3RleHQ9TmV1cmFsK05ldHdvcmsrVmlzdWFsaXphdGlvbiIsImFsdCI6Ik5ldXJhbCBuZXR3b3JrIHZpc3VhbGl6YXRpb24iLCJjYXB0aW9uIjoiQSBzaW1wbGlmaWVkIHZpZXcgb2YgbXVsdGktaGVhZCBhdHRlbnRpb24ifSwKICB7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJHYWxsZXJ5In0sCiAgeyJ0eXBlIjoiZ2FsbGVyeSIsImltYWdlcyI6W3sic3JjIjoiaHR0cHM6Ly9wbGFjZWhvbGQuY28vNDAweDMwMC8wZjE3MmEvOTRhM2I4P3RleHQ9RW5jb2RlciIsImFsdCI6IkVuY29kZXIifSx7InNyYyI6Imh0dHBzOi8vcGxhY2Vob2xkLmNvLzQwMHgzMDAvMWUxYjRiL2E1YjRmYz90ZXh0PUF0dGVudGlvbiIsImFsdCI6IkF0dGVudGlvbiJ9LHsic3JjIjoiaHR0cHM6Ly9wbGFjZWhvbGQuY28vNDAweDMwMC8wNDJmMmUvNmVlN2I3P3RleHQ9RGVjb2RlciIsImFsdCI6IkRlY29kZXIifV19LAogIHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IlZpZGVvIn0sCiAgeyJ0eXBlIjoidmlkZW8iLCJzcmMiOiJodHRwczovL3d3dy53M3NjaG9vbHMuY29tL2h0bWwvbW92X2JiYi5tcDQiLCJjYXB0aW9uIjoiU2FtcGxlIHZpZGVvIGJsb2NrIOKAlCBCaWcgQnVjayBCdW5ueSBjbGlwIn0sCiAgeyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiRmlsZSJ9LAogIHsidHlwZSI6ImZpbGUiLCJzcmMiOiJodHRwczovL2FyeGl2Lm9yZy9wZGYvMTcwNi4wMzc2MiIsIm5hbWUiOiJhdHRlbnRpb24taXMtYWxsLXlvdS1uZWVkLnBkZiIsInNpemUiOiIyLjIgTUIifSwKICB7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJFbWJlZHMifSwKICB7InR5cGUiOiJlbWJlZCIsInByb3ZpZGVyIjoieW91dHViZSIsInVybCI6Imh0dHBzOi8vd3d3LnlvdXR1YmUuY29tL3dhdGNoP3Y9ckJDcU9URWZ4dmcifSwKICB7InR5cGUiOiJlbWJlZC1ub3RlIiwidGFyZ2V0IjoicHJvbXB0LWVuZ2luZWVyaW5nLWZ1bmRhbWVudGFscyIsImFuY2hvciI6IiNjb3JlLXRlY2huaXF1ZXMifSwKICB7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJNZXJtYWlkIn0sCiAgeyJ0eXBlIjoibWVybWFpZCIsImNvbnRlbnQiOiJncmFwaCBMUlxuICBJbnB1dFtJbnB1dCBUb2tlbnNdIC0tPiBFbWJlZFtFbWJlZGRpbmcgKyBQb3NpdGlvbmFsIEVuY29kaW5nXVxuICBFbWJlZCAtLT4gQXR0bltNdWx0aS1IZWFkIFNlbGYtQXR0ZW50aW9uXVxuICBBdHRuIC0tPiBGRk5bRmVlZC1Gb3J3YXJkIE5ldHdvcmtdXG4gIEZGTiAtLT4gTm9ybVtMYXllciBOb3JtXVxuICBOb3JtIC0tPiBPdXRwdXRbT3V0cHV0IFByb2JhYmlsaXRpZXNdIiwidGl0bGUiOiJTaW1wbGlmaWVkIFRyYW5zZm9ybWVyIiwibGF5b3V0IjoidGFicyIsImRlZmF1bHRUYWIiOiJkaWFncmFtIn0sCiAgeyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiQ29sbGVjdGlvbiJ9LAogIHsidHlwZSI6ImNvbGxlY3Rpb24iLCJ2aWV3IjoibGlzdCIsImZpbHRlciI6eyJ0b3BpYyI6ImFpLW1sIn0sInNvcnQiOiJ1cGRhdGVkX2F0In0sCiAgeyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiQ29udGFpbmVyIEJsb2NrcyJ9LAogIHsidHlwZSI6ImRldGFpbHMiLCJzdW1tYXJ5IjoiSW1wbGVtZW50YXRpb24gbm90ZXMg4oCUIGNsaWNrIHRvIGV4cGFuZCIsImJsb2NrcyI6W3sidHlwZSI6InRleHQiLCJjb250ZW50IjoiVGhlc2UgZGV0YWlscyBhcmUgY29sbGFwc2VkIGJ5IGRlZmF1bHQuIEdvb2QgZm9yIHN1cHBsZW1lbnRhcnkgbWF0ZXJpYWwsIHNwb2lsZXJzLCBvciBsb25nIGRpZ3Jlc3Npb25zLiJ9LHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiJpbXBvcnQgdG9yY2hcbmltcG9ydCB0b3JjaC5ubi5mdW5jdGlvbmFsIGFzIEZcblxuZGVmIHNjYWxlZF9kb3RfcHJvZHVjdF9hdHRlbnRpb24oUSwgSywgVik6XG4gICAgZF9rID0gUS5zaXplKC0xKVxuICAgIHNjb3JlcyA9IHRvcmNoLm1hdG11bChRLCBLLnRyYW5zcG9zZSgtMiwgLTEpKSAvIGRfayAqKiAwLjVcbiAgICB3ZWlnaHRzID0gRi5zb2Z0bWF4KHNjb3JlcywgZGltPS0xKVxuICAgIHJldHVybiB0b3JjaC5tYXRtdWwod2VpZ2h0cywgVikifV19LAogIHsidHlwZSI6InRhYnMiLCJ0YWJzIjpbeyJsYWJlbCI6IlB5dGhvbiIsImJsb2NrcyI6W3sidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiJmcm9tIHRyYW5zZm9ybWVycyBpbXBvcnQgQXV0b1Rva2VuaXplciwgQXV0b01vZGVsXG5cbnRva2VuaXplciA9IEF1dG9Ub2tlbml6ZXIuZnJvbV9wcmV0cmFpbmVkKCdiZXJ0LWJhc2UtdW5jYXNlZCcpXG5tb2RlbCA9IEF1dG9Nb2RlbC5mcm9tX3ByZXRyYWluZWQoJ2JlcnQtYmFzZS11bmNhc2VkJylcbmlucHV0cyA9IHRva2VuaXplcignSGVsbG8sIHdvcmxkIScsIHJldHVybl90ZW5zb3JzPSdwdCcpXG5vdXRwdXRzID0gbW9kZWwoKippbnB1dHMpIn1dfSx7ImxhYmVsIjoiVHlwZVNjcmlwdCIsImJsb2NrcyI6W3sidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InR5cGVzY3JpcHQiLCJjb250ZW50IjoiaW1wb3J0IHsgcGlwZWxpbmUgfSBmcm9tICdAaHVnZ2luZ2ZhY2UvdHJhbnNmb3JtZXJzJztcblxuY29uc3QgZ2VuZXJhdG9yID0gYXdhaXQgcGlwZWxpbmUoJ3RleHQtZ2VuZXJhdGlvbicsICdncHQyJyk7XG5jb25zdCByZXN1bHQgPSBhd2FpdCBnZW5lcmF0b3IoJ1RoZSB0cmFuc2Zvcm1lciBhcmNoaXRlY3R1cmUnKTtcbmNvbnNvbGUubG9nKHJlc3VsdCk7In1dfV19LAogIHsidHlwZSI6ImNvbHVtbnMiLCJjb2x1bW5zIjpbeyJibG9ja3MiOlt7InR5cGUiOiJjYWxsb3V0IiwidmFyaWFudCI6InRpcCIsInRpdGxlIjoiRW5jb2Rlci1vbmx5IiwiY29udGVudCI6IkJFUlQtc3R5bGUgbW9kZWxzLiBHb29kIGZvciBjbGFzc2lmaWNhdGlvbiBhbmQgdW5kZXJzdGFuZGluZyB0YXNrcy4ifV19LHsiYmxvY2tzIjpbeyJ0eXBlIjoiY2FsbG91dCIsInZhcmlhbnQiOiJpbmZvIiwidGl0bGUiOiJEZWNvZGVyLW9ubHkiLCJjb250ZW50IjoiR1BULXN0eWxlIG1vZGVscy4gR29vZCBmb3IgZ2VuZXJhdGlvbiB0YXNrcyBhbmQgbGFuZ3VhZ2UgbW9kZWxsaW5nLiJ9XX1dfQpd"
 ---
 
 # Understanding Transformers
 
-Transformers revolutionized NLP by replacing recurrent architectures with self-attention mechanisms.
+This note exercises every block type in the schema — one of each, including all container blocks and callout variants.
 
-## Self-Attention
+## Headings
 
-The key insight is that every token can attend to every other token in the sequence simultaneously, rather than sequentially.
+### Level 3 Heading
+
+#### Level 4 Heading
+
+##### Level 5 Heading
+
+###### Level 6 Heading
+
+---
+
+## Code
+
+```typescript
+function attend(query: number[], keys: number[][]): number[] {
+  // Scaled dot-product attention
+  const scores = keys.map(k => dot(query, k) / Math.sqrt(query.length));
+  return softmax(scores);
+}
+```
+
+## Math
+
+$$
+\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right)V
+$$
+
+## Callouts
+
+> **Info**
+> This is an **info** callout. Useful for supplementary information.
+
+> **Warning**
+> This is a **warning** callout. Something might go wrong.
+
+> **Error**
+> This is an **error** callout. Something has gone wrong.
+
+> **Tip**
+> This is a **tip** callout. A helpful shortcut or trick.
+
+> **note**
+> A **note** callout with no custom title — the variant name is used instead.
+
+## Quote
+
+> The transformer architecture replaces recurrence with attention, enabling parallelism across sequence positions.
+>
+> — Vaswani et al., 2017
+
+## Lists
+
+- Self-attention operates over the full sequence in parallel
+- Multi-head attention captures different relationship types
+- Positional encoding injects sequence order information
+
+1. Tokenise the input sequence
+2. Compute query, key, and value projections
+3. Apply scaled dot-product attention
+4. Feed through position-wise FFN
+
+## Todo
+
+- [x] Read the original Attention Is All You Need paper
+- [x] Implement a single attention head from scratch
+- [ ] Benchmark against an RNN baseline
+- [ ] Write up findings in a note
+
+## Table
+
+| Block Type | Category | Nests Blocks |
+| --- | --- | --- |
+| text | leaf | no |
+| heading | leaf | no |
+| code | leaf | no |
+| callout | leaf | no |
+| details | container | yes |
+| tabs | container | yes |
+| columns | container | yes |
+
+## Image
+
+![Neural network visualization](https://placehold.co/800x400/0f172a/94a3b8?text=Neural+Network+Visualization)
+*A simplified view of multi-head attention*
+
+## Gallery
+
+## Video
+
+[▶ Video](https://www.w3schools.com/html/mov_bbb.mp4)
+
+## File
+
+[📎 attention-is-all-you-need.pdf](https://arxiv.org/pdf/1706.03762)
+
+## Embeds
+
+[Embed](https://www.youtube.com/watch?v=rBCqOTEfxvg)
+
+## Mermaid
+
+```mermaid
+graph LR
+  Input[Input Tokens] --> Embed[Embedding + Positional Encoding]
+  Embed --> Attn[Multi-Head Self-Attention]
+  Attn --> FFN[Feed-Forward Network]
+  FFN --> Norm[Layer Norm]
+  Norm --> Output[Output Probabilities]
+```
+
+## Collection
+
+## Container Blocks
+
+<details>
+<summary>Implementation notes — click to expand</summary>
+
+These details are collapsed by default. Good for supplementary material, spoilers, or long digressions.
+
+```python
+import torch
+import torch.nn.functional as F
+
+def scaled_dot_product_attention(Q, K, V):
+    d_k = Q.size(-1)
+    scores = torch.matmul(Q, K.transpose(-2, -1)) / d_k ** 0.5
+    weights = F.softmax(scores, dim=-1)
+    return torch.matmul(weights, V)
+```
+
+</details>
+
+**Python**
+
+```python
+from transformers import AutoTokenizer, AutoModel
+
+tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
+model = AutoModel.from_pretrained('bert-base-uncased')
+inputs = tokenizer('Hello, world!', return_tensors='pt')
+outputs = model(**inputs)
+```
+
+**TypeScript**
+
+```typescript
+import { pipeline } from '@huggingface/transformers';
+
+const generator = await pipeline('text-generation', 'gpt2');
+const result = await generator('The transformer architecture');
+console.log(result);
+```
+
+> **Tip**
+> BERT-style models. Good for classification and understanding tasks.
+
+> **Decoder-only**
+> GPT-style models. Good for generation tasks and language modelling.
