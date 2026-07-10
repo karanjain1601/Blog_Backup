@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pipeline Parallelism for LLM Inference | Notes Backup</title>
+  <meta name="description" content="Partitioning transformer layers across GPUs in a pipeline, where each GPU processes one stage while others process subsequent microbatches, reducing per-GPU memory at the cost of pipeline bubbles." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Pipeline Parallelism for LLM Inference</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Partitioning transformer layers across GPUs in a pipeline, where each GPU processes one stage while others process subsequent microbatches, reducing per-GPU memory at the cost of pipeline bubbles.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Pipeline Parallelism for LLM Inference</h1>
+<p>Pipeline parallelism is a model-parallel strategy that partitions the layers of a large transformer model across multiple GPUs, assigning each device a contiguous subset of layers called a pipeline stage. Unlike data parallelism — where every GPU holds a full model replica — pipeline parallelism enables models that exceed the VRAM capacity of any single GPU by distributing parameters horizontally. The key trade-off is the pipeline bubble: when processing a single batch, earlier stages must wait for the batch to propagate to the final stage, leaving most GPUs idle. The solution is micro-batching: splitting each batch into smaller micro-batches that fill the pipeline and dramatically reduce idle time.</p>
+<h2>Overview</h2>
+<p>In a pipeline-parallel setup, a transformer with L layers is partitioned into S stages of L/S layers each. Stage 0 holds the embedding layer and layers 0..(L/S - 1), stage 1 holds layers L/S..(2L/S - 1), and so on. Each stage lives on a dedicated GPU. During the forward pass, stage 0 computes activations for the input and passes them to stage 1 over an interconnect (NVLink or Ethernet), stage 1 continues the computation and passes to stage 2, and so on until stage S-1 produces the final logits. During the backward pass, gradients flow in the reverse direction through the same chain.</p>
+<p>The memory benefit is immediate: a 70B-parameter model that would require 140 GB of VRAM in fp16 can be split across 8 GPUs at 17.5 GB each — comfortably fitting on A100-40GB hardware. The communication cost per stage boundary is proportional to the activation tensor size: batch_size × sequence_length × hidden_dim × dtype_bytes. For a typical fp16 activation with batch=1, seq=2048, hidden=8192, this is roughly 32 MB per stage boundary per forward pass, which is manageable even over PCIe.</p>
+<h2>Naive Pipeline Partitioning</h2>
+<p>The naive approach assigns an equal number of consecutive layers to each GPU and processes one microbatch at a time sequentially through all stages. This gives correct results but is highly inefficient: at any given clock cycle, only one GPU is active. The remaining S-1 GPUs are idle, waiting either for activations to arrive (forward) or for gradients to propagate back (backward). The fraction of wasted time is (S-1)/S, which for S=8 stages means 87.5% of all GPU-cycles are idle. This bubble fraction makes naive pipeline parallelism impractical without micro-batching.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import time
+from typing import List
+
+class PipelineStage(nn.Module):
+    def __init__(self, num_layers: int, hidden_dim: int = 512):
+        super().__init__()
+        self.layers = nn.ModuleList(
+            [nn.Linear(hidden_dim, hidden_dim) for _ in range(num_layers)]
+        )
+
+    def forward(self, x: torch.Tensor) -&gt; torch.Tensor:
+        for layer in self.layers:
+            x = torch.relu(layer(x))
+        return x
+
+def naive_pipeline(num_stages: int = 4, layers_per_stage: int = 8, dim: int = 512):
+    &quot;&quot;&quot;Split 32-layer model across 4 GPUs; process one microbatch; measure bubble.&quot;&quot;&quot;
+    stages = [PipelineStage(layers_per_stage, dim) for _ in range(num_stages)]
+    x = torch.randn(1, dim)
+    times: List[float] = []
+    for stage in stages:
+        t0 = time.perf_counter()
+        x = stage(x)
+        times.append((time.perf_counter() - t0) * 1e3)
+    bubble_frac = (num_stages - 1) / num_stages
+    print(f'Stage times (ms): {[round(t, 2) for t in times]}')
+    print(f'Bubble fraction: {bubble_frac:.2%}  ({num_stages-1}/{num_stages} stages idle)')
+    print(f'Pipeline efficiency: {1 - bubble_frac:.0%}')
+    return bubble_frac
+
+bubble = naive_pipeline()
+print(f'At 4 stages, {bubble:.0%} of all compute cycles are wasted pipeline bubbles.')
+</code></pre>
+<p>The simulation above confirms the theoretical bubble fraction of 75% for a 4-stage pipeline with a single microbatch. Every GPU except the currently active one sits completely idle. Only stage 0 is active at t=0, only stage 1 at t=1, and so on. The total wall-clock time equals 4 stage-latencies but only 1/4 of the theoretical peak throughput is achieved.</p>
+<h2>Pipeline Bubbles</h2>
+<p>The pipeline bubble arises from data dependency: stage k cannot begin processing microbatch m until stage k-1 has finished it. In a pipeline with S stages and M microbatches, the total number of clock cycles is M + S - 1 (like filling a FIFO queue). The bubble fraction — the proportion of wasted cycles — is (S-1)/(M + S - 1). As M grows large relative to S, the bubble fraction approaches zero. This is why micro-batching is so effective: by splitting one large batch into many small microbatches, the pipeline stays full almost continuously.</p>
+<p>Formally, let T_stage be the latency of one stage processing one microbatch. The ideal time to process M microbatches through S stages with no bubbles is M × T_stage (only one stage ever active). The actual time is (M + S - 1) × T_stage. The efficiency is M / (M + S - 1). For M=8 microbatches and S=4 stages, efficiency = 8/11 ≈ 73%. For M=32, efficiency = 32/35 ≈ 91%. The 1F1B (one-forward-one-backward) schedule, used in PipeDream and Megatron-LM, achieves similar bubble fractions but with much lower activation memory overhead by interleaving forward and backward passes.</p>
+<h2>Micro-batching to Fill Bubbles</h2>
+<p>Micro-batching splits a global batch of size B into M micro-batches of size B/M. Each micro-batch independently passes through all pipeline stages. With the 1F1B schedule, once the pipeline is full, every stage is simultaneously processing a different micro-batch: stage 0 works on microbatch m while stage 1 works on m-1, stage 2 on m-2, and stage S-1 on m-S+1. This keeps all GPUs active (except during the startup and cooldown phases at the beginning and end of each global batch). The bubble is confined to the warm-up and cool-down periods, giving bubble fraction (S-1)/(M+S-1).</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from typing import List, Tuple
+import time
+
+def microbatch_pipeline(
+    stages: List[nn.Module],
+    microbatches: List[torch.Tensor]
+) -&gt; Tuple[List[torch.Tensor], float]:
+    &quot;&quot;&quot;Schedule microbatches through pipeline stages; report bubble stats.&quot;&quot;&quot;
+    S = len(stages)
+    M = len(microbatches)
+    # Theoretical: bubble = (S-1)/(M+S-1)
+    total_cycles = M + S - 1
+    bubble_frac = (S - 1) / total_cycles
+    naive_bubble = (S - 1) / S
+    results = []
+    for m_idx in range(M):
+        x = microbatches[m_idx]
+        for stage in stages:
+            x = stage(x)
+        results.append(x)
+    print(f'Microbatches: {M}  |  Stages: {S}')
+    print(f'Total clock cycles: {total_cycles}  (M+S-1)')
+    print(f'Bubble fraction (1F1B): {bubble_frac:.2%}')
+    print(f'Naive bubble (M=1):     {naive_bubble:.2%}')
+    print(f'Improvement:            {naive_bubble / bubble_frac:.2f}x less waste')
+    return results, bubble_frac
+
+stages = [nn.Linear(256, 256) for _ in range(4)]
+micros = [torch.randn(8, 256) for _ in range(4)]
+out, bub = microbatch_pipeline(stages, micros)
+print(f'Output count: {len(out)}  |  Bubble: {bub:.1%}')
+</code></pre>
+<p>With M=4 microbatches and S=4 stages, the bubble fraction drops from 75% (naive) to 43% — a meaningful improvement. With M=32 microbatches, it falls to just 9%. The trade-off is memory: more microbatches means more activations held in memory simultaneously for the backward pass. GPipe materializes all activations (high memory) while PipeDream uses activation checkpointing per stage (lower memory, higher compute).</p>
+<h2>GPipe vs PipeDream</h2>
+<p>GPipe (Google, 2019) uses a synchronous all-forward-then-all-backward schedule. All M microbatches complete their forward pass first (accumulating all intermediate activations), then all complete their backward pass in reverse order. This gives clean gradient accumulation across microbatches and matches the semantics of a full-batch update, but requires storing M × S activation tensors simultaneously — substantial memory for large M. GPipe mitigates this with rematerialization (re-computing activations during backward instead of storing them), trading compute for memory.</p>
+<p>PipeDream (Microsoft, 2018) uses an asynchronous 1F1B schedule: each stage alternates between one forward microbatch and one backward microbatch. This limits the number of in-flight microbatches to S (the number of stages), rather than M, drastically reducing activation memory. However, asynchronous updates mean different microbatches use weight versions from different training steps. PipeDream introduces weight stashing — storing multiple versions of weights — to handle this staleness. PipeDream-Flush (2020) uses a synchronous 1F1B with periodic pipeline flushes, eliminating weight staleness while preserving the memory benefits.</p>
+<pre><code class="language-python">import torch
+import time
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+def hf_pipeline_demo(model_name: str = 'gpt2-medium', n_new_tokens: int = 50):
+    &quot;&quot;&quot;Load with device_map='auto', inspect layer placement, measure throughput.&quot;&quot;&quot;
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        device_map='auto',
+        torch_dtype=torch.float16
+    )
+    if hasattr(model, 'hf_device_map'):
+        print('Layer-to-device mapping (first 8):')
+        for k, v in list(model.hf_device_map.items())[:8]:
+            print(f'  {k:45s}: {v}')
+    prompt = 'Pipeline parallelism distributes transformer layers across GPUs.'
+    inputs = tokenizer(prompt, return_tensors='pt')
+    with torch.no_grad():
+        model.generate(**inputs, max_new_tokens=5)  # warmup
+    t0 = time.perf_counter()
+    with torch.no_grad():
+        out = model.generate(**inputs, max_new_tokens=n_new_tokens, do_sample=False)
+    elapsed = time.perf_counter() - t0
+    tps = n_new_tokens / elapsed
+    print(f'Generated {n_new_tokens} tokens in {elapsed:.2f}s ({tps:.1f} tok/s)')
+    return tps
+
+hf_pipeline_demo()
+</code></pre>
+<p>HuggingFace Accelerate's device_map='auto' implements naive pipeline parallelism automatically: it inspects the model's layer structure, estimates parameter memory per layer, and greedily assigns layers to GPUs until each device's VRAM budget is exhausted before moving to the next. This is inference-only pipeline parallelism without micro-batching — suitable for serving with throughput-optimized batch sizes, but not the most efficient for low-latency single-request serving.</p>
+<h2>Inference-Specific Scheduling</h2>
+<p>Training pipeline parallelism focuses on throughput and gradient correctness across microbatches. Inference pipeline parallelism has different priorities: minimize time-to-first-token (TTFT) for interactive workloads, maximize tokens-per-second for batch throughput, and handle variable-length requests efficiently. The continuous batching paradigm (used in vLLM, TGI) is compatible with pipeline parallelism: the scheduler treats each pipeline stage as processing a continuous stream of tokens from different requests, with new requests entering the pipeline as earlier ones finish. This fills pipeline bubbles with tokens from other requests rather than padding.</p>
+<p>Activation pipelining and prefetching are key optimizations: while stage k is computing the forward pass for microbatch m, the interconnect can be prefetching stage k-1's activation for microbatch m+1. This overlaps computation and communication, further reducing effective bubble time. For NVLink (600 GB/s bidirectional), the transfer time for a typical fp16 activation (batch=1, hidden=8192) is under 1ms — negligible compared to computation. For PCIe (64 GB/s) or Ethernet (25 Gbps), transfer latency can dominate and requires careful activation compression or chunking.</p>
+<h2>Pipeline vs Tensor Parallelism</h2>
+<p>Tensor parallelism (TP) splits individual weight matrices across GPUs: each GPU holds a column-shard of the MLP weight matrix and performs partial matrix multiplications, then an all-reduce combines partial results. TP requires an all-reduce every layer (2 all-reduces per transformer block), making it highly sensitive to interconnect bandwidth. It reduces per-layer latency by a factor of TP degree but only works efficiently on fast NVLink. Pipeline parallelism (PP), by contrast, only transfers activations at stage boundaries — much less communication per token, making it viable over slower interconnects. The optimal hybrid is PP×TP where nodes are connected by NVLink within a server and Ethernet across servers.</p>
+<pre><code class="language-python">import time
+from dataclasses import dataclass
+from typing import List
+
+@dataclass
+class ParallelConfig:
+    label: str
+    pp: int
+    tp: int
+
+def compare_parallel_configs(
+    n_layers: int = 32,
+    n_new_tokens: int = 50,
+    link_type: str = 'nvlink'
+) -&gt; None:
+    &quot;&quot;&quot;Estimate latency and throughput for PP=4 vs TP=4 vs PP=2+TP=2.&quot;&quot;&quot;
+    allreduce_cost = 0.05 if link_type == 'nvlink' else 0.8  # ms per all-reduce
+    configs = [
+        ParallelConfig('PP=4, TP=1', pp=4, tp=1),
+        ParallelConfig('PP=1, TP=4', pp=1, tp=4),
+        ParallelConfig('PP=2, TP=2', pp=2, tp=2),
+        ParallelConfig('SeqPar',     pp=1, tp=1),
+    ]
+    print(f'Link: {link_type}  |  all-reduce cost: {allreduce_cost} ms\n')
+    print(f'{&quot;Config&quot;:&lt;16} {&quot;Lat (ms)&quot;:&gt;10} {&quot;Tput (tok/s)&quot;:&gt;14} {&quot;Comm/layer&quot;:&gt;12}')
+    print('-' * 56)
+    for cfg in configs:
+        pp_comm  = cfg.pp * 0.3              # activation xfer per stage boundary
+        tp_comm  = cfg.tp * n_layers * allreduce_cost  # all-reduce every layer
+        compute  = n_layers * 0.06           # base compute per layer
+        lat_ms   = pp_comm + tp_comm + compute
+        tput     = (n_new_tokens * 1000) / (lat_ms * cfg.pp)
+        print(f'{cfg.label:&lt;16} {lat_ms:&gt;10.1f} {tput:&gt;14.0f} {tp_comm/n_layers:&gt;12.3f}')
+
+compare_parallel_configs(link_type='nvlink')
+print()
+compare_parallel_configs(link_type='ethernet')
+</code></pre>
+<p>The results highlight the interconnect sensitivity of tensor parallelism. On NVLink, TP=4 achieves the lowest per-token latency because all-reduces are fast and the 4x compute parallelism dominates. On Ethernet, TP=4 is dominated by all-reduce overhead and PP=4 wins on both latency and throughput. The hybrid PP=2+TP=2 is a balanced choice for multi-server deployments: TP=2 within each NVLink-connected server node, PP=2 across nodes over Ethernet.</p>
+<table>
+<thead>
+<tr>
+<th>Strategy</th>
+<th>Latency (1 req)</th>
+<th>Throughput</th>
+<th>Communication pattern</th>
+<th>Best use case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>PP=4, TP=1</td>
+<td>High (sequential stages)</td>
+<td>High (microbatching)</td>
+<td>Activations at stage boundaries only</td>
+<td>Multi-node slow-link serving</td>
+</tr>
+<tr>
+<td>TP=4, PP=1</td>
+<td>Low (parallel compute)</td>
+<td>Medium (all-reduce bottleneck)</td>
+<td>All-reduce every transformer layer</td>
+<td>Single-node NVLink inference</td>
+</tr>
+<tr>
+<td>PP=2+TP=2</td>
+<td>Medium (balanced)</td>
+<td>High (hybrid)</td>
+<td>TP all-reduce within node; PP xfer across</td>
+<td>Multi-node NVLink cluster</td>
+</tr>
+<tr>
+<td>Sequence parallelism</td>
+<td>Low</td>
+<td>High</td>
+<td>Ring all-reduce over sequence dimension</td>
+<td>Very long context (&gt;32K tokens)</td>
+</tr>
+<tr>
+<td>Expert parallelism (MoE)</td>
+<td>Low (sparse compute)</td>
+<td>Very high</td>
+<td>All-to-all token routing to experts</td>
+<td>Mixture-of-Experts models</td>
+</tr>
+</tbody>
+</table>
+<h2>Key Takeaways</h2>
+<p>Pipeline parallelism enables deploying models larger than any single GPU's VRAM by distributing layers across a chain of GPUs. The bubble fraction (S-1)/(M+S-1) shrinks as the number of microbatches M grows, making micro-batching essential for efficiency. For inference serving with continuous batching, pipeline stages can always be kept busy by tokens from different in-flight requests, approaching the ideal of zero bubble. The optimal parallelism strategy depends on interconnect topology: tensor parallelism for fast NVLink within a node, pipeline parallelism for slower inter-node links.</p>
+<blockquote>
+<p><strong>When to choose pipeline parallelism</strong>: Pipeline parallelism is ideal when you have many GPUs connected over slower links (PCIe or Ethernet) since only activations cross stage boundaries, unlike tensor parallelism which requires an all-reduce every layer. For NVLink-connected GPUs, a hybrid of PP across nodes and TP within nodes typically delivers the best latency-throughput trade-off.</p>
+</blockquote>
+<ul>
+<li>Bubble fraction = (S-1)/(M+S-1): grows with stages, shrinks with microbatches</li>
+<li>1F1B schedule (PipeDream-Flush) keeps activation memory bounded at O(S) microbatches</li>
+<li>HuggingFace device_map='auto' provides zero-code pipeline parallelism for inference</li>
+<li>Communication cost per stage boundary = batch × seq_len × hidden × 2 bytes (fp16)</li>
+<li>Tensor parallelism beats pipeline parallelism for latency only on fast NVLink interconnects</li>
+<li>Continuous batching fills pipeline stages with tokens from different requests, eliminating bubbles</li>
+<li>For models with strong load imbalance across layers, unequal stage partitioning reduces per-stage latency variance</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

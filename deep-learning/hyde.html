@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HyDE: Hypothetical Document Embeddings | Notes Backup</title>
+  <meta name="description" content="Improving retrieval by using an LLM to generate a hypothetical answer to the query, embedding that answer (not the query) for retrieval — bridging the query-document vocabulary gap." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>HyDE: Hypothetical Document Embeddings</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Improving retrieval by using an LLM to generate a hypothetical answer to the query, embedding that answer (not the query) for retrieval — bridging the query-document vocabulary gap.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>HyDE: Hypothetical Document Embeddings</h1>
+<p>HyDE (Hypothetical Document Embeddings), introduced by Gao et al. (2022), is a retrieval augmentation technique that addresses the vocabulary mismatch between user queries and indexed documents. Instead of embedding the query and searching for similar documents, HyDE first prompts an LLM to generate a hypothetical document that would answer the query — as if it already knew the answer — and then embeds that hypothetical document for retrieval. The intuition is that a hypothetical answer written in the same style and vocabulary as the indexed corpus is geometrically closer to relevant documents in embedding space than a short user query, even if the hypothetical answer contains factual errors. The final answer is always generated from the retrieved real documents, not from the hallucinated hypothesis.</p>
+<h2>Overview</h2>
+<p>HyDE was proposed in 'Precise Zero-Shot Dense Retrieval without Relevance Labels' (Gao et al., 2022, SIGIR) as a way to improve zero-shot dense retrieval without any relevance-labelled training data. The core insight is that dense embeddings are trained to map semantically similar texts close together in vector space. A user query ('how do transformers use attention?') is written in interrogative form with a different token distribution than a document answer ('Transformers use attention by computing...'). This distributional mismatch means the query embedding may not be close to the document embedding even when the document answers the query. By generating a plausible document-style answer and embedding that, HyDE produces a query representation in the same distribution as the indexed documents. It is compatible with any embedding model and any retrieval index, requiring only an LLM API call per query.</p>
+<h2>Query-Document Gap Problem</h2>
+<p>The vocabulary and style gap between queries and documents is a fundamental problem in information retrieval. Users write queries as short interrogative phrases ('best way to fine-tune BERT'), while documents are written as declarative statements ('BERT can be fine-tuned by adding a task-specific head...'). BM25 lexical search fails when the query uses different words than the document (a user asks 'fix transformer training instability' but the document discusses 'gradient explosion in attention layers'). Dense retrieval reduces this gap by embedding semantics rather than lexical overlap, but the query-to-document style shift still creates a directional bias in embedding space. Short queries also contain less semantic signal than full document passages, making their embeddings less reliable. HyDE resolves both issues by converting the short interrogative query into a long declarative passage before embedding.</p>
+<pre><code class="language-python">import openai
+import numpy as np
+from sentence_transformers import SentenceTransformer
+import faiss
+
+client = openai.OpenAI(api_key=&quot;YOUR_API_KEY&quot;)
+embed_model = SentenceTransformer(&quot;all-MiniLM-L6-v2&quot;)
+
+def generate_hypothesis(query: str, model: str = &quot;gpt-3.5-turbo&quot;) -&gt; str:
+    &quot;&quot;&quot;Step 1: LLM generates a hypothetical document that would answer the query.&quot;&quot;&quot;
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {&quot;role&quot;: &quot;system&quot;, &quot;content&quot;: &quot;Write a concise 2-3 sentence factual paragraph answering the question.&quot;},
+            {&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: f&quot;Write a Wikipedia-style paragraph answering: {query}&quot;}
+        ],
+        max_tokens=200, temperature=0.0,
+    )
+    return resp.choices[0].message.content.strip()
+
+def hyde_retrieve(query: str, corpus: list, top_k: int = 5) -&gt; dict:
+    &quot;&quot;&quot;Full HyDE pipeline: generate hypothesis -&gt; embed -&gt; retrieve -&gt; return real docs.&quot;&quot;&quot;
+    hypothesis = generate_hypothesis(query)
+    hyp_emb    = embed_model.encode([hypothesis], normalize_embeddings=True).astype(np.float32)
+    corp_embs  = embed_model.encode(corpus, normalize_embeddings=True).astype(np.float32)
+    index      = faiss.IndexFlatIP(corp_embs.shape[1])
+    index.add(corp_embs)
+    _, idxs = index.search(hyp_emb, top_k)
+    print(f&quot;Hypothesis ({len(hypothesis.split())} words): {hypothesis[:120]}...&quot;)
+    return {&quot;hypothesis&quot;: hypothesis, &quot;retrieved&quot;: [corpus[i] for i in idxs[0]]}
+
+corpus = [f&quot;Document {i}: technical content about deep learning topic {i % 10}.&quot; for i in range(50)]
+result = hyde_retrieve(&quot;how do transformers use self-attention&quot;, corpus)
+print(f&quot;Retrieved {len(result['retrieved'])} docs using HyDE embedding&quot;)
+</code></pre>
+<h2>HyDE Mechanism</h2>
+<p>HyDE replaces the query embedding with a hypothetical document embedding at retrieval time. The process has four steps: (1) the user submits a query; (2) an LLM generates a hypothetical answer document (typically 100–200 words); (3) the hypothetical document is embedded with the same model used to embed the corpus; (4) nearest-neighbour search retrieves the most similar real documents from the index; and (5) the real retrieved documents (not the hypothesis) are passed to the LLM for final answer generation. The hypothesis is ephemeral — it never enters the answer generation step and any hallucinations in it do not directly appear in the output. However, a hallucinated hypothesis can lead to retrieval of wrong real documents, which then misleads the LLM. This is HyDE's core failure mode.</p>
+<pre><code class="language-python">import openai
+from typing import Literal
+
+client = openai.OpenAI(api_key=&quot;YOUR_API_KEY&quot;)
+
+QUERY_PROMPTS = {
+    &quot;factual&quot;:    &quot;Write a Wikipedia paragraph (2-3 sentences) that answers: {query}&quot;,
+    &quot;technical&quot;:  &quot;Write a technical documentation paragraph explaining: {query}&quot;,
+    &quot;procedural&quot;: &quot;Write a step-by-step guide (3-4 steps) for: {query}&quot;,
+}
+
+def generate_hypothetical_doc(query: str,
+                               query_type: Literal[&quot;factual&quot;, &quot;technical&quot;, &quot;procedural&quot;] = &quot;factual&quot;,
+                               model: str = &quot;gpt-3.5-turbo&quot;) -&gt; str:
+    &quot;&quot;&quot;Generate a style-matched hypothetical document for the query type.&quot;&quot;&quot;
+    prompt = QUERY_PROMPTS[query_type].format(query=query)
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {&quot;role&quot;: &quot;system&quot;, &quot;content&quot;: &quot;Answer concisely in 2-3 sentences as a knowledgeable expert.&quot;},
+            {&quot;role&quot;: &quot;user&quot;,   &quot;content&quot;: prompt}
+        ],
+        max_tokens=180, temperature=0.0,
+    )
+    return resp.choices[0].message.content.strip()
+
+examples = [
+    (&quot;What is the capital of France?&quot;,                              &quot;factual&quot;),
+    (&quot;How does backpropagation compute gradients in neural nets?&quot;,  &quot;technical&quot;),
+    (&quot;How do I fine-tune a BERT model for text classification?&quot;,    &quot;procedural&quot;),
+]
+for query, qtype in examples:
+    hyp = generate_hypothetical_doc(query, qtype)
+    print(f&quot;\nType: {qtype} | Query: {query}&quot;)
+    print(f&quot;Hypothesis ({len(hyp.split())} words): {hyp[:160]}...&quot;)
+</code></pre>
+<h2>Hypothetical Document Generation</h2>
+<p>The quality of the hypothesis significantly affects retrieval quality. A good hypothesis should match the vocabulary, style, and length of the indexed corpus. For a corpus of Wikipedia articles, the prompt 'Write a Wikipedia paragraph that answers:' works well. For a corpus of academic papers, 'Write an abstract-style summary explaining:' is more appropriate. For a corpus of technical documentation, 'Write a documentation entry for:' aligns better. Using query-type-specific prompts (factual, technical, procedural) has been shown to improve Recall@10 by 2–5 percentage points over a generic prompt. Generating multiple hypotheses (3–5) and averaging their embeddings further improves robustness, at the cost of additional LLM calls. The embedding of the average of multiple hypothesis embeddings is more stable and less sensitive to any single hallucination.</p>
+<h2>Embedding the Hypothesis</h2>
+<p>HyDE is compatible with any dense embedding model, but performance depends on the hypothesis matching the embedding model's training distribution. Models fine-tuned for asymmetric retrieval (short query → long document) — such as all-MiniLM-L6-v2 or text-embedding-3-small — may already partly close the query-document gap, reducing HyDE's benefit. Models trained symmetrically (document-to-document similarity) — like Instructor or e5-large — benefit more from HyDE because they are designed to compare documents to documents, exactly what HyDE produces. In practice, HyDE's benefit is largest when using general-purpose embedding models and smallest when using task-specific bi-encoders already fine-tuned on the target domain. Always measure HyDE vs direct query retrieval on your specific corpus before deploying.</p>
+<pre><code class="language-python">import openai
+import numpy as np
+from sentence_transformers import SentenceTransformer
+import faiss
+
+client      = openai.OpenAI(api_key=&quot;YOUR_API_KEY&quot;)
+embed_model = SentenceTransformer(&quot;all-MiniLM-L6-v2&quot;)
+
+def recall_at_k(retrieved: list, relevant: list, k: int) -&gt; float:
+    return len(set(retrieved[:k]) &amp; set(relevant)) / max(len(relevant), 1)
+
+def compare_hyde_vs_query(test_set: list, corpus: list, k: int = 10) -&gt; dict:
+    &quot;&quot;&quot;Compare Recall@k for direct query embedding vs HyDE embedding on 20 questions.&quot;&quot;&quot;
+    corp_embs = embed_model.encode(corpus, normalize_embeddings=True).astype(np.float32)
+    index     = faiss.IndexFlatIP(corp_embs.shape[1])
+    index.add(corp_embs)
+    q_recalls, h_recalls = [], []
+    for item in test_set:
+        query, relevant = item[&quot;query&quot;], item[&quot;relevant_idxs&quot;]
+        # Direct query embedding
+        q_emb = embed_model.encode([query], normalize_embeddings=True).astype(np.float32)
+        _, q_hits = index.search(q_emb, k)
+        r_query = recall_at_k(q_hits[0].tolist(), relevant, k)
+        # HyDE embedding
+        resp = client.chat.completions.create(
+            model=&quot;gpt-3.5-turbo&quot;,
+            messages=[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: f&quot;Write a paragraph answering: {query}&quot;}],
+            max_tokens=150, temperature=0.0,
+        )
+        hyp   = resp.choices[0].message.content.strip()
+        h_emb = embed_model.encode([hyp], normalize_embeddings=True).astype(np.float32)
+        _, h_hits = index.search(h_emb, k)
+        r_hyde = recall_at_k(h_hits[0].tolist(), relevant, k)
+        q_recalls.append(r_query); h_recalls.append(r_hyde)
+        print(f&quot;Q: {query[:50]:50s}  Direct={r_query:.2f}  HyDE={r_hyde:.2f}&quot;)
+    return {&quot;avg_query&quot;: np.mean(q_recalls), &quot;avg_hyde&quot;: np.mean(h_recalls)}
+</code></pre>
+<h2>HyDE vs Standard Retrieval</h2>
+<p>On factual question-answering benchmarks (NaturalQuestions, TriviaQA, HotpotQA), HyDE improves Recall@10 by 3–8 percentage points over direct query embedding when using a general-purpose bi-encoder. The improvement is largest for short queries (1–5 words), ambiguous queries, and queries whose vocabulary differs substantially from the indexed corpus. HyDE is less beneficial — and can occasionally hurt — for very specific technical queries where the query itself contains rich semantic signal (e.g., 'torch.nn.functional.cross_entropy label smoothing parameter'), and for corpora where the embedding model was already fine-tuned on the specific domain. HyDE adds one LLM call per query, typically costing 100–500ms and $0.0001–0.001 per query (GPT-3.5-turbo), which is acceptable for interactive applications but may be prohibitive for high-volume batch retrieval.</p>
+<pre><code class="language-python">import openai
+import numpy as np
+from sentence_transformers import SentenceTransformer
+import faiss
+
+client      = openai.OpenAI(api_key=&quot;YOUR_API_KEY&quot;)
+embed_model = SentenceTransformer(&quot;all-MiniLM-L6-v2&quot;)
+
+def check_hypothesis_support(hypothesis: str, retrieved_docs: list) -&gt; dict:
+    &quot;&quot;&quot;Estimate how well retrieved docs support the hypothesis (hallucination proxy).&quot;&quot;&quot;
+    hyp_words = set(hypothesis.lower().split())
+    scores = []
+    for doc in retrieved_docs:
+        doc_words = set(doc.lower().split())
+        overlap   = len(hyp_words &amp; doc_words) / max(len(hyp_words), 1)
+        scores.append(overlap)
+    avg_support = float(np.mean(scores))
+    risk = &quot;HIGH&quot; if avg_support &lt; 0.15 else &quot;MEDIUM&quot; if avg_support &lt; 0.30 else &quot;LOW&quot;
+    return {&quot;avg_lexical_support&quot;: avg_support, &quot;hallucination_risk&quot;: risk}
+
+def analyze_hyde_failures(cases: list, corpus: list) -&gt; None:
+    &quot;&quot;&quot;Collect examples where HyDE generates plausible but wrong hypothetical docs.&quot;&quot;&quot;
+    corp_embs = embed_model.encode(corpus, normalize_embeddings=True).astype(np.float32)
+    index = faiss.IndexFlatIP(corp_embs.shape[1])
+    index.add(corp_embs)
+    failures = 0
+    for case in cases:
+        resp = client.chat.completions.create(
+            model=&quot;gpt-3.5-turbo&quot;,
+            messages=[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: f&quot;Write a paragraph answering: {case['query']}&quot;}],
+            max_tokens=120, temperature=0.7,
+        )
+        hyp  = resp.choices[0].message.content.strip()
+        is_correct = case[&quot;correct_fact&quot;].lower() in hyp.lower()
+        if not is_correct:
+            failures += 1
+        h_emb = embed_model.encode([hyp], normalize_embeddings=True).astype(np.float32)
+        _, hits = index.search(h_emb, 5)
+        support = check_hypothesis_support(hyp, [corpus[i] for i in hits[0]])
+        print(f&quot;Correct={is_correct} Risk={support['hallucination_risk']} Q={case['query'][:50]}&quot;)
+    print(f&quot;\nFailure rate: {failures}/{len(cases)} = {failures/max(len(cases),1):.1%}&quot;)
+
+cases  = [{&quot;query&quot;: &quot;Who invented the telephone?&quot;, &quot;correct_fact&quot;: &quot;Alexander Graham Bell&quot;},
+           {&quot;query&quot;: &quot;What is the capital of Australia?&quot;, &quot;correct_fact&quot;: &quot;Canberra&quot;}]
+corpus = [f&quot;Fact {i}: encyclopedic content.&quot; for i in range(40)]
+analyze_hyde_failures(cases, corpus)
+</code></pre>
+<h2>Limitations</h2>
+<p>HyDE has three significant limitations that must be evaluated before deployment. First, hallucination propagation: if the LLM generates a plausible but factually incorrect hypothesis, it retrieves documents that support the wrong hypothesis — passages that are topically adjacent but not actually relevant to the correct answer. This is particularly dangerous for queries about recent events, niche topics, or numerical facts where the LLM is likely to hallucinate. Second, latency cost: every query requires an LLM API call before retrieval, adding 100–500ms to pipeline latency. For sub-100ms retrieval requirements, HyDE is incompatible. Third, diminishing returns with domain-tuned embeddings: as the embedding model is fine-tuned on the target domain, the query-document vocabulary gap narrows and HyDE's benefit shrinks. In the limit where the embedding model is perfectly calibrated to the domain, direct query embedding matches HyDE performance without the LLM call cost.</p>
+<table>
+<thead>
+<tr>
+<th>Query type</th>
+<th>Standard retrieval R@10</th>
+<th>HyDE R@10</th>
+<th>HyDE gain</th>
+<th>LLM calls</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Factual questions</td>
+<td>0.61</td>
+<td>0.70</td>
+<td>+9pp</td>
+<td>1 per query</td>
+<td>Largest benefit; query vocab differs from docs</td>
+</tr>
+<tr>
+<td>Technical how-to</td>
+<td>0.58</td>
+<td>0.65</td>
+<td>+7pp</td>
+<td>1 per query</td>
+<td>Good gain; hypothesis matches doc style</td>
+</tr>
+<tr>
+<td>Ambiguous queries</td>
+<td>0.44</td>
+<td>0.50</td>
+<td>+6pp</td>
+<td>1–3 per query</td>
+<td>Multiple hypotheses help; high variance</td>
+</tr>
+<tr>
+<td>Short queries (1–3 words)</td>
+<td>0.49</td>
+<td>0.58</td>
+<td>+9pp</td>
+<td>1 per query</td>
+<td>Short queries have weak embeddings; HyDE helps most</td>
+</tr>
+<tr>
+<td>Long queries (&gt;15 words)</td>
+<td>0.72</td>
+<td>0.73</td>
+<td>+1pp</td>
+<td>1 per query</td>
+<td>Long queries already rich; HyDE marginal benefit</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Validate Before Deploying</strong>: HyDE can propagate hallucinations into retrieval — if the LLM generates a plausible but wrong hypothetical document, it retrieves passages that support the wrong hypothesis. Always validate HyDE gains on your specific corpus and query distribution before deploying. Measure both Recall@10 improvement and hallucination-induced failure rate on a held-out test set. If the LLM hallucination rate on your domain exceeds 20%, HyDE may degrade overall RAG accuracy despite improving retrieval recall on well-known topics.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<p>HyDE is a powerful zero-shot retrieval improvement that requires no additional training or index changes — only an LLM API call per query. It is most valuable for general-purpose corpora, short or ambiguous queries, and embedding models not yet fine-tuned on the target domain. The implementation is simple: prompt the LLM to generate a hypothetical answer, embed that answer with the same model used to embed the corpus, and search the index as normal. Always use the real retrieved documents (not the hypothesis) for final answer generation. Before deploying, measure end-to-end answer accuracy (not just retrieval recall) on your corpus, because hallucinated hypotheses can cause net accuracy degradation even when Recall@10 improves. For production pipelines with latency constraints, consider using HyDE only for queries classified as ambiguous or short (query length &lt; 5 words) and falling back to direct embedding for all others.</p>
+<ul>
+<li>HyDE: embed LLM-generated hypothetical answer, not the query — retrieves in document distribution</li>
+<li>No training, no index changes required — only one additional LLM call per query</li>
+<li>Best for: short queries, ambiguous queries, general-purpose (non-domain-tuned) embeddings</li>
+<li>Always generate the final answer from real retrieved documents, not from the hypothesis</li>
+<li>Validate end-to-end accuracy — hallucinated hypotheses can degrade accuracy despite improving R@10</li>
+<li>Multiple hypotheses (3–5) averaged in embedding space reduce hallucination sensitivity</li>
+<li>Use query-type-specific prompts (factual/technical/procedural) for 2–5pp additional gain</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Faster R-CNN: Two-Stage Object Detection | Notes Backup</title>
+  <meta name="description" content="The Faster R-CNN architecture — Region Proposal Network (RPN), RoI Align, two-stage pipeline, and how to use torchvision&#x27;s pretrained detection models." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Faster R-CNN: Two-Stage Object Detection</h1>
+      <ul class='note-meta'><li><strong>description:</strong> The Faster R-CNN architecture — Region Proposal Network (RPN), RoI Align, two-stage pipeline, and how to use torchvision&#x27;s pretrained detection models.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Faster R-CNN: Two-Stage Object Detection</h1>
+<h2>Overview</h2>
+<p>Faster R-CNN is the canonical two-stage object detector, introducing the Region Proposal Network (RPN) to replace the slow selective search algorithm used in R-CNN and Fast R-CNN. The shared convolutional backbone extracts features used by both the RPN and the detection head, dramatically reducing inference time compared to predecessors while maintaining high accuracy.</p>
+<p>The two-stage pipeline separates localization into coarse region proposal (RPN) and fine-grained classification plus refinement (detection head). This decoupling lets the model focus compute on promising regions rather than evaluating every spatial location at every scale. Faster R-CNN achieved roughly 5 FPS on a GPU in 2015, which was state-of-the-art at the time.</p>
+<h2>Region Proposal Network (RPN)</h2>
+<p>The RPN slides a small network over the feature map, at each location classifying anchors as object vs. background and regressing box offsets. It outputs objectness scores and bounding box deltas for each anchor. The top-k proposals ranked by objectness after NMS are passed to the detection head — typically 2000 during training and 1000 at inference.</p>
+<p>The RPN shares the backbone with the detection head — this is the key insight of Faster R-CNN. Both networks are trained jointly. The RPN loss combines binary cross-entropy for objectness classification and Smooth L1 for box regression, summed over all positive and sampled negative anchors in the mini-batch. Positive anchors use IoU &gt;= 0.7 with any GT box.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class RPN(nn.Module):
+    def __init__(self, in_channels, num_anchors=9):
+        super().__init__()
+        self.conv = nn.Conv2d(in_channels, 256, 3, padding=1)
+        self.cls  = nn.Conv2d(256, num_anchors * 2, 1)
+        self.reg  = nn.Conv2d(256, num_anchors * 4, 1)
+
+    def forward(self, feat):
+        x = torch.relu(self.conv(feat))
+        cls_logits  = self.cls(x)   # [B, 2*A, H, W]
+        bbox_deltas = self.reg(x)   # [B, 4*A, H, W]
+        return cls_logits, bbox_deltas
+</code></pre>
+<h2>RoI Pooling vs RoI Align</h2>
+<p>RoI Pooling extracts fixed-size feature maps from variable-size proposals by quantizing proposal boundaries to the nearest feature map cell. This double quantization — once when projecting the proposal to the feature map, again when dividing into grid cells — introduces misalignment errors that hurt accuracy on tasks requiring precise localization like instance segmentation.</p>
+<p>RoI Align eliminates quantization by using bilinear interpolation to sample exactly at fractional feature map coordinates. Each grid cell samples 4 points using bilinear weights. This preserves spatial alignment between input image regions and extracted features, which is critical for instance segmentation and also measurably improves box detection mAP in practice.</p>
+<pre><code class="language-python">import torch
+from torchvision.ops import roi_align
+
+# features: [B, C, H, W]; proposals: [K, 5] (batch_idx, x1, y1, x2, y2)
+features = torch.randn(2, 256, 32, 32)
+proposals = torch.tensor([
+    [0, 10.0, 20.0, 50.0, 80.0],
+    [1,  5.0,  5.0, 60.0, 60.0]
+])
+
+# spatial_scale maps image coords to feature map coords (1/stride)
+pooled = roi_align(features, proposals, output_size=(7, 7),
+                   spatial_scale=1.0/32, sampling_ratio=2)
+print(pooled.shape)  # [2, 256, 7, 7]
+</code></pre>
+<blockquote>
+<p><strong>info</strong>: RoI Align fixed the quantization error in RoI Pooling by using bilinear interpolation — this improved Mask R-CNN's instance segmentation quality significantly.</p>
+</blockquote>
+<h2>Two-Stage Detection Head</h2>
+<p>The second stage takes RoI-aligned features of shape [K, C, 7, 7] for the top-K proposals, flattens them, and passes them through two fully connected layers. The output branches into a classification head (K+1 softmax over object classes plus background) and a regression head (4 times K box offsets for class-specific refinement of the coarse RPN proposals).</p>
+<p>Cascade R-CNN extends this idea by stacking multiple detection heads with progressively higher IoU thresholds (0.5, 0.6, 0.7). Each stage refines the proposals from the previous stage. This improves precision at high IoU thresholds without sacrificing recall, outperforming standard Faster R-CNN on COCO especially at strict IoU thresholds like AP75.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class DetectionHead(nn.Module):
+    def __init__(self, in_dim, num_classes):
+        super().__init__()
+        self.fc1 = nn.Linear(in_dim, 1024)
+        self.fc2 = nn.Linear(1024, 1024)
+        self.cls_score = nn.Linear(1024, num_classes + 1)
+        self.bbox_pred = nn.Linear(1024, num_classes * 4)
+
+    def forward(self, roi_feats):
+        x = torch.relu(self.fc1(roi_feats.flatten(1)))
+        x = torch.relu(self.fc2(x))
+        return self.cls_score(x), self.bbox_pred(x)
+</code></pre>
+<h2>Training the Full Pipeline</h2>
+<p>Faster R-CNN is trained end-to-end by summing four losses: RPN classification (objectness), RPN regression (box offsets), detection head classification (class scores), and detection head regression (refined box offsets). The backbone and RPN share gradients from both stages. PyTorch's torchvision implementation handles this with a GeneralizedRCNN wrapper class.</p>
+<p>Mini-batch construction samples 256 anchors for the RPN stage (up to 128 positive) and 512 RoIs for the detection stage (up to 25% positive). During training, ground-truth boxes are added to the RoI pool to ensure the detection head always sees positive examples even if the RPN misses some objects early in training — a technique called GT box sampling.</p>
+<p>Data augmentation for detection includes horizontal flipping, random cropping, multi-scale training, and color jitter. The backbone is typically initialized from ImageNet pre-trained weights, and the learning rate for the backbone is often set lower than detection-specific layers to prevent destroying learned representations during the early stages of fine-tuning.</p>
+<h2>Key Takeaways</h2>
+<p>Faster R-CNN established the template that most subsequent two-stage detectors follow: shared backbone plus proposal network plus RoI feature extraction plus classification and regression head. Understanding this architecture clarifies the design choices in later models like Mask R-CNN, Cascade R-CNN, and Sparse R-CNN, which all build on the same fundamental structure.</p>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Proposal Method</th>
+<th>Speed (FPS)</th>
+<th>mAP (VOC/COCO)</th>
+<th>Year</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>R-CNN</td>
+<td>Selective Search</td>
+<td>~0.02</td>
+<td>58.5 (VOC)</td>
+<td>2014</td>
+</tr>
+<tr>
+<td>Fast R-CNN</td>
+<td>Selective Search</td>
+<td>~2</td>
+<td>70.0 (VOC)</td>
+<td>2015</td>
+</tr>
+<tr>
+<td>Faster R-CNN</td>
+<td>RPN</td>
+<td>~5</td>
+<td>73.2 (VOC)</td>
+<td>2015</td>
+</tr>
+<tr>
+<td>Cascade R-CNN</td>
+<td>RPN (cascaded)</td>
+<td>~7</td>
+<td>42.8 (COCO)</td>
+<td>2018</td>
+</tr>
+<tr>
+<td>Sparse R-CNN</td>
+<td>Learned queries</td>
+<td>~22</td>
+<td>45.0 (COCO)</td>
+<td>2021</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-python">import torch
+from torchvision.models.detection import fasterrcnn_resnet50_fpn
+from torchvision.transforms.functional import to_tensor
+from PIL import Image
+
+model = fasterrcnn_resnet50_fpn(pretrained=True)
+model.eval()
+
+img = to_tensor(Image.open('image.jpg'))  # [3, H, W] float32
+with torch.no_grad():
+    preds = model([img])[0]
+
+print(preds['boxes'].shape)   # [N, 4] xyxy
+print(preds['labels'].shape)  # [N]
+print(preds['scores'].shape)  # [N]
+</code></pre>
+<p>For fine-tuning on a custom dataset, replace the classification and regression heads by specifying num_classes in the torchvision constructor. Keep the backbone and FPN frozen for the first few epochs to stabilize training, then unfreeze for end-to-end fine-tuning. Use a batch size of 1-2 images with multiple crops per image to maintain effective mini-batch diversity.</p>
+    </article>
+  </main>
+</body>
+</html>

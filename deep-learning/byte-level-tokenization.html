@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Byte-Level Tokenization | Notes Backup</title>
+  <meta name="description" content="Operating directly on raw UTF-8 bytes with a 256-token vocabulary — eliminating OOV tokens and supporting any language — as used in ByT5, MegaByte, and CharFormer." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Byte-Level Tokenization</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Operating directly on raw UTF-8 bytes with a 256-token vocabulary — eliminating OOV tokens and supporting any language — as used in ByT5, MegaByte, and CharFormer.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Byte-Level Tokenization</h1>
+<p>Byte-level tokenization treats every Unicode string as a sequence of raw UTF-8 bytes and assigns each possible byte value (0–255) a unique token ID. The resulting vocabulary has exactly 256 entries — one per byte — making out-of-vocabulary tokens structurally impossible. Any string in any language, any programming language, any emoji, or any binary data can be encoded without special handling, unknown-token markers, or language-specific preprocessing. This stands in sharp contrast to subword methods like BPE or SentencePiece, which maintain a fixed vocabulary of common byte sequences and must fall back to character or byte splitting for rare strings. Byte-level models — ByT5, MegaByte, CharFormer, and CANINE — have demonstrated that the simplicity of a universal 256-token vocabulary can compensate for the much longer token sequences it produces, particularly in tasks where surface form matters: spell-checking, transliteration, noisy user input, and code generation with unusual identifiers.</p>
+<h2>Overview</h2>
+<p>Standard subword tokenizers (BPE, WordPiece, SentencePiece Unigram) build a vocabulary of tens of thousands of frequent character n-grams and encode text as a sequence of those subwords. When encountering an unknown character combination — a rare foreign word, a novel emoji, or a malformed URL — they either fall back to individual characters or emit a generic <unk> token that permanently erases information. Byte-level tokenization sidesteps this entirely: every possible input is representable as a sequence of bytes drawn from the fixed {0, …, 255} alphabet, because UTF-8 itself is defined over bytes. The vocabulary never needs to be expanded, there are no unknown tokens, and no language-specific preprocessing is required. The price is sequence length: where GPT-4's cl100k might encode a Chinese sentence in 15 tokens, the byte-level representation requires 40–60 bytes.</p>
+<p>Three distinct architectural approaches have demonstrated the viability of byte-level processing at scale. ByT5 (2021, Xue et al.) is a straightforward T5 variant that replaces SentencePiece with raw bytes, achieving competitive or superior performance on character-level tasks despite having no vocabulary beyond the 256 bytes. MegaByte (2023, Yu et al., Meta AI) introduces a hierarchical two-level architecture — a small local byte transformer and a large global patch transformer — reducing the quadratic attention cost of very long byte sequences. CharFormer (2021, Tay et al.) learns a soft downsampling operation that merges byte embeddings into fewer, denser representations before the main transformer stack, combining byte-level flexibility with subword-level efficiency. CANINE (2021, Clark et al., Google) applies a similar strategy to BERT-style encoders, using strided convolutions to downsample byte sequences and transposed convolutions to recover byte resolution for token-level predictions.</p>
+<h2>The 256-Token Vocabulary</h2>
+<p>The byte vocabulary consists of exactly 256 entries, one for each integer in [0, 255]. UTF-8 encodes Unicode code points into sequences of 1–4 bytes: ASCII characters (U+0000–U+007F) require one byte; Latin extended, Greek, Cyrillic, and Arabic characters require two bytes; CJK characters, mathematical symbols, and most non-Latin scripts require three bytes; emoji and rare supplementary characters require four bytes. A byte-level model therefore sees Chinese text at roughly 3× the sequence length of ASCII text, and emoji at 4×. Token IDs 0–255 map directly to byte values: token 72 is always the byte 0x48 (ASCII 'H'), and this mapping is the same for every byte-level model ever trained. No tokenizer binary, vocabulary file, or merge table is needed — encoding is simply <code>text.encode('utf-8')</code> and decoding is <code>bytes(ids).decode('utf-8')</code>.</p>
+<pre><code class="language-python"># Byte-level tokenization: vocab = 256 token IDs (one per UTF-8 byte value)
+# No OOV possible — every byte 0-255 is a valid vocabulary entry
+
+def encode(text: str) -&gt; list:
+    return list(text.encode('utf-8'))   # each int = token ID 0-255
+
+def decode(ids: list) -&gt; str:
+    return bytes(ids).decode('utf-8')
+
+samples = {
+    'ASCII':   'Hello, world!',
+    'Chinese': '自然语言处理',
+    'Arabic':  'معالجة اللغة',
+    'Russian': 'Привет мир!',
+}
+for label, text in samples.items():
+    ids = encode(text)
+    rt  = decode(ids)
+    print(f'{label:&lt;10} | chars={len(text):&gt;3} | bytes={len(ids):&gt;3}'
+          f' | ratio={len(ids)/len(text):.2f} | ok={rt==text}')
+# ASCII≈1.0x, Chinese≈3.0x, Arabic≈2.0x, Russian≈2.0x bytes per char
+</code></pre>
+<p>The 256-entry vocabulary is far smaller than any subword vocabulary (30K–256K for modern LLMs), which has several practical implications. The embedding table contains only 256 × D parameters — for D = 512 (ByT5-small's hidden size), that is just 131,072 parameters, a negligible fraction of the model. The softmax output projection is equally tiny: 256 × D FLOPs per decode step vs. 128,000 × D for Llama-3. Byte-level decoding is therefore computationally cheap per step — the bottleneck is the long sequence length, not the vocabulary computation. The embedding table is also small enough to fit in L1 cache on modern processors, making embedding lookups extremely fast. ByT5 adds three special tokens (<pad> at ID 0, <eos> at ID 1, and a mask token), giving a total vocabulary of 259 entries.</p>
+<h2>ByT5: Byte-to-Byte T5</h2>
+<p>ByT5 (Xue et al., 2021) adapts the T5 encoder-decoder architecture to operate on raw bytes. The model uses the same span-corruption pre-training objective as T5 — randomly masking contiguous spans of bytes — but operates at the byte rather than subword level. ByT5 was pre-trained on the mC4 multilingual corpus and comes in five sizes from small (300M parameters) to XXL (13B). On most NLP benchmarks, ByT5 matches or slightly underperforms mT5 (the multilingual T5 with SentencePiece) on clean, well-tokenised text. However, on character-level tasks — transliteration (Dakshina dataset), spelling correction (BEA-2019), noise-robust classification, and morphological analysis — ByT5 outperforms mT5 by significant margins. The model is particularly effective on low-resource languages, where SentencePiece tokenizers produce high fertility and allocate few vocabulary slots to minority scripts. A key insight from the ByT5 paper is that larger ByT5 models narrow the gap with SentencePiece models faster on semantic tasks, because larger models can compensate for lower per-token information density.</p>
+<pre><code class="language-python">from transformers import AutoTokenizer
+
+# Compare ByT5 byte vocab vs T5 SentencePiece on sequence lengths
+byt5_tok = AutoTokenizer.from_pretrained('google/byt5-small')
+t5_tok   = AutoTokenizer.from_pretrained('t5-small')
+
+samples = {
+    'English':  'Tokenization is a foundational step in NLP pipelines.',
+    'Chinese':  '自然语言处理中的分词是一个基础步骤。',
+    'Arabic':   'التمييز الرمزي خطوة في معالجة اللغة.',
+    'Code':     'def attn(q,k,v): return softmax(q@k.T)@v',
+}
+print(f&quot;{'Sample':&lt;10} | {'T5 (32K)':&gt;9} | {'ByT5':&gt;6} | {'Ratio':&gt;7}&quot;)
+print('-' * 42)
+for label, text in samples.items():
+    t5_n   = len(t5_tok.encode(text, add_special_tokens=False))
+    byt5_n = len(byt5_tok.encode(text, add_special_tokens=False))
+    print(f'{label:&lt;10} | {t5_n:&gt;9} | {byt5_n:&gt;6} | {byt5_n/t5_n:&gt;7.2f}x')
+print()
+print(&quot;ByT5 byte count always equals len(text.encode('utf-8')).&quot;)
+</code></pre>
+<p>Empirically, ByT5-large outperforms mT5-XXL on transliteration despite having 4× fewer parameters, because the byte-level representation never loses character identity to subword merging. For production use cases, the primary cost is throughput: ByT5 requires roughly 3–4× more attention compute than the equivalent mT5 model for the same text, due to longer sequences. The ByT5 paper recommends using ByT5 whenever the task requires character-level sensitivity, and mT5 or language-specific models when semantic content dominates and character surface form is irrelevant. Concretely: prefer ByT5 for transliteration, OCR correction, cross-lingual morphology, and noisy user-generated text; prefer mT5 for question answering, summarisation, and NLI.</p>
+<h2>MegaByte: Hierarchical Bytes</h2>
+<p>MegaByte (Yu et al., 2023, Meta AI) addresses the core scaling challenge of byte-level models: the quadratic cost of full attention over very long byte sequences. A 10,000-character document encodes to roughly 30,000–40,000 bytes, making full-sequence attention impractical. MegaByte introduces a hierarchical two-level architecture. At the local level, a small transformer processes bytes within fixed-size non-overlapping patches (typically 4–8 bytes). At the global level, a large transformer processes the sequence of patch representations, one vector per patch. Each new patch is decoded by first computing a global patch embedding from the global model, then conditioning the local model on that embedding to autoregressively generate the bytes within the patch. This two-level design reduces global attention computation from O(n²) over bytes to O((n/p)²) over patches, where p is the patch size — a 16× reduction for p=4.</p>
+<p>MegaByte was evaluated on language modelling benchmarks using raw bytes with no tokenization at all, achieving lower bits-per-byte than byte-level baselines while enabling training on very long contexts (up to 1 million bytes). The global model captures long-range semantic structure, while the local model handles low-level character patterns — a division of labour that mirrors how subword models implicitly separate morphological and syntactic processing. One limitation of MegaByte is that patches are defined by fixed byte count, not by linguistic boundaries; a patch might straddle a word boundary or cut a multi-byte character in the middle. Fixed-size patches also mean the global model sees a fixed sequence length regardless of text density. The patch size p is a hyperparameter that trades off local context richness (small p) against global sequence length reduction (large p), and optimal p varies by language and task.</p>
+<h2>Sequence Length Overhead</h2>
+<p>The most significant practical drawback of byte-level tokenization is sequence length overhead. For English text, UTF-8 bytes closely track character count (1 byte per ASCII character), but BPE vocabularies merge common sequences into single tokens, typically achieving 3–5 characters per token for English prose. This means byte sequences are 3–5× longer than BPE token sequences for typical English text. For CJK text, each character is 3 bytes but may be a single token in a large vocabulary tokenizer, giving a 3× byte overhead vs. tokens. For Arabic, 2-byte characters give 2–3× overhead. Since transformer attention complexity scales as O(L²) in sequence length L, a 4× longer sequence means 16× more attention computation — a severe penalty that must be offset by architectural choices such as hierarchical processing, local attention windows, or strided pooling.</p>
+<pre><code class="language-python">import tiktoken                                # pip install tiktoken
+from transformers import AutoTokenizer
+
+byt5_tok = AutoTokenizer.from_pretrained('google/byt5-small')
+cl100k   = tiktoken.get_encoding('cl100k_base')   # GPT-4 BPE, 100K vocab
+
+corpus = {
+    'English prose': 'The transformer architecture has revolutionised NLP.',
+    'Chinese text':  '变换器架构通过引入自注意力机制彻底改变了自然语言处理。',
+    'Arabic text':   'أحدثت بنية المحول ثورة في معالجة اللغة الطبيعية.',
+    'Python code':   'def sdpa(Q,K,V): return (Q@K.T/K.size(-1)**.5).softmax(-1)@V',
+}
+print(f&quot;{'Domain':&lt;16} | {'BPE':&gt;5} | {'Bytes':&gt;6} | {'Overhead':&gt;9}&quot;)
+print('-' * 44)
+for label, text in corpus.items():
+    bpe_n  = len(cl100k.encode(text))
+    byte_n = len(byt5_tok.encode(text, add_special_tokens=False))
+    print(f'{label:&lt;16} | {bpe_n:&gt;5} | {byte_n:&gt;6} | {byte_n/bpe_n:&gt;9.2f}x')
+print()
+print('Byte seqs are 2-8x longer than BPE — quadratic attention cost penalty.')
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Vocab Size</th>
+<th>Handles Any Unicode?</th>
+<th>OOV Tokens?</th>
+<th>Seq. Overhead vs BPE</th>
+<th>Best For</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ByT5</td>
+<td>259 (256 bytes + 3 special)</td>
+<td>Yes — structurally guaranteed</td>
+<td>None</td>
+<td>3–4× English, 3× CJK, 2–3× Arabic</td>
+<td>Char-level tasks, noisy text, transliteration, low-resource NLP</td>
+</tr>
+<tr>
+<td>MegaByte</td>
+<td>256 bytes + patch embeddings</td>
+<td>Yes</td>
+<td>None</td>
+<td>High bytes; patches reduce global seq by p×</td>
+<td>Long-document byte modelling at scale</td>
+</tr>
+<tr>
+<td>CharFormer / CANINE</td>
+<td>256 bytes (learned pooling)</td>
+<td>Yes</td>
+<td>None</td>
+<td>~1× after downsampling (matches subword length)</td>
+<td>Encoder tasks, NER, classification with byte inputs</td>
+</tr>
+<tr>
+<td>tiktoken byte fallback</td>
+<td>100,277 (cl100k, GPT-4)</td>
+<td>Yes — rare chars fall back to byte tokens</td>
+<td>Rare</td>
+<td>1× for common text; byte tokens are 1 char each</td>
+<td>GPT-4 and OpenAI API general use</td>
+</tr>
+<tr>
+<td>Standard BPE (e.g. Llama-3)</td>
+<td>128,000</td>
+<td>Partially — OOV chars split or dropped</td>
+<td>Yes for truly rare chars</td>
+<td>1× (baseline reference)</td>
+<td>English/multilingual LLMs at scale</td>
+</tr>
+</tbody>
+</table>
+<h2>Use Cases and Limitations</h2>
+<blockquote>
+<p><strong>When to Reach for a Byte-Level Model</strong>: Byte-level models are ideal for tasks where the exact surface form matters: spell-checking, transliteration, noisy text, code generation with unusual identifiers — but expect 3-5× more compute per character vs BPE models. If your task requires semantic understanding of clean text at scale, a subword model with a large vocabulary (128K+) will deliver better throughput for the same FLOP budget. Use bytes when you cannot afford to lose character identity; use BPE when you cannot afford long sequences.</p>
+</blockquote>
+<p>Byte-level models excel in four concrete deployment scenarios. First, noisy or user-generated text: social media, chat, and search queries frequently contain misspellings, abbreviations, mixed scripts, emoticons, and non-standard Unicode. Subword tokenizers trained on clean text produce fragmented, high-fertility encodings of such inputs, degrading model performance. Byte models are invariant to surface variation because they never abstract away individual characters. Second, multilingual code-switching: users frequently mix languages within a single sentence (e.g., Hindi-English or Arabic-French code-mixing). Subword tokenizers optimised for one language produce poor representations of the other; byte models handle both without reconfiguration. Third, low-resource languages: languages with small corpora receive few vocabulary slots in large multilingual tokenizers, producing high fertility. Byte models treat every script identically. Fourth, cybersecurity and binary analysis: shell scripts, obfuscated code, and binary data are naturally represented as byte sequences.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+# CharFormer/CANINE: stride-pool byte embeddings into subword-scale patches
+class ByteDownsampler(nn.Module):
+    def __init__(self, dim=128, stride=4):
+        super().__init__()
+        self.emb  = nn.Embedding(256, dim)   # 256-byte vocabulary
+        self.pool = nn.Conv1d(dim, dim, kernel_size=stride, stride=stride)
+        self.norm = nn.LayerNorm(dim)
+
+    def forward(self, x: torch.Tensor) -&gt; torch.Tensor:
+        x = self.emb(x).transpose(1, 2)    # (B, dim, L)
+        return self.norm(self.pool(x).transpose(1, 2))  # (B, L//stride, dim)
+
+model    = ByteDownsampler(dim=128, stride=4)
+byte_ids = torch.randint(0, 256, (2, 64))   # 2 seqs x 64 bytes
+pooled   = model(byte_ids)                  # (2, 16, 128)
+print(f'Input:  {tuple(byte_ids.shape)}')   # (2, 64)
+print(f'Output: {tuple(pooled.shape)}')     # (2, 16, 128) — 4x compression
+</code></pre>
+<p>The primary limitation of byte-level models is compute cost. For a fixed parameter budget, a byte-level model must process 3–5× more tokens per training example than a BPE model, meaning each training step is 9–25× more compute intensive if full attention is used (quadratic in sequence length). This is the fundamental reason subword models dominate at scale: for a fixed FLOPs budget, BPE models train on more semantic content per compute unit. A second limitation is that byte models require larger hidden dimensions or deeper architectures to compensate for reduced information per token — each byte carries less semantic signal than a subword token. A third practical limitation is ecosystem compatibility: most production LLM infrastructure (KV-cache management, speculative decoding, evaluation harnesses) assumes subword tokens; byte-level models require custom pipelines. Finally, byte models may not generalise well to non-UTF-8 data (Latin-1, binary files) without explicit training coverage of those byte patterns.</p>
+<h2>Key Takeaways</h2>
+<ul>
+<li>The byte vocabulary has exactly 256 entries (byte values 0–255), making OOV tokens structurally impossible for any Unicode input — encoding is always <code>text.encode('utf-8')</code>, no merge table required.</li>
+<li>ByT5 replaces T5's SentencePiece tokenizer with raw bytes; it outperforms subword models on character-level tasks (transliteration, spelling, noisy text) but requires 3–4× more attention compute due to longer sequences.</li>
+<li>MegaByte uses a hierarchical two-level architecture — small local byte transformer + large global patch transformer — to reduce the O(n²) attention cost of long byte sequences to O((n/p)²) over patches.</li>
+<li>CharFormer and CANINE learn a trainable byte-to-patch downsampling step (strided Conv1d over byte embeddings) that compresses byte sequences to subword length before the main transformer, recovering computational efficiency.</li>
+<li>Sequence length overhead is 2–8×: English prose is typically 3–4× longer in bytes than BPE tokens; CJK text 3×; Arabic 2–3×; emoji 4×; since attention is O(L²), a 4× longer sequence means 16× more attention compute.</li>
+<li>The softmax output layer over only 256 classes is negligible in cost (vs. 128K for Llama-3); the entire compute bottleneck of byte-level models is sequence length and attention, not vocabulary projection.</li>
+<li>Byte-level models are ideal for tasks sensitive to surface form: spell-checking, transliteration, noisy text, low-resource languages, and code with unusual identifiers — anywhere you cannot afford to lose character identity.</li>
+<li>For production deployment, byte-level models simplify the stack: no tokenizer binary, no vocabulary file, no OOV handling, and no language-specific preprocessing — encoding and decoding are single-line Python calls.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

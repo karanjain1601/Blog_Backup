@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Why Multiple Attention Heads — Different Subspace Specialisation | Notes Backup</title>
+  <meta name="description" content="Examine single-head limitations, the subspace specialisation argument, Clark et al. 2019 empirical evidence, gradient-based head importance scoring, and head pruning experiments." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Why Multiple Attention Heads — Different Subspace Specialisation</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Examine single-head limitations, the subspace specialisation argument, Clark et al. 2019 empirical evidence, gradient-based head importance scoring, and head pruning experiments.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Why Multiple Attention Heads — Different Subspace Specialisation</h1>
+<p>A Transformer with a single attention head per layer learns one global attention pattern per layer — a single learned similarity function applied uniformly to all queries. Multiple heads allow the model to simultaneously route information through h different learned routing functions, each operating on a different linear projection of the same input. This is not merely redundancy: different heads tend to specialise on syntactic dependencies, coreference, positional structure, and semantic similarity simultaneously.</p>
+<h2>Single-Head Limitation</h2>
+<p>With a single attention head of dimension d_model, every position computes a single query and compares it to a single set of keys. The output is one weighted combination of value vectors — a rank-1 routing. If the task requires simultaneously attending to multiple unrelated positions (e.g., the subject of a sentence and a distant pronoun that refers to it), a single head must trade off between them, achieving neither reliably. Multiple heads circumvent this by partitioning the capacity — head 1 can attend to syntactic dependencies while head 2 handles coreference without either interfering with the other.</p>
+<h2>Mathematical Justification — Subspace Representation</h2>
+<p>The projection matrices WᵢQ and WᵢK map the full d_model-dimensional input into a dₖ-dimensional subspace. Different heads project into different subspaces, so they measure similarity along different directions. Formally, h heads produce h independent attention-weighted sums of value projections; concatenating them before Wᴼ allows the output projection to mix information from all h subspaces. The rank of the combined output is bounded by min(h·dv, d_model) — potentially far higher than the rank achievable with a single head of dimension d_model.</p>
+<p>Superposition theory (Elhage et al. 2022) provides a complementary view: with enough heads, a Transformer layer can store and retrieve multiple approximately-orthogonal 'features' simultaneously. Each head acts on a different subspace in which distinct features are nearly orthogonal; interference between features is suppressed across heads even when it cannot be avoided within a single head. This allows the model to maintain more independent 'thoughts' per layer than its raw dimension would suggest.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+torch.manual_seed(42)
+d_model, h = 256, 8
+mha = nn.MultiheadAttention(d_model, h, batch_first=True)
+WQ, WK, _ = mha.in_proj_weight.chunk(3, dim=0)
+dk = d_model // h
+
+tokens = ['[CLS]', 'the', 'cat', 'sat', 'on', 'mat', '[SEP]', '.']
+seq_len = len(tokens)
+x = torch.randn(1, seq_len, d_model)
+x_flat = x.squeeze(0)
+
+def head_attn(x_flat, i):
+    with torch.no_grad():
+        Q = (x_flat @ WQ.T)[:, i*dk:(i+1)*dk]
+        K = (x_flat @ WK.T)[:, i*dk:(i+1)*dk]
+        S = (Q @ K.T / dk**0.5).numpy()
+    S -= S.max(1, keepdims=True)
+    A = np.exp(S); A /= A.sum(1, keepdims=True)
+    return A
+
+print('Head | ' + ' | '.join('{:&gt;5}'.format(t[:5]) for t in tokens))
+print('-' * (7 + 8 * seq_len))
+for i in range(h):
+    A = head_attn(x_flat, i)
+    peaks = [tokens[j][:5] for j in A.argmax(axis=1)]
+    ent = -(A * np.log(A + 1e-9)).sum(1).mean()
+    row = ' | '.join('{:&gt;5}'.format(p) for p in peaks)
+    print('H{:&gt;2}  | {}  ent={:.2f}'.format(i, row, ent))
+</code></pre>
+<h2>Empirical Evidence — Clark et al. 2019</h2>
+<p>Clark et al. (2019) systematically analysed attention patterns across all 144 heads in BERT-base. They found clear functional specialisation: certain heads track direct object relationships, others attend to coreferent mentions, and a distinct class attends to the immediately preceding or following token. Crucially, some heads capture information highly correlated with the output of supervised dependency parsers — without any explicit supervision on syntax. This provides strong empirical evidence that multi-head attention spontaneously learns diverse, linguistically meaningful routing functions across heads.</p>
+<blockquote>
+<p><strong>Clark et al. 2019 Key Findings</strong>: In BERT-base (12 layers × 12 heads = 144 heads total): (1) Heads in layers 6–10 show the strongest syntactic behaviour. (2) A single head in layer 8 achieves 76.1% accuracy on a coreference task with no fine-tuning. (3) Certain heads attend almost exclusively to [SEP] or [CLS] tokens — acting as 'no-op' attention sinks. (4) Removing any single head causes &lt;1% performance drop; removing the top-5 most important heads causes ~3% drop. Attention patterns are sparse and interpretable at the head level.</p>
+</blockquote>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+torch.manual_seed(7)
+d_model, h, seq_len, batch = 128, 8, 20, 16
+
+class TinyTransformerLayer(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(d_model, h, batch_first=True)
+        self.norm = nn.LayerNorm(d_model)
+        self.proj = nn.Linear(d_model, 1)
+
+    def forward(self, x):
+        a, _ = self.attn(x, x, x)
+        x = self.norm(x + a)
+        return self.proj(x.mean(dim=1))
+
+model = TinyTransformerLayer()
+x = torch.randn(batch, seq_len, d_model)
+y = x.mean(dim=(1, 2)).unsqueeze(-1)
+loss = nn.functional.mse_loss(model(x), y)
+loss.backward()
+
+WQ_g, WK_g, WV_g = model.attn.in_proj_weight.grad.chunk(3, dim=0)
+dk = d_model // h
+print('{:&gt;6} {:&gt;10} {:&gt;10} {:&gt;10} {:&gt;12}'.format('Head', 'Q_grad', 'K_grad', 'V_grad', 'Importance'))
+for i in range(h):
+    qg = WQ_g[i*dk:(i+1)*dk].norm().item()
+    kg = WK_g[i*dk:(i+1)*dk].norm().item()
+    vg = WV_g[i*dk:(i+1)*dk].norm().item()
+    imp = (qg + kg + vg) / 3
+    print('{:&gt;6} {:&gt;10.4f} {:&gt;10.4f} {:&gt;10.4f} {:&gt;12.4f}'.format(i, qg, kg, vg, imp))
+print('Higher gradient norm -&gt; head contributes more to this task.')
+</code></pre>
+<h2>Head Pruning</h2>
+<p>Michel et al. (2019) showed that most attention heads in BERT can be pruned at test time with minimal accuracy loss — for BERT-base on MNLI, only 16 of 144 heads are needed to retain 90% of performance. Voita et al. (2019) identified four head roles that are consistently preserved: positional (attend to adjacent token), syntactic (attend to syntactic dependents), rare-word (attend to low-frequency tokens), and coreference. Unimportant heads — those whose removal causes the smallest accuracy drop — can be zeroed out by setting the corresponding columns of Wᴼ to zero, which is equivalent to removing their contribution to the output.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+torch.manual_seed(0)
+d_model, h, n = 128, 8, 15
+
+mha = nn.MultiheadAttention(d_model, h, batch_first=True)
+x = torch.randn(4, n, d_model)
+
+with torch.no_grad():
+    baseline, _ = mha(x, x, x)
+
+# Compute per-head importance: gradient of output L2 norm w.r.t. WV slice
+importances = []
+for i in range(h):
+    x_req = x.clone().requires_grad_(True)
+    out, _ = mha(x_req, x_req, x_req)
+    out.norm().backward()
+    WQ_g, WK_g, WV_g = mha.in_proj_weight.grad.chunk(3, dim=0) if mha.in_proj_weight.grad is not None else (torch.zeros(d_model,d_model),)*3
+    dk = d_model // h
+    importances.append(float(WV_g[i*dk:(i+1)*dk].norm()) if WV_g is not None else 0.0)
+    mha.zero_grad()
+
+importances = np.array(importances)
+ranked = np.argsort(importances)
+print('Head importance ranking (least to most):', ranked.tolist())
+print('Least important head (prune first): head', ranked[0])
+
+# Zero out the least important head in WO
+with torch.no_grad():
+    dk = d_model // h
+    mha.out_proj.weight[:, ranked[0]*dk:(ranked[0]+1)*dk] = 0
+    pruned, _ = mha(x, x, x)
+
+diff = (baseline - pruned).abs().mean().item()
+print('Output change after pruning head {}: {:.4f}'.format(ranked[0], diff))
+</code></pre>
+<h2>Single-Head vs Multi-Head Task Comparison</h2>
+<p>A single attention head can represent at most one routing pattern per layer — it is limited to a rank-1 weighting of value vectors from a single subspace. Tasks requiring simultaneous attention to multiple diverse positions (subject+verb+object, or token+its coreference antecedent+sentence end) force a single head to compromise. Multi-head attention achieves a higher effective rank in its output transformation, enabling it to route through multiple independent pathways and combine them in the output projection.</p>
+<pre><code class="language-python">import numpy as np
+
+def softmax(S):
+    S = S - S.max(axis=-1, keepdims=True)
+    e = np.exp(S); return e / e.sum(axis=-1, keepdims=True)
+
+def single_head(Q, K, V, Wq, Wk, Wv, Wo):
+    A = softmax((Q @ Wq) @ (K @ Wk).T / np.sqrt(Wq.shape[1]))
+    return (A @ (V @ Wv)) @ Wo
+
+def multi_head(Q, K, V, WQs, WKs, WVs, Wo):
+    heads = [(softmax((Q@Wq)@(K@Wk).T/np.sqrt(Wq.shape[1])))@(V@Wv)
+             for Wq, Wk, Wv in zip(WQs, WKs, WVs)]
+    return np.concatenate(heads, axis=-1) @ Wo
+
+np.random.seed(1)
+n, d, h = 12, 64, 8
+dk = d // h
+Q = K = V = np.random.randn(n, d)
+
+Wq1 = np.random.randn(d, d) * 0.1
+Wk1 = np.random.randn(d, d) * 0.1
+Wv1 = np.eye(d); Wo1 = np.eye(d)
+sh_out = single_head(Q, K, V, Wq1, Wk1, Wv1, Wo1)
+
+WQs = [np.random.randn(d, dk)*0.1 for _ in range(h)]
+WKs = [np.random.randn(d, dk)*0.1 for _ in range(h)]
+WVs = [np.eye(d)[:, i*dk:(i+1)*dk] for i in range(h)]
+WOm = np.random.randn(d, d) * 0.1
+mh_out = multi_head(Q, K, V, WQs, WKs, WVs, WOm)
+
+print('Single-head output matrix rank:', np.linalg.matrix_rank(sh_out))
+print('Multi-head output matrix rank: ', np.linalg.matrix_rank(mh_out))
+print('Multi-head achieves higher rank -&gt; richer representational capacity.')
+</code></pre>
+<h2>Diminishing Returns and Practical Guidance</h2>
+<p>Empirical results show diminishing returns beyond 8–16 heads for most NLP tasks at standard model sizes. Beyond that, additional heads often converge to similar patterns or act as attention sinks. The optimal h balances representational diversity (favouring more heads) against per-head capacity (favouring fewer, wider heads). For very large models (d_model ≥ 4096) more heads help by splitting the enormous key space; for small models (d_model ≤ 256) fewer heads with larger dₖ typically work better.</p>
+<table>
+<thead>
+<tr>
+<th>Head Type</th>
+<th>What It Attends To</th>
+<th>Example in BERT</th>
+<th>Safely Prunable?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Local / positional</td>
+<td>Adjacent tokens (prev or next position)</td>
+<td>Each word attending to its immediate neighbour</td>
+<td>Often yes — low task relevance</td>
+</tr>
+<tr>
+<td>Syntactic dependency</td>
+<td>Head noun → modifier; subject → verb</td>
+<td>Noun attending to its governing verb</td>
+<td>No — task-critical</td>
+</tr>
+<tr>
+<td>Coreference</td>
+<td>Pronoun → its antecedent noun</td>
+<td>'it' attending to the entity it refers to</td>
+<td>No — task-critical</td>
+</tr>
+<tr>
+<td>Attention sink ([SEP]/[CLS])</td>
+<td>Many tokens attend to special tokens</td>
+<td>[SEP] acting as no-op information dump</td>
+<td>Yes — minimal information transfer</td>
+</tr>
+<tr>
+<td>Semantic similarity</td>
+<td>Semantically related tokens across the sentence</td>
+<td>Synonyms and co-hyponyms</td>
+<td>Partially — depends on task</td>
+</tr>
+<tr>
+<td>Rare-word</td>
+<td>Low-frequency tokens attend globally</td>
+<td>Unknown words gather broad context</td>
+<td>Partially</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>Start with h = d_model / 64 as the default (dₖ = 64 per head): works well for d_model ∈ {256, 512, 768, 1024}</li>
+<li>Grouped Query Attention (GQA): use fewer KV heads than Q heads to reduce KV cache at inference without much quality loss</li>
+<li>Head pruning budget: for BERT-scale models, pruning 50% of heads typically costs &lt; 1% accuracy</li>
+<li>Diagnostic: measure per-head entropy on a held-out set — heads with near-maximum entropy are candidates for pruning</li>
+<li>Attention head analysis is most interpretable in the first few layers; deep layers exhibit less structured patterns</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

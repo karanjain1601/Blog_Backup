@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Energy-Based Models — Contrastive Divergence and Langevin Sampling | Notes Backup</title>
+  <meta name="description" content="Energy-based models define unnormalized densities via a learned energy function and train via contrastive divergence with MCMC sampling, with Langevin dynamics providing a gradient-based sampler that connects EBMs to score-based models and enables out-of-distribution detection." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Energy-Based Models — Contrastive Divergence and Langevin Sampling</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Energy-based models define unnormalized densities via a learned energy function and train via contrastive divergence with MCMC sampling, with Langevin dynamics providing a gradient-based sampler that connects EBMs to score-based models and enables out-of-distribution detection.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Energy-Based Models — Contrastive Divergence and Langevin Sampling</h1>
+<p>Energy-Based Models (EBMs) define a probability distribution via an energy function E_θ(x): p_θ(x) = exp(-E_θ(x)) / Z(θ), where Z(θ) = ∫exp(-E_θ(x))dx is the partition function. Low energy corresponds to high probability — the model assigns low energy to data-like samples and high energy to unlikely ones. The central challenge is that Z(θ) is intractable for continuous high-dimensional x, so maximum likelihood training requires approximating the gradient of log Z with MCMC sampling. EBMs are a flexible framework that unifies Boltzmann machines, denoising autoencoders, and score-based models.</p>
+<h2>Energy Function and Unnormalized Density</h2>
+<p>The gradient of the log-likelihood decomposes into two terms: ∇<em p_θ="p_θ">θ log p_θ(x) = -∇_θ E_θ(x) + E</em>[∇_θ E_θ(x)]. The first term (data term) pushes down energy at real data points. The second term (model term) pushes up energy at model samples, computed by MCMC. If the model samples are high quality, this gradient correctly shapes the energy landscape. The data term is exact; the model term is estimated via k steps of Markov chain Monte Carlo from the current model distribution, making EBM training fundamentally tied to MCMC quality.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class EnergyNet(nn.Module):
+    &quot;&quot;&quot;Neural network energy function: maps input to scalar energy (lower = more likely).&quot;&quot;&quot;
+    def __init__(self, input_dim, hidden=256):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden), nn.LeakyReLU(0.2),
+            nn.Linear(hidden, hidden), nn.LeakyReLU(0.2),
+            nn.Linear(hidden, 1)
+        )
+
+    def energy(self, x):
+        return self.net(x).squeeze(-1)  # (B,)
+
+    def unnorm_log_prob(self, x):
+        return -self.energy(x)          # log p*(x) without Z
+
+# Demo: energy landscape over 2D grid
+ebm = EnergyNet(input_dim=2)
+torch.manual_seed(0)
+grid = torch.stack(torch.meshgrid(
+    torch.linspace(-3, 3, 30), torch.linspace(-3, 3, 30), indexing='ij'
+), dim=-1).reshape(-1, 2)
+with torch.no_grad():
+    energies = ebm.energy(grid)
+print(f'Grid energy range: [{energies.min():.3f}, {energies.max():.3f}]')
+print(f'Energy at origin: {ebm.energy(torch.zeros(1, 2)).item():.4f}')
+print(f'Unnorm log-prob at origin: {ebm.unnorm_log_prob(torch.zeros(1, 2)).item():.4f}')
+</code></pre>
+<h2>Contrastive Divergence</h2>
+<p>Contrastive Divergence (CD, Hinton 2002) approximates the intractable model expectation by running a short Markov chain starting from data points instead of from noise. CD-k initialises chains at data x ~ p_data and runs k Gibbs or Langevin steps to get 'negative' samples x^- that approximate p_θ. The gradient estimate is: ∇_θ L ≈ E_data[∇_θ E_θ(x)] - E[∇_θ E_θ(x^-)]. With k=1, CD is biased but computationally cheap and works well for shallow models like RBMs. The bias comes from the chains not mixing to the true model distribution.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+def langevin_step(ebm, x, step_size=0.01, noise_scale=0.005):
+    &quot;&quot;&quot;Single Langevin MCMC step toward lower energy regions.&quot;&quot;&quot;
+    x = x.detach().requires_grad_(True)
+    energy = ebm.energy(x).sum()
+    energy.backward()
+    with torch.no_grad():
+        x_new = x - step_size * x.grad + noise_scale * torch.randn_like(x)
+    return x_new.detach()
+
+def cd_k_update(ebm, x_data, k=1, lr=1e-3, step_size=0.01):
+    &quot;&quot;&quot;CD-k: run k Langevin steps from data, compute contrastive gradient.&quot;&quot;&quot;
+    optimizer = torch.optim.Adam(ebm.parameters(), lr=lr)
+    x_neg = x_data.clone().detach()
+    for _ in range(k):
+        x_neg = langevin_step(ebm, x_neg, step_size=step_size)
+    energy_pos = ebm.energy(x_data)
+    energy_neg = ebm.energy(x_neg.detach())
+    # Minimize energy at data, maximize at model samples
+    loss = energy_pos.mean() - energy_neg.mean()
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    return loss.item(), x_neg
+
+ebm = EnergyNet(input_dim=2)
+torch.manual_seed(0)
+x_data = torch.randn(64, 2) * 0.5 + 2.0  # data cluster at (2,2)
+for step in range(50):
+    loss, x_neg = cd_k_update(ebm, x_data, k=5)
+    if step % 10 == 0:
+        print(f'Step {step}: CD loss={loss:.4f}  E_data={ebm.energy(x_data).mean():.4f}')
+</code></pre>
+<h2>Persistent Contrastive Divergence</h2>
+<p>Persistent CD (PCD, Tieleman 2008) maintains a set of persistent Markov chains across parameter updates instead of restarting from data each step. The chains accumulate mixing history and eventually sample from the true model distribution (given slow enough parameter updates). PCD produces better model samples than CD-k at the cost of memory for storing chain states. The tradeoff: if learning rate is too large, parameters change faster than chains can mix, causing the persistent samples to lag behind the true model distribution.</p>
+<h2>Langevin Dynamics MCMC</h2>
+<p>Stochastic Gradient Langevin Dynamics (SGLD) samples from p_θ using the gradient of the energy: x_{t+1} = x_t - ε·∇_x E_θ(x_t) + √(2ε)·ξ where ξ ~ N(0,I). This is gradient descent on the energy with injected noise to prevent collapse to a single mode. In the limit ε→0 with step count T→∞, SGLD samples exactly from p_θ. In practice, finite ε introduces bias — this is the fundamental tension in EBM training. The gradient ∇_x E_θ(x) connects EBMs directly to score-based models: score = -∇_x E_θ(x) = ∇_x log p_θ(x).</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def langevin_sample(ebm, n_samples=256, n_steps=100, step_size=0.1,
+                    noise_scale=0.01, device='cpu'):
+    &quot;&quot;&quot;SGLD sampler: gradient descent on energy + Gaussian noise injection.&quot;&quot;&quot;
+    x = torch.randn(n_samples, 2, device=device)  # start from noise
+    trajectory_energies = []
+    for step in range(n_steps):
+        x = x.detach().requires_grad_(True)
+        energy = ebm.energy(x).sum()
+        energy.backward()
+        with torch.no_grad():
+            # Gradient step toward low-energy regions + Langevin noise
+            x = x - step_size * x.grad + (2 * step_size) ** 0.5 * noise_scale * torch.randn_like(x)
+        if step % 20 == 0:
+            with torch.no_grad():
+                e = ebm.energy(x.detach()).mean().item()
+            trajectory_energies.append(e)
+    return x.detach(), trajectory_energies
+
+ebm = EnergyNet(input_dim=2)
+torch.manual_seed(42)
+samples, energies = langevin_sample(ebm, n_samples=128, n_steps=100)
+print(f'Langevin MCMC: {len(energies)} checkpoints')
+for i, e in enumerate(energies):
+    print(f'  Step {i*20:3d}: mean energy = {e:.4f}')
+</code></pre>
+<h2>Connection to Score Matching</h2>
+<p>The score function s(x) = ∇_x log p(x) = -∇_x E_θ(x) directly links EBMs to denoising score matching and diffusion models. Score matching (Hyvärinen 2005) avoids the partition function entirely by training on the Stein identity: E[||∇_x log p_θ(x) - ∇_x log p_data(x)||²] can be computed without knowing Z. Denoising score matching further converts this to a regression problem: predict the score from noisy samples. This insight — that training EBMs and score models are equivalent — underlies why diffusion models can be interpreted as hierarchical EBMs with different noise levels.</p>
+<h2>EBMs for OOD Detection</h2>
+<p>EBMs provide a principled framework for out-of-distribution detection: in-distribution samples should have low energy (high probability) and OOD samples should have high energy. This is in contrast to classifiers, which can be arbitrarily confident on OOD inputs. Grathwohl et al. (JEM, 2020) showed that training a joint energy-based model — where the same network serves as both classifier and energy function — achieves strong OOD detection while maintaining classification accuracy.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+
+class JEMClassifier(nn.Module):
+    &quot;&quot;&quot;Joint Energy Model: classifier that also computes free energy for OOD detection.&quot;&quot;&quot;
+    def __init__(self, input_dim, n_classes, hidden=128):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden), nn.GELU(),
+            nn.Linear(hidden, hidden), nn.GELU(),
+            nn.Linear(hidden, n_classes)
+        )
+    def forward(self, x):
+        return self.net(x)  # logits
+    def free_energy(self, x):
+        logits = self.forward(x)
+        return -torch.logsumexp(logits, dim=-1)  # -log sum_c exp(f_c(x))
+
+torch.manual_seed(0)
+model = JEMClassifier(input_dim=10, n_classes=4)
+
+# In-distribution data (MNIST-like, features in [-1, 1])
+x_in  = torch.randn(100, 10) * 0.5
+# OOD data (very different distribution)
+x_ood = torch.randn(100, 10) * 5.0 + 10.0
+
+with torch.no_grad():
+    e_in  = model.free_energy(x_in)
+    e_ood = model.free_energy(x_ood)
+print(f'In-distribution free energy:  mean={e_in.mean():.3f} std={e_in.std():.3f}')
+print(f'OOD free energy:              mean={e_ood.mean():.3f} std={e_ood.std():.3f}')
+auroc_proxy = (e_ood &gt; e_in.median()).float().mean()  # higher energy = OOD
+print(f'AUROC proxy (higher E = OOD): {auroc_proxy:.3f}')
+</code></pre>
+<h2>Practical Considerations</h2>
+<blockquote>
+<p><strong>MCMC Instability in EBM Training</strong>: EBM training is notoriously unstable because the model samples used for the contrastive gradient are themselves produced by the current model. If the MCMC chains do not mix (e.g., step size too small, too few steps), the model samples cluster near data points and the energy landscape does not learn to push up energy in between modes. Monitor the energy gap between data and model samples — a shrinking gap indicates the chains are not exploring. Use spectral normalisation on the energy network to stabilise training.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Likelihood Tractable</th>
+<th>Sample Quality</th>
+<th>Training Stability</th>
+<th>MCMC Needed</th>
+<th>OOD Detection</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>VAE</td>
+<td>Yes (ELBO lower bound)</td>
+<td>Moderate — blurry</td>
+<td>High — stable KL objective</td>
+<td>No</td>
+<td>Poor — decoder uncertainty</td>
+</tr>
+<tr>
+<td>GAN</td>
+<td>No</td>
+<td>High — sharp samples</td>
+<td>Low — mode collapse, oscillation</td>
+<td>No</td>
+<td>Possible via discriminator</td>
+</tr>
+<tr>
+<td>EBM</td>
+<td>No (intractable Z)</td>
+<td>Moderate — mode-seeking</td>
+<td>Low — MCMC instability</td>
+<td>Yes — at train and test time</td>
+<td>Excellent — free energy threshold</td>
+</tr>
+<tr>
+<td>Diffusion</td>
+<td>Approximate (ELBO)</td>
+<td>Very high — SoTA</td>
+<td>High — stable MSE objective</td>
+<td>No (deterministic at test)</td>
+<td>Good via likelihood proxy</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>The partition function Z is intractable — never attempt to compute it exactly; use MCMC approximations.</li>
+<li>CD-1 is biased but fast and works for shallow models; use PCD for deeper networks where mixing is slower.</li>
+<li>Langevin step size ε controls the bias-variance tradeoff: small ε = low bias, many steps needed; large ε = fast but biased.</li>
+<li>Spectral normalisation on energy network weights bounds the Lipschitz constant and stabilises training.</li>
+<li>JEM combines EBM + classifier in one network — the free energy serves as an OOD score at negligible extra cost.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Stable Diffusion: Latent Diffusion Models at Scale | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Stable Diffusion: Latent Diffusion Models at Scale</h1>
+      
+      <h1>Stable Diffusion: Latent Diffusion Models at Scale</h1>
+<h2>Overview</h2>
+<p>Stable Diffusion implements Latent Diffusion Models (LDM) by Rombach et al. (2022), moving the diffusion process from pixel space into a compressed latent space learned by a VAE. This reduces computation by ~64x while retaining perceptual quality, enabling high-resolution text-to-image synthesis on consumer hardware for the first time.</p>
+<p>The system combines three components: a VAE that compresses images to a 4x64x64 latent space from 3x512x512 pixels, a CLIP text encoder that produces conditioning embeddings, and a U-Net diffusion model that denoises in latent space conditioned on text via cross-attention. SDXL and SD3 scale this design to 1024x1024 resolution.</p>
+<h2>Latent Space Compression</h2>
+<p>The VAE encoder E maps pixel images to a latent distribution z ~ q(z|x) = N(mu, sigma). KL regularization keeps the latent space near unit Gaussian, while a perceptual loss and patch-GAN discriminator preserve high-frequency details. The decoder D reconstructs pixel images from z with near-lossless perceptual quality at 8x spatial downsampling.</p>
+<pre><code># Encode image to latent (HF diffusers API)\nfrom diffusers import AutoencoderKL\nvae = AutoencoderKL.from_pretrained(&quot;stabilityai/sd-vae-ft-mse&quot;)\n\ndef encode(pixel_image):\n    z = vae.encode(pixel_image).latent_dist.sample()\n    return z * 0.18215  # scale to unit variance\n\ndef decode(z):\n    return vae.decode(z / 0.18215).sample
+</code></pre>
+<p>The 0.18215 scaling factor normalizes VAE latents to approximately unit variance, aligning with the diffusion model's noise schedule which assumes N(0,I) data. Without scaling, small-magnitude latents would cause the noise schedule to operate in the wrong amplitude range, degrading generation quality and slowing convergence during training.</p>
+<h2>U-Net Denoising Architecture</h2>
+<p>The SD U-Net operates on 4-channel latents at spatial resolution 64x64. It consists of residual blocks, self-attention layers at multiple resolutions, and cross-attention layers for text conditioning. The architecture uses 860M parameters in SD 1.x, processing features at resolutions 64, 32, 16, and 8 in encoder and decoder paths.</p>
+<p>Timestep conditioning is injected via learned sinusoidal+MLP embeddings added to residual block activations. Encoder-to-decoder skip connections preserve spatial detail. SD 2.x introduced v-parameterization, predicting a linear combination of signal and noise rather than noise alone, which improves training stability at high resolutions.</p>
+<h2>Text Conditioning with CLIP</h2>
+<p>CLIP encodes text prompts into a sequence of 768-dim (SD 1.x) or 1024-dim (SD 2.x) token embeddings. These embeddings enter the U-Net at every cross-attention layer in both encoder and decoder paths. The CLIP text encoder is frozen during diffusion model training in the original SD pipeline, using OpenAI ViT-L/14 weights.</p>
+<pre><code># Cross-attention conditioning inside U-Net\nimport torch.nn.functional as F\nimport math\n\ndef cross_attention(img_feat, text_emb, d_head=64):\n    Q = img_feat                          # (B, HW, C)\n    K = text_emb                          # (B, L, C)\n    V = text_emb\n    scale = math.sqrt(d_head)\n    attn  = F.softmax(Q @ K.transpose(-1,-2) / scale, dim=-1)\n    return attn @ V
+</code></pre>
+<p>Each cross-attention layer allows spatial image features (queries) to attend to all text token positions (keys and values), enabling fine-grained token-to-region alignment. Long prompts exceeding 77 CLIP tokens are truncated or handled via weighted concatenation. T5-based encoders in SD3 and Flux capture longer-range textual dependencies better.</p>
+<blockquote>
+<p><strong>tip</strong>: The 0.18215 scaling factor on VAE latents is empirically chosen to make the latent space unit variance — it compensates for the VAE encoder's tendency to produce small-magnitude latents, matching the diffusion model's noise schedule.</p>
+</blockquote>
+<h2>CFG and Sampling</h2>
+<p>Classifier-Free Guidance (CFG) trains a single model for both conditional and unconditional generation by randomly dropping text conditioning with 10-20% probability during training. At inference, conditional and unconditional noise predictions are combined to amplify the text signal strength without requiring a separate classifier network.</p>
+<pre><code>def cfg_step(unet, x_t, t, prompt_emb, null_emb, scale=7.5):\n    eps_uncond = unet(x_t, t, null_emb)\n    eps_cond   = unet(x_t, t, prompt_emb)\n    return eps_uncond + scale * (eps_cond - eps_uncond)
+</code></pre>
+<pre><code>def generate(prompt, steps=50, cfg=7.5, seed=42):\n    torch.manual_seed(seed)\n    text_emb = clip_encode(prompt)\n    null_emb = clip_encode(&quot;&quot;)\n    z = torch.randn(1, 4, 64, 64)         # init latents\n    for t in ddim_schedule(steps):        # 50 DDIM steps\n        eps = cfg_step(unet, z, t, text_emb, null_emb, cfg)\n        z   = ddim_update(z, eps, t)\n    return vae_decode(z)                  # pixel image
+</code></pre>
+<p>CFG scale controls the fidelity-diversity trade-off: low values (1-3) give diverse but prompt-unaligned images; high values (15+) follow prompts sharply but reduce variety and introduce artifacts. A CFG of 7.5 is the standard default. Negative prompts populate the unconditional embedding to steer away from unwanted visual elements.</p>
+<table>
+<thead>
+<tr>
+<th>SD Version</th>
+<th>Base Model</th>
+<th>Resolution</th>
+<th>CFG Range</th>
+<th>Key Capability</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SD 1.5</td>
+<td>LAION-5B</td>
+<td>512x512</td>
+<td>5-15</td>
+<td>Largest community fine-tuning ecosystem</td>
+</tr>
+<tr>
+<td>SD 2.1</td>
+<td>LAION-Aesthetic</td>
+<td>768x768</td>
+<td>5-12</td>
+<td>Improved prompt adherence, v-pred</td>
+</tr>
+<tr>
+<td>SDXL</td>
+<td>Multi-aspect</td>
+<td>1024x1024</td>
+<td>5-10</td>
+<td>2-stage refinement, better composition</td>
+</tr>
+<tr>
+<td>SD3</td>
+<td>MMDiT</td>
+<td>1024x1024</td>
+<td>4-8</td>
+<td>Tri-encoder, flow matching objective</td>
+</tr>
+<tr>
+<td>Flux.1</td>
+<td>Rectified flow</td>
+<td>1024x1024</td>
+<td>1-4</td>
+<td>Best photorealism, fast convergence</td>
+</tr>
+</tbody>
+</table>
+<h2>Key Takeaways</h2>
+<p>Moving diffusion to latent space was the architectural breakthrough enabling high-resolution text-to-image generation at consumer scale. The 8x spatial compression reduces the U-Net's input from 512x512 to 64x64, cutting memory and compute by roughly 64x while retaining perceptual quality through the VAE reconstruction pathway.</p>
+<p>Classifier-Free Guidance is the inference-time mechanism that makes text-to-image generation practically useful. Without CFG, the model produces diverse but weakly text-aligned images. The guidance scale hyperparameter provides intuitive control over the creativity-fidelity trade-off that end users interact with daily in consumer applications.</p>
+<p>The open release of Stable Diffusion weights in 2022 catalyzed a global fine-tuning ecosystem including LoRA adapters, DreamBooth personalization, ControlNet structural conditioning, and hundreds of community checkpoints. The architecture's modularity — separate VAE, text encoder, and U-Net — made component-level replacement and improvement straightforward.</p>
+    </article>
+  </main>
+</body>
+</html>

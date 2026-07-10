@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Scaled Dot-Product Attention — Derivation and Numerical Stability | Notes Backup</title>
+  <meta name="description" content="Derive Attention(Q,K,V)=softmax(QKᵀ/√dₖ)V from first principles, prove why √dₖ scaling prevents softmax saturation, and explore O(n²d) complexity and FlashAttention tiling." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Scaled Dot-Product Attention — Derivation and Numerical Stability</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Derive Attention(Q,K,V)=softmax(QKᵀ/√dₖ)V from first principles, prove why √dₖ scaling prevents softmax saturation, and explore O(n²d) complexity and FlashAttention tiling.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Scaled Dot-Product Attention — Derivation and Numerical Stability</h1>
+<p>Scaled dot-product attention is the computational core of every Transformer. Given queries Q, keys K, and values V it computes a weighted sum of value vectors where the weights are determined by query-key similarity: Attention(Q,K,V) = softmax(QKᵀ/√dₖ)V. Three design choices — dot-product scoring, √dₖ scaling, and softmax normalisation — each have precise mathematical motivations that are easy to miss when reading only the formula.</p>
+<h2>Mathematical Definition and Tensor Shapes</h2>
+<p>Queries Q ∈ ℝ^{nq×dₖ} represent nq positions asking for information. Keys K ∈ ℝ^{nk×dₖ} represent nk positions advertising what they contain. Values V ∈ ℝ^{nk×dv} carry the actual content to be retrieved. The score matrix S = QKᵀ/√dₖ ∈ ℝ^{nq×nk} measures pairwise compatibility — entry Sᵢⱼ = qᵢ·kⱼ/√dₖ is how relevant key j is to query i. Applying row-wise softmax gives attention weights A = softmax(S) ∈ ℝ^{nq×nk} with rows summing to one. The output O = AV ∈ ℝ^{nq×dv} is a convex combination of value vectors for each query.</p>
+<p>$$\text{Attention}(Q,K,V) = \text{softmax}!\left(\frac{QK^\top}{\sqrt{d_k}}\right)V$$</p>
+<h2>The √dₖ Scaling Factor — Derivation</h2>
+<p>Suppose Q and K have independent entries drawn from N(0,1). The dot product qᵢ·kⱼ = Σₗ qᵢₗkⱼₗ is a sum of dₖ independent terms each with mean 0 and variance 1, so qᵢ·kⱼ ~ N(0, dₖ). The standard deviation is √dₖ — for dₖ=64 this is 8, meaning raw scores span roughly ±24. The softmax exp(x)/Σexp pushes values in its flat saturation region when |x| is large: all probability mass collapses onto the maximum-scoring key. Dividing by √dₖ restores unit variance, keeping scores in the regime where softmax distributes mass across multiple keys and its Jacobian retains non-negligible entries.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+import torch.nn.functional as F
+
+def sdp_attention_numpy(Q, K, V, mask=None):
+    # Q: (nq, dk), K: (nk, dk), V: (nk, dv)
+    # Returns: output (nq, dv), weights (nq, nk)
+    dk = Q.shape[-1]
+    scores = Q @ K.T / np.sqrt(dk)
+    if mask is not None:
+        scores = scores + mask * -1e9
+    scores = scores - scores.max(axis=-1, keepdims=True)  # numeric stability
+    weights = np.exp(scores)
+    weights = weights / weights.sum(axis=-1, keepdims=True)
+    return weights @ V, weights
+
+def sdp_attention_torch(Q, K, V):
+    dk = Q.shape[-1]
+    scores = Q @ K.transpose(-2, -1) / dk ** 0.5
+    weights = F.softmax(scores, dim=-1)
+    return weights @ V, weights
+
+np.random.seed(42)
+nq, nk, dk, dv = 5, 7, 64, 64
+Q = np.random.randn(nq, dk).astype(np.float32)
+K = np.random.randn(nk, dk).astype(np.float32)
+V = np.random.randn(nk, dv).astype(np.float32)
+out_np, w_np = sdp_attention_numpy(Q, K, V)
+Qt = torch.tensor(Q); Kt = torch.tensor(K); Vt = torch.tensor(V)
+out_pt, w_pt = sdp_attention_torch(Qt, Kt, Vt)
+print('Output shape:', out_np.shape)
+print('Weights row-sum:', w_np.sum(axis=1).round(5))
+print('Max diff NumPy vs PyTorch:', np.abs(out_np - out_pt.numpy()).max())
+</code></pre>
+<h2>Softmax Saturation and Gradient Flow</h2>
+<p>The softmax Jacobian ∂σ/∂z = diag(σ) − σσᵀ has entries bounded by σᵢ(1−σᵢ). When softmax approaches a one-hot vector (due to large unscaled scores), all entries σᵢ(1−σᵢ) collapse toward zero and the Frobenius norm of the Jacobian vanishes — blocking gradient flow during backpropagation. With √dₖ scaling the score distribution remains approximately N(0,1) regardless of dₖ, keeping the Jacobian norm stable across all model sizes.</p>
+<pre><code class="language-python">import numpy as np
+
+def softmax(x):
+    e = np.exp(x - x.max())
+    return e / e.sum()
+
+def jacobian_frob_norm(s):
+    # Frobenius norm of softmax Jacobian: diag(s) - s*s^T
+    return np.sqrt(np.sum((np.diag(s) - np.outer(s, s)) ** 2))
+
+print('{:&gt;5} | {:&gt;9} | {:&gt;11} | {:&gt;14} | {:&gt;12}'.format(
+    'dk', 'dot_std', 'scaled_std', 'J_unscaled', 'J_scaled'))
+print('-' * 60)
+np.random.seed(0)
+for dk in [1, 4, 16, 64, 256, 1024]:
+    q = np.random.randn(dk)
+    keys = np.random.randn(6, dk)
+    dots = keys @ q                    # ~ N(0, dk)
+    scaled = dots / np.sqrt(dk)        # ~ N(0, 1)
+    jn_u = jacobian_frob_norm(softmax(dots))
+    jn_s = jacobian_frob_norm(softmax(scaled))
+    print('{:&gt;5} | {:&gt;9.3f} | {:&gt;11.3f} | {:&gt;14.6f} | {:&gt;12.6f}'.format(
+        dk, dots.std(), scaled.std(), jn_u, jn_s))
+print('Unscaled Jacobian norm collapses as dk grows -&gt; vanishing gradients.')
+print('Scaled norm stays near constant -&gt; stable gradient flow.')
+</code></pre>
+<blockquote>
+<p><strong>Numerical Stability in Implementation</strong>: Always subtract the row maximum before computing exp: scores -= scores.max(-1, keepdims=True). This prevents overflow without changing the result since exp(x-c)/Σexp(x-c) = exp(x)/Σexp(x). PyTorch F.softmax handles this internally. For custom CUDA kernels this step is non-negotiable — a single inf produced by exp ruins the entire row.</p>
+</blockquote>
+<h2>Attention Pattern Visualisation</h2>
+<p>The attention weight matrix A ∈ ℝ^{nq×nk} is interpretable as a soft routing map: entry Aᵢⱼ is the fraction of value-vector j aggregated into output position i. Visualising A as a heatmap reveals which key positions each query relies on. High-entropy rows (diffuse attention) indicate general information gathering; low-entropy rows (peaked attention) indicate specific retrieval. In language models, patterns like diagonal concentration (local attention), column concentration (attending to a special token), and block structure (phrase-level grouping) each reflect different linguistic behaviours.</p>
+<pre><code class="language-python">import numpy as np
+
+def sdp_attention(Q, K, V):
+    dk = Q.shape[-1]
+    S = Q @ K.T / np.sqrt(dk)
+    S -= S.max(axis=-1, keepdims=True)
+    A = np.exp(S); A /= A.sum(axis=-1, keepdims=True)
+    return A @ V, A
+
+def print_heatmap(A, row_labels, col_labels):
+    col_w = max(len(c) for c in col_labels) + 1
+    header = '{:&gt;10}'.format('') + ''.join('{:&gt;{w}}'.format(c, w=col_w) for c in col_labels)
+    print(header)
+    print('-' * len(header))
+    for rl, row in zip(row_labels, A):
+        cells = ''.join(
+            '{:&gt;{w}}'.format('++' if w &gt; 0.3 else '+' if w &gt; 0.1 else '.', w=col_w)
+            for w in row)
+        print('{:&gt;10}{}'.format(rl[:10], cells) + '  peak-&gt;' + col_labels[row.argmax()])
+
+np.random.seed(99)
+tokens = ['The', 'cat', 'sat', 'on', 'the', 'mat']
+dk, dv = 32, 32
+Q = np.random.randn(len(tokens), dk)
+K = np.random.randn(len(tokens), dk)
+V = np.random.randn(len(tokens), dv)
+_, A = sdp_attention(Q, K, V)
+print_heatmap(A, tokens, tokens)
+entropy = -(A * np.log(A + 1e-9)).sum(axis=1)
+print('Attention entropy per token (nats):', entropy.round(3))
+print('Uniform entropy would be: {:.3f}'.format(np.log(len(tokens))))
+</code></pre>
+<h2>Computational Complexity</h2>
+<p>Attention has three stages: score computation QKᵀ costs O(nq·nk·dₖ), softmax costs O(nq·nk), and value aggregation AV costs O(nq·nk·dv). Total: O(nq·nk·(dₖ+dv)). For self-attention nq=nk=n, giving O(n²d). This quadratic dependence on sequence length is the primary scalability bottleneck: a 4× sequence length increase costs 16× in computation and 16× in memory for the score matrix S ∈ ℝ^{n×n}. The memory footprint is n²·4 bytes (float32); at n=4096 with dₖ=64 the score matrix alone consumes 64 MB per head.</p>
+<pre><code class="language-python">import numpy as np
+import time
+
+def attention_time_ms(seq_len, dk=64, dv=64, n_trials=3):
+    rng = np.random.RandomState(42)
+    timings = []
+    for _ in range(n_trials):
+        Q = rng.randn(seq_len, dk).astype(np.float32)
+        K = rng.randn(seq_len, dk).astype(np.float32)
+        V = rng.randn(seq_len, dv).astype(np.float32)
+        t0 = time.perf_counter()
+        S = Q @ K.T / np.sqrt(dk)         # O(n^2 * dk)
+        S -= S.max(1, keepdims=True)
+        A = np.exp(S); A /= A.sum(1, keepdims=True)
+        _ = A @ V                          # O(n^2 * dv)
+        timings.append(time.perf_counter() - t0)
+    return np.median(timings) * 1000
+
+seq_lens = [128, 256, 512, 1024, 2048]
+print('{:&gt;6} {:&gt;9} {:&gt;8} {:&gt;10} {:&gt;8}'.format('n', 'time_ms', 'ratio', 'n^2_ratio', 'mem_MB'))
+prev_t, prev_n = None, None
+for n in seq_lens:
+    t = attention_time_ms(n)
+    ratio = t / prev_t if prev_t else 1.0
+    n2r = (n / prev_n) ** 2 if prev_n else 1.0
+    mem = n * n * 4 / 1e6
+    print('{:&gt;6} {:&gt;9.2f} {:&gt;8.2f} {:&gt;10.2f} {:&gt;8.1f}'.format(n, t, ratio, n2r, mem))
+    prev_t, prev_n = t, n
+print('Time ratio tracks n^2 ratio -&gt; O(n^2*d) complexity confirmed.')
+</code></pre>
+<h2>Attention as Soft Dictionary Lookup</h2>
+<p>Attention generalises a hard key-value store. In a hard lookup a query exactly matches one key and retrieves the corresponding value. In soft attention the query computes a similarity score with every key and retrieves a differentiable weighted blend of all values. The softmax plays the role of a differentiable argmax — approximating discrete selection while remaining differentiable throughout. This framing clarifies the design: queries ask questions, keys describe what each position knows about itself, and values carry the payload to be aggregated.</p>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Shape</th>
+<th>Role</th>
+<th>Analogy</th>
+<th>Extreme Behaviour</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Query (Q)</td>
+<td>nq × dₖ</td>
+<td>What information am I looking for?</td>
+<td>Search query</td>
+<td>One-hot attention if scores peak sharply</td>
+</tr>
+<tr>
+<td>Key (K)</td>
+<td>nk × dₖ</td>
+<td>What do I advertise?</td>
+<td>Index key in a database</td>
+<td>Uniform attention if all keys equal</td>
+</tr>
+<tr>
+<td>Value (V)</td>
+<td>nk × dv</td>
+<td>What content do I carry?</td>
+<td>Stored record / content</td>
+<td>Retrieval uninformative if V is constant</td>
+</tr>
+<tr>
+<td>Score S = QKᵀ/√dₖ</td>
+<td>nq × nk</td>
+<td>Query-key compatibility</td>
+<td>Similarity metric</td>
+<td>Large scores saturate softmax → near-zero gradients</td>
+</tr>
+<tr>
+<td>Weight A = softmax(S)</td>
+<td>nq × nk</td>
+<td>Normalised importance per query-key pair</td>
+<td>Relevance probability</td>
+<td>Rows always sum to 1; entropy measures focus</td>
+</tr>
+</tbody>
+</table>
+<h2>Efficient Implementations — FlashAttention</h2>
+<p>Standard attention materialises the full n×n score matrix in GPU HBM (high-bandwidth memory), requiring O(n²) memory. FlashAttention (Dao et al. 2022) avoids this by tiling computation in fast on-chip SRAM: it fuses score computation, softmax, and value aggregation into a single kernel pass, maintaining running softmax statistics (online normalisation) to merge partial results correctly. The output O is written to HBM directly — the score matrix S is never materialised. This achieves exact attention in O(n) memory with 2–4× wall-clock speedup on A100 GPUs compared to standard implementations.</p>
+<ul>
+<li>Tiling: divide Q, K, V into blocks of ~64–128 rows that fit in SRAM</li>
+<li>Online softmax: track running maximum and normalisation constant across blocks</li>
+<li>No materialisation: never write the n×n score matrix to HBM — write only output O</li>
+<li>Recomputation in backward pass: recompute S and A on-the-fly from saved Q, K, V</li>
+<li>Memory: O(n) vs O(n²) for standard attention — critical for n &gt; 4096</li>
+<li>FlashAttention-2 (Dao 2023) further improves parallelism across the sequence dimension</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Statistical Anomaly Detection — Z-Score, IQR, and Grubbs Test | Notes Backup</title>
+  <meta name="description" content="Master univariate anomaly detection with Z-score, modified Z-score (MAD), IQR fences, Grubbs test, and extreme value theory — with robust implementations and statistical foundations." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Statistical Anomaly Detection — Z-Score, IQR, and Grubbs Test</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Master univariate anomaly detection with Z-score, modified Z-score (MAD), IQR fences, Grubbs test, and extreme value theory — with robust implementations and statistical foundations.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Statistical Anomaly Detection — Z-Score, IQR, and Grubbs Test</h1>
+<p>Statistical methods detect anomalies by modelling the expected distribution of normal data and flagging observations in the tails. They are interpretable, fast, and require no training beyond summary statistics. The core tradeoff is the distributional assumption: Z-score assumes Gaussian, IQR is distribution-free but univariate, and extreme value theory targets the behaviour of block maxima. All methods are strictly univariate — they flag individual features, not combinations.</p>
+<h2>Z-Score Method</h2>
+<p>The Z-score standardises each observation relative to the sample mean and standard deviation. Points with |z| &gt; 3 fall more than three standard deviations from the mean; under a Gaussian this encompasses 99.73% of probability mass, so flagged points are rare by construction. However, both μ and σ are non-robust: a single extreme outlier inflates σ and deflates every other Z-score — the masking effect. One-sided tests (z &gt; 3 only) are appropriate when anomalies occur only in the positive direction.</p>
+<p>$$z_i = \frac{x_i - \mu}{\sigma}, \quad \text{flag if } |z_i| &gt; 3$$</p>
+<h2>Modified Z-Score — MAD-Based Robustness</h2>
+<p>The modified Z-score replaces μ with the sample median x̃ and σ with MAD = median(|xᵢ − x̃|). The constant 0.6745 makes MAD a consistent estimator of σ under a Gaussian. Both median and MAD have breakdown point 50%: up to half the data can be corrupted without distorting the estimates. Recommended threshold is |Mᵢ| &gt; 3.5. The modified Z-score is the preferred univariate method when the data may be contaminated.</p>
+<p>$$M_i = \frac{0.6745(x_i - \tilde{x})}{\operatorname{MAD}}, \quad \operatorname{MAD} = \operatorname{median}(|x_i - \tilde{x}|)$$</p>
+<pre><code class="language-python">import numpy as np
+from scipy import stats
+
+np.random.seed(42)
+data = np.concatenate([np.random.normal(0, 1, 100), [10.0, -8.5, 15.0]])
+
+def zscore_flags(x, threshold=3.0):
+    mu, sigma = x.mean(), x.std(ddof=1)
+    z = (x - mu) / sigma
+    return np.abs(z) &gt; threshold, z
+
+def modified_zscore_flags(x, threshold=3.5):
+    med = np.median(x)
+    mad = np.median(np.abs(x - med))
+    mad = max(mad, 1e-9)
+    m = 0.6745 * (x - med) / mad
+    return np.abs(m) &gt; threshold, m
+
+flag_z, z_scores   = zscore_flags(data)
+flag_mz, mz_scores = modified_zscore_flags(data)
+print(f'Z-score:          {flag_z.sum()} anomalies at {np.where(flag_z)[0].tolist()}')
+print(f'Modified Z-score: {flag_mz.sum()} anomalies at {np.where(flag_mz)[0].tolist()}')
+
+# Masking: injecting a giant outlier reduces sensitivity of standard Z-score
+masked = np.concatenate([data, [100.0]])
+flag_masked, _ = zscore_flags(masked)
+print(f'After injecting 100.0 — Z-score detects: {flag_masked.sum()} (masking inflates sigma)')
+</code></pre>
+<h2>IQR Method — Distribution-Free Bounds</h2>
+<p>The IQR method sets bounds lower = Q1 − k·IQR and upper = Q3 + k·IQR. Tukey inner fences use k=1.5 (flags ~0.7% of Gaussian data); outer fences use k=3.0 for extreme outliers. The method requires no distributional assumption, is resistant to skewed distributions, and is the standard choice for exploratory data analysis. Its primary limitation is strict univariate scope.</p>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+
+np.random.seed(42)
+data = np.concatenate([np.random.normal(50, 10, 200), [5.0, -10.0, 110.0, 125.0]])
+
+def iqr_bounds(x, k=1.5):
+    Q1, Q3 = np.percentile(x, [25, 75])
+    IQR = Q3 - Q1
+    return Q1 - k * IQR, Q3 + k * IQR, IQR
+
+lower, upper, iqr = iqr_bounds(data)
+flags = (data &lt; lower) | (data &gt; upper)
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+ax1.boxplot(data, vert=True)
+ax1.set_title('Box Plot with IQR Fences')
+colors = ['red' if f else 'steelblue' for f in flags]
+ax2.scatter(range(len(data)), data, c=colors, alpha=0.6, s=20)
+ax2.axhline(lower, color='orange', linestyle='--', label=f'Lower={lower:.1f}')
+ax2.axhline(upper, color='orange', linestyle='--', label=f'Upper={upper:.1f}')
+ax2.legend()
+ax2.set_title(f'IQR Anomalies (k=1.5): {flags.sum()} flagged')
+plt.tight_layout()
+plt.savefig('iqr_anomalies.png', dpi=100)
+print(f'IQR={iqr:.2f}  Bounds=[{lower:.2f}, {upper:.2f}]  Flagged: {flags.sum()}')
+</code></pre>
+<h2>Grubbs Test — Formal Hypothesis Testing</h2>
+<p>The Grubbs test (1969) formally tests H₀: no outliers in a Gaussian sample. Test statistic G = max|xᵢ − x̄|/s is compared against a critical value from the t-distribution at significance α. The sequential Grubbs procedure removes the identified outlier and retests — but each iteration should use a corrected significance level to control family-wise error. Normality should be verified with Shapiro-Wilk before applying.</p>
+<pre><code class="language-python">import numpy as np
+from scipy import stats
+
+def grubbs_stat(x):
+    return np.max(np.abs(x - x.mean())) / x.std(ddof=1)
+
+def grubbs_critical(n, alpha=0.05):
+    # Two-sided critical value via t-distribution (Grubbs 1969)
+    p = alpha / (2 * n)
+    t = stats.t.ppf(1 - p, df=n - 2)
+    return ((n - 1) / np.sqrt(n)) * np.sqrt(t**2 / (n - 2 + t**2))
+
+def grubbs_test(x, alpha=0.05):
+    n = len(x)
+    G = grubbs_stat(x)
+    G_crit = grubbs_critical(n, alpha)
+    idx = int(np.argmax(np.abs(x - x.mean())))
+    return G, G_crit, G &gt; G_crit, idx, x[idx]
+
+np.random.seed(0)
+sample = np.concatenate([np.random.normal(0, 1, 30), [6.2]])
+G, G_crit, reject, idx, val = grubbs_test(sample)
+print(f'G statistic : {G:.4f}')
+print(f'G critical  : {G_crit:.4f}')
+print(f'Reject H0   : {reject}  (outlier value = {val:.3f})')
+
+if reject:
+    reduced = np.delete(sample, idx)
+    G2, G2c, r2, _, _ = grubbs_test(reduced)
+    print(f'Sequential — after removal: G={G2:.4f}, G_crit={G2c:.4f}, reject={r2}')
+</code></pre>
+<h2>Extreme Value Theory — Block Maxima</h2>
+<p>Extreme Value Theory (EVT) models the distribution of maxima rather than individual observations. By the Fisher-Tippett-Gnedenko theorem, the maximum of n i.i.d. random variables converges to a Generalized Extreme Value (GEV) distribution with shape parameter ξ: ξ=0 (Gumbel, light-tailed), ξ&gt;0 (Fréchet, heavy-tailed), ξ&lt;0 (Weibull, bounded). Fit GEV to block maxima (e.g., annual maxima) to compute return levels: the T-year return level is exceeded with probability 1/T per year.</p>
+<pre><code class="language-python">import numpy as np
+from scipy.stats import gumbel_r, genextreme
+import matplotlib.pyplot as plt
+
+np.random.seed(42)
+daily = np.random.normal(20, 5, 365 * 30)
+annual_max = np.array([daily[i*365:(i+1)*365].max() for i in range(30)])
+
+loc, scale = gumbel_r.fit(annual_max)
+print(f'Gumbel fit — location: {loc:.2f}, scale: {scale:.2f}')
+
+for rp in [2, 5, 10, 25, 50]:
+    level = gumbel_r.ppf(1 - 1/rp, loc=loc, scale=scale)
+    print(f'  {rp:3d}-yr return level: {level:.2f}')
+
+shape, loc_g, scale_g = genextreme.fit(annual_max)
+print(f'GEV shape xi = {shape:.3f} (Gumbel if ~0, Frechet if &gt;0)')
+
+threshold_50 = gumbel_r.ppf(0.98, loc=loc, scale=scale)
+anomalies = annual_max[annual_max &gt; threshold_50]
+print(f'Anomalies above 50-yr level ({threshold_50:.2f}): {len(anomalies)}')
+
+x = np.linspace(annual_max.min() - 2, annual_max.max() + 8, 200)
+plt.plot(x, gumbel_r.pdf(x, loc=loc, scale=scale), label='Gumbel fit')
+plt.hist(annual_max, bins=8, density=True, alpha=0.5, label='Annual maxima')
+plt.axvline(threshold_50, color='red', linestyle='--', label='50-yr level')
+plt.legend()
+plt.title('EVT — Gumbel Fit to Annual Maxima')
+plt.tight_layout()
+plt.savefig('evt_gumbel.png', dpi=100)
+</code></pre>
+<h2>Method Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Distribution</th>
+<th>Robustness</th>
+<th>Multivariate</th>
+<th>Complexity</th>
+<th>Best Use Case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Z-score</td>
+<td>Gaussian</td>
+<td>Low (μ,σ non-robust)</td>
+<td>No</td>
+<td>O(n)</td>
+<td>Clean Gaussian data, no masking risk</td>
+</tr>
+<tr>
+<td>Modified Z-score</td>
+<td>Approx. Gaussian</td>
+<td>High (MAD, median)</td>
+<td>No</td>
+<td>O(n log n)</td>
+<td>Contaminated univariate data</td>
+</tr>
+<tr>
+<td>IQR (Tukey)</td>
+<td>None (free)</td>
+<td>High (quartile-based)</td>
+<td>No</td>
+<td>O(n log n)</td>
+<td>Exploratory analysis, any distribution</td>
+</tr>
+<tr>
+<td>Grubbs</td>
+<td>Gaussian (strict)</td>
+<td>Low</td>
+<td>No</td>
+<td>O(n)</td>
+<td>Formal test, single outlier, small n</td>
+</tr>
+<tr>
+<td>EVT (GEV)</td>
+<td>GEV / Gumbel</td>
+<td>Moderate</td>
+<td>No (extensions exist)</td>
+<td>O(n)</td>
+<td>Rare extremes, return-level estimation</td>
+</tr>
+</tbody>
+</table>
+<h2>Limitations and Practical Guidance</h2>
+<p>All methods above are strictly univariate: they cannot detect combinations of features that are jointly unusual (e.g., height=190cm is normal, weight=40kg is normal, but the combination is anomalous). For multivariate anomaly detection use Mahalanobis distance or Isolation Forest. Z-score and Grubbs require approximate normality — always check with a Q-Q plot or Shapiro-Wilk test first. IQR and modified Z-score are safe defaults when the distribution is unknown.</p>
+<blockquote>
+<p><strong>Multiple Testing Correction</strong>: When flagging anomalies across p features simultaneously with α=0.05 per test, the expected number of false positives is 0.05·p. With p=100 features, expect 5 spurious anomaly flags per normal point. Apply Bonferroni correction (α/p) or Benjamini-Hochberg FDR control to limit family-wise error rate across variables.</p>
+</blockquote>
+<ul>
+<li>Prefer modified Z-score over standard Z-score whenever contamination is possible</li>
+<li>IQR is the safest choice when the distribution is unknown or skewed</li>
+<li>Grubbs test is appropriate for small, approximately normal samples (n &lt; 100)</li>
+<li>EVT is essential for modelling probability of rare extreme events (floods, network spikes)</li>
+<li>Always visualise with box plots and Q-Q plots before choosing a method</li>
+</ul>
+<p>One-sided vs two-sided tests matter: detecting only unusually high values (network traffic, error rates) uses one-sided tests with threshold z &gt; 3. Two-sided tests flag both extremes and are appropriate when anomalies can occur in either direction. When testing multiple time points sequentially, apply a correction for temporal autocorrelation (e.g., use a CUSUM chart instead of independent Z-tests).</p>
+    </article>
+  </main>
+</body>
+</html>

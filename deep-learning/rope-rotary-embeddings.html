@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RoPE — Rotary Position Embeddings and Long-Context Extension | Notes Backup</title>
+  <meta name="description" content="Master RoPE (Rotary Position Embeddings): rotating query and key vectors by position-dependent angles to encode relative distance directly in the attention dot product, with zero extra parameters, used in LLaMA 1/2/3, Mistral, Falcon, and Qwen, plus YaRN for long-context extension." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>RoPE — Rotary Position Embeddings and Long-Context Extension</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Master RoPE (Rotary Position Embeddings): rotating query and key vectors by position-dependent angles to encode relative distance directly in the attention dot product, with zero extra parameters, used in LLaMA 1/2/3, Mistral, Falcon, and Qwen, plus YaRN for long-context extension.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>RoPE — Rotary Position Embeddings and Long-Context Extension</h1>
+<p>RoPE (Rotary Position Embeddings), introduced by Su et al. (2021) in RoFormer, encodes position information by rotating the query and key vectors before computing the dot product. The key mathematical insight is that if you rotate a vector at position m by angle m·θ and a vector at position n by angle n·θ, their dot product involves only the relative angle (m−n)·θ — the absolute positions cancel out. This gives RoPE the best of both worlds: it encodes relative position directly in the attention score (like relative PE schemes) while being computed as a simple multiplicative operation on existing Q/K vectors (like absolute PE), with zero additional parameters.</p>
+<h2>RoPE Mathematical Foundation — Rotation in 2D Subspaces</h2>
+<p>RoPE splits the d_model dimension into d/2 pairs. For pair k, the rotation angle is θ_k = 10000^{-2k/d}, matching the frequency schedule of sinusoidal PE. For a vector at position m, pair k is rotated by m·θ_k: the 2D rotation [x1, x2] → [x1·cos(mθ_k) − x2·sin(mθ_k), x1·sin(mθ_k) + x2·cos(mθ_k)]. When computing the dot product of rotated query q_m and rotated key k_n: (R_m·q)^T · (R_n·k) = q^T · R_{n-m} · k — only the relative position (n−m) appears. This holds exactly for any choice of q and k vectors, making RoPE a parameter-free mechanism that provably encodes relative distance without any approximation.</p>
+<p>The frequency schedule θ_k = 10000^{-2k/d} means low-index pairs (k=0) rotate fast (θ_0 = 1) while high-index pairs (k=d/2−1) rotate slowly (θ_{d/2-1} ≈ 10000^{-1} = 0.0001). Short-range dependencies are captured by fast-rotating pairs; long-range dependencies by slow-rotating pairs. This matches the frequency spectrum of sinusoidal PE and is the same schedule used in the original Transformer. The base 10000 can be changed: larger base = slower rotation = better long-context (used in Code Llama, Llama-3 with base=500000).</p>
+<h2>Implementing RoPE from Scratch</h2>
+<p>The standard implementation precomputes a (max_seq_len, d/2) table of cos(m·θ_k) and sin(m·θ_k) values. At forward time, these are used to rotate each Q and K vector: the first half of the vector is [x1·cos − x2·sin] and the second half is [x1·sin + x2·cos]. This is equivalent to complex multiplication: treating each pair (x1, x2) as a complex number x1 + i·x2 and multiplying by e^{i·m·θ_k}. The rotate_half trick avoids materialising the full rotation matrix and operates with element-wise multiplications on half-shifted slices.</p>
+<pre><code class="language-python">import torch
+import math
+
+def build_rope_cache(seq_len, d_model, base=10000):
+    # Precompute cos/sin tables for RoPE. d_model must be even.
+    assert d_model % 2 == 0
+    half  = d_model // 2
+    k     = torch.arange(half, dtype=torch.float32)
+    theta = base ** (-2 * k / d_model)            # (half,) frequencies
+    pos   = torch.arange(seq_len, dtype=torch.float32)
+    freqs = torch.outer(pos, theta)               # (seq_len, half)
+    return torch.cos(freqs), torch.sin(freqs)
+
+def apply_rope(x, cos, sin):
+    # Apply RoPE to x: (batch, seq_len, d_model)
+    x1, x2 = x[..., :x.shape[-1]//2], x[..., x.shape[-1]//2:]
+    cos = cos[:x.shape[1]].unsqueeze(0)           # (1, seq_len, half)
+    sin = sin[:x.shape[1]].unsqueeze(0)
+    x_rot = torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
+    return x_rot
+
+torch.manual_seed(42)
+seq_len, d_model = 16, 64
+cos_cache, sin_cache = build_rope_cache(seq_len, d_model)
+print('cos cache shape:', cos_cache.shape, ' sin cache shape:', sin_cache.shape)
+
+Q = torch.randn(1, seq_len, d_model)
+K = torch.randn(1, seq_len, d_model)
+Q_rot = apply_rope(Q, cos_cache, sin_cache)
+K_rot = apply_rope(K, cos_cache, sin_cache)
+print('Q:', Q.shape, '-&gt; Q_rot:', Q_rot.shape)
+scores = (Q_rot @ K_rot.transpose(-2, -1)) / d_model ** 0.5
+print('Score matrix shape:', scores.shape)
+print('Scores encode only relative position — no absolute index needed.')
+</code></pre>
+<h2>Verifying the Relative Distance Property</h2>
+<p>The defining property of RoPE is that the attention score between a rotated query at position p_q and a rotated key at position p_k depends only on (p_q − p_k), not on the absolute values of p_q or p_k individually. We can verify this numerically: fix q and k vectors, rotate them at different absolute position pairs that share the same relative distance, and confirm the dot products are identical. For example, (pos_q=0, pos_k=2) and (pos_q=1, pos_k=3) both have relative distance −2 and should yield the same dot product.</p>
+<pre><code class="language-python">import torch
+import math
+
+def build_rope(seq_len, d_model, base=10000):
+    half  = d_model // 2
+    theta = torch.tensor([base ** (-2*k/d_model) for k in range(half)])
+    freqs = torch.outer(torch.arange(seq_len, dtype=torch.float32), theta)
+    return torch.cos(freqs), torch.sin(freqs)
+
+def rotate_vec(v, pos, cos, sin):
+    c, s = cos[pos], sin[pos]
+    v1, v2 = v[:len(v)//2], v[len(v)//2:]
+    return torch.cat([v1*c - v2*s, v1*s + v2*c])
+
+torch.manual_seed(0)
+d_model = 16
+cos, sin = build_rope(20, d_model)
+q = torch.randn(d_model)
+k = torch.randn(d_model)
+
+print('Verifying: dot(q_rot@pq, k_rot@pk) depends only on (pq - pk)')
+print('{:&gt;6} {:&gt;6} {:&gt;10} {:&gt;14}'.format('pos_q', 'pos_k', 'relative', 'dot_score'))
+for pq, pk in [(0,0),(1,1),(5,5),(0,2),(1,3),(5,7),(0,4),(1,5)]:
+    q_r = rotate_vec(q, pq, cos, sin)
+    k_r = rotate_vec(k, pk, cos, sin)
+    dot = (q_r * k_r).sum().item()
+    print('{:&gt;6} {:&gt;6} {:&gt;10} {:&gt;14.6f}'.format(pq, pk, pq-pk, dot))
+print('Pairs (0,-2), (1,-2), (5,-2) should give identical dot scores.')
+</code></pre>
+<blockquote>
+<p><strong>RoPE Has Zero Trainable Parameters</strong>: Unlike learned PE (which has max_len × d_model parameters) or Shaw-style relative PE (which has (2×max_rel+1) × d_model parameters), RoPE adds exactly zero trainable parameters. The cos/sin tables are computed from a fixed formula and stored as non-gradient buffers. This means RoPE's position encoding capacity comes entirely from the model learning to use rotated Q/K vectors — the rotation schedule itself is a hyperparameter, not a learned one. Changing the base from 10000 to 500000 (as in LLaMA-3) shifts the frequency spectrum without adding any parameters.</p>
+</blockquote>
+<h2>Efficient RoPE with Precomputed cos/sin Cache</h2>
+<p>Production implementations register the cos/sin tables as non-trainable buffers using register_buffer, ensuring they are moved to the correct device with the model without appearing in model.parameters(). The tables are precomputed for the maximum expected sequence length at initialisation. At forward time, the first T rows are sliced for the actual sequence. The rotate_half operation — negating the second half and swapping — enables the rotation using only element-wise multiplication and addition, avoiding any explicit rotation matrix. This is the implementation used in HuggingFace transformers for LLaMA, Mistral, and similar models.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class RotaryEmbedding(nn.Module):
+    # Production RoPE: precomputed cos/sin cache, no learned parameters.
+    def __init__(self, dim, max_seq_len=4096, base=10000):
+        super().__init__()
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer('inv_freq', inv_freq)
+        t     = torch.arange(max_seq_len).float()
+        freqs = torch.outer(t, inv_freq)
+        emb   = torch.cat([freqs, freqs], dim=-1)   # (max_seq_len, dim)
+        self.register_buffer('cos_cached', emb.cos())
+        self.register_buffer('sin_cached', emb.sin())
+
+    @staticmethod
+    def rotate_half(x):
+        x1, x2 = x[..., :x.shape[-1]//2], x[..., x.shape[-1]//2:]
+        return torch.cat([-x2, x1], dim=-1)
+
+    def forward(self, q, k):
+        T   = q.shape[-2]
+        cos = self.cos_cached[:T].unsqueeze(0).unsqueeze(0)
+        sin = self.sin_cached[:T].unsqueeze(0).unsqueeze(0)
+        return (q * cos + self.rotate_half(q) * sin,
+                k * cos + self.rotate_half(k) * sin)
+
+rope = RotaryEmbedding(dim=64, max_seq_len=2048)
+b, h, s, d = 2, 8, 128, 64
+q = torch.randn(b, h, s, d)
+k = torch.randn(b, h, s, d)
+q_rot, k_rot = rope(q, k)
+print('Input q:', q.shape, '-&gt; q_rot:', q_rot.shape)
+print('Trainable parameters:', sum(p.numel() for p in rope.parameters()))
+print('Buffers (not trained):', [name for name, _ in rope.named_buffers()])
+print('RoPE adds zero trainable parameters to the model.')
+</code></pre>
+<h2>YaRN — Long-Context Extension Beyond Training Length</h2>
+<p>Naive RoPE extrapolation (using position indices beyond the training maximum) causes the attention scores to involve rotation angles the model never saw during training, degrading quality. YaRN (Peng et al. 2023) addresses this by selectively scaling the θ frequencies: high-frequency dimensions (small wavelength) are left unchanged because they already see diverse relative distances within the training length; low-frequency dimensions (large wavelength) are scaled down by a factor equal to the context extension ratio. This selective scaling keeps the per-dimension rotation rates within the distribution seen during training while physically accommodating longer sequences. YaRN also adjusts the softmax temperature to compensate for score magnitude changes.</p>
+<pre><code class="language-python">import torch
+import math
+
+def rope_cache(seq_len, d_model, scale=1.0, base=10000):
+    # Standard RoPE with optional uniform frequency scaling.
+    half  = d_model // 2
+    k     = torch.arange(half, dtype=torch.float32)
+    theta = base ** (-2 * k / d_model) / scale
+    freqs = torch.outer(torch.arange(seq_len, dtype=torch.float32), theta)
+    return torch.cos(freqs), torch.sin(freqs)
+
+def yarn_cache(seq_len, d_model, scale, base=10000, beta_fast=32, beta_slow=1):
+    # YaRN: selective scaling — high-freq dims unchanged, low-freq scaled.
+    half    = d_model // 2
+    k       = torch.arange(half, dtype=torch.float32)
+    theta   = base ** (-2 * k / d_model)
+    wavelen = 2 * math.pi / (theta + 1e-9)
+    scaled        = theta.clone()
+    low_mask      = wavelen &gt; scale * beta_slow
+    scaled[low_mask] /= scale
+    freqs = torch.outer(torch.arange(seq_len, dtype=torch.float32), scaled)
+    return torch.cos(freqs), torch.sin(freqs)
+
+d_model = 64
+print('{:&gt;8} {:&gt;8} {:&gt;14} {:&gt;14}'.format('seq_len', 'scale', 'rope_spread', 'yarn_spread'))
+for test_len, scale in [(2048, 1.0), (4096, 2.0), (8192, 4.0), (16384, 8.0)]:
+    c_std,  _ = rope_cache(test_len, d_model, scale=1.0)
+    c_yarn, _ = yarn_cache(test_len, d_model, scale=scale)
+    std_sp   = c_std.std(dim=0).mean().item()
+    yarn_sp  = c_yarn.std(dim=0).mean().item()
+    print('{:&gt;8} {:&gt;8.1f} {:&gt;14.4f} {:&gt;14.4f}'.format(test_len, scale, std_sp, yarn_sp))
+print('YaRN maintains cos/sin spread; naive uniform scaling collapses it.')
+</code></pre>
+<p>The spread metric above measures how well the cos/sin cache distinguishes different positions: a high spread means many distinct rotation states (good), while a low spread means many positions collapse to similar angles (bad). At 16384 tokens with naive RoPE (scale=1.0), many high-frequency dimensions have completed many full rotations (2π cycles) and alias to previously seen angles — the model cannot distinguish positions 0 and 8192 in those dimensions. YaRN's selective scaling slows down the rotation rates specifically in the dimensions where aliasing would occur, maintaining distinguishability across the longer context.</p>
+<h2>RoPE in Production LLMs</h2>
+<p>RoPE has become the de-facto positional encoding for decoder-only LLMs since 2023. Its combination of relative-in-score encoding, zero extra parameters, and support for context extension has made it dominant. Key deployment notes: RoPE is applied independently to each attention head (each head gets its own Q and K rotated by the same position angles); the base frequency (default 10000) can be increased to shift the useful range to longer sequences; YaRN or linear scaling with continued pre-training is the standard recipe for extending a 4K-context model to 32K or 128K contexts.</p>
+<ul>
+<li>LLaMA 1/2: RoPE with base=10000, max_seq_len=4096 (LLaMA-2)</li>
+<li>LLaMA-3: RoPE with base=500000, extended to 128K via long-context fine-tuning</li>
+<li>Mistral 7B: RoPE base=10000, sliding window attention for efficient 32K context</li>
+<li>Falcon: RoPE with base=10000 across 7B, 40B, 180B model sizes</li>
+<li>Qwen 1/2: RoPE with dynamic NTK scaling for 8K-32K context</li>
+<li>GPT-NeoX / Pythia: RoPE as the default PE for open reproduction of GPT-class models</li>
+<li>Code Llama: RoPE base=1000000 (1M) for long code contexts up to 100K tokens</li>
+</ul>
+<h2>Comparison — Sinusoidal vs Learned vs RoPE vs ALiBi</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Relative in Score</th>
+<th>No Params</th>
+<th>Extrapolation</th>
+<th>LLM Adoption</th>
+<th>Score Complexity</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Sinusoidal PE</td>
+<td>No — absolute only</td>
+<td>Yes</td>
+<td>Weak — periodic aliasing</td>
+<td>Low — legacy only</td>
+<td>O(nd) precompute</td>
+</tr>
+<tr>
+<td>Learned PE</td>
+<td>No — absolute only</td>
+<td>No — max_len×d_model</td>
+<td>None — hard failure</td>
+<td>Medium — BERT, GPT-2</td>
+<td>O(nd) lookup</td>
+</tr>
+<tr>
+<td>RoPE</td>
+<td>Yes — rotation encodes distance</td>
+<td>Yes — zero params</td>
+<td>Good — YaRN/NTK extends to 100K+</td>
+<td>Very high — LLaMA, Mistral, Qwen</td>
+<td>O(nd) per layer</td>
+</tr>
+<tr>
+<td>ALiBi</td>
+<td>Yes — additive linear bias</td>
+<td>Yes — h slopes only</td>
+<td>Strong — linear extrapolates naturally</td>
+<td>Medium — MPT, BLOOM</td>
+<td>O(n²) bias add</td>
+</tr>
+</tbody>
+</table>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>K-Means Convergence — Monotone Decrease and Local Optima | Notes Backup</title>
+  <meta name="description" content="Prove that Lloyd&#x27;s algorithm converges in finite steps via monotone WCSS decrease, understand why convergence is to a local not global minimum, quantify the O(log k) approximation from k-means++ initialization, and demonstrate pathological cases where k-means gets stuck." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>K-Means Convergence — Monotone Decrease and Local Optima</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Prove that Lloyd&#x27;s algorithm converges in finite steps via monotone WCSS decrease, understand why convergence is to a local not global minimum, quantify the O(log k) approximation from k-means++ initialization, and demonstrate pathological cases where k-means gets stuck.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>K-Means Convergence — Monotone Decrease and Local Optima</h1>
+<p>K-means is guaranteed to converge, but only to a local minimum of the Within-Cluster Sum of Squares. This note proves the convergence argument rigorously, demonstrates how poor initialization leads to bad local optima, and shows why k-means++ and multiple restarts are essential for reliable results. Understanding convergence behavior helps practitioners decide how many restarts to use and when to trust the final clustering.</p>
+<h2>WCSS as the Convergence Criterion</h2>
+<p>The objective WCSS = Σᵢ Σ_{x∈Cᵢ} ‖x − μᵢ‖² is bounded below by zero (distances are non-negative). At initialization, WCSS has some finite value determined by the initial centroids. The convergence argument is: if WCSS cannot increase at any step and it is bounded below, it must converge. The key is showing that each of the two steps — E-step and M-step — is non-increasing. Since there are finitely many partitions of n points into k labeled clusters (at most kⁿ), WCSS can decrease only finitely many times before reaching a fixed point.</p>
+<h2>Why Each Step Decreases WCSS</h2>
+<p>E-step (assignment): for fixed centroids μ₁,...,μₖ, assigning each point x to its nearest centroid arg min_i ‖x−μᵢ‖² is exactly minimizing the WCSS contribution of x. Any reassignment to a farther centroid would strictly increase WCSS. Therefore the E-step cannot increase WCSS and will decrease it whenever any point is closer to a different centroid. M-step (update): for fixed assignments, the centroid that minimizes Σ_{x∈Cᵢ} ‖x−μ‖² over μ is exactly the mean μᵢ = (1/|Cᵢ|)Σ_{x∈Cᵢ} x. This follows because ∇_μ Σ ‖x−μ‖² = −2Σ(x−μ) = 0 implies μ = mean(Cᵢ). Any other centroid position gives strictly higher WCSS.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.datasets import make_blobs
+
+rng = np.random.default_rng(7)
+X, _ = make_blobs(n_samples=300, centers=4, cluster_std=0.9, random_state=42)
+k = 4
+
+# Random initialization to make convergence tracking interesting
+centers = X[rng.choice(len(X), k, replace=False)].copy()
+
+wcss_history = []
+for iteration in range(50):
+    # E-step
+    diffs = X[:, None, :] - centers[None, :, :]
+    labels = np.argmin((diffs ** 2).sum(axis=2), axis=1)
+    # Compute WCSS after E-step
+    wcss_e = sum(np.sum((X[labels == i] - centers[i]) ** 2) for i in range(k))
+    wcss_history.append(('E', iteration, wcss_e))
+    # M-step
+    new_centers = np.array([X[labels == i].mean(axis=0) for i in range(k)])
+    wcss_m = sum(np.sum((X[labels == i] - new_centers[i]) ** 2) for i in range(k))
+    wcss_history.append(('M', iteration, wcss_m))
+    assert wcss_m &lt;= wcss_e + 1e-9, &quot;M-step increased WCSS!&quot;
+    if np.max(np.linalg.norm(new_centers - centers, axis=1)) &lt; 1e-6:
+        print(f&quot;Converged at iteration {iteration + 1}&quot;)
+        centers = new_centers
+        break
+    centers = new_centers
+
+print(&quot;\nIteration | Step | WCSS&quot;)
+for step, it, w in wcss_history[:12]:
+    print(f&quot;    {it:5d} |    {step} | {w:.4f}&quot;)
+</code></pre>
+<h2>Convergence to Local Optima</h2>
+<p>Convergence is guaranteed, but the fixed point is a local minimum of WCSS — not necessarily the global minimum. The landscape of WCSS as a function of centroid positions is non-convex with exponentially many local minima. Running k-means with different random initializations produces different final WCSS values; the variance across restarts directly measures how hard the problem is. In the worst case, k-means can converge to a partition where WCSS is Θ(n) times the optimum, though this is rare in practice with k-means++ seeding.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.cluster import KMeans
+from sklearn.datasets import make_blobs
+
+X, _ = make_blobs(n_samples=400, centers=5, cluster_std=1.2, random_state=0)
+k = 5
+
+# Run 20 restarts with random init
+final_wcss_random, final_wcss_pp = [], []
+for seed in range(20):
+    km_r = KMeans(n_clusters=k, init='random', n_init=1, random_state=seed, max_iter=300)
+    km_r.fit(X)
+    final_wcss_random.append(km_r.inertia_)
+
+    km_p = KMeans(n_clusters=k, init='k-means++', n_init=1, random_state=seed, max_iter=300)
+    km_p.fit(X)
+    final_wcss_pp.append(km_p.inertia_)
+
+print(f&quot;Random init  — mean: {np.mean(final_wcss_random):.2f}, &quot;
+      f&quot;std: {np.std(final_wcss_random):.2f}, &quot;
+      f&quot;min: {min(final_wcss_random):.2f}, max: {max(final_wcss_random):.2f}&quot;)
+print(f&quot;K-Means++ — mean: {np.mean(final_wcss_pp):.2f}, &quot;
+      f&quot;std: {np.std(final_wcss_pp):.2f}, &quot;
+      f&quot;min: {min(final_wcss_pp):.2f}, max: {max(final_wcss_pp):.2f}&quot;)
+print(f&quot;\nVariance reduction from k-means++: {np.std(final_wcss_random)/np.std(final_wcss_pp):.1f}x&quot;)
+</code></pre>
+<h2>K-Means++ vs Random Init — Quality Guarantee</h2>
+<p>K-Means++ provides a theoretical guarantee: E[WCSS after initialization] ≤ 8(ln k + 2) × OPT. This O(log k) approximation means that even before running Lloyd's algorithm, the initial centroids already have bounded quality. After running Lloyd's to convergence from a k-means++ initialization, the expected final WCSS is within O(log k) of optimal. The initialization cost is O(n·k) additional distance computations — negligible compared to the full Lloyd's run. The practical consequence is that 3–5 restarts with k-means++ typically gives results as good as 50+ restarts with random initialization.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.cluster import KMeans
+from sklearn.datasets import make_blobs
+import matplotlib
+matplotlib.use('Agg')
+
+X, _ = make_blobs(n_samples=600, centers=6, cluster_std=1.0, random_state=1)
+k = 6
+n_trials = 30
+
+wcss_random = [KMeans(n_clusters=k, init='random', n_init=1,
+                       random_state=s).fit(X).inertia_ for s in range(n_trials)]
+wcss_pp = [KMeans(n_clusters=k, init='k-means++', n_init=1,
+                   random_state=s).fit(X).inertia_ for s in range(n_trials)]
+
+best_possible = KMeans(n_clusters=k, init='k-means++', n_init=50, random_state=42).fit(X).inertia_
+
+print(f&quot;Best possible WCSS (50 restarts, k-means++): {best_possible:.2f}&quot;)
+print(f&quot;\nRandom init over {n_trials} trials:&quot;)
+print(f&quot;  Mean ratio to best: {np.mean(wcss_random)/best_possible:.4f}&quot;)
+print(f&quot;  Worst ratio:        {max(wcss_random)/best_possible:.4f}&quot;)
+print(f&quot;  Fraction optimal:   {sum(w &lt; best_possible*1.01 for w in wcss_random)/n_trials:.0%}&quot;)
+print(f&quot;\nK-Means++ over {n_trials} trials:&quot;)
+print(f&quot;  Mean ratio to best: {np.mean(wcss_pp)/best_possible:.4f}&quot;)
+print(f&quot;  Worst ratio:        {max(wcss_pp)/best_possible:.4f}&quot;)
+print(f&quot;  Fraction optimal:   {sum(w &lt; best_possible*1.01 for w in wcss_pp)/n_trials:.0%}&quot;)
+</code></pre>
+<blockquote>
+<p><strong>How Many Restarts?</strong>: With k-means++ initialization, 3–10 restarts (n_init in sklearn) is usually sufficient for well-separated clusters. For high-overlap or high-dimensional data, use n_init=20 or n_init='auto' (sklearn ≥1.2). With random initialization you need 50+ restarts to achieve comparable reliability. Always report the minimum WCSS across restarts, not the mean.</p>
+</blockquote>
+<h2>Pathological Case — Bad Local Minimum</h2>
+<p>The classic pathological case for k-means is two elongated clusters along different axes initialized with centroids that bisect each cluster horizontally. Lloyd's algorithm converges to a partition that splits each true cluster into two halves rather than correctly identifying the two elongated groups. K-means++ significantly reduces (but does not eliminate) the probability of landing in such bad configurations.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.cluster import KMeans
+
+rng = np.random.default_rng(99)
+# Two horizontally elongated clusters at different heights
+cluster_a = rng.normal(loc=[0, 0], scale=[3.0, 0.15], size=(150, 2))
+cluster_b = rng.normal(loc=[0, 2], scale=[3.0, 0.15], size=(150, 2))
+X = np.vstack([cluster_a, cluster_b])
+y_true = np.array([0]*150 + [1]*150)
+
+# Bad init: both centroids near x-axis, one left one right
+bad_init = np.array([[-2.0, 1.0], [2.0, 1.0]])
+km_bad = KMeans(n_clusters=2, init=bad_init, n_init=1, max_iter=300)
+km_bad.fit(X)
+
+# Good init: one centroid per true cluster
+good_init = np.array([[0.0, 0.0], [0.0, 2.0]])
+km_good = KMeans(n_clusters=2, init=good_init, n_init=1, max_iter=300)
+km_good.fit(X)
+
+from sklearn.metrics import adjusted_rand_score
+print(f&quot;Bad init  WCSS={km_bad.inertia_:.2f}, ARI={adjusted_rand_score(y_true, km_bad.labels_):.3f}&quot;)
+print(f&quot;Good init WCSS={km_good.inertia_:.2f}, ARI={adjusted_rand_score(y_true, km_good.labels_):.3f}&quot;)
+print(&quot;\nBad init produces LOWER WCSS but WRONG clusters: classic local minimum trap.&quot;)
+</code></pre>
+<h2>Complexity and Practical Guidance</h2>
+<p>The time complexity of k-means is O(n·k·d·T) where n is points, k is clusters, d is dimensions, and T is iterations. T is usually 10–300 in practice. The number of distinct partitions is O(kⁿ), but convergence happens long before the algorithm enumerates them. For large n, Mini-Batch K-Means replaces the full pass with a batch of size b, reducing per-iteration cost to O(b·k·d). Space complexity is O(n·d + k·d) for storing data and centroids.</p>
+<ul>
+<li>Use n_init=10 (sklearn default) with k-means++ for most problems; increase to 20–50 for k &gt; 20 or high-overlap data.</li>
+<li>Set max_iter=300 (default); most runs converge in 10–50 iterations — watch for convergence warnings.</li>
+<li>Scale features before clustering — k-means uses Euclidean distance; unscaled features with large variance dominate.</li>
+<li>For n &gt; 100K, use MiniBatchKMeans with batch_size=1024–4096 for a 10–100x speedup.</li>
+<li>Always check multiple k values with silhouette score; the elbow alone is unreliable for diffuse clusters.</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Initialization</th>
+<th>Quality</th>
+<th>Extra Cost</th>
+<th>Restarts Needed</th>
+<th>Guarantee</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Random</td>
+<td>Poor — high variance</td>
+<td>None</td>
+<td>20–50 for reliability</td>
+<td>None</td>
+</tr>
+<tr>
+<td>K-Means++</td>
+<td>Good — low variance</td>
+<td>O(n·k) distances</td>
+<td>3–10 sufficient</td>
+<td>O(log k) approximation</td>
+</tr>
+<tr>
+<td>K-Means‖ (parallel)</td>
+<td>Very good — scalable</td>
+<td>O(n·k/round) × rounds</td>
+<td>1–3 typically</td>
+<td>O(log k) with fewer rounds</td>
+</tr>
+</tbody>
+</table>
+<p>In practice, run sklearn KMeans with n_init='auto' (adaptive — 10 for small k, more for large k) and always check that inertia_ is consistent across 3–5 independent runs before trusting the result. If the best WCSS across restarts varies by more than 5%, increase n_init or switch to a stronger initialization strategy. Convergence within 10–30 iterations is typical for well-separated clusters; slow convergence (&gt;100 iterations) signals that k is too large, features are poorly scaled, or the data structure is fundamentally non-spherical.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

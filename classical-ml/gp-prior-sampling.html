@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GP Prior — Sampling Functions and Prior Specification | Notes Backup</title>
+  <meta name="description" content="How a GP prior f~GP(m,k) encodes beliefs about functions before data: Cholesky sampling, kernel choice, length-scale and signal variance effects, and prior predictive checks." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>GP Prior — Sampling Functions and Prior Specification</h1>
+      <ul class='note-meta'><li><strong>description:</strong> How a GP prior f~GP(m,k) encodes beliefs about functions before data: Cholesky sampling, kernel choice, length-scale and signal variance effects, and prior predictive checks.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>GP Prior — Sampling Functions and Prior Specification</h1>
+<h2>What Is a GP Prior?</h2>
+<p>A Gaussian Process (GP) is a distribution over functions. Writing f ~ GP(m, k) means: any finite collection of function values (f(x₁), …, f(xₙ)) follows a multivariate normal distribution with mean vector [m(x₁), …, m(xₙ)] and covariance matrix Kᵢⱼ = k(xᵢ, xⱼ). The prior encodes everything we believe about the function before observing data — its smoothness, amplitude, and mean trend. Unlike parametric models, the prior lives directly in function space.</p>
+<h2>Sampling from a GP Prior with Cholesky Decomposition</h2>
+<p>To draw a function sample: (1) choose a set of test points X<em>, (2) compute the covariance matrix K = k(X</em>, X<em>), (3) add a small jitter εI for numerical stability, (4) compute the Cholesky factor L = chol(K + εI), (5) draw z ~ N(0, I), (6) return f = m(X</em>) + Lz. The Cholesky method is preferred over eigendecomposition for numerical stability and gives samples with exactly the right marginal covariance.</p>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+
+def rbf_kernel(X1, X2, length_scale=1.0, signal_var=1.0):
+    &quot;&quot;&quot;Squared Exponential (RBF) kernel k(x,x') = σ²_f exp(-||x-x'||²/(2ℓ²))&quot;&quot;&quot;
+    X1 = np.atleast_2d(X1).reshape(-1, 1)
+    X2 = np.atleast_2d(X2).reshape(-1, 1)
+    sqdist = np.sum(X1**2, 1).reshape(-1,1) + np.sum(X2**2, 1) - 2*X1@X2.T
+    return signal_var * np.exp(-0.5 * sqdist / length_scale**2)
+
+def sample_gp_prior(x, kernel_fn, n_samples=5, jitter=1e-6, **kernel_kwargs):
+    K = kernel_fn(x, x, **kernel_kwargs)
+    L = np.linalg.cholesky(K + jitter * np.eye(len(x)))
+    z = np.random.randn(len(x), n_samples)
+    return L @ z   # shape (n_points, n_samples)
+
+np.random.seed(42)
+x = np.linspace(-5, 5, 200)
+samples = sample_gp_prior(x, rbf_kernel, n_samples=5, length_scale=1.0, signal_var=1.0)
+
+plt.figure(figsize=(10, 4))
+for i in range(5):
+    plt.plot(x, samples[:, i], lw=1.5, alpha=0.8, label=f'Sample {i+1}')
+plt.axhline(0, color='k', lw=0.8, ls='--', label='Mean m(x)=0')
+plt.title('GP Prior Samples — RBF Kernel (ℓ=1, σ²_f=1)')
+plt.xlabel('x'); plt.ylabel('f(x)'); plt.legend(ncol=3); plt.tight_layout()
+plt.show()
+</code></pre>
+<h2>Kernel Functions and Prior Smoothness</h2>
+<p>The kernel k(x, x') completely determines the smoothness and correlation structure of prior samples. The RBF kernel produces infinitely differentiable (analytic) functions. The Matérn family parameterises smoothness via ν: Matérn-1/2 gives continuous but nowhere-differentiable paths (like Brownian motion), Matérn-3/2 gives once-differentiable paths, and Matérn-5/2 gives twice-differentiable paths. Choice of kernel encodes domain knowledge about the function's regularity.</p>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from scipy.spatial.distance import cdist
+
+def matern_kernel(X1, X2, length_scale=1.0, signal_var=1.0, nu=1.5):
+    X1 = np.atleast_2d(X1).reshape(-1, 1)
+    X2 = np.atleast_2d(X2).reshape(-1, 1)
+    r = cdist(X1, X2) / length_scale
+    if nu == 0.5:
+        return signal_var * np.exp(-r)
+    elif nu == 1.5:
+        return signal_var * (1 + np.sqrt(3)*r) * np.exp(-np.sqrt(3)*r)
+    elif nu == 2.5:
+        return signal_var * (1 + np.sqrt(5)*r + 5*r**2/3) * np.exp(-np.sqrt(5)*r)
+    else:
+        raise ValueError(f'nu={nu} not supported')
+
+np.random.seed(0)
+x = np.linspace(-4, 4, 200)
+kernels = [('RBF (∞-diff)', lambda X1,X2: matern_kernel(X1,X2,nu=2.5)*0+
+            __import__('numpy').exp(-0.5*cdist(np.atleast_2d(X1).reshape(-1,1),
+            np.atleast_2d(X2).reshape(-1,1))**2)),
+           ('Matérn-1/2', lambda X1,X2: matern_kernel(X1,X2,nu=0.5)),
+           ('Matérn-5/2', lambda X1,X2: matern_kernel(X1,X2,nu=2.5))]
+
+fig, axes = plt.subplots(1, 3, figsize=(14, 4), sharey=True)
+for ax, (name, kfn) in zip(axes, kernels):
+    K = kfn(x, x)
+    L = np.linalg.cholesky(K + 1e-6*np.eye(len(x)))
+    for _ in range(4):
+        ax.plot(x, L @ np.random.randn(len(x)), lw=1.2, alpha=0.8)
+    ax.set_title(name); ax.set_xlabel('x')
+axes[0].set_ylabel('f(x)')
+plt.suptitle('Prior Samples by Kernel Smoothness Class')
+plt.tight_layout(); plt.show()
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Kernel</th>
+<th>Differentiability</th>
+<th>Typical ℓ Range</th>
+<th>Best Domain</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>RBF (SE)</td>
+<td>Infinitely differentiable (analytic)</td>
+<td>0.1 – 10</td>
+<td>Physics simulations, smooth signals</td>
+</tr>
+<tr>
+<td>Matérn-1/2</td>
+<td>Continuous, not differentiable</td>
+<td>0.05 – 5</td>
+<td>Rough terrain, financial returns</td>
+</tr>
+<tr>
+<td>Matérn-3/2</td>
+<td>Once differentiable</td>
+<td>0.1 – 5</td>
+<td>Robotics, speech features</td>
+</tr>
+<tr>
+<td>Matérn-5/2</td>
+<td>Twice differentiable</td>
+<td>0.1 – 10</td>
+<td>General regression, most tabular data</td>
+</tr>
+<tr>
+<td>Periodic</td>
+<td>Infinitely differentiable, periodic</td>
+<td>period: 0.5–50</td>
+<td>Seasonality, cyclic processes</td>
+</tr>
+</tbody>
+</table>
+<h2>Effect of Length-Scale on Function Smoothness</h2>
+<p>The length-scale ℓ controls the correlation range: k(x, x') decays as |x−x'| grows relative to ℓ. Large ℓ means points far apart are still correlated — prior samples are slowly varying and smooth. Small ℓ means the correlation decays quickly — prior samples are wiggly and nearly independent at distances larger than ℓ. The signal variance σ²_f scales the overall amplitude of the function.</p>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+
+def rbf_kernel(X1, X2, ell=1.0, sf2=1.0):
+    X1 = np.atleast_2d(X1).reshape(-1, 1)
+    X2 = np.atleast_2d(X2).reshape(-1, 1)
+    sqdist = (X1 - X2.T)**2
+    return sf2 * np.exp(-0.5 * sqdist / ell**2)
+
+np.random.seed(7)
+x = np.linspace(-5, 5, 200)
+length_scales = [0.3, 1.0, 3.0]
+
+fig, axes = plt.subplots(1, 3, figsize=(14, 4), sharey=True)
+for ax, ell in zip(axes, length_scales):
+    K = rbf_kernel(x, x, ell=ell)
+    L = np.linalg.cholesky(K + 1e-6*np.eye(len(x)))
+    for _ in range(5):
+        f = L @ np.random.randn(len(x))
+        ax.plot(x, f, lw=1.2, alpha=0.75)
+    ax.set_title(f'ℓ = {ell}')
+    ax.set_xlabel('x')
+    ax.set_ylim(-3.5, 3.5)
+axes[0].set_ylabel('f(x)')
+plt.suptitle('RBF Prior Samples: Effect of Length-Scale')
+plt.tight_layout(); plt.show()
+
+# Print correlation at different distances
+for ell in length_scales:
+    r1 = np.exp(-0.5 * 1.0**2 / ell**2)
+    r2 = np.exp(-0.5 * 2.0**2 / ell**2)
+    print(f'ℓ={ell}: corr(Δ=1)={r1:.3f}, corr(Δ=2)={r2:.3f}')
+</code></pre>
+<blockquote>
+<p><strong>Choosing Length-Scale from Domain Knowledge</strong>: If you know that your function changes meaningfully over a distance of roughly d units, initialise ℓ ≈ d. For spatial data in kilometres, ℓ in the tens. For normalised features in [0,1], ℓ between 0.1 and 0.5. Always verify your choice with a prior predictive check.</p>
+</blockquote>
+<h2>Prior Predictive Checks</h2>
+<p>A prior predictive check asks: do random draws from the prior look like plausible data? Plot 10–20 prior samples overlaid on the domain. If the prior amplitude is wildly wrong (all samples near 0 when the data spans 100 units), adjust σ²_f. If the wiggles are far too fast, increase ℓ. This is an important diagnostic before spending compute on posterior inference.</p>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+
+def rbf_kernel(X1, X2, ell=1.0, sf2=1.0):
+    X1 = np.atleast_2d(X1).reshape(-1, 1)
+    X2 = np.atleast_2d(X2).reshape(-1, 1)
+    return sf2 * np.exp(-0.5 * (X1 - X2.T)**2 / ell**2)
+
+np.random.seed(99)
+# Suppose we expect function values in [0, 10] over x in [0, 5]
+x = np.linspace(0, 5, 150)
+
+# Bad prior: default params misaligned with domain
+K_bad = rbf_kernel(x, x, ell=0.1, sf2=1.0)
+L_bad = np.linalg.cholesky(K_bad + 1e-6*np.eye(len(x)))
+
+# Good prior: domain-informed params
+K_good = rbf_kernel(x, x, ell=1.5, sf2=25.0)  # sf=5 -&gt; amplitude ~5, ell=1.5
+L_good = np.linalg.cholesky(K_good + 1e-6*np.eye(len(x)))
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+for i in range(8):
+    axes[0].plot(x, L_bad @ np.random.randn(len(x)), lw=1, alpha=0.6)
+    axes[1].plot(x, 5 + L_good @ np.random.randn(len(x)), lw=1, alpha=0.6)
+axes[0].set_title('Bad Prior (ℓ=0.1, σ²_f=1) — too wiggly, wrong scale')
+axes[1].set_title('Domain-Informed Prior (ℓ=1.5, σ²_f=25) — plausible')
+for ax in axes:
+    ax.set_xlabel('x'); ax.set_ylabel('f(x)')
+plt.tight_layout(); plt.show()
+</code></pre>
+<h2>Choosing Kernels from Domain Knowledge</h2>
+<p>Kernel selection is the primary modelling decision in GP regression. Use the RBF kernel as a baseline when you expect a smooth function with no strong periodicity. Prefer Matérn-5/2 for most regression tasks — it is smooth enough for gradient-based optimisation but less prone to overfitting wiggly artefacts than RBF. Use periodic kernels for seasonal time series. Composite kernels (e.g., RBF + periodic + linear) decompose signals into interpretable components.</p>
+<ul>
+<li>RBF: default for smooth, non-periodic functions; differentiable everywhere</li>
+<li>Matérn-5/2: better generalisation than RBF in most real-world tabular tasks</li>
+<li>Matérn-1/2: rough processes — weather, financial log-returns</li>
+<li>Periodic: seasonality with known period (e.g., yearly, weekly)</li>
+<li>Linear kernel: GP becomes Bayesian linear regression — useful as a baseline component</li>
+<li>Composite k = k₁ + k₂: additive structure; k = k₁ × k₂: interaction terms</li>
+</ul>
+<h2>Key Takeaways</h2>
+<p>The GP prior f ~ GP(m, k) defines a distribution over functions via its mean function m and kernel k. Sampling uses the Cholesky decomposition of the kernel matrix: f = m + Lz where L = chol(K + εI) and z ~ N(0, I). Kernel choice determines differentiability (RBF → smooth, Matérn-1/2 → rough). Length-scale ℓ controls correlation range; signal variance σ²_f controls amplitude. Always run a prior predictive check before fitting — it catches misconfigured hyperparameters before expensive inference.</p>
+<blockquote>
+<p><strong>Numerical Stability Requires Jitter</strong>: Without a small jitter term εI added to K, the Cholesky decomposition will fail on near-singular matrices (e.g., when two x-points are very close). A jitter of 1e-6 to 1e-4 is standard and does not meaningfully alter the prior.</p>
+</blockquote>
+<ul>
+<li>Prior f ~ GP(m,k): mean function m(x) and kernel k(x,x') fully specify beliefs</li>
+<li>Cholesky sampling: draw z~N(0,I), return m + Lz where L=chol(K+εI)</li>
+<li>RBF kernel → infinitely differentiable; Matérn-1/2 → continuous only</li>
+<li>Length-scale ℓ: large → smooth slowly varying; small → wiggly rapidly varying</li>
+<li>Signal variance σ²_f: scales overall function amplitude</li>
+<li>Prior predictive check: plot 10-20 prior samples before fitting to data</li>
+<li>Composite kernels allow additive decomposition of signal components</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

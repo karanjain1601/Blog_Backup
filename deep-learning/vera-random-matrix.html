@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VeRA — Vector-Based Random Matrix Adaptation for Extreme Parameter Efficiency | Notes Backup</title>
+  <meta name="description" content="VeRA (Kopiczko et al. 2024) shares a single frozen random matrix pair across all adapter layers and learns only per-layer scaling vectors, achieving ~32× fewer trainable parameters than LoRA r=16 while remaining competitive on language tasks." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>VeRA — Vector-Based Random Matrix Adaptation for Extreme Parameter Efficiency</h1>
+      <ul class='note-meta'><li><strong>description:</strong> VeRA (Kopiczko et al. 2024) shares a single frozen random matrix pair across all adapter layers and learns only per-layer scaling vectors, achieving ~32× fewer trainable parameters than LoRA r=16 while remaining competitive on language tasks.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>VeRA — Vector-Based Random Matrix Adaptation for Extreme Parameter Efficiency</h1>
+<p>LoRA reduces trainable parameters by using low-rank matrices per layer, but each layer still maintains its own private A and B matrices. For a 7B parameter model with LoRA rank=16 applied to all attention projections, trainable parameters reach ~84M. VeRA (Vector-based Random matrix Adaptation, Kopiczko et al., 2024) pushes parameter efficiency further: a single pair of random matrices is shared (frozen) across all layers, and only small per-layer scaling vectors are learned. This reduces trainable parameters to approximately 1.4M — a 60× reduction over LoRA r=16 — while achieving surprisingly competitive task performance.</p>
+<h2>VeRA Architecture — Shared Random Matrices</h2>
+<p>In VeRA, a single random matrix A ∈ ℝ^{r×d_in} and a single random matrix B ∈ ℝ^{d_out×r} are generated once (using a fixed random seed) and kept frozen across all layers. For each layer l, VeRA introduces two learnable scaling vectors: b_d^l ∈ ℝ^{d_out} (scales rows of B) and d_r^l ∈ ℝ^r (scales rows of A). The forward pass for layer l is: h += B·diag(b_d^l)·A·diag(d_r^l)·x. The diagonal scaling vectors select which directions in the shared random basis matter for each specific layer.</p>
+<h2>VeRA Layer Implementation</h2>
+<p>The implementation instantiates the shared random matrices as buffers (not parameters) at model initialization. Per-layer trainable vectors are registered as parameters. The forward pass computes the scaled random projection via element-wise multiplication — equivalent to row-scaling of the matrices — which avoids materializing full diagonal matrices.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import math
+
+class VeRALinear(nn.Module):
+    &quot;&quot;&quot;VeRA adapter: shared frozen (A,B), learnable per-layer scaling vectors.&quot;&quot;&quot;
+
+    def __init__(self, in_features: int, out_features: int,
+                 rank: int, shared_A: torch.Tensor, shared_B: torch.Tensor,
+                 alpha: float = 1.0, dropout: float = 0.0):
+        super().__init__()
+        self.rank = rank
+        self.scaling = alpha / rank
+        # Base weight (frozen)
+        self.weight = nn.Parameter(torch.randn(out_features, in_features), requires_grad=False)
+        self.bias = nn.Parameter(torch.zeros(out_features), requires_grad=False)
+        # Shared random matrices (frozen buffers, NOT trainable)
+        self.register_buffer('shared_A', shared_A)  # (rank, in_features)
+        self.register_buffer('shared_B', shared_B)  # (out_features, rank)
+        # Per-layer trainable scaling vectors
+        self.vec_d = nn.Parameter(torch.ones(rank))       # scales A rows
+        self.vec_b = nn.Parameter(torch.zeros(out_features))  # scales B rows
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -&gt; torch.Tensor:
+        base = nn.functional.linear(x, self.weight, self.bias)
+        # diag(d_r) @ A: scale each row of A, shape (rank, in_features)
+        scaled_A = self.shared_A * self.vec_d.unsqueeze(1)
+        # B @ diag(b_d): scale each row of B, shape (out_features, rank)
+        scaled_B = self.shared_B * self.vec_b.unsqueeze(1)
+        lora_out = nn.functional.linear(
+            nn.functional.linear(self.dropout(x), scaled_A), scaled_B
+        )
+        return base + lora_out * self.scaling
+
+rank, d_in, d_out = 16, 768, 768
+shared_A = torch.randn(rank, d_in)
+shared_B = torch.randn(d_out, rank)
+layer = VeRALinear(d_in, d_out, rank, shared_A, shared_B)
+x = torch.randn(4, d_in)
+print(f'Output: {layer(x).shape}')
+print(f'Trainable params: vec_d={layer.vec_d.numel()}, vec_b={layer.vec_b.numel()}')
+</code></pre>
+<h2>Parameter Count Comparison</h2>
+<p>For a model with L adapter layers, d_in and d_out, and rank r: LoRA contributes 2×L×r×d params per layer pair. VeRA contributes L×(r+d_out) for the scaling vectors, plus one shared pair (r×d_in + d_out×r) that does not scale with L. For a 7B LLaMA-style model with L=32 attention layers, d=4096, r=16: LoRA has 32×2×16×4096 = 4.2M trainable params per projection. VeRA has 32×(16+4096) = 131K trainable params — a 32× reduction per projection.</p>
+<pre><code class="language-python">import torch
+
+def compare_param_counts(model_dims: dict, ranks: list = (4, 8, 16, 32)):
+    &quot;&quot;&quot;Compare LoRA vs VeRA trainable params for a transformer model.&quot;&quot;&quot;
+    n_layers = model_dims['n_layers']     # e.g., 32
+    d_model = model_dims['d_model']       # e.g., 4096
+    n_proj = model_dims['n_projections']  # Q, K, V, O = 4
+    print(f'Model: {n_layers} layers, d={d_model}, {n_proj} projections')
+    print(f'{&quot;Rank&quot;:&gt;6}  {&quot;LoRA params&quot;:&gt;14}  {&quot;VeRA params&quot;:&gt;14}  {&quot;Ratio&quot;:&gt;8}')
+    print('-' * 50)
+    for r in ranks:
+        lora_params = n_layers * n_proj * 2 * r * d_model
+        # VeRA: per-layer vectors + one shared pair (counted once)
+        vera_per_layer = n_layers * n_proj * (r + d_model)
+        vera_shared = 2 * r * d_model  # shared A and B
+        vera_params = vera_per_layer + vera_shared
+        ratio = lora_params / vera_params
+        print(f'{r:&gt;6}  {lora_params/1e6:&gt;12.2f}M  {vera_params/1e6:&gt;12.3f}M  {ratio:&gt;7.1f}x')
+
+compare_param_counts({'n_layers': 32, 'd_model': 4096, 'n_projections': 4})
+print()
+compare_param_counts({'n_layers': 32, 'd_model': 4096, 'n_projections': 4},
+                     ranks=[64, 128])
+</code></pre>
+<h2>VeRA Training</h2>
+<p>Training VeRA requires generating the shared random matrices once with a fixed seed and replicating them across all layers. Only the scaling vectors are passed to the optimizer. The shared matrices are registered as buffers so they move to the correct device automatically but do not consume optimizer state (no Adam m/v statistics for them).</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.optim as optim
+from typing import List
+
+def build_vera_model(n_layers: int, d_model: int, rank: int = 16,
+                     seed: int = 42) -&gt; nn.ModuleList:
+    &quot;&quot;&quot;Build a stack of VeRA layers sharing a single random matrix pair.&quot;&quot;&quot;
+    torch.manual_seed(seed)
+    shared_A = torch.randn(rank, d_model) / (rank ** 0.5)  # normalized init
+    shared_B = torch.randn(d_model, rank) / (rank ** 0.5)
+    layers = nn.ModuleList([
+        VeRALinear(d_model, d_model, rank, shared_A.clone(), shared_B.clone())
+        for _ in range(n_layers)
+    ])
+    return layers
+
+def get_vera_optimizer(model: nn.ModuleList, lr: float = 1e-3) -&gt; optim.AdamW:
+    &quot;&quot;&quot;Only optimize scaling vectors; ignore frozen weights and shared buffers.&quot;&quot;&quot;
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    total = sum(p.numel() for p in trainable)
+    print(f'VeRA trainable parameters: {total:,}')
+    return optim.AdamW(trainable, lr=lr, weight_decay=0.01)
+
+# Simulate training
+layers = build_vera_model(n_layers=4, d_model=256, rank=16)
+optimizer = get_vera_optimizer(layers)
+x = torch.randn(8, 256)
+for step in range(5):
+    h = x
+    for layer in layers:
+        h = layer(h) + h  # residual
+    loss = h.pow(2).mean()
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    if step % 2 == 0:
+        print(f'Step {step}: loss={loss.item():.4f}')
+</code></pre>
+<h2>Quality vs Parameter Efficiency</h2>
+<p>Benchmarking VeRA against LoRA and full fine-tuning reveals that VeRA achieves surprisingly competitive accuracy on language understanding tasks. The gap widens on tasks that require very different representations across layers, where the shared random basis becomes a bottleneck. However, for standard instruction following and commonsense reasoning, VeRA within ~1–3% of LoRA r=16 despite 32× fewer parameters.</p>
+<pre><code class="language-python">import torch
+import math
+
+# Approximate benchmark results from VeRA paper (Kopiczko et al. 2024)
+# Evaluated on LLaMA-7B with commonsense and GLUE benchmarks
+benchmark_data = [
+    {'method': 'Full Fine-Tuning', 'params_M': 7000.0, 'accuracy': 0.892},
+    {'method': 'LoRA r=16',        'params_M': 83.9,   'accuracy': 0.871},
+    {'method': 'LoRA r=4',         'params_M': 20.9,   'accuracy': 0.859},
+    {'method': 'DoRA r=16',        'params_M': 83.9,   'accuracy': 0.878},
+    {'method': 'VeRA r=256',       'params_M': 1.4,    'accuracy': 0.862},
+    {'method': 'IA3',              'params_M': 0.02,   'accuracy': 0.828},
+]
+
+print(f'{&quot;Method&quot;:&lt;20}  {&quot;Params (M)&quot;:&gt;12}  {&quot;Accuracy&quot;:&gt;10}  {&quot;Params/FullFT&quot;:&gt;14}')
+print('-' * 65)
+for entry in benchmark_data:
+    frac = entry['params_M'] / 7000.0
+    print(f&quot;{entry['method']:&lt;20}  {entry['params_M']:&gt;12.1f}  &quot;
+          f&quot;{entry['accuracy']:&gt;10.3f}  {frac:&gt;13.4%}&quot;)
+
+# Efficiency score: accuracy / log10(params)
+print('\nEfficiency score (accuracy / log10(params)):')
+for entry in benchmark_data:
+    score = entry['accuracy'] / math.log10(entry['params_M'] * 1e6 + 1)
+    print(f&quot;  {entry['method']:&lt;20}: {score:.4f}&quot;)
+</code></pre>
+<h2>Why Random Matrices Work</h2>
+<p>The theoretical justification for VeRA comes from random feature theory. A random matrix A with i.i.d. Gaussian entries spans the entire input space in expectation — any direction can be approximately reached by a suitable linear combination of the rows. The scaling vector d_r selects which random directions to amplify, effectively constructing a task-specific projection from the shared random basis. This is analogous to random kitchen sinks (Rahimi &amp; Recht, 2007): random features approximate a rich kernel function, and the learned weights select the relevant features for the task.</p>
+<h2>PEFT Parameter Efficiency Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Trainable Params (7B)</th>
+<th>% of Total</th>
+<th>Quality vs Full FT</th>
+<th>Inference Overhead</th>
+<th>Memory Savings</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Full Fine-Tuning</td>
+<td>7,000M</td>
+<td>100%</td>
+<td>Baseline</td>
+<td>None</td>
+<td>None</td>
+</tr>
+<tr>
+<td>LoRA r=16</td>
+<td>~84M</td>
+<td>~1.2%</td>
+<td>-1 to -2%</td>
+<td>Merge: none; separate: minimal</td>
+<td>High</td>
+</tr>
+<tr>
+<td>LoRA r=4</td>
+<td>~21M</td>
+<td>~0.3%</td>
+<td>-2 to -4%</td>
+<td>Merge: none; separate: minimal</td>
+<td>Very high</td>
+</tr>
+<tr>
+<td>VeRA (r=256)</td>
+<td>~1.4M</td>
+<td>~0.02%</td>
+<td>-2 to -3%</td>
+<td>Shared buffers; minimal</td>
+<td>Extreme</td>
+</tr>
+<tr>
+<td>Prefix Tuning (P=100)</td>
+<td>~5M</td>
+<td>~0.07%</td>
+<td>-3 to -5%</td>
+<td>Extra KV cache per layer</td>
+<td>High</td>
+</tr>
+<tr>
+<td>IA3</td>
+<td>~0.02M</td>
+<td>~0.0003%</td>
+<td>-6 to -10%</td>
+<td>None</td>
+<td>Extreme</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Why shared random matrices work</strong>: VeRA's shared random matrices work because random projection matrices span a rich function space — any direction can be approximately reached by scaling random vectors, similar to how random features approximate kernel methods. The per-layer scaling vectors learn which directions in this shared random basis are most useful for each layer's task.</p>
+</blockquote>
+<ul>
+<li>Shared random seed: use the same seed across processes and runs so shared_A and shared_B are reproducible.</li>
+<li>Rank choice: VeRA uses much larger ranks (r=64–256) than LoRA because the matrices are not learned — more columns give richer basis coverage.</li>
+<li>Limitation: shared matrices limit expressivity when tasks require highly diverse layer-wise adaptations (e.g., multimodal models).</li>
+<li>Memory: VeRA's shared buffers are stored once and broadcast — saves memory on multi-GPU setups vs per-layer LoRA matrices.</li>
+<li>Stacking: VeRA scaling vectors can be task-specific; load different vec_d and vec_b for different tasks with the same base + shared random matrices.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

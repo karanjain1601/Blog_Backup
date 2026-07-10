@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Padding Mask — Variable-Length Sequences in Batches | Notes Backup</title>
+  <meta name="description" content="Handling variable-length sequences in batched Transformer training and inference by masking PAD tokens from attention, covering PyTorch and HuggingFace conventions plus sequence packing." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Padding Mask — Variable-Length Sequences in Batches</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Handling variable-length sequences in batched Transformer training and inference by masking PAD tokens from attention, covering PyTorch and HuggingFace conventions plus sequence packing.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Padding Mask — Variable-Length Sequences in Batches</h1>
+<p>GPUs process examples in parallel batches, but natural language sequences vary wildly in length. A batch of sentences with lengths [3, 7, 12] must be padded to a common length of 12 before being stacked into a tensor. The padding tokens (PAD) are meaningless — they carry no information — but without explicit handling, the attention mechanism will happily attend to them, corrupting the computation and degrading model quality especially at the end of shorter sequences.</p>
+<h2>Variable-Length Sequences and the Padding Problem</h2>
+<p>Two separate masking needs arise when padding is present. First, no query token should attend to PAD key positions — a real token at position 2 attending to a PAD token at position 9 would pull meaningless information into its representation. Second, PAD token queries themselves produce meaningless outputs, which must be zeroed out or ignored in the loss computation. The padding mask addresses the first concern by adding -∞ to attention scores at PAD key positions before softmax, producing zero attention weight on those positions.</p>
+<ul>
+<li>seq_lens = [3, 7, 12] → pad all sequences to max_len = 12</li>
+<li>PAD token id (typically 0) added at positions beyond the real sequence length</li>
+<li>Create key_padding_mask: True at PAD positions (PyTorch) or 0 at PAD positions (HuggingFace)</li>
+<li>Mask maps to additive -∞ on PAD key columns before softmax</li>
+<li>Loss: ignore PAD positions via label = -100 in CrossEntropyLoss</li>
+</ul>
+<blockquote>
+<p><strong>Convention Mismatch: PyTorch vs HuggingFace</strong>: PyTorch nn.MultiheadAttention uses key_padding_mask where True means 'ignore this position' (ignore=True). HuggingFace transformers uses attention_mask where 1 means 'attend' and 0 means 'ignore' (attend=1). These are opposite conventions — converting between them is a common source of bugs when mixing PyTorch attention layers with HuggingFace tokenizers.</p>
+</blockquote>
+<h2>Constructing a Padding Mask from Sequence Lengths</h2>
+<p>Given a list of actual sequence lengths, the padding mask is computed by broadcasting: create a (1, max_len) range tensor of position indices and compare it against a (B, 1) tensor of lengths. Positions where index &gt;= length are PAD. This vectorised comparison avoids looping over the batch and is fully GPU-compatible.</p>
+<h2>PyTorch vs HuggingFace Conventions</h2>
+<p>The two major libraries use opposite sign conventions. PyTorch's nn.MultiheadAttention accepts key_padding_mask as a Boolean tensor where True flags positions to ignore, which it internally converts to -∞ additive values. HuggingFace models accept attention_mask as a float or int tensor where 1 flags real tokens and 0 flags PAD — the model converts 0s to -∞ additive values. Both achieve the same result but require different input preparation. When using a HuggingFace tokenizer with a custom PyTorch attention layer, always check and convert the convention.</p>
+<h2>Code 1 — Padding Mask from Sequence Lengths</h2>
+<p>Vectorised construction of the additive padding mask from a list of real sequence lengths, returning shape (B, 1, 1, max_len) ready to broadcast over attention score tensors.</p>
+<pre><code class="language-python">import torch
+
+def make_padding_mask(seq_lens: list, max_len: int,
+                      device: str = 'cpu') -&gt; torch.Tensor:
+    &quot;&quot;&quot;
+    Additive padding mask of shape (B, 1, 1, max_len).
+    Value: 0.0 at real token positions, -inf at PAD positions.
+    Broadcast-safe with attention scores of shape (B, H, L_q, L_k).
+    &quot;&quot;&quot;
+    B    = len(seq_lens)
+    ids  = torch.arange(max_len, device=device).unsqueeze(0)  # (1, max_len)
+    lens = torch.tensor(seq_lens, device=device).unsqueeze(1) # (B, 1)
+    is_pad = (ids &gt;= lens).float()                             # (B, max_len)
+    mask   = is_pad * float('-inf')                            # 0 or -inf
+    return mask.view(B, 1, 1, max_len)                         # (B,1,1,max_len)
+
+# Demo with three sequences of different lengths
+seq_lens = [6, 4, 2]
+mask = make_padding_mask(seq_lens, max_len=6)
+print('Mask shape:', mask.shape)  # (3, 1, 1, 6)
+for i, length in enumerate(seq_lens):
+    row = mask[i, 0, 0].tolist()
+    labels = ['ok' if v == 0.0 else '-inf' for v in row]
+    print(f'  seq {i} (len={length}): {labels}')
+# Adding this mask to (B, H, L, L) scores blocks all PAD key columns
+</code></pre>
+<h2>Code 2 — nn.MultiheadAttention with key_padding_mask</h2>
+<p>Using PyTorch's built-in MultiheadAttention with the key_padding_mask parameter, verifying that attention weights on PAD key positions are effectively zero.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+torch.manual_seed(0)
+B, L, d_model, n_heads = 3, 6, 64, 4
+
+mha = nn.MultiheadAttention(embed_dim=d_model, num_heads=n_heads, batch_first=True)
+
+# Input sequences; padding already applied (zeros at PAD positions)
+x = torch.randn(B, L, d_model)
+seq_lens = [6, 4, 2]
+
+# PyTorch key_padding_mask: True = ignore (PAD), False = attend (real token)
+ids  = torch.arange(L).unsqueeze(0)              # (1, L)
+lens = torch.tensor(seq_lens).unsqueeze(1)        # (B, 1)
+key_padding_mask = (ids &gt;= lens)                  # (B, L) bool, True at PAD
+
+out, attn_weights = mha(
+    query=x, key=x, value=x,
+    key_padding_mask=key_padding_mask,
+    need_weights=True,
+    average_attn_weights=False,
+)
+print('Output shape:       ', out.shape)           # (3, 6, 64)
+print('Attn weights shape: ', attn_weights.shape)  # (3, 4, 6, 6)
+
+# Verify: weights on PAD key columns should be near zero
+for i, length in enumerate(seq_lens):
+    if length &lt; L:
+        pad_w = attn_weights[i, :, :length, length:].abs().max().item()
+        print(f'  seq {i} (len={length}): max weight on PAD keys = {pad_w:.2e}')
+</code></pre>
+<h2>Code 3 — HuggingFace Attention Mask Convention</h2>
+<p>Converting between the HuggingFace attention_mask (1=attend, 0=PAD) and the additive -∞ format expected by raw attention score tensors.</p>
+<pre><code class="language-python">import torch
+
+def hf_to_additive_mask(attention_mask: torch.Tensor) -&gt; torch.Tensor:
+    &quot;&quot;&quot;
+    HuggingFace convention: attention_mask[b, pos] = 1 attend, 0 ignore.
+    Convert to additive mask: 0 at real positions, -inf at PAD positions.
+    Input: (B, L)  -&gt;  Output: (B, 1, 1, L) for broadcasting over (B, H, L, L).
+    &quot;&quot;&quot;
+    inverted = (1.0 - attention_mask.float()) * float('-inf')
+    return inverted.unsqueeze(1).unsqueeze(2)      # (B, 1, 1, L)
+
+def additive_to_hf(mask: torch.Tensor) -&gt; torch.Tensor:
+    &quot;&quot;&quot;Reverse: additive (B,1,1,L) -&gt; HF attention_mask (B, L).&quot;&quot;&quot;
+    flat = mask.squeeze(1).squeeze(1)              # (B, L)
+    return (flat == 0.0).long()                    # 1 where real, 0 where -inf
+
+# Simulate HuggingFace tokenizer output (PAD id = 0)
+input_ids = torch.tensor([
+    [101, 1234, 5678, 9012, 3456,  102],  # length 6
+    [101, 2468, 1357,  102,    0,    0],  # length 4, pads at 4,5
+    [101,  999,  102,    0,    0,    0],  # length 3, pads at 3,4,5
+])
+hf_mask   = (input_ids != 0).long()       # 1=real, 0=PAD  (HuggingFace)
+print('HF attention_mask:')
+print(hf_mask)
+add_mask = hf_to_additive_mask(hf_mask)
+print('Additive mask (seq 1):', add_mask[1, 0, 0].tolist())
+# [0.0, 0.0, 0.0, 0.0, -inf, -inf]
+</code></pre>
+<h2>Code 4 — Sequence Packing Without Padding</h2>
+<p>For training efficiency, sequences can be packed end-to-end without PAD tokens, eliminating wasted compute. PyTorch's pack_padded_sequence / pad_packed_sequence implements this for RNN-style layers; for Transformers the same idea applies with custom position ids and segment attention masks.</p>
+<pre><code class="language-python">import torch
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
+
+torch.manual_seed(1)
+d_model  = 32
+seq_lens = [8, 5, 3]       # must be sorted descending for pack_padded_sequence
+max_len  = max(seq_lens)
+B        = len(seq_lens)
+
+# Padded input: (B, max_len, d_model)
+x_padded = torch.randn(B, max_len, d_model)
+for i, l in enumerate(seq_lens):
+    x_padded[i, l:] = 0.0  # zero-fill PAD positions for clarity
+
+print('Padded tensor shape:', x_padded.shape)          # (3, 8, 32)
+print('Total elements (with PAD):', B * max_len)
+print('Real token count:         ', sum(seq_lens))
+waste = 100 * (1 - sum(seq_lens) / (B * max_len))
+print(f'Wasted compute (PAD fraction): {waste:.1f}%')
+
+# Pack: remove PAD tokens, concatenate only real tokens
+lengths_t = torch.tensor(seq_lens)
+packed = pack_padded_sequence(x_padded, lengths_t, batch_first=True,
+                               enforce_sorted=True)
+print('\nPacked data shape:', packed.data.shape)       # (16, 32) real tokens only
+
+# Unpack back to padded for loss computation
+unpacked, out_lens = pad_packed_sequence(packed, batch_first=True)
+print('Unpacked shape:', unpacked.shape)
+print('Recovered lengths:', out_lens.tolist())
+</code></pre>
+<h2>Padding Strategies Compared</h2>
+<table>
+<thead>
+<tr>
+<th>Strategy</th>
+<th>Model Type</th>
+<th>Positions Masked</th>
+<th>Implementation</th>
+<th>HF Convention</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>No mask</td>
+<td>Any</td>
+<td>None (attend to all)</td>
+<td>Omit mask parameter</td>
+<td>attention_mask: all 1s</td>
+</tr>
+<tr>
+<td>Padding only</td>
+<td>Encoder (BERT)</td>
+<td>PAD key positions</td>
+<td>key_padding_mask=True at PAD</td>
+<td>attention_mask: 0 at PAD</td>
+</tr>
+<tr>
+<td>Causal only</td>
+<td>Decoder (GPT)</td>
+<td>Future positions (j &gt; i)</td>
+<td>attn_mask upper-tri -inf</td>
+<td>Not a standard HF param</td>
+</tr>
+<tr>
+<td>Causal + padding</td>
+<td>Decoder (batched)</td>
+<td>Future + PAD keys</td>
+<td>Sum causal + pad additive masks</td>
+<td>attention_mask + causal</td>
+</tr>
+<tr>
+<td>Sequence packing</td>
+<td>Any (training)</td>
+<td>No PAD tokens at all</td>
+<td>pack_padded_sequence or custom</td>
+<td>Variable position_ids</td>
+</tr>
+</tbody>
+</table>
+<p>Padding masks are conceptually simple but operationally important: unmasked PAD tokens introduce spurious signal, especially in short sequences where PAD tokens form a large fraction of the batch. Sequence packing eliminates this overhead entirely during training. At inference, padding masks remain necessary when processing variable-length batches because most serving frameworks pad to a fixed bucket size for memory layout efficiency.</p>
+    </article>
+  </main>
+</body>
+</html>

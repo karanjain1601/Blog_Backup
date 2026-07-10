@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Code Tokenization — Whitespace, Indentation, and Programming Language Fertility | Notes Backup</title>
+  <meta name="description" content="Code imposes unique challenges for BPE tokenizers: whitespace is semantic in Python, operators split unexpectedly, and identifier naming conventions affect token counts. Covers GPT-2/GPT-4 BPE artifacts in code, indentation encoding, operator splitting, and cross-language fertility differences." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Code Tokenization — Whitespace, Indentation, and Programming Language Fertility</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Code imposes unique challenges for BPE tokenizers: whitespace is semantic in Python, operators split unexpectedly, and identifier naming conventions affect token counts. Covers GPT-2/GPT-4 BPE artifacts in code, indentation encoding, operator splitting, and cross-language fertility differences.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Code Tokenization — Whitespace, Indentation, and Programming Language Fertility</h1>
+<p>Code tokenization differs fundamentally from natural language tokenization. In Python, whitespace encodes program semantics — four spaces of indentation is not stylistic but structural. Operators like == or -&gt; carry precise meaning but may tokenize as one or two tokens depending on the vocabulary. Identifier naming conventions (camelCase, snake_case, PascalCase) affect how identifiers split across token boundaries. Understanding these artifacts is critical for code model fine-tuning, token budget estimation, and span-level code highlighting in IDE tooling.</p>
+<h2>GPT-2/GPT-4 BPE Artifacts in Code</h2>
+<p>GPT-2 and GPT-4 BPE tokenizers use special Unicode markers to encode whitespace. A space before a word is represented by the Ġ prefix (Unicode U+0120), so ' def' becomes 'Ġdef'. Newlines are encoded as Ċ (U+010A). Consecutive spaces get their own merged tokens: '    ' (four spaces) may tokenize as a single 'Ġ   ' token or as four individual space tokens depending on vocabulary frequency. This means Python indentation tokens are highly tokenizer-specific — the same indented block may consume 1 or 4 tokens depending on training corpus composition.</p>
+<p>CodeBERT and StarCoder use code-specific vocabularies pre-trained on GitHub repositories. Their vocabularies include common programming tokens like 'def', 'return', 'import', 'class', and common operators as single tokens. This gives them lower fertility on code than general-purpose tokenizers, but higher fertility on natural language descriptions and docstrings. The tradeoff is deliberate: code models optimise their token budget for the domain they will primarily process.</p>
+<h2>Code Tokenization Analysis Across Languages</h2>
+<pre><code class="language-python">import tiktoken
+from transformers import AutoTokenizer
+
+def tokenize_algorithm(algo_text, tokenizer_fn, tokenizer_name):
+    tokens = tokenizer_fn(algo_text)
+    return {'n': len(tokens), 'name': tokenizer_name}
+
+# Same bubble sort algorithm in three languages
+algorithms = {
+    'python': 'def bubble_sort(arr):\n    n = len(arr)\n    for i in range(n):\n        for j in range(n - i - 1):\n            if arr[j] &gt; arr[j + 1]:\n                arr[j], arr[j + 1] = arr[j + 1], arr[j]\n    return arr',
+    'javascript': 'function bubbleSort(arr) {\n  const n = arr.length;\n  for (let i = 0; i &lt; n; i++) {\n    for (let j = 0; j &lt; n - i - 1; j++) {\n      if (arr[j] &gt; arr[j + 1]) {\n        [arr[j], arr[j + 1]] = [arr[j + 1], arr[j]];\n      }\n    }\n  }\n  return arr;\n}',
+    'java': 'public static void bubbleSort(int[] arr) {\n    int n = arr.length;\n    for (int i = 0; i &lt; n - 1; i++) {\n        for (int j = 0; j &lt; n - i - 1; j++) {\n            if (arr[j] &gt; arr[j + 1]) {\n                int tmp = arr[j];\n                arr[j] = arr[j + 1];\n                arr[j + 1] = tmp;\n            }\n        }\n    }\n}',
+}
+enc_gpt4 = tiktoken.get_encoding('cl100k_base')
+enc_gpt2 = tiktoken.get_encoding('gpt2')
+starcoder = AutoTokenizer.from_pretrained('bigcode/starcoder')
+for lang, code in algorithms.items():
+    n_gpt4 = len(enc_gpt4.encode(code))
+    n_gpt2 = len(enc_gpt2.encode(code))
+    n_star = len(starcoder.encode(code))
+    print(f'{lang:&lt;12}: gpt4={n_gpt4:&gt;4}  gpt2={n_gpt2:&gt;4}  starcoder={n_star:&gt;4}')
+</code></pre>
+<h2>Indentation Token Analysis</h2>
+<p>Python indentation is semantically critical — stripping or modifying it changes program meaning. A standard 4-space indent tokenizes differently across tokenizers: GPT-4 (cl100k_base) merges consecutive spaces into a single token for common indent widths, while GPT-2 may split them into individual space tokens. Tab characters (\t) typically tokenize as a single token. Nested indentation (8 or 12 spaces for doubly or triply nested blocks) further compounds the token count, making deeply nested Python code disproportionately expensive.</p>
+<pre><code class="language-python">import tiktoken
+
+def analyze_indentation(tokenizer_name='cl100k_base'):
+    enc = tiktoken.get_encoding(tokenizer_name)
+    indent_styles = {
+        '2-space indent':   '  x = 1',
+        '4-space indent':   '    x = 1',
+        '8-space indent':   '        x = 1',
+        '12-space indent':  '            x = 1',
+        'tab indent':       '\tx = 1',
+        'tab+4 indent':     '\t    x = 1',
+    }
+    print(f'Tokenizer: {tokenizer_name}')
+    for label, text in indent_styles.items():
+        tokens = enc.encode(text)
+        decoded = [enc.decode([t]) for t in tokens]
+        display = [repr(d) for d in decoded]
+        print(f'  {label:&lt;20}: {len(tokens)} tokens  {display}')
+
+analyze_indentation('cl100k_base')
+print()
+analyze_indentation('gpt2')
+</code></pre>
+<h2>Operator and Identifier Tokenization</h2>
+<p>Identifier naming conventions interact strongly with BPE tokenization. A snake_case identifier like 'calculate_gradient_norm' typically splits at underscores, producing 3–4 tokens. A camelCase identifier like 'calculateGradientNorm' may split at case boundaries (some tokenizers treat uppercase letters as split points) or remain merged if the whole identifier appears in training data. Operators like == usually tokenize as a single token in code-aware vocabularies, while -&gt; and =&gt; may be one or two tokens depending on the training corpus.</p>
+<pre><code class="language-python">import tiktoken
+
+def analyze_identifiers_and_ops(tokenizer_name='cl100k_base'):
+    enc = tiktoken.get_encoding(tokenizer_name)
+    samples = {
+        'camelCase':    'calculateGradientNorm',
+        'snake_case':   'calculate_gradient_norm',
+        'PascalCase':   'CalculateGradientNorm',
+        'SCREAMING':    'MAX_GRADIENT_NORM',
+        'eq operator':  '==',
+        'ne operator':  '!=',
+        'arrow (C++)':  '-&gt;',
+        'fat arrow':    '=&gt;',
+        'walrus':       ':=',
+        'type hint':    'list[int]',
+        'decorator':    '@torch.no_grad()',
+    }
+    print(f'Operator/identifier tokenization ({tokenizer_name})')
+    for label, text in samples.items():
+        tokens = enc.encode(text)
+        pieces = [enc.decode([t]) for t in tokens]
+        print(f'  {label:&lt;16}: {len(tokens)} tok  {pieces}')
+
+analyze_identifiers_and_ops('cl100k_base')
+print()
+analyze_identifiers_and_ops('gpt2')
+</code></pre>
+<h2>Cross-Language Fertility</h2>
+<pre><code class="language-python">import tiktoken
+
+def tokens_per_line(code_snippet, enc):
+    lines = [l for l in code_snippet.split('\n') if l.strip()]
+    if not lines:
+        return 0.0
+    total = sum(len(enc.encode(l)) for l in lines)
+    return total / len(lines)
+
+enc = tiktoken.get_encoding('cl100k_base')
+snippets = {
+    'Python':     'def add(a, b):\n    return a + b\nresult = add(1, 2)',
+    'JavaScript': 'const add = (a, b) =&gt; a + b;\nconst result = add(1, 2);',
+    'Java':       'public int add(int a, int b) { return a + b; }\nint result = add(1, 2);',
+    'SQL':        'SELECT id, name FROM users WHERE active = 1 ORDER BY name ASC;',
+    'LaTeX':      '\\frac{\\partial L}{\\partial w} = \\sum_{i=1}^{n} x_i (y_i - \\hat{y}_i)',
+    'JSON':       '{&quot;model&quot;: &quot;gpt-4&quot;, &quot;temperature&quot;: 0.7, &quot;max_tokens&quot;: 512}',
+    'Regex':      '^(?:[0-9]{1,3}\\.){3}[0-9]{1,3}$',
+    'Bash':       'for f in *.py; do python $f --output results/; done',
+}
+print(f'{&quot;Language&quot;:&lt;14} {&quot;Tok/Line&quot;:&gt;10} {&quot;Total Tok&quot;:&gt;10}')
+for lang, code in snippets.items():
+    tpl = tokens_per_line(code, enc)
+    total = len(enc.encode(code))
+    print(f'{lang:&lt;14} {tpl:&gt;10.2f} {total:&gt;10}')
+</code></pre>
+<h2>Code Tokenization Characteristics</h2>
+<table>
+<thead>
+<tr>
+<th>Language</th>
+<th>Avg Tokens/Line</th>
+<th>Key Tokenization Artifact</th>
+<th>Indentation Handling</th>
+<th>Operator Splitting</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Python</td>
+<td>6–10</td>
+<td>Ġ prefix on space tokens; merged indent blocks</td>
+<td>4 spaces → 1–4 tokens (tokenizer-dependent)</td>
+<td>== as 1 token; // as 2 tokens usually</td>
+</tr>
+<tr>
+<td>JavaScript</td>
+<td>5–9</td>
+<td>{ } merge with preceding token; =&gt; split</td>
+<td>Braces not indented; space after { is separate</td>
+<td>=&gt; may be 1–2 tokens; === is 2–3 tokens</td>
+</tr>
+<tr>
+<td>Java</td>
+<td>7–12</td>
+<td>Long class/method names split at case boundaries</td>
+<td>Braces on same or next line; indentation less semantic</td>
+<td>-&gt; lambda arrow: 1–2 tokens</td>
+</tr>
+<tr>
+<td>SQL</td>
+<td>4–8</td>
+<td>UPPERCASE keywords often single tokens; lowercase variants split</td>
+<td>No indentation semantics</td>
+<td>!= and &lt;&gt; both tokenize as 2 tokens</td>
+</tr>
+<tr>
+<td>LaTeX</td>
+<td>8–15</td>
+<td>Backslash sequences: \frac splits into 2–3 tokens</td>
+<td>No indentation; heavy use of { } braces</td>
+<td>_ and ^ as single tokens; subscripts split</td>
+</tr>
+<tr>
+<td>JSON</td>
+<td>3–6</td>
+<td>Colon and quotes often merge with key tokens</td>
+<td>No semantic indentation</td>
+<td>: usually 1 token; {} and [] as 1 token each</td>
+</tr>
+</tbody>
+</table>
+<h2>Token Alignment to Source Code Lines</h2>
+<p>IDE tooling for code models — inline completions, error explanations, span highlighting — requires mapping token indices back to source line and column positions. BPE tokens do not align to line boundaries: a token may span a newline character, and a single logical line may produce dozens of tokens. To build the token-to-line mapping, reconstruct the character offset of each token by decoding prefix token sequences, then binary-search against the newline positions of the original source string.</p>
+<p>The HumanEval benchmark uses code in a specific format: function signature followed by docstring followed by implementation. Tokenizing this format with different tokenizers produces different prompt lengths, affecting the number of completion tokens available within the model's context window. Code models fine-tuned with a specific tokenizer must use that same tokenizer at inference time — cross-tokenizer evaluation invalidates token count comparisons across papers.</p>
+<h2>Fine-Tuning Code Models — Tokenizer Implications</h2>
+<blockquote>
+<p><strong>Check Operator Merging Before Fine-Tuning</strong>: When fine-tuning code models, check that the tokenizer correctly merges common operators in your target language — some tokenizers split '-&gt;' into 2 tokens and '=&gt;' into 2 tokens, affecting token budget predictions by 10–20%. Run the indentation and operator analysis on a representative sample of your training code before committing to a tokenizer, and prefer code-specific vocabularies (StarCoder, CodeLlama) for code-heavy workloads to minimise fertility and maximise effective context window usage.</p>
+</blockquote>
+<ul>
+<li>Use code-specific tokenizers (StarCoder, CodeLlama) for code-heavy tasks — 15–30% lower fertility than GPT-2.</li>
+<li>Indentation is semantic in Python: normalise to spaces before tokenizing to avoid tab/space fertility differences.</li>
+<li>Operator splitting affects token budget: test ==, !=, -&gt;, =&gt;, := on your target tokenizer before estimating costs.</li>
+<li>camelCase identifiers may tokenize as 1 token if they appear frequently in training; rare identifiers always split.</li>
+<li>SQL UPPERCASE keywords tokenize better than lowercase variants in tokenizers trained on mixed-case corpora.</li>
+<li>HumanEval evaluations must match training tokenizer exactly — cross-tokenizer comparisons are invalid.</li>
+</ul>
+<p>A practical code tokenization workflow: (1) sample 1000 lines of production code in your target language, (2) tokenize with each candidate tokenizer and compute mean tokens per line, (3) select the tokenizer with lowest fertility for your dominant language, (4) verify operator and identifier splitting for the 20 most common constructs in your codebase, (5) measure context window headroom with your typical prompt template. This analysis typically takes under an hour and prevents costly mis-estimates at production scale.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

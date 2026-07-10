@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Kernel Density Estimation (KDE) — Bandwidth Selection | Notes Backup</title>
+  <meta name="description" content="Master kernel density estimation for anomaly detection: the mathematics of p̂(x)=(1/nh)Σ K((x−xᵢ)/h), Silverman&#x27;s rule of thumb, cross-validation bandwidth selection, the curse of dimensionality, and how log-density thresholding compares to parametric alternatives." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Kernel Density Estimation (KDE) — Bandwidth Selection</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Master kernel density estimation for anomaly detection: the mathematics of p̂(x)=(1/nh)Σ K((x−xᵢ)/h), Silverman&#x27;s rule of thumb, cross-validation bandwidth selection, the curse of dimensionality, and how log-density thresholding compares to parametric alternatives.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Kernel Density Estimation (KDE) — Bandwidth Selection</h1>
+<p>Kernel Density Estimation is a non-parametric method that estimates the density p(x) directly from data without assuming a parametric form. The key hyperparameter — bandwidth h — controls the bias-variance tradeoff. Anomaly detection with KDE is straightforward: compute the log-density −log p̂(x) for each test point and flag those below a threshold. Understanding bandwidth selection and the limitations in high dimensions is essential for reliable deployment.</p>
+<h2>KDE Fundamentals and Kernel Functions</h2>
+<p>The KDE estimate at point x is p̂(x) = (1/nh) Σᵢ K((x−xᵢ)/h) where K is a kernel function satisfying ∫K(u)du=1, K(u)≥0, K(u)=K(−u). The Gaussian kernel K(u)=(1/√2π)exp(−u²/2) is most common for smooth densities. The bandwidth h is the single most important tuning parameter: too small (undersmoothing) produces a spiky density that memorises noise; too large (oversmoothing) blurs genuine structure and misses local anomalies.</p>
+<ul>
+<li>Gaussian kernel: K(u) = (1/√2π)exp(−u²/2) — infinitely differentiable, widely used.</li>
+<li>Epanechnikov kernel: K(u) = 0.75(1−u²)1(|u|≤1) — optimal in mean integrated squared error, compact support.</li>
+<li>Tophat (uniform) kernel: K(u) = 0.5·1(|u|≤1) — simple histogram-like estimate, discontinuous.</li>
+<li>Triangular kernel: K(u) = (1−|u|)·1(|u|≤1) — continuous but not differentiable at 0.</li>
+</ul>
+<pre><code class="language-python">import numpy as np
+
+def gaussian_kernel(u):
+    return np.exp(-0.5 * u ** 2) / np.sqrt(2 * np.pi)
+
+def kde_density(X_train, x_query, h):
+    '''KDE density estimate at query points using Gaussian kernel.'''
+    n, d = X_train.shape
+    scores = np.zeros(len(x_query))
+    for i, xq in enumerate(x_query):
+        diffs = (X_train - xq) / h          # (n, d)
+        k_vals = np.prod(gaussian_kernel(diffs), axis=1)  # product kernel
+        scores[i] = k_vals.mean() / (h ** d)
+    return scores
+
+np.random.seed(0)
+X_train = np.concatenate([
+    np.random.randn(300, 2),
+    np.random.randn(100, 2) + [4, 1]
+])
+h_opt = 1.06 * X_train.std() * len(X_train) ** (-1/5)
+X_query = np.array([[0., 0.], [4., 1.], [8., 8.]])
+densities = kde_density(X_train, X_query, h=h_opt)
+for xq, dens in zip(X_query, densities):
+    print(f'x={xq}  density={dens:.5f}  log-density={np.log(dens+1e-12):.3f}')
+</code></pre>
+<h2>Bandwidth Selection Methods</h2>
+<p>Three main strategies for selecting h: (1) Silverman's rule of thumb: h = 1.06·σ·n^{−1/(d+4)}, optimal for Gaussian data — fast but oversmooths multimodal distributions. (2) Scott's rule: h = n^{−1/(d+4)} uses the identity covariance — equivalent to Silverman's with σ=1. (3) Cross-validation: maximise leave-one-out log-likelihood L(h) = Σᵢ log p̂<em _i="−i">{−i}(xᵢ) where p̂</em> excludes point i — the most robust method but O(n²) cost.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.neighbors import KernelDensity
+from sklearn.model_selection import GridSearchCV
+
+np.random.seed(1)
+X = np.concatenate([
+    np.random.randn(200, 1),
+    np.random.randn(100, 1) * 0.5 + 3.5
+])
+
+# Silverman rule
+h_sil = 1.06 * X.std() * len(X) ** (-0.2)
+print(f'Silverman bandwidth: h = {h_sil:.4f}')
+
+# Cross-validation grid search
+bandwidths = np.logspace(-2, 1, 30)
+grid = GridSearchCV(
+    KernelDensity(kernel='gaussian'),
+    param_grid={'bandwidth': bandwidths},
+    cv=5, scoring='neg_log_loss'
+)
+grid.fit(X)
+h_cv = grid.best_params_['bandwidth']
+print(f'CV-optimal bandwidth: h = {h_cv:.4f}')
+
+kde = KernelDensity(kernel='gaussian', bandwidth=h_cv).fit(X)
+X_test = np.array([[-2.], [0.], [3.5], [6.]])
+log_dens = kde.score_samples(X_test)
+for x, ld in zip(X_test.ravel(), log_dens):
+    print(f'  x={x:5.1f}  log p={ld:.3f}  anomaly_score={-ld:.3f}')
+</code></pre>
+<h2>The Effect of Bandwidth on Density Estimation</h2>
+<p>Bandwidth directly controls the bias-variance tradeoff. Small h memorises each training point (variance dominates); large h produces a uniform-like density (bias dominates). The optimal h minimises the Mean Integrated Squared Error (MISE) = E[∫(p̂(x)−p(x))² dx]. For Gaussian data the MISE-optimal h scales as n^{−4/(d+4)}, which decays very slowly in high dimensions — this is the curse of dimensionality. Visualising the density for a range of h values reveals the tradeoff.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.neighbors import KernelDensity
+
+np.random.seed(2)
+X_1d = np.concatenate([np.random.randn(150), np.random.randn(50)*0.4 + 3]).reshape(-1,1)
+x_grid = np.linspace(-4, 6, 300).reshape(-1, 1)
+
+print('Bandwidth comparison on 1D bimodal mixture:')
+print(f'  {&quot;h&quot;:&gt;6}  {&quot;peak1_dens&quot;:&gt;12}  {&quot;valley_dens&quot;:&gt;13}  {&quot;peak2_dens&quot;:&gt;12}')
+for h in [0.05, 0.15, 0.5, 1.5, 4.0]:
+    kde = KernelDensity(bandwidth=h, kernel='gaussian').fit(X_1d)
+    ld = kde.score_samples(x_grid)
+    dens = np.exp(ld)
+    # Evaluate at key points
+    peak1  = np.exp(kde.score_samples([[0.0]]))[0]
+    valley = np.exp(kde.score_samples([[1.8]]))[0]
+    peak2  = np.exp(kde.score_samples([[3.0]]))[0]
+    print(f'  {h:&gt;6.2f}  {peak1:&gt;12.5f}  {valley:&gt;13.5f}  {peak2:&gt;12.5f}')
+print()
+print('Small h: spiky (high variance). Large h: flat (high bias).')
+print('CV-selected h should preserve both modes.')
+</code></pre>
+<h2>KDE for Anomaly Detection</h2>
+<p>The KDE anomaly score is −log p̂(x). Points with very low estimated density are flagged as anomalies. The threshold is set as the τ-th quantile (e.g., 5th percentile) of log-density scores on normal training data. Unlike parametric models, KDE adapts to the shape of the data without assuming Gaussianity — useful for multimodal or heavy-tailed distributions. The main limitation is scalability: evaluating the density at a query point costs O(n) operations.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.neighbors import KernelDensity
+from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import GridSearchCV
+
+np.random.seed(3)
+X_train = np.random.randn(500, 2)  # normal class
+X_normal_test = np.random.randn(100, 2)
+X_anomaly = np.random.uniform(-6, 6, (30, 2))  # uniform anomalies
+
+bws = np.logspace(-1, 1, 20)
+kde = KernelDensity(kernel='gaussian')
+bw_cv = GridSearchCV(kde, {'bandwidth': bws}, cv=5).fit(X_train)
+h_best = bw_cv.best_params_['bandwidth']
+kde_fit = KernelDensity(bandwidth=h_best).fit(X_train)
+
+log_d_norm = kde_fit.score_samples(X_normal_test)
+log_d_anom = kde_fit.score_samples(X_anomaly)
+threshold = np.percentile(log_d_norm, 5)  # 5th percentile as low-density cut
+
+X_all = np.vstack([X_normal_test, X_anomaly])
+y_all = np.array([0]*100 + [1]*30)
+scores = -kde_fit.score_samples(X_all)  # negate: high score = anomaly
+auroc = roc_auc_score(y_all, scores)
+print(f'Bandwidth (CV): {h_best:.3f}')
+print(f'AUROC: {auroc:.4f}')
+print(f'Normal log-density mean:  {log_d_norm.mean():.3f}')
+print(f'Anomaly log-density mean: {log_d_anom.mean():.3f}')
+</code></pre>
+<h2>Multivariate KDE and the Curse of Dimensionality</h2>
+<p>For d-dimensional data the product kernel is p̂(x) = (1/n·hᵈ) Σᵢ Πⱼ K((xⱼ−xᵢⱼ)/h). The MISE-optimal bandwidth scales as h★ ~ n^{−1/(d+4)}, meaning the convergence rate of KDE deteriorates exponentially with dimension. For d=1 the rate is n^{4/5}; for d=10 it is n^{4/14} ≈ n^{0.286} — far slower. In practice KDE becomes unreliable for d&gt;5 unless the effective intrinsic dimensionality of the data is much lower. Alternatives include GMM, normalizing flows, and random-subspace KDE ensembles.</p>
+<ul>
+<li>For d≤3: KDE with CV bandwidth is highly effective and interpretable.</li>
+<li>For 3&lt;d≤10: consider GMM or a mixture of diagonal Gaussians — parametric but faster.</li>
+<li>For d&gt;10: use normalizing flows (exact likelihood) or isolation-forest-based density proxies.</li>
+<li>Bandwidth decay: h★ ~ n^{-1/(d+4)} — double the dimension, need exponentially more data for the same accuracy.</li>
+<li>Random subspace KDE: fit 1D or 2D KDE on random projections and aggregate — scales better than full-dimensional KDE.</li>
+</ul>
+<h2>Density Estimator Comparison</h2>
+<blockquote>
+<p><strong>KDE Scalability</strong>: KDE density evaluation is O(n·d) per query — expensive for large training sets. Use a ball-tree or KD-tree index (sklearn KernelDensity uses these automatically) to reduce query cost to O(d·log n) for low dimensions. For n&gt;100K or d&gt;10, GMM or normalizing flows will be faster and more accurate.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Parametric</th>
+<th>High-dim</th>
+<th>Training Cost</th>
+<th>Anomaly Score</th>
+<th>Interpretable</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>KDE</td>
+<td>No</td>
+<td>Poor (d&gt;5)</td>
+<td>O(n·d) fit, O(n) query</td>
+<td>−log p̂(x)</td>
+<td>Yes — density plot</td>
+</tr>
+<tr>
+<td>GMM</td>
+<td>Yes (mixture)</td>
+<td>Moderate (diagonal)</td>
+<td>EM, O(n·k·d) per iter</td>
+<td>−log p_GMM(x)</td>
+<td>Yes — components</td>
+</tr>
+<tr>
+<td>Isolation Forest</td>
+<td>No (tree)</td>
+<td>Good</td>
+<td>O(n·log n)</td>
+<td>Mean path length</td>
+<td>Partial</td>
+</tr>
+<tr>
+<td>OC-SVM</td>
+<td>No (kernel)</td>
+<td>Poor</td>
+<td>O(n²)–O(n³)</td>
+<td>Signed distance</td>
+<td>No</td>
+</tr>
+<tr>
+<td>Normalizing Flow</td>
+<td>Semi (bijective NN)</td>
+<td>Good</td>
+<td>O(n·epochs·d)</td>
+<td>−log p_flow(x)</td>
+<td>No — black-box</td>
+</tr>
+</tbody>
+</table>
+<p>KDE excels in low to moderate dimensions with small to medium datasets where interpretability matters. For production anomaly detection at scale, combine KDE-based thresholds on low-dimensional feature projections with faster parametric alternatives for high-dimensional raw input spaces.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

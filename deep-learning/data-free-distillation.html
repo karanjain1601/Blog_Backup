@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Data-Free Knowledge Distillation — Synthesizing Proxy Data | Notes Backup</title>
+  <meta name="description" content="Data-free KD synthesises proxy training data using only the trained teacher model, enabling distillation without access to the original dataset. Covers activation maximisation, BN statistic regularisation, DAFL generator methods, CMI, privacy use cases, and the accuracy gap vs data-dependent KD." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Data-Free Knowledge Distillation — Synthesizing Proxy Data</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Data-free KD synthesises proxy training data using only the trained teacher model, enabling distillation without access to the original dataset. Covers activation maximisation, BN statistic regularisation, DAFL generator methods, CMI, privacy use cases, and the accuracy gap vs data-dependent KD.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Data-Free Knowledge Distillation — Synthesizing Proxy Data</h1>
+<p>Standard knowledge distillation requires the same training data used to train the teacher. When that data is unavailable — due to privacy regulations, proprietary licensing, or simply being discarded after training — distillation cannot proceed. Data-free knowledge distillation (DFKD) solves this by synthesising proxy training data using only the trained teacher model itself. The frozen teacher becomes a supervisory oracle: it can label any synthetic input, and its internal BatchNorm statistics reveal properties of the original training distribution.</p>
+<h2>The Data Access Problem in Standard KD</h2>
+<p>Standard KD transfers knowledge by computing KL divergence between teacher and student outputs on real training data. Without this data, there are no inputs to compute soft targets from. DFKD reframes the problem: generate synthetic inputs that the teacher responds to meaningfully. The teacher's BatchNorm running statistics — stored means and variances at every layer — encode aggregate information about the real training distribution. These statistics become the anchor for generating realistic synthetic images without any real data access.</p>
+<h2>Activation Maximization</h2>
+<p>Activation maximisation is the simplest DFKD approach: optimise a synthetic image z directly in pixel space to maximise the teacher's confidence for a target class. The objective is z* = argmax_z [log p_teacher(y=c|z)]. Without regularisation, this produces adversarial-like images — high-frequency patterns that maximise neuron activations but look nothing like real data. BatchNorm statistics matching is the key regulariser: penalise synthetic images whose intermediate activations deviate from the teacher's stored running statistics. This forces generated images to produce realistic internal representations.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+
+def activation_maximization(teacher: nn.Module, target_class: int,
+                             n_steps: int = 300, lr: float = 0.1,
+                             bn_reg: float = 0.001,
+                             img_shape: tuple = (1, 3, 32, 32)) -&gt; torch.Tensor:
+    &quot;&quot;&quot;Synthesise image by maximising teacher class probability + BN regularisation.&quot;&quot;&quot;
+    teacher.eval()
+    z = torch.randn(*img_shape, requires_grad=True)
+    optimizer = optim.Adam([z], lr=lr)
+    bn_hooks = []
+    for module in teacher.modules():
+        if isinstance(module, nn.BatchNorm2d):
+            mu  = module.running_mean.detach()
+            var = module.running_var.detach()
+            def make_hook(target_mu, target_var):
+                def hook(m, inp, out):
+                    m._bn_loss = (F.mse_loss(out.mean((0, 2, 3)), target_mu) +
+                                  F.mse_loss(out.var((0, 2, 3)),  target_var))
+                return hook
+            bn_hooks.append(module.register_forward_hook(make_hook(mu, var)))
+    for step in range(n_steps):
+        optimizer.zero_grad()
+        out = teacher(z)
+        cls_loss = -F.log_softmax(out, dim=-1)[0, target_class]
+        bn_loss  = sum(m._bn_loss for m in teacher.modules()
+                       if isinstance(m, nn.BatchNorm2d) and hasattr(m, '_bn_loss'))
+        (cls_loss + bn_reg * bn_loss).backward()
+        optimizer.step()
+    for h in bn_hooks:
+        h.remove()
+    return z.detach()
+
+print('Activation maximisation synthesises class-conditional images from teacher only.')
+print('BN regularisation ensures generated images have realistic activation statistics.')
+</code></pre>
+<h2>BatchNorm Statistic Regularization</h2>
+<p>Every BatchNorm2d layer stores running_mean and running_var computed over the training data during training. For a synthetic image to produce realistic intermediate activations, its activations at each BN layer should match these stored statistics. The BN statistics loss is: L_BN = sum_l [MSE(mean_generated_l, mean_running_l) + MSE(var_generated_l, var_running_l)]. This loss is differentiable with respect to the input image z and can be backpropagated through the frozen teacher to shape the generated image. BN matching is what distinguishes good DFKD from naive activation maximisation.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from typing import List, Tuple
+
+def get_teacher_bn_stats(teacher: nn.Module) -&gt; List[Tuple[torch.Tensor, torch.Tensor]]:
+    &quot;&quot;&quot;Return (running_mean, running_var) for every BatchNorm2d in teacher.&quot;&quot;&quot;
+    return [(m.running_mean.detach().clone(), m.running_var.detach().clone())
+            for m in teacher.modules() if isinstance(m, nn.BatchNorm2d)]
+
+def bn_stat_matching_loss(teacher: nn.Module, x: torch.Tensor,
+                           target_stats: List[Tuple[torch.Tensor, torch.Tensor]]) -&gt; torch.Tensor:
+    &quot;&quot;&quot;Penalise mismatch between x's BN activation stats and teacher's stored stats.&quot;&quot;&quot;
+    losses, hooks = [], []
+    bn_modules = [m for m in teacher.modules() if isinstance(m, nn.BatchNorm2d)]
+    for i, module in enumerate(bn_modules):
+        t_mean, t_var = target_stats[i]
+        def make_hook(tm, tv):
+            def hook(m, inp, out):
+                losses.append(F.mse_loss(out.mean((0, 2, 3)), tm) +
+                               F.mse_loss(out.var((0, 2, 3)),  tv))
+            return hook
+        hooks.append(module.register_forward_hook(make_hook(t_mean, t_var)))
+    teacher.eval()
+    _ = teacher(x)
+    for h in hooks:
+        h.remove()
+    return torch.stack(losses).mean() if losses else x.new_tensor(0.0)
+
+teacher = nn.Sequential(nn.Conv2d(3, 16, 3, padding=1), nn.BatchNorm2d(16), nn.ReLU(),
+                         nn.Conv2d(16, 8, 3, padding=1), nn.BatchNorm2d(8), nn.ReLU())
+real_stats = get_teacher_bn_stats(teacher)
+gen_image  = torch.randn(4, 3, 32, 32, requires_grad=True)
+loss = bn_stat_matching_loss(teacher, gen_image, real_stats)
+print(f'BN stat matching loss (random image): {loss.item():.4f}')
+print('Minimising this loss during synthesis yields realistic internal activations.')
+</code></pre>
+<h2>Generator-Based Methods — DAFL and CMI</h2>
+<p>DAFL (Data-Free Learning of Student Networks, Chen et al. 2019) replaces per-image optimisation with a learned generator G. G takes a noise vector z and produces synthetic images x_gen = G(z). G is trained adversarially: produce images that maximise teacher confidence and activation magnitudes while maintaining diversity. The student S is simultaneously trained to match teacher outputs on generated data. CMI (Contrastive Model Inversion, Fang et al. 2022) improves diversity by adding a contrastive loss that encourages different samples to produce distinct activation patterns, reducing mode collapse in the generated distribution.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+
+class DataFreeGenerator(nn.Module):
+    def __init__(self, z_dim=100, channels=3, size=32):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(z_dim, 512), nn.BatchNorm1d(512), nn.ReLU(),
+            nn.Linear(512, channels * size * size), nn.Tanh())
+        self.out_shape = (channels, size, size)
+
+    def forward(self, z):
+        return self.net(z).view(z.size(0), *self.out_shape)
+
+def train_dfkd(teacher, student, generator, n_steps=100, z_dim=100, B=32, T=4.0):
+    &quot;&quot;&quot;Data-free KD: jointly train generator + student using frozen teacher.&quot;&quot;&quot;
+    teacher.eval()
+    opt_g = optim.Adam(generator.parameters(), lr=1e-3)
+    opt_s = optim.Adam(student.parameters(),   lr=1e-3)
+    for step in range(n_steps):
+        z = torch.randn(B, z_dim)
+        with torch.no_grad():
+            soft = F.softmax(teacher(generator(z)) / T, dim=-1)
+        opt_s.zero_grad()
+        kd = F.kl_div(F.log_softmax(student(generator(z).detach()) / T, dim=-1),
+                       soft, reduction='batchmean') * T ** 2
+        kd.backward(); opt_s.step()
+        opt_g.zero_grad()
+        g_loss = -teacher(generator(torch.randn(B, z_dim))).softmax(-1).max(-1).values.mean()
+        g_loss.backward(); opt_g.step()
+        if (step + 1) % 25 == 0:
+            print(f'Step {step+1}: KD={kd.item():.3f}  G={g_loss.item():.3f}')
+
+teacher = nn.Sequential(nn.Flatten(), nn.Linear(3072, 10))
+student = nn.Sequential(nn.Flatten(), nn.Linear(3072, 10))
+gen = DataFreeGenerator()
+train_dfkd(teacher, student, gen, n_steps=50)
+</code></pre>
+<h2>Privacy and GDPR Use Cases</h2>
+<p>One compelling motivation for DFKD is privacy preservation. Training data often contains personal information — medical records, user communications, private images — that cannot be shared or stored after training under GDPR Article 17 (right to erasure). Once a model is trained, the original data can be legally deleted, leaving only the model weights. DFKD allows knowledge transfer from the frozen teacher to a smaller student without ever accessing the deleted data, enabling model compression and deployment optimisation while maintaining full regulatory compliance.</p>
+<h2>Accuracy Gap vs Data-Dependent KD</h2>
+<p>Data-free KD consistently underperforms data-dependent KD. At low compression (retaining &gt;75% of teacher parameters), the gap is 1-2%. At aggressive compression (&lt;25% of parameters), the gap widens to 4-8%. CMI achieves the smallest gap by maximising mutual information between generated samples. The fundamental bottleneck is distribution shift: even the best generators do not perfectly replicate the training distribution, so the student sees a slightly different distribution than the teacher was optimised for.</p>
+<pre><code class="language-python">import numpy as np
+
+# Accuracy comparison: data-free KD methods vs data-dependent KD on CIFAR-100
+# Teacher: ResNet-34 (77.8%), Student: ResNet-18 family at various compressions
+compression_pct = [100, 75, 50, 25, 10]  # student param % relative to teacher
+
+data_dependent = [77.8, 76.4, 75.1, 71.3, 63.2]  # standard KD with real data
+dfkd_dafl      = [77.8, 73.8, 72.1, 67.4, 58.1]  # DAFL (Chen et al. 2019)
+dfkd_cmi       = [77.8, 74.9, 73.2, 69.1, 60.8]  # CMI  (Fang et al. 2022)
+dfkd_zeroshot  = [77.8, 72.1, 70.4, 65.2, 55.7]  # Zero-shot KD (Nayak 2019)
+
+print(f'{&quot;Compression&quot;:&gt;12}  {&quot;Data-Dep&quot;:&gt;9}  {&quot;DAFL&quot;:&gt;7}  {&quot;CMI&quot;:&gt;7}  {&quot;ZeroShot&quot;:&gt;9}')
+print(f'{&quot;(% params)&quot;:&gt;12}  {&quot;(real)&quot;: &gt;9}  {&quot;(DFKD)&quot;:&gt;7}  {&quot;(DFKD)&quot;:&gt;7}  {&quot;(DFKD)&quot;:&gt;9}')
+print('-' * 55)
+for c, dd, da, cm, zs in zip(compression_pct, data_dependent, dfkd_dafl, dfkd_cmi, dfkd_zeroshot):
+    print(f'{c:&gt;11}%  {dd:&gt;9.1f}  {da:&gt;7.1f}  {cm:&gt;7.1f}  {zs:&gt;9.1f}')
+
+gaps_dafl = [dd - da for dd, da in zip(data_dependent, dfkd_dafl)]
+gaps_cmi  = [dd - cm for dd, cm in zip(data_dependent, dfkd_cmi)]
+print(f'\nMean accuracy gap — DAFL: {np.mean(gaps_dafl):.1f}%  CMI: {np.mean(gaps_cmi):.1f}%')
+print(f'Typical data-free quality gap: 2-5% vs data-dependent KD.')
+</code></pre>
+<h2>Fast-DFKD and Amortized Generation</h2>
+<p>Fast-DFKD (Fang et al. 2021) reduces the computational cost of DFKD through meta-learning. Rather than training a new generator from scratch for each teacher model, Fast-DFKD meta-learns a generator initialisation that adapts quickly to any teacher with only a few gradient steps. The meta-learned initialisation captures general visual priors (edges, textures, shapes) that are useful for any classification teacher, requiring only task-specific fine-tuning. Zero-shot KD (Nayak et al. 2019) is another fast approach: it samples from a Dirichlet distribution conditioned on the teacher's class statistics, bypassing neural synthesis entirely at lower accuracy.</p>
+<blockquote>
+<p><strong>Data-Free KD Cannot Fully Recover Data-Dependent KD Accuracy</strong>: The 2-5% accuracy gap between data-free and data-dependent KD is a fundamental information-theoretic limitation. The teacher weights encode information about training data, but not all of it. Generated images can match BN statistics globally but not capture rare examples, class boundaries, or domain-specific patterns. If accuracy recovery is critical, consider using even a small amount of real data — 100 samples per class — to anchor the synthesis. This dramatically closes the gap at minimal privacy cost.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Data Required</th>
+<th>Generator Type</th>
+<th>Accuracy vs Real KD</th>
+<th>Privacy Safe</th>
+<th>Training Cost</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Activation maximisation</td>
+<td>None</td>
+<td>Per-image optimisation</td>
+<td>-4 to -8%</td>
+<td>Yes</td>
+<td>High (per-image opt)</td>
+</tr>
+<tr>
+<td>DAFL (Chen 2019)</td>
+<td>None</td>
+<td>GAN generator</td>
+<td>-3 to -5%</td>
+<td>Yes</td>
+<td>Medium (train G once)</td>
+</tr>
+<tr>
+<td>CMI (Fang 2022)</td>
+<td>None</td>
+<td>GAN + contrastive</td>
+<td>-2 to -4%</td>
+<td>Yes</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>Zero-shot KD (Nayak 2019)</td>
+<td>None</td>
+<td>Dirichlet sampling</td>
+<td>-4 to -7%</td>
+<td>Yes</td>
+<td>Low (no generator)</td>
+</tr>
+<tr>
+<td>Fast-DFKD</td>
+<td>None</td>
+<td>Meta-learned generator</td>
+<td>-3 to -5%</td>
+<td>Yes</td>
+<td>Low (fast adaptation)</td>
+</tr>
+<tr>
+<td>Data-dependent KD</td>
+<td>Full training set</td>
+<td>Real data</td>
+<td>Baseline</td>
+<td>No</td>
+<td>Low (no generator)</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>BN statistic matching is the key regulariser: without it, generated images are adversarial-like noise.</li>
+<li>Temperature for DFKD generator training: use T=20 (very soft) to maximise gradient signal.</li>
+<li>Generator diversity: condition G on one-hot class labels for class-conditional image synthesis.</li>
+<li>DAFL objective: maximise teacher confidence + activation magnitude + sample diversity (three terms).</li>
+<li>GDPR compliance: DFKD allows legal model compression when training data must be deleted post-training.</li>
+<li>Quality gap closes with data: 100 real samples per class reduces the gap by ~50% vs fully data-free.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

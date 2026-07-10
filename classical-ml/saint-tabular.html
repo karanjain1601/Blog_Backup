@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SAINT — Self-Attention and Intersample Attention for Tabular Data | Notes Backup</title>
+  <meta name="description" content="SAINT alternates between row-wise self-attention (over features) and intersample attention (over other training rows) to combine feature interaction modeling with instance-based learning." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>SAINT — Self-Attention and Intersample Attention for Tabular Data</h1>
+      <ul class='note-meta'><li><strong>description:</strong> SAINT alternates between row-wise self-attention (over features) and intersample attention (over other training rows) to combine feature interaction modeling with instance-based learning.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>SAINT — Self-Attention and Intersample Attention for Tabular Data</h1>
+<p>SAINT (Self-Attention and Intersample Attention Transformer, Somepalli et al. 2021) addresses a key limitation of FT-Transformer: attention is computed only across features of a single row, ignoring relationships between training samples. SAINT adds a second attention axis — across rows — effectively combining a feature-interaction Transformer with a learned k-NN in embedding space.</p>
+<h2>Two Types of Attention</h2>
+<p>Each SAINT block contains two sequential sub-blocks. Row attention (identical to FT-Transformer) processes features within a single sample. Intersample attention processes the representation of the same feature across a batch of samples.</p>
+<ul>
+<li>Row attention: for one sample, attend over F feature tokens — captures feature interactions within a row</li>
+<li>Intersample attention: for a mini-batch of B samples, attend over B sample representations of the same feature position</li>
+<li>Alternating pattern: [Row Attn → Intersample Attn] × N_layers</li>
+<li>Intersample attention lets the model ask: which other training samples are most informative for predicting the current sample?</li>
+<li>Computational cost: O(B²) per intersample attention — quadratic in batch size, not dataset size</li>
+<li>At inference time, the batch acts as the context — similar samples in the batch reinforce predictions</li>
+</ul>
+<h2>Row Attention Block</h2>
+<p>The row attention block is a standard Transformer encoder layer applied to the F feature tokens of a single sample. It is identical in design to one FT-Transformer layer.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from torch import Tensor
+
+class RowAttentionBlock(nn.Module):
+    &quot;&quot;&quot;Self-attention over features within each row (identical to FT-Transformer layer).&quot;&quot;&quot;
+    def __init__(self, d_token: int, n_heads: int, d_ffn: int, dropout: float = 0.1):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(
+            embed_dim=d_token, num_heads=n_heads,
+            dropout=dropout, batch_first=True
+        )
+        self.ff = nn.Sequential(
+            nn.LayerNorm(d_token),
+            nn.Linear(d_token, d_ffn),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_ffn, d_token),
+            nn.Dropout(dropout)
+        )
+        self.norm1 = nn.LayerNorm(d_token)
+        self.norm2 = nn.LayerNorm(d_token)
+
+    def forward(self, x: Tensor) -&gt; Tensor:  # x: (B, F, d)
+        # Self-attention over features (F tokens)
+        attn_out, _ = self.attn(x, x, x)
+        x = self.norm1(x + attn_out)
+        # Feed-forward
+        x = self.norm2(x + self.ff(x))
+        return x  # (B, F, d)
+</code></pre>
+<h2>Intersample Attention Block</h2>
+<p>Intersample attention transposes the batch and feature dimensions: for each feature position, all B sample representations attend to each other. This produces a B×B attention matrix per feature — the model learns which samples are relevant for predicting each other.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from torch import Tensor
+
+class IntersampleAttentionBlock(nn.Module):
+    &quot;&quot;&quot;Self-attention over samples for each feature position.&quot;&quot;&quot;
+    def __init__(self, d_token: int, n_heads: int, d_ffn: int, dropout: float = 0.1):
+        super().__init__()
+        self.attn  = nn.MultiheadAttention(
+            embed_dim=d_token, num_heads=n_heads,
+            dropout=dropout, batch_first=True
+        )
+        self.norm1 = nn.LayerNorm(d_token)
+        self.norm2 = nn.LayerNorm(d_token)
+        self.ff    = nn.Sequential(
+            nn.Linear(d_token, d_ffn), nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_ffn, d_token), nn.Dropout(dropout)
+        )
+
+    def forward(self, x: Tensor) -&gt; Tensor:  # x: (B, F, d)
+        B, F, d = x.shape
+        # Transpose: treat each feature position as a sequence of B samples
+        x_t = x.permute(1, 0, 2)          # (F, B, d)
+        attn_out, _ = self.attn(x_t, x_t, x_t)  # attend over B samples
+        x_t = self.norm1(x_t + attn_out)
+        x_t = self.norm2(x_t + self.ff(x_t))
+        return x_t.permute(1, 0, 2)        # back to (B, F, d)
+</code></pre>
+<h2>SAINT Full Forward Pass</h2>
+<p>SAINT stacks alternating row and intersample attention blocks. The [CLS] token (prepended to the feature sequence) aggregates global information and drives the prediction.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from torch import Tensor
+
+class SAINT(nn.Module):
+    def __init__(self, n_features: int, d_token: int, n_heads: int,
+                 d_ffn: int, n_layers: int, n_classes: int):
+        super().__init__()
+        # Feature tokenization (numerical, same as FT-Transformer)
+        self.tokenizer = nn.Linear(1, d_token)  # simplified: shared projection
+        self.cls_token  = nn.Parameter(torch.zeros(1, 1, d_token))
+
+        self.row_blocks = nn.ModuleList([
+            RowAttentionBlock(d_token, n_heads, d_ffn) for _ in range(n_layers)
+        ])
+        self.isample_blocks = nn.ModuleList([
+            IntersampleAttentionBlock(d_token, n_heads, d_ffn) for _ in range(n_layers)
+        ])
+        self.head = nn.Sequential(
+            nn.LayerNorm(d_token),
+            nn.Linear(d_token, n_classes)
+        )
+
+    def forward(self, x: Tensor) -&gt; Tensor:  # x: (B, F)
+        # Tokenize each feature independently
+        tokens = self.tokenizer(x.unsqueeze(-1))           # (B, F, d)
+        cls    = self.cls_token.expand(x.size(0), -1, -1)  # (B, 1, d)
+        tokens = torch.cat([cls, tokens], dim=1)            # (B, F+1, d)
+
+        # Alternate row and intersample attention
+        for row_blk, isample_blk in zip(self.row_blocks, self.isample_blocks):
+            tokens = row_blk(tokens)
+            tokens = isample_blk(tokens)
+
+        return self.head(tokens[:, 0])  # CLS token → prediction
+</code></pre>
+<h2>SCARF-Style Pretraining</h2>
+<p>SAINT uses SCARF (Self-supervised Contrastive learning using random Feature Corruption) for pretraining: randomly replace each feature value with a value sampled from the empirical marginal distribution of that feature. The model learns to produce similar representations for clean and corrupted views of the same row (contrastive loss).</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch import Tensor
+
+def scarf_corrupt(x: Tensor, corruption_rate: float = 0.6) -&gt; Tensor:
+    &quot;&quot;&quot;Replace each feature with a random value from its empirical marginal.&quot;&quot;&quot;
+    B, F = x.shape
+    mask = torch.bernoulli(torch.full((B, F), corruption_rate)).bool()
+    # Sample random row indices for each position to use as replacement
+    random_rows = torch.randint(0, B, (B, F))
+    x_corrupt   = x.clone()
+    for j in range(F):
+        x_corrupt[mask[:, j], j] = x[random_rows[mask[:, j], j], j]
+    return x_corrupt
+
+class SCARFLoss(nn.Module):
+    def __init__(self, temperature: float = 0.07):
+        super().__init__()
+        self.temperature = temperature
+
+    def forward(self, z_clean: Tensor, z_corrupt: Tensor) -&gt; Tensor:
+        z1 = F.normalize(z_clean,   dim=-1)  # (B, d)
+        z2 = F.normalize(z_corrupt, dim=-1)  # (B, d)
+        logits = z1 @ z2.T / self.temperature  # (B, B)
+        labels = torch.arange(z1.size(0), device=z1.device)
+        return F.cross_entropy(logits, labels)  # InfoNCE loss
+</code></pre>
+<hr />
+<h2>SAINT vs Other Tabular Models</h2>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Attention Type</th>
+<th>Pretraining</th>
+<th>Complexity</th>
+<th>Benchmark Performance</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FT-Transformer</td>
+<td>Row only (feature × feature)</td>
+<td>MLM-style optional</td>
+<td>O(F²) per layer</td>
+<td>Competitive with XGBoost on large datasets</td>
+</tr>
+<tr>
+<td>SAINT</td>
+<td>Row + Intersample</td>
+<td>SCARF contrastive</td>
+<td>O(F²) + O(B²) per layer</td>
+<td>Generally outperforms FT-Transformer</td>
+</tr>
+<tr>
+<td>TabNet</td>
+<td>Sequential sparse feature selection</td>
+<td>Reconstruction pretraining</td>
+<td>O(N_steps × F)</td>
+<td>Often behind FT-Transformer and SAINT</td>
+</tr>
+<tr>
+<td>XGBoost</td>
+<td>None (greedy splits)</td>
+<td>None</td>
+<td>O(n log n) per tree</td>
+<td>State-of-the-art on most tabular benchmarks</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Intersample Attention Cost</strong>: Intersample attention is quadratic in batch size O(B²). For B=512, this means 262,144 attention score computations per feature position per layer. Keep batch sizes moderate (128–512) and monitor GPU memory. At inference, predictions improve when the batch contains diverse, representative samples from the training distribution.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<ul>
+<li>SAINT combines row attention (feature interactions) with intersample attention (sample similarity) in alternating blocks</li>
+<li>Intersample attention is analogous to a learned soft k-NN: similar training samples attend to each other</li>
+<li>SCARF pretraining uses marginal-distribution feature corruption with contrastive InfoNCE loss</li>
+<li>SAINT generally outperforms FT-Transformer and TabNet but at higher computational cost</li>
+<li>O(B²) intersample attention cost requires careful batch size selection to avoid memory issues</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

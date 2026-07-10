@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Common Crawl Processing for LLM Pretraining | Notes Backup</title>
+  <meta name="description" content="The multi-stage pipeline for extracting, filtering, and cleaning web-crawled text from Common Crawl WARC files into high-quality pretraining data — as used in C4, The Pile, RedPajama, and Dolma." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Common Crawl Processing for LLM Pretraining</h1>
+      <ul class='note-meta'><li><strong>description:</strong> The multi-stage pipeline for extracting, filtering, and cleaning web-crawled text from Common Crawl WARC files into high-quality pretraining data — as used in C4, The Pile, RedPajama, and Dolma.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Common Crawl Processing for LLM Pretraining</h1>
+<p>Common Crawl is a nonprofit organization that crawls the web continuously and releases its data publicly as WARC (Web ARChive) files. Each monthly snapshot contains 2–3 billion pages, 50–100 TB of compressed HTML, and 200+ million unique domains — making it the single largest and most commonly used source of web text for LLM pretraining. Raw Common Crawl cannot be fed directly to a model: it contains duplicate content at multiple granularities (exact copies, near-duplicates, and repeated boilerplate), multilingual text spanning hundreds of languages, adult and offensive material, search-engine-optimised spam, and enormous quantities of low-quality machine-generated pages. Every major open pretraining corpus — C4, The Pile, RedPajama-v1, Dolma, FineWeb, and DCLM-Baseline — applies a multi-stage processing pipeline that transforms raw WARC archives into curated, filtered text suitable for training language models at scale.</p>
+<h2>Overview</h2>
+<p>The Common Crawl processing pipeline decomposes into five sequential stages applied in order of increasing computational cost. Stage 1 is WARC extraction: reading archive records, converting HTML to plain text with a boilerplate-removal library, and discarding non-textual content types. Stage 2 is language identification: running a fast n-gram classifier (fastText LID-176) to keep only documents in the target language(s). Stage 3 is heuristic quality filtering: applying deterministic rules for document length, punctuation density, symbol ratio, stop-word fraction, and n-gram repetition. Stage 4 is classifier-based filtering: scoring documents against a supervised quality model trained on reference text (Wikipedia, books, curated web) and discarding low-scoring documents. Stage 5 is deduplication: removing near-duplicate documents at the URL, paragraph, and document level using MinHash LSH or suffix array techniques. The ordering is intentional — cheap filters run first to minimize the data volume that reaches expensive downstream steps. Applying LangID before heuristics, and heuristics before the quality classifier, can reduce total compute by 40–60% relative to running all stages in parallel.</p>
+<table>
+<thead>
+<tr>
+<th>Dataset</th>
+<th>CC Source</th>
+<th>Filtering Stages</th>
+<th>Final Size</th>
+<th>Used By</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>C4</td>
+<td>CC 2019-18 (one snapshot)</td>
+<td>langdetect LangID, C4 heuristic rules, exact-line dedup</td>
+<td>180 GB / ~156B tokens</td>
+<td>T5, Flan-T5, mT5</td>
+</tr>
+<tr>
+<td>The Pile</td>
+<td>CC + 22 curated sources</td>
+<td>LangID, Gopher-style heuristic, quality-weighted sampling</td>
+<td>825 GB raw (~300B tokens)</td>
+<td>GPT-NeoX-20B, Pythia</td>
+</tr>
+<tr>
+<td>RedPajama-v1</td>
+<td>Five CC snapshots</td>
+<td>CCNet: fastText LangID + n-gram LM perplexity + heuristic</td>
+<td>1.2 TB (~1.2T tokens)</td>
+<td>MPT-7B, OpenLLaMA</td>
+</tr>
+<tr>
+<td>Dolma</td>
+<td>CC + S2ORC + Wikipedia + C4 + others</td>
+<td>fastText LangID, Gopher rules, URL blocklist, MinHash dedup</td>
+<td>3 TB (~3T tokens)</td>
+<td>OLMo-1B / 7B</td>
+</tr>
+<tr>
+<td>FineWeb</td>
+<td>95 CC snapshots (2013–2024)</td>
+<td>fastText LangID, Gopher heuristics, quality classifier, MinHash dedup</td>
+<td>44 TB / 15T tokens</td>
+<td>SmolLM, custom runs</td>
+</tr>
+<tr>
+<td>DCLM-Baseline</td>
+<td>CC WARC (full crawl)</td>
+<td>fastText LangID, OH-2.5 heuristics, fastText quality classifier</td>
+<td>3.8T tokens</td>
+<td>DCLM reference LM</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Filtering Is Non-Negotiable</strong>: Common Crawl contains substantial amounts of duplicate content, adult content, and low-quality text — skipping quality filtering produces models that score 5–10 PPL points worse on standard benchmarks; always filter aggressively</p>
+</blockquote>
+<h2>WARC to Text Extraction</h2>
+<p>WARC files store raw HTTP request and response records produced by the web crawler. Each WARC response record contains the full HTTP response: status line, response headers, and body. The extraction pipeline must handle several concerns simultaneously: (a) skipping non-HTML content types — images, CSS, JavaScript, PDF, XML sitemaps, JSON feeds — which would produce garbage if passed to an HTML parser; (b) detecting and normalizing character encoding from HTML meta tags or HTTP Content-Type headers, since Common Crawl pages arrive in dozens of encodings; (c) removing HTML boilerplate — navigation menus, sidebars, cookie consent banners, pagination controls, footers — while keeping the main article or body text. Trafilatura is the current state-of-the-art boilerplate removal library, outperforming BeautifulSoup-based heuristics, Readability/lxml, and newspaper3k on precision-recall benchmarks over news and Wikipedia-style pages. For very large-scale pipelines where Python overhead is prohibitive, Resiliparse (from the WARC-DL toolkit) provides a C++ core with Python bindings and achieves 2–3× the throughput of trafilatura at the cost of slightly lower precision on noisy pages.</p>
+<pre><code class="language-python">import gzip
+from io import BytesIO
+from pathlib import Path
+
+import trafilatura
+from warcio.archiveiterator import ArchiveIterator
+
+def extract_text_from_warc(warc_path: str) -&gt; list[dict]:
+    &quot;&quot;&quot;Extract cleaned text from a WARC file using trafilatura for boilerplate removal.&quot;&quot;&quot;
+    records = []
+    opener = gzip.open if warc_path.endswith(&quot;.gz&quot;) else open
+    with opener(warc_path, &quot;rb&quot;) as stream:
+        for record in ArchiveIterator(stream):
+            if record.rec_type != &quot;response&quot;:
+                continue
+            url = record.rec_headers.get_header(&quot;WARC-Target-URI&quot;, &quot;&quot;)
+            content_type = record.http_headers.get_header(&quot;Content-Type&quot;, &quot;&quot;)
+            if &quot;text/html&quot; not in content_type:
+                continue
+            payload = record.content_stream().read()
+            text = trafilatura.extract(
+                payload,
+                include_comments=False,
+                include_tables=True,
+                no_fallback=False,
+                favor_precision=True,
+            )
+            if text and len(text.split()) &gt;= 20:
+                records.append({&quot;url&quot;: url, &quot;text&quot;: text})
+    return records
+
+if __name__ == &quot;__main__&quot;:
+    results = extract_text_from_warc(&quot;CC-MAIN-20240101-warc.gz&quot;)
+    print(f&quot;Extracted {len(results)} documents from WARC&quot;)
+</code></pre>
+<p>The warcio library provides a lazy Python iterator over WARC records, handling both plain and gzip-compressed archives transparently. The ArchiveIterator yields typed record objects with rec_type attributes: 'request', 'response', 'warcinfo', 'metadata', and 'resource'. Only 'response' records contain useful page content. The HTTP Content-Type check is critical: many WARC records contain non-HTML responses — around 30% of raw WARC records are images, JavaScript, CSS, or binary files — and skipping these early prevents expensive and pointless calls to the HTML extractor. The favor_precision=True flag in trafilatura makes the library prefer returning nothing over returning low-confidence boilerplate fragments, which produces cleaner output at the cost of ~5% more empty responses. The minimum word count check (≥ 20 words) after extraction acts as a final safeguard against very short page fragments, landing pages with minimal copy, or pages where trafilatura extracted only a title.</p>
+<h2>Language Identification</h2>
+<p>Raw Common Crawl is approximately 45% English by word count, with Chinese, German, French, Japanese, Spanish, and Russian each contributing 2–5%, and hundreds of other languages making up the remainder. Language identification (LangID) is applied early in the pipeline because it is computationally cheap — sub-millisecond per document — and it eliminates more than half the data immediately, dramatically reducing the load on expensive downstream operations. The fastText LID-176 model (lid.176.bin, downloadable from the fastText project page) identifies 176 languages and achieves greater than 98% accuracy on balanced benchmarks. It uses character n-gram bag-of-words features, making it robust to short texts, code-mixed content, and unusual Unicode scripts. The confidence threshold is a key hyperparameter: a threshold of 0.65 is the FineWeb standard and provides a good balance between keeping clean English and excluding borderline multilingual pages. CCNet (Wenzek et al. 2020) used a different approach — language-model perplexity scoring with a character-level KenLM model — which is more expensive but produces higher-quality monolingual corpora.</p>
+<pre><code class="language-python">import fasttext
+from collections import defaultdict
+from pathlib import Path
+
+def filter_by_language(
+    documents: list[dict],
+    target_langs: frozenset = frozenset({&quot;en&quot;}),
+    model_path: str = &quot;lid.176.bin&quot;,
+    threshold: float = 0.65,
+) -&gt; list[dict]:
+    &quot;&quot;&quot;Filter documents to target languages using the fastText LID-176 model.&quot;&quot;&quot;
+    if not Path(model_path).exists():
+        raise FileNotFoundError(f&quot;LID model not found: {model_path}. Download from fastText.cc&quot;)
+    model = fasttext.load_model(model_path)
+    kept: list[dict] = []
+    lang_counts: dict[str, int] = defaultdict(int)
+    for doc in documents:
+        text = doc[&quot;text&quot;].replace(&quot;\n&quot;, &quot; &quot;)[:1000]
+        labels, scores = model.predict(text, k=1)
+        lang = labels[0].replace(&quot;__label__&quot;, &quot;&quot;)
+        lang_counts[lang] += 1
+        if lang in target_langs and scores[0] &gt;= threshold:
+            doc[&quot;lang&quot;] = lang
+            kept.append(doc)
+    total = sum(lang_counts.values()) or 1
+    for lang, cnt in sorted(lang_counts.items(), key=lambda x: -x[1])[:10]:
+        print(f&quot;  {lang}: {cnt:&gt;6} docs ({100 * cnt / total:.1f}%)&quot;)
+    print(f&quot;Kept {len(kept)}/{len(documents)} docs (threshold={threshold})&quot;)
+    return kept
+</code></pre>
+<p>The LID-176 model expects a single-line, leading-whitespace-free input for best accuracy. Stripping newlines before prediction avoids false detections caused by document structure artifacts such as HTML boilerplate that survived extraction. The 1000-character prefix is sufficient for reliable classification — language is typically established in the opening sentences — and processing the full document adds latency without improving accuracy. fastText returns labels with a namespace prefix (__label__en) that must be stripped before comparison. The defaultdict accumulates per-language counts across the full batch, enabling post-hoc audit of the language distribution. For multilingual pretraining datasets (mT5, BLOOM), the same function is used with target_langs containing all desired ISO 639-1 codes, and the threshold is typically lowered to 0.5 to improve recall for low-resource languages.</p>
+<h2>Heuristic Quality Filters</h2>
+<p>Heuristic quality filters are deterministic, threshold-based rules derived from empirical observation of what low-quality web text looks like. The Gopher paper (Rae et al., 2021) codified many of the most widely adopted heuristics: word count bounds (50 minimum, 100k maximum), mean word length in the range 3–10 characters, fraction of lines ending with punctuation above 60%, fraction of words that are stop-words above 20%, fraction of duplicate lines below 30%, fraction of duplicate n-grams below 20% (2-gram), 18% (3-gram), and 16% (4-gram). The C4 rules are complementary: they require at least one sentence with terminal punctuation per document, remove lines containing the word 'javascript', remove documents with fewer than five sentences, and remove documents containing placeholder text ('lorem ipsum'). FineWeb's ablation study (2024) showed that combining Gopher rules with additional per-line cleaning steps — removing lines shorter than 10 characters, trimming lines starting with bullet-like characters in documents where &gt;80% of lines are bullet-heavy — outperforms either rule set alone by 1–2 points on MMLU and HellaSwag.</p>
+<pre><code class="language-python">import re
+from collections import Counter
+from typing import Optional
+
+PUNCT_END = frozenset(&quot;.!?&quot;)
+SYMBOL_CHARS = frozenset(&quot;#{}&lt;&gt;|^~&quot;)
+
+def passes_heuristic_filters(text: str, stats: Optional[dict] = None) -&gt; bool:
+    &quot;&quot;&quot;Return True if the document passes all heuristic quality gates.&quot;&quot;&quot;
+    words = text.split()
+    if len(words) &lt; 50:
+        if stats is not None: stats[&quot;too_short&quot;] = stats.get(&quot;too_short&quot;, 0) + 1
+        return False
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    punct_ratio = sum(1 for ln in lines if ln[-1] in PUNCT_END) / max(len(lines), 1)
+    if punct_ratio &lt; 0.6:
+        if stats is not None: stats[&quot;low_punct&quot;] = stats.get(&quot;low_punct&quot;, 0) + 1
+        return False
+    bullet_ratio = sum(1 for ln in lines if ln[0] in &quot;-*&quot;) / max(len(lines), 1)
+    if bullet_ratio &gt; 0.9:
+        if stats is not None: stats[&quot;bullet_heavy&quot;] = stats.get(&quot;bullet_heavy&quot;, 0) + 1
+        return False
+    symbol_ratio = sum(1 for c in text if c in SYMBOL_CHARS) / max(len(words), 1)
+    if symbol_ratio &gt; 0.1:
+        if stats is not None: stats[&quot;symbol_heavy&quot;] = stats.get(&quot;symbol_heavy&quot;, 0) + 1
+        return False
+    ngrams = [&quot; &quot;.join(words[i:i+3]) for i in range(len(words) - 2)]
+    top_count = Counter(ngrams).most_common(1)[0][1] if ngrams else 0
+    if ngrams and top_count / len(ngrams) &gt; 0.15:
+        if stats is not None: stats[&quot;repetitive&quot;] = stats.get(&quot;repetitive&quot;, 0) + 1
+        return False
+    return True
+</code></pre>
+<ul>
+<li>Min word count &gt;= 50 (C4, Gopher, Dolma, FineWeb) — removes stubs, error pages, and metadata-only records that would contribute noise to the token distribution</li>
+<li>Fraction of lines ending with terminal punctuation &gt;= 60% (C4 / Gopher) — removes navigation menus, code dumps, tabular data, and lists of links masquerading as prose</li>
+<li>Mean word length in [3, 10] characters (Gopher) — removes documents dominated by URLs, hash strings, single-character CJK tokens, or garbled encoding artifacts</li>
+<li>Fraction of stop-words (the, be, to, of, and...) &gt;= 20% (Gopher) — removes keyword-stuffed SEO pages, code listings, and non-prose data tables</li>
+<li>Fraction of duplicate lines &lt; 30% (Gopher) — removes cookie consent blocks, repeated navigation elements, and boilerplate that survived the extractor</li>
+<li>Top 2-gram fraction &lt; 20%, top 3-gram fraction &lt; 18%, top 4-gram fraction &lt; 16% (Gopher) — removes templated pages, machine-generated repetitive text, and carousel content</li>
+<li>No 'lorem ipsum' substring (C4) — removes placeholder content from web CMSs and site builders that were indexed before real content was added</li>
+<li>No 'javascript' keyword on terminal lines (C4) — removes pages where the JS bundle leaked into the extracted text because JS rendering failed during crawl</li>
+</ul>
+<h2>Classifier-Based Filtering</h2>
+<p>Classifier-based filtering trains a supervised model to distinguish high-quality text (Wikipedia, books, curated web) from low-quality CC text, then scores all CC documents and applies a threshold. This approach was popularized by GPT-3 (Brown et al., 2020), which trained a logistic regression on TF-IDF features using WebText (Reddit-upvoted links) as the positive class and raw CC as the negative class. The key insight is that a sparse linear model over character or word n-gram features generalizes well because quality correlates strongly with vocabulary richness, sentence structure, and phrasing complexity — and these correlate with n-gram frequency patterns. The classifier can be deployed at inference time using fastText (binary format, microseconds per document) or sklearn's predict_proba in batch mode. The DCLM paper (2024) showed that replacing most heuristic filters with a single fastText classifier trained on high-quality sources (OpenHermes, high-scoring Dolma documents) produced datasets that outperformed heuristically filtered corpora of the same size on standard downstream benchmarks by 2–5 points, validating the classifier-first approach at multi-trillion-token scale.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import cross_val_score
+
+def build_quality_classifier(
+    good_docs: list[str],
+    bad_docs: list[str],
+) -&gt; Pipeline:
+    &quot;&quot;&quot;Train a TF-IDF + logistic regression quality classifier (good=Wikipedia, bad=raw CC).&quot;&quot;&quot;
+    X = good_docs + bad_docs
+    y = [1] * len(good_docs) + [0] * len(bad_docs)
+    clf = Pipeline([
+        (&quot;tfidf&quot;, TfidfVectorizer(max_features=200_000, ngram_range=(1, 2), sublinear_tf=True)),
+        (&quot;lr&quot;, LogisticRegression(C=1.0, max_iter=1000, solver=&quot;lbfgs&quot;)),
+    ])
+    cv_scores = cross_val_score(clf, X, y, cv=5, scoring=&quot;roc_auc&quot;)
+    print(f&quot;CV ROC-AUC: {cv_scores.mean():.3f} +/- {cv_scores.std():.3f}&quot;)
+    clf.fit(X, y)
+    return clf
+
+def filter_by_quality(
+    documents: list[dict],
+    classifier: Pipeline,
+    keep_fraction: float = 0.30,
+) -&gt; list[dict]:
+    &quot;&quot;&quot;Score documents and retain only the top keep_fraction by quality score.&quot;&quot;&quot;
+    texts = [d[&quot;text&quot;] for d in documents]
+    scores = classifier.predict_proba(texts)[:, 1]
+    threshold = float(np.percentile(scores, 100 * (1 - keep_fraction)))
+    print(f&quot;Quality threshold (top {keep_fraction*100:.0f}%): {threshold:.3f}&quot;)
+    return [d for d, s in zip(documents, scores) if s &gt;= threshold]
+</code></pre>
+<p>The keep_fraction hyperparameter is the most consequential design decision in classifier-based filtering. Keeping too little (&lt; 5%) removes useful linguistic diversity and domain coverage; keeping too much (&gt; 50%) dilutes the quality improvement. Most production pipelines keep 10–30% of CC documents after classifier scoring. GPT-3 kept ~20% by score but then upsampled the retained CC documents in the final training mixture. The DCLM approach uses a fastText binary classifier (far faster than sklearn LogisticRegression on TF-IDF at inference) which can score hundreds of documents per second per CPU core, making it practical to rescore the entire CC at each pipeline run without GPU infrastructure. When training the classifier, using Wikipedia plus BookCorpus or high-quality curated sources as positives and randomly sampled raw CC as negatives gives a strong baseline. An important nuance: using already-heuristically-filtered CC as negatives (rather than raw CC) produces a more discriminative classifier that targets the subtler quality differences remaining after basic filtering — this two-stage approach is used by FineWeb.</p>
+<h2>URL and Content Blocklisting</h2>
+<p>URL blocklisting removes documents from known low-quality, harmful, or privacy-violating domains before any content-based analysis — it is the cheapest possible filter because it operates on the URL string alone, requires no HTTP fetch or HTML parsing, and can be applied at CDX index scan time before any WARC download occurs. The UT1 Blacklist (maintained by the University of Toulouse) and the MIT List of Dirty, Naughty, Obscene, and Otherwise Bad Words are common reference sources, but pretraining-specific datasets like Dolma and FineWeb maintain their own curated domain blocklists derived from automated quality signals (domain perplexity, fraction of documents passing heuristics, complaint rate). Content-based blocklisting — removing documents containing specific substrings, pattern matches, or exceeding a density threshold of flagged terms — supplements URL filtering because problematic content appears on otherwise acceptable domains. The Common Crawl organization itself maintains a robots.txt exclusion list and a known-spam domain list; using these as a starting point and augmenting with downstream filtering statistics is the standard approach. URL-level blocklisting typically removes 3–8% of documents by count but those documents are disproportionately harmful — a small number of spam networks and adult content farms produce outsized quantities of crawled pages.</p>
+<ul>
+<li>Adult and NSFW domains: blocklisted by URL using reference lists such as UT1 and domain-specific crawl metadata — typically removes 3–8% of raw CC by document count but dramatically reduces harmful training signal</li>
+<li>Spam and SEO farm domains: identified by high outlink density, keyword-stuffed titles, affiliate link density, and thin content fraction — flagged via domain-level crawl statistics from the CC CDX index</li>
+<li>Malware and phishing domains: flagged by threat intelligence feeds (Google Safe Browsing, PhishTank) — rare in CC but produce highly atypical token distributions that corrupt embeddings for security-adjacent vocabulary</li>
+<li>Data broker and PII-heavy sites: removed to reduce privacy risks — patterns such as SSN format, credit card number format, and high email address density are used as per-document signals for removal</li>
+<li>Duplicate content networks: article-spinning sites that republish lightly paraphrased versions of the same content across many domains — caught by cross-domain near-deduplication with MinHash at the paragraph level</li>
+<li>Low-signal top-level domains: certain ccTLDs have historically elevated spam rates and are downweighted or removed from English-focused pipelines after per-TLD quality analysis</li>
+</ul>
+<h2>Pipeline at Scale</h2>
+<p>Processing 50+ TB of compressed WARC data per monthly CC snapshot requires distributed computing infrastructure and careful attention to I/O efficiency. The dominant execution framework is Apache Spark for batch processing: workers read WARC shards from S3 in parallel, apply the full filter chain within each task, and write filtered Parquet files back to object storage. A typical FineWeb-scale pipeline (95 CC snapshots) ran on a 100-node cluster and took several weeks of wall-clock time to produce the full 44 TB dataset. An alternative stack adopted by Dolma and DCLM is Ray with custom Python workers: lower operational overhead than Spark for Python-native pipelines, but with less mature shuffle and distributed join operations. The Common Crawl CDX index (cdx-XXXXXX.gz) is a critical optimization target — it lists every WARC record with its byte offset, URL, detected MIME type, and HTTP status code. Pre-filtering the CDX to select only status 200, text/html records before any WARC download reduces network I/O by 40–60% and allows domain blocklisting before any content is fetched. Deduplication with MinHash LSH is typically the last and most expensive stage, implemented by the text-dedup library or HuggingFace's DataTrove framework, which both support distributed MinHash computation and LSH bucket joins at billion-document scale with configurable Jaccard threshold and n-gram size.</p>
+<ul>
+<li>Apache Spark + S3: batch WARC processing with RDD tasks; each task reads one WARC shard (~1 GB), extracts, filters, and writes Parquet — used by FineWeb (HuggingFace) and RedPajama pipelines</li>
+<li>Ray + Python workers: task-parallel processing with dynamic scheduling; better for heterogeneous Python-heavy filter chains with native library dependencies — used by Dolma (AI2) and DCLM</li>
+<li>CDX index pre-filtering: scan CC CDX files to select only HTTP 200 / text/html records before WARC download, reducing network I/O by 40–60% and enabling URL blocklisting before any content fetch</li>
+<li>MinHash LSH deduplication: DataTrove and text-dedup implement 13-gram MinHash with 9000 hash functions and band-based LSH at Jaccard threshold 0.8 — removes 30–50% of quality-filtered documents</li>
+<li>Suffix array deduplication: ExactSubstr (Lee et al. 2022) finds all exact substring duplicates &gt;= 50 tokens across documents using memory-mapped suffix arrays — more precise than MinHash but 10x slower per document</li>
+<li>DataTrove (HuggingFace, 2024): unified pipeline framework with built-in WARC/WET readers, fastText LangID, Gopher filters, MinHash dedup, and Parquet writers — simplifies reproducing FineWeb-quality pipelines from scratch</li>
+</ul>
+<h2>Key Takeaways</h2>
+<ul>
+<li>Pipeline ordering matters: LangID then heuristics then quality classifier then dedup maximizes throughput by applying the cheapest filters first, reducing data volume at each stage</li>
+<li>WARC extraction quality sets the ceiling: boilerplate removal with trafilatura or Resiliparse is the most important single decision — downstream filters cannot recover content that was discarded or corrupted during extraction</li>
+<li>fastText LID-176 at threshold 0.65 is the community standard for English; lowering to 0.5 improves recall for low-resource languages at the cost of increased multilingual noise in the corpus</li>
+<li>Gopher heuristics (Rae et al. 2021) and C4 rules are the two reference filter implementations — most production datasets are ablations or combinations of these two rule sets with minor dataset-specific modifications</li>
+<li>Classifier-based filtering adds 3–8 downstream benchmark points improvement over heuristics alone, as demonstrated by the FineWeb ablation study (2024) and DCLM evaluation suite</li>
+<li>MinHash deduplication with Jaccard threshold 0.8 on 13-gram shingles is the standard setting — dedup typically removes 30–50% of documents that survive quality filters, and skipping it causes significant memorization risk</li>
+<li>URL blocklisting should be applied at CDX scan time before content filtering to avoid wasting compute downloading and parsing known-bad domains</li>
+<li>The full CC archive (95+ monthly snapshots through 2024) contains roughly 70 trillion raw tokens; English-only filtering with aggressive quality thresholds yields 10–20 trillion tokens of usable pretraining text</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

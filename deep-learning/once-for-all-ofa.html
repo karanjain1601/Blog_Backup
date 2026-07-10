@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Once-for-All — Train Once, Deploy Many Architectures | Notes Backup</title>
+  <meta name="description" content="OFA trains a single supernet with elastic kernel, depth, and width so any subnet can be extracted for any hardware target without retraining. Covers progressive shrinking, in-place distillation, elastic kernel sharing, subnet search with latency lookup tables, and comparison with MobileNetV3 and DARTS." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Once-for-All — Train Once, Deploy Many Architectures</h1>
+      <ul class='note-meta'><li><strong>description:</strong> OFA trains a single supernet with elastic kernel, depth, and width so any subnet can be extracted for any hardware target without retraining. Covers progressive shrinking, in-place distillation, elastic kernel sharing, subnet search with latency lookup tables, and comparison with MobileNetV3 and DARTS.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Once-for-All — Train Once, Deploy Many Architectures</h1>
+<p>Standard NAS finds one architecture per hardware target. Deploying a model to 10 different devices (phone, tablet, server, IoT) requires 10 separate NAS runs, each potentially days of compute. Once-for-All (OFA, Cai et al. 2020) decouples training from search: a single supernet is trained once, and arbitrary subnets — defined by depth, width, kernel size, and resolution — can be extracted and deployed without any retraining. Each subnet achieves accuracy close to the equivalent standalone model.</p>
+<h2>OFA Search Space</h2>
+<p>The OFA supernet is built from MobileNetV3-like inverted residual blocks. The elastic dimensions are: (1) kernel size per layer ∈ {3, 5, 7}, (2) depth (number of blocks per stage) ∈ {2, 3, 4}, (3) expand ratio (width multiplier inside blocks) ∈ {3, 4, 6}, and (4) input resolution ∈ {128, 160, 192, 224}. The total number of possible subnets exceeds 10^19, covering a continuous Pareto frontier from 150M to 600M FLOPs.</p>
+<h2>Elastic Kernel Sharing</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class ElasticKernelConv(nn.Module):
+    &quot;&quot;&quot;
+    A single conv weight of size 7x7 that can act as 7x7, 5x5, or 3x3
+    by extracting the center sub-kernel (shared weights).
+    &quot;&quot;&quot;
+
+    def __init__(self, in_channels: int, out_channels: int, max_kernel: int = 7):
+        super().__init__()
+        assert max_kernel in (7, 5, 3), 'max_kernel must be 7, 5, or 3'
+        self.max_kernel = max_kernel
+        # All kernel sizes share from this single weight tensor
+        self.weight = nn.Parameter(
+            torch.randn(out_channels, in_channels, max_kernel, max_kernel)
+            * (2 / (in_channels * max_kernel ** 2)) ** 0.5
+        )
+        self.bias = nn.Parameter(torch.zeros(out_channels))
+        # Learnable transformation matrices to adapt center kernel for smaller sizes
+        self.transforms = nn.ParameterDict()
+        for ks in [k for k in [3, 5, 7] if k &lt; max_kernel]:
+            self.transforms[str(ks)] = nn.Parameter(torch.eye(ks * ks))
+
+    def _extract_sub_kernel(self, kernel_size: int) -&gt; torch.Tensor:
+        if kernel_size == self.max_kernel:
+            return self.weight
+        # Extract center crop
+        start = (self.max_kernel - kernel_size) // 2
+        sub = self.weight[:, :, start:start+kernel_size, start:start+kernel_size]
+        # Apply learned linear transformation (shape-preserving)
+        C_out, C_in = sub.shape[:2]
+        sub_flat = sub.reshape(C_out * C_in, -1)  # (..., ks*ks)
+        T = self.transforms[str(kernel_size)]      # (ks*ks, ks*ks)
+        sub_transformed = (sub_flat @ T).reshape(C_out, C_in, kernel_size, kernel_size)
+        return sub_transformed
+
+    def forward(self, x: torch.Tensor, kernel_size: int = None) -&gt; torch.Tensor:
+        if kernel_size is None:
+            kernel_size = self.max_kernel
+        W = self._extract_sub_kernel(kernel_size)
+        pad = kernel_size // 2
+        return F.conv2d(x, W, self.bias, padding=pad)
+
+# Demo: same weights, different kernel sizes
+elastic_conv = ElasticKernelConv(16, 32, max_kernel=7)
+x = torch.randn(2, 16, 8, 8)
+for ks in [3, 5, 7]:
+    out = elastic_conv(x, kernel_size=ks)
+    print(f'kernel_size={ks}: input {x.shape} -&gt; output {out.shape}')
+</code></pre>
+<h2>Progressive Shrinking Training</h2>
+<p>Training the full supernet from scratch is difficult: all subnets share weights, and small subnets interfere with large ones. Progressive shrinking solves this by training in stages: (1) train the full network (largest kernel, most layers, widest expand ratio) to convergence; (2) add elastic kernel by training with randomly sampled kernel sizes while distilling from the full-kernel subnet; (3) add elastic depth by randomly dropping layers; (4) add elastic width. Each stage uses in-place knowledge distillation: the teacher is the same supernet evaluated with the current stage's maximum configuration.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import random
+
+def progressive_shrinking_step(supernet, x, y_true, criterion,
+                               stage='kernel',
+                               kernel_choices=(3, 5, 7),
+                               depth_choices=(2, 3, 4)):
+    &quot;&quot;&quot;
+    One training step with progressive shrinking and in-place distillation.
+    Teacher: supernet with max config. Student: random smaller config.
+    &quot;&quot;&quot;
+    supernet.eval()
+    # Teacher forward: always max config
+    with torch.no_grad():
+        teacher_logits = supernet(x, kernel_size=max(kernel_choices),
+                                  depth=max(depth_choices))
+        teacher_probs = F.softmax(teacher_logits / 4.0, dim=-1)  # T=4 temperature
+
+    supernet.train()
+    # Student forward: random smaller config
+    if stage == 'kernel':
+        ks = random.choice(kernel_choices)
+        student_logits = supernet(x, kernel_size=ks, depth=max(depth_choices))
+    elif stage == 'depth':
+        ks = random.choice(kernel_choices)
+        d = random.choice(depth_choices)
+        student_logits = supernet(x, kernel_size=ks, depth=d)
+    else:
+        student_logits = supernet(x, kernel_size=max(kernel_choices),
+                                  depth=max(depth_choices))
+
+    # Combined loss: task loss + KD loss from teacher
+    task_loss = criterion(student_logits, y_true)
+    kd_loss = F.kl_div(
+        F.log_softmax(student_logits / 4.0, dim=-1),
+        teacher_probs,
+        reduction='batchmean'
+    ) * (4.0 ** 2)  # scale by T^2
+
+    total_loss = 0.5 * task_loss + 0.5 * kd_loss
+    return total_loss, task_loss.item(), kd_loss.item()
+
+print('Progressive shrinking: full -&gt; elastic kernel -&gt; elastic depth -&gt; elastic width')
+</code></pre>
+<h2>Subnet Search with Latency Lookup</h2>
+<pre><code class="language-python">import torch
+import random
+from itertools import product
+
+# Precomputed latency lookup table (ms) for each op on target device
+# In practice, measured by profiling each op independently
+LATENCY_LUT = {
+    ('conv3', 2): 1.2, ('conv3', 3): 1.8, ('conv3', 4): 2.4,
+    ('conv5', 2): 2.1, ('conv5', 3): 3.2, ('conv5', 4): 4.3,
+    ('conv7', 2): 3.5, ('conv7', 3): 5.2, ('conv7', 4): 6.9,
+}
+
+def estimate_latency(subnet_config: dict) -&gt; float:
+    &quot;&quot;&quot;Estimate latency from lookup table without running the model.&quot;&quot;&quot;
+    total = 0.0
+    for stage_idx, (kernel, depth) in enumerate(
+        zip(subnet_config['kernels'], subnet_config['depths'])
+    ):
+        key = (f'conv{kernel}', depth)
+        total += LATENCY_LUT.get(key, 3.0)  # default 3ms if not in table
+    return total
+
+def evolutionary_subnet_search(n_iterations=100, latency_budget_ms=12.0,
+                               population_size=50):
+    &quot;&quot;&quot;Simple evolutionary search over subnet configurations.&quot;&quot;&quot;
+    kernel_choices = [3, 5, 7]
+    depth_choices = [2, 3, 4]
+    n_stages = 5
+
+    def random_subnet():
+        return {
+            'kernels': [random.choice(kernel_choices) for _ in range(n_stages)],
+            'depths': [random.choice(depth_choices) for _ in range(n_stages)],
+        }
+
+    # Initialize population with valid (within budget) subnets
+    population = [c for _ in range(n_iterations)
+                  if (c := random_subnet()) and estimate_latency(c) &lt;= latency_budget_ms]
+
+    print(f'Found {len(population)} valid subnets within {latency_budget_ms}ms budget')
+    if population:
+        lats = [estimate_latency(c) for c in population[:5]]
+        print(f'Sample latencies (ms): {[round(l,2) for l in lats]}')
+    return population
+
+results = evolutionary_subnet_search(n_iterations=200, latency_budget_ms=12.0)
+</code></pre>
+<h2>OFA Deployment — Mobile vs Server Subnet</h2>
+<p>After training the OFA supernet once, selecting a subnet for a new hardware target takes minutes: measure the latency of individual operations on the target device, build a lookup table, run an evolutionary search over subnet configurations, and extract the best subnet. No gradient computation or weight updates are needed. The extracted subnet is evaluated by forward pass through the supernet with the fixed configuration.</p>
+<blockquote>
+<p><strong>OFA vs NAS-Retrain Trade-off</strong>: Training the OFA supernet takes roughly 1200 GPU-hours — more than training a single EfficientNet. However, once trained, extracting and evaluating 10 subnets for 10 different hardware targets costs near zero. The break-even is approximately 3 hardware targets: if you are deploying to 3 or more devices, OFA's one-time training cost is offset by the elimination of repeated NAS runs.</p>
+</blockquote>
+<h2>Comparison with Competing Approaches</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Search Cost</th>
+<th>Deployment Flexibility</th>
+<th>Accuracy/Latency Pareto</th>
+<th>Hardware Constraint Support</th>
+<th>Retrain After Search</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MobileNetV3</td>
+<td>~75 GPU-days (platform-specific)</td>
+<td>Single target per search</td>
+<td>Good (manually tuned)</td>
+<td>Mobile-specific</td>
+<td>N/A — fixed arch</td>
+</tr>
+<tr>
+<td>DARTS</td>
+<td>4 GPU-days</td>
+<td>Single architecture</td>
+<td>Moderate</td>
+<td>No explicit constraint</td>
+<td>Yes — re-train from scratch</td>
+</tr>
+<tr>
+<td>ProxylessNAS/FBNet</td>
+<td>~9 GPU-days per target</td>
+<td>Single target per search</td>
+<td>Very good</td>
+<td>Latency table per device</td>
+<td>No — fine-tune only</td>
+</tr>
+<tr>
+<td>OFA</td>
+<td>~1200 GPU-hours (one time)</td>
+<td>Any subnet from 10^19 space</td>
+<td>State of the art Pareto</td>
+<td>Any device with LUT</td>
+<td>No — direct extraction</td>
+</tr>
+<tr>
+<td>EfficientNet-NAS</td>
+<td>~3600 GPU-days</td>
+<td>Fixed compound scale</td>
+<td>State of art (single target)</td>
+<td>Generic (TPU-tuned)</td>
+<td>N/A — fixed arch</td>
+</tr>
+</tbody>
+</table>
+<h2>Elastic Width — Channel Importance Sorting</h2>
+<p>Elastic width means any subset of channels can be selected within each layer. For this to work with shared weights, channels must be sorted by importance before training. OFA sorts channels by their L1-norm of weights (most important first), then any subnet simply takes the top-k channels. This ordering is learned progressively during training: the network is periodically re-sorted after each elastic-width stage so that the first k channels always represent the best k channels for any k.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def sort_channels_by_importance(conv: nn.Conv2d, bn: nn.BatchNorm2d):
+    &quot;&quot;&quot;
+    Sort output channels by L1 norm of conv weights (descending).
+    Most important channels first so top-k slicing always gives best k.
+    Returns new conv and bn with reordered channels.
+    &quot;&quot;&quot;
+    import copy
+    W = conv.weight.data  # (C_out, C_in, kH, kW)
+    importance = W.abs().sum(dim=(1, 2, 3))  # (C_out,)
+    sorted_idx = importance.argsort(descending=True)  # most important first
+
+    new_conv = copy.deepcopy(conv)
+    new_conv.weight.data = W[sorted_idx]
+    if conv.bias is not None:
+        new_conv.bias.data = conv.bias.data[sorted_idx]
+
+    new_bn = copy.deepcopy(bn)
+    new_bn.weight.data = bn.weight.data[sorted_idx]
+    new_bn.bias.data = bn.bias.data[sorted_idx]
+    new_bn.running_mean = bn.running_mean[sorted_idx]
+    new_bn.running_var = bn.running_var[sorted_idx]
+
+    print(f'Sorted {W.shape[0]} channels. Top-5 importance: '
+          f'{importance[sorted_idx[:5]].round(decimals=2).tolist()}')
+    return new_conv, new_bn
+
+conv = nn.Conv2d(3, 32, 3, padding=1)
+bn = nn.BatchNorm2d(32)
+new_conv, new_bn = sort_channels_by_importance(conv, bn)
+# Now: new_conv.weight[:k] gives the best k output channels for any k
+for k in [8, 16, 24, 32]:
+    sub_weight = new_conv.weight.data[:k]
+    print(f'Top-{k} channels weight norm: {sub_weight.norm().item():.3f}')
+</code></pre>
+<p>Accuracy results from the OFA paper (ImageNet): on a Pixel2 phone with a 58ms latency budget, OFA finds a subnet with 76.0% top-1 accuracy. MobileNetV3-Large with the same latency achieves 75.2%. On a Note10 GPU with a 12ms budget, OFA achieves 80.0% vs 79.8% for MobileNetV3. The accuracy gains are modest but the deployment flexibility (no NAS re-run) is the primary advantage.</p>
+<ul>
+<li>Progressive shrinking order: full → elastic kernel → elastic depth → elastic width (each stage adds one elastic dim).</li>
+<li>In-place KD: teacher = same supernet at max config; student = random smaller config; no external teacher needed.</li>
+<li>Elastic kernel transform matrix: learned linear map adapts 3×3 center crop from 7×7 weights — not just a slice.</li>
+<li>Subnet accuracy proxy: train a small accuracy predictor (MLP on subnet config) to rank subnets without forward pass.</li>
+<li>Resolution elasticity: training with random input crops [128,224] teaches the supernet to handle varying resolutions.</li>
+<li>Deployment: subnet extraction is a forward pass with fixed config — takes milliseconds, no GPU gradient computation.</li>
+</ul>
+<p>The OFA accuracy predictor is a small MLP (3 layers, 400 hidden units) trained on (subnet_config → top-1_accuracy) pairs collected by sampling ~16,000 random subnets and evaluating them on a 10,000-image validation subset. Once trained, the predictor ranks subnets in microseconds, enabling evolutionary search over millions of candidates without any GPU forward passes. The predictor's ranking accuracy (Spearman correlation with true accuracy) is typically 0.95+, making it a reliable proxy for the full evaluation.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

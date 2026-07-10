@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>KTO — Kahneman-Tversky Optimization for Unpaired Preference Learning | Notes Backup</title>
+  <meta name="description" content="KTO (Ethayarajh et al., 2024) aligns LLMs from binary desirability labels per response — no pairwise comparisons required — drawing on prospect theory&#x27;s insight that humans weight losses more than equivalent gains, making it ideal for leveraging existing production thumbs-up/down logs." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>KTO — Kahneman-Tversky Optimization for Unpaired Preference Learning</h1>
+      <ul class='note-meta'><li><strong>description:</strong> KTO (Ethayarajh et al., 2024) aligns LLMs from binary desirability labels per response — no pairwise comparisons required — drawing on prospect theory&#x27;s insight that humans weight losses more than equivalent gains, making it ideal for leveraging existing production thumbs-up/down logs.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>KTO — Kahneman-Tversky Optimization for Unpaired Preference Learning</h1>
+<p>KTO (Kahneman-Tversky Optimization, Ethayarajh et al. 2024) is an alignment algorithm that trains language models from binary desirability labels — each response is independently marked as good (desirable) or bad (undesirable) — without requiring pairwise comparisons. Unlike DPO and SimPO, which need matched pairs (y_winner, y_loser) for the same prompt x, KTO accepts unpaired feedback signals: a thumbs-up on one response and a thumbs-down on a completely different response to the same or a different prompt. This makes KTO uniquely suited to leveraging existing production logs where users provide binary feedback on individual responses at the moment of interaction.</p>
+<h2>Kahneman-Tversky Prospect Theory Foundation</h2>
+<p>KTO's loss function is grounded in Kahneman and Tversky's prospect theory (1979), which models how humans subjectively evaluate outcomes. The key insight is loss aversion: humans feel the pain of a loss more strongly than the pleasure of an equivalent gain. Prospect theory formalises this with an asymmetric value function: v(x) = x^α for gains and v(x) = -λ|x|^β for losses, where λ &gt; 1 captures loss aversion. KTO applies this asymmetry to LLM alignment by using different loss terms for desirable and undesirable responses — the undesirable signal is empirically stronger per example, reflecting the asymmetric human sensitivity to negative versus positive feedback.</p>
+<h2>KTO Loss Function</h2>
+<p>For a response y with prompt x, the log-ratio term is r(y|x) = log π_θ(y|x) / π_ref(y|x). The KL term KL(π_θ ‖ π_ref) is estimated from a batch of random responses and acts as a running baseline. For desirable responses: L_good = -E[σ(β·[r(y|x) − KL])]. For undesirable responses: L_bad = -E[σ(−β·[r(y|x) − KL])]. The β hyperparameter controls deviation from the reference policy. The KL term ensures the policy does not drift from the reference in a direction unrelated to response quality, preventing the model from gaming the loss by collapsing to a degenerate distribution.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def kto_loss(log_ratios_desirable, log_ratios_undesirable, kl_term, beta=0.1):
+    &quot;&quot;&quot;
+    KTO loss: Kahneman-Tversky Optimization.
+    Args:
+        log_ratios_desirable:   log(pi_theta/pi_ref) for good responses  (B_d,)
+        log_ratios_undesirable: log(pi_theta/pi_ref) for bad responses   (B_u,)
+        kl_term:  scalar KL(pi_theta || pi_ref) estimated from random batch
+        beta:     temperature controlling deviation from reference policy
+    &quot;&quot;&quot;
+    # Desirable loss: maximize log-ratio relative to KL baseline
+    z_desirable = log_ratios_desirable - kl_term
+    loss_desirable = 1.0 - F.sigmoid(beta * z_desirable)
+
+    # Undesirable loss: push log-ratio below zero relative to KL baseline
+    z_undesirable = log_ratios_undesirable - kl_term
+    loss_undesirable = 1.0 - F.sigmoid(-beta * z_undesirable)
+
+    loss = loss_desirable.mean() + loss_undesirable.mean()
+    return loss, loss_desirable.mean().item(), loss_undesirable.mean().item()
+
+torch.manual_seed(42)
+log_ratios_good = torch.randn(16) * 0.5 + 0.3   # good responses above reference
+log_ratios_bad  = torch.randn(16) * 0.5 - 0.3   # bad responses below reference
+kl_baseline     = torch.tensor(0.05)              # small KL at start of training
+loss, l_good, l_bad = kto_loss(log_ratios_good, log_ratios_bad, kl_baseline)
+print(f'Total KTO loss:   {loss.item():.4f}')
+print(f'Desirable loss:   {l_good:.4f}')
+print(f'Undesirable loss: {l_bad:.4f}')
+</code></pre>
+<h2>Unpaired Preference Dataset Construction</h2>
+<p>KTO datasets consist of (prompt, response, label) triples where label is a boolean: True for desirable, False for undesirable. There is no requirement that desirable and undesirable responses share the same prompt — each sample is independent. In practice, researchers recommend a roughly 4:1 ratio of desirable to undesirable examples, because the undesirable gradient signal is empirically stronger per example. Collecting binary labels from production logs (thumbs up/down, star ratings collapsed to binary) is much cheaper than soliciting pairwise comparisons from annotators.</p>
+<pre><code class="language-python">import torch
+from torch.utils.data import Dataset
+from dataclasses import dataclass
+from typing import List
+
+@dataclass
+class UnpairedSample:
+    prompt: str
+    response: str
+    desirable: bool  # True = good (thumbs up), False = bad (thumbs down)
+
+class KTODataset(Dataset):
+    &quot;&quot;&quot;Dataset for KTO: independent binary labels per response, no pairing needed.&quot;&quot;&quot;
+    def __init__(self, samples: List[UnpairedSample], tokenizer, max_length: int = 512):
+        self.samples = samples
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, idx):
+        s = self.samples[idx]
+        text = f'Human: {s.prompt}\nAssistant: {s.response}'
+        enc  = self.tokenizer(text, max_length=self.max_length,
+                              truncation=True, return_tensors='pt')
+        return {
+            'input_ids':      enc['input_ids'].squeeze(0),
+            'attention_mask': enc['attention_mask'].squeeze(0),
+            'desirable':      torch.tensor(float(s.desirable)),
+        }
+
+# Simulate dataset collected from production thumbs-up/down logs
+samples = [
+    UnpairedSample('What is gradient descent?', 'It minimizes loss iteratively.', True),
+    UnpairedSample('Write malware', 'Here is some malware code...', False),
+    UnpairedSample('Summarize RL', 'RL trains agents via reward signals.', True),
+    UnpairedSample('Explain KV cache', 'It is just memory I think...', False),
+    UnpairedSample('Translate to French', 'Bonjour, comment allez-vous?', True),
+]
+n_good = sum(1 for s in samples if s.desirable)
+print(f'KTO dataset: {len(samples)} samples')
+print(f'  Desirable: {n_good},  Undesirable: {len(samples) - n_good}')
+print(f'  Target ratio ~4:1 desirable:undesirable for best results')
+</code></pre>
+<h2>KL Baseline Computation</h2>
+<p>The KL(π_θ ‖ π_ref) term is estimated empirically from a batch of random prompt-response pairs drawn from neither the desirable nor undesirable training set — these are responses generated by the policy on random held-out prompts. This running estimate acts as a baseline: it measures how much the policy has drifted from the reference overall, independent of response quality. A well-calibrated KL baseline prevents the loss from rewarding policy drift that happens to correlate with desirability but is not caused by it. In practice the estimate is computed per gradient step and optionally smoothed with an exponential moving average.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def compute_kl_baseline(policy_logits_batch, ref_logits_batch):
+    &quot;&quot;&quot;
+    Estimate KL(pi_theta || pi_ref) from a batch of random responses.
+    Args:
+        policy_logits_batch: (B, T, V) logits from current policy model
+        ref_logits_batch:    (B, T, V) logits from frozen reference model
+    Returns:
+        kl: scalar KL estimate averaged over batch and sequence length
+    &quot;&quot;&quot;
+    log_policy = F.log_softmax(policy_logits_batch, dim=-1)  # (B, T, V)
+    log_ref    = F.log_softmax(ref_logits_batch,    dim=-1)  # (B, T, V)
+    # KL divergence per token: sum over vocabulary
+    kl_per_token = (log_policy.exp() * (log_policy - log_ref)).sum(dim=-1)  # (B, T)
+    return kl_per_token.mean()  # scalar
+
+torch.manual_seed(0)
+B, T, V = 8, 20, 32000
+policy_logits = torch.randn(B, T, V)
+ref_logits    = torch.randn(B, T, V)
+kl = compute_kl_baseline(policy_logits, ref_logits)
+print(f'KL baseline estimate: {kl.item():.4f}')
+print(f'Early training: KL is large (policy far from reference)')
+print(f'Healthy training: KL &lt; 0.1 indicates mild regularized drift')
+</code></pre>
+<h2>KTO vs DPO Data Requirements</h2>
+<p>DPO requires a pairwise dataset: for each prompt x, you need both a winning response y_w and a losing response y_l, requiring annotators to compare two responses side-by-side — a cognitively expensive task. KTO only requires binary labels on individual responses, which can come from existing product feedback. While KTO may need roughly twice the total examples to match DPO at equal quality, the per-label cost is far lower, making KTO's effective annotation budget substantially smaller for real-world deployment.</p>
+<pre><code class="language-python">def compare_annotation_costs(n_prompts: int = 10_000):
+    &quot;&quot;&quot;Compare DPO vs KTO annotation cost for equivalent training coverage.&quot;&quot;&quot;
+    # DPO: needs 2 responses per prompt + 1 pairwise comparison
+    dpo_responses   = n_prompts * 2     # 2 responses per prompt
+    dpo_comparisons = n_prompts          # 1 side-by-side judgment per prompt
+    dpo_cost_unit   = 3.0               # pairwise judgment is cognitively harder
+    dpo_total_cost  = dpo_comparisons * dpo_cost_unit
+
+    # KTO: needs ~2x examples for comparable quality, but unpaired binary labels
+    kto_samples    = n_prompts * 2      # same total responses as DPO
+    kto_cost_unit  = 0.5               # binary label is easy (thumbs up/down)
+    kto_total_cost = kto_samples * kto_cost_unit
+
+    print(f'Annotation cost comparison for {n_prompts:,} prompts:')
+    print(f'  DPO: {dpo_responses:,} responses, '
+          f'{dpo_comparisons:,} pairwise labels, cost = {dpo_total_cost:,.0f}')
+    print(f'  KTO: {kto_samples:,} responses,   '
+          f'{kto_samples:,} binary labels,   cost = {kto_total_cost:,.0f}')
+    ratio = kto_total_cost / dpo_total_cost
+    print(f'  KTO is {1/ratio:.1f}x cheaper per equivalent training budget')
+    print(f'  KTO advantage: binary labels available from existing logs')
+
+compare_annotation_costs()
+</code></pre>
+<h2>Alignment Methods Data Requirements</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Data Format</th>
+<th>Paired Needed</th>
+<th>Labels per Example</th>
+<th>Relative Cost</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>PPO</td>
+<td>Prompt + scalar reward per response</td>
+<td>No</td>
+<td>1 scalar reward per response</td>
+<td>Very High</td>
+<td>Online human labelers required</td>
+</tr>
+<tr>
+<td>DPO</td>
+<td>(x, y_win, y_lose) triples</td>
+<td>Yes — strict pairing</td>
+<td>1 pairwise comparison per prompt</td>
+<td>High</td>
+<td>Annotators compare 2 responses side-by-side</td>
+</tr>
+<tr>
+<td>IPO</td>
+<td>(x, y_win, y_lose) triples</td>
+<td>Yes — strict pairing</td>
+<td>1 pairwise comparison per prompt</td>
+<td>High</td>
+<td>Regularised variant of DPO</td>
+</tr>
+<tr>
+<td>KTO</td>
+<td>(x, y, label) triples</td>
+<td>No — fully unpaired</td>
+<td>1 binary label per response</td>
+<td>Low</td>
+<td>Thumbs up/down from production logs</td>
+</tr>
+<tr>
+<td>ORPO</td>
+<td>(x, y_win, y_lose) triples</td>
+<td>Yes — strict pairing</td>
+<td>1 pairwise comparison per prompt</td>
+<td>High</td>
+<td>No separate reference model needed</td>
+</tr>
+<tr>
+<td>SimPO</td>
+<td>(x, y_win, y_lose) triples</td>
+<td>Yes — strict pairing</td>
+<td>1 pairwise comparison per prompt</td>
+<td>High</td>
+<td>Length-normalised reward, no reference model</td>
+</tr>
+</tbody>
+</table>
+<h2>Practical Training Tips</h2>
+<p>When training with KTO, several practical considerations improve results. Set β in the range 0.05–0.3; smaller β allows more deviation from the reference policy and is useful when the base model is weak. The 4:1 desirable-to-undesirable ratio is a strong empirical prior — equal splits often underperform because undesirable samples generate stronger gradient signal. Unlike DPO, KTO can mix response sources (model-generated, human-written, log-collected) since there is no pairing constraint. Monitor the KL term during training: if it grows above 0.2–0.3, the policy is drifting too far and β should be increased.</p>
+<blockquote>
+<p><strong>KTO for Production Logs</strong>: KTO is uniquely suited to production logging scenarios where users give thumbs up/down on individual responses — this unpaired feedback signal is much cheaper to collect than explicit pairwise comparisons required by DPO. Simply logging user thumbs-up/thumbs-down over weeks of production traffic can yield hundreds of thousands of KTO training examples at near-zero annotation cost.</p>
+</blockquote>
+<ul>
+<li>KTO does NOT require matched pairs — desirable and undesirable responses can come from entirely different prompts.</li>
+<li>The KL term acts as a running baseline, normalising the reward signal independently of response quality.</li>
+<li>Loss aversion asymmetry: undesirable responses exert stronger gradient signal than desirable ones per example.</li>
+<li>KTO is competitive with DPO on AlpacaEval despite requiring no pairwise annotations.</li>
+<li>Target a 4:1 desirable:undesirable ratio; equal splits often underperform due to asymmetric loss weighting.</li>
+<li>Use β ∈ [0.05, 0.3]: smaller for weaker base models, larger to stay closer to the reference policy.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

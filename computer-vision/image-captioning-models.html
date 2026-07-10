@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Image Captioning: From Show-and-Tell to BLIP and Beyond | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Image Captioning: From Show-and-Tell to BLIP and Beyond</h1>
+      
+      <h1>Image Captioning: From Show-and-Tell to BLIP and Beyond</h1>
+<p>Image captioning is the task of generating a natural-language description for a given image. Early systems used CNN encoders to extract global image representations and LSTM decoders to generate token sequences word by word. Captioning served as a benchmark for encoder-decoder architectures well before Transformer-based vision-language models became the dominant paradigm.</p>
+<p>Modern captioning models leverage pretrained vision transformers and large language model decoders fine-tuned on curated image-caption pairs. Evaluation metrics such as CIDEr and SPICE measure generation quality against multiple human-authored reference captions. Self-critical sequence training (SCST) improved scores by optimizing non-differentiable metrics directly via reinforcement learning.</p>
+<p>The encoder-decoder framework processes an image through a CNN to produce a global feature vector, then feeds it as the initial hidden state of an LSTM decoder. At each timestep, the decoder predicts the next token from a vocabulary softmax distribution. Teacher forcing — providing the ground-truth previous token during training — stabilizes convergence but creates exposure bias at inference.</p>
+<p>Early models such as Show-and-Tell used GoogLeNet as the encoder and a word-embedding LSTM as the decoder. The fixed-size bottleneck vector forced all visual information through a single dense representation, making fine-grained spatial reasoning and attribute binding unreliable for complex multi-object scenes with overlapping visual cues and dense spatial relationships.</p>
+<pre><code>image_feat = cnn(image)\nh0 = linear(image_feat)\nfor t in range(max_len):\n    token, h = lstm(embed(prev_token), h)\n    logits = head(h)
+</code></pre>
+<p>Visual attention mechanisms allow the decoder to selectively focus on different spatial image regions at each decoding step. Instead of using a single global feature, the decoder queries a grid of spatial features extracted from an intermediate CNN layer, computing an attention weight for each cell that determines its contribution to the current generation step.</p>
+<p>The attention weight vector is computed by scoring each spatial feature against the current decoder hidden state. High-weight regions contribute more to the context vector that conditions token prediction. This soft alignment between generated words and image regions can be visualized as an interpretable attention map revealing what the model focuses on while generating each output token.</p>
+<pre><code>context = softmax(score(h, image_feats)) @ image_feats\nscore = tanh(W_h @ h + W_v @ feat)
+</code></pre>
+<p>Self-Critical Sequence Training (SCST) applies the REINFORCE policy gradient algorithm to optimize non-differentiable evaluation metrics such as CIDEr directly during training. At each step, the model samples a caption and computes its reward relative to a greedy-decoded baseline caption. Subtracting the baseline reward reduces gradient variance and stabilizes the reinforcement learning update.</p>
+<p>SCST significantly outperforms cross-entropy pre-training on CIDEr because it optimizes the metric directly rather than maximizing teacher-forced log-likelihood. However, reward-based training is slower to converge and sensitive to reward normalization. The standard recipe pre-trains with cross-entropy first to ensure fluency, then fine-tunes with SCST to align generation with the evaluation metric.</p>
+<pre><code>baseline = greedy_decode(model, image)\nsample_cap = sample_decode(model, image)\nreward = CIDEr(sample_cap) - CIDEr(baseline)\nloss = -reward * log_prob
+</code></pre>
+<p>Large vision-language models such as BLIP and BLIP-2 unify contrastive image-text learning, image-text matching, and caption generation in a shared framework trained on web-scale data. BLIP uses a bootstrapped captioner to filter noisy web-scraped image-text pairs, producing a cleaner training signal that substantially improves downstream performance on standard captioning benchmarks.</p>
+<p>BLIP-2 introduces a Q-Former module that bridges a frozen image encoder and a frozen large language model using a small set of learnable query tokens. Only the Q-Former is trained during fine-tuning, making the approach computationally efficient. The resulting model achieves strong zero-shot captioning performance without task-specific adaptation of the frozen encoder or decoder components.</p>
+<pre><code>processor = BlipProcessor.from_pretrained(&quot;Salesforce/blip-image-captioning-base&quot;)\ninputs = processor(image, return_tensors=&quot;pt&quot;)\nout = model.generate(**inputs)\nprint(processor.decode(out[0]))
+</code></pre>
+<blockquote>
+<p>****: CIDEr is the standard captioning metric — it rewards n-grams that are distinctive to each reference caption using TF-IDF weighting. SPICE measures semantic similarity via scene graphs and correlates better with human judgments for complex captions.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Architecture</th>
+<th>CIDEr (COCO)</th>
+<th>BLEU-4</th>
+<th>Training Objective</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Show-and-Tell</td>
+<td>CNN + LSTM</td>
+<td>86</td>
+<td>27.7</td>
+<td>Cross-entropy</td>
+</tr>
+<tr>
+<td>Att2in</td>
+<td>CNN + LSTM + Attn</td>
+<td>111</td>
+<td>31.3</td>
+<td>Cross-entropy</td>
+</tr>
+<tr>
+<td>Transformer</td>
+<td>ViT + Transformer</td>
+<td>128</td>
+<td>33.5</td>
+<td>Cross-entropy + SCST</td>
+</tr>
+<tr>
+<td>OSCAR</td>
+<td>BERT + Region Feat</td>
+<td>137</td>
+<td>36.5</td>
+<td>Masked LM + Matching</td>
+</tr>
+<tr>
+<td>BLIP</td>
+<td>ViT + Enc-Dec</td>
+<td>136</td>
+<td>38.6</td>
+<td>Contrastive + LM</td>
+</tr>
+</tbody>
+</table>
+<p>Image captioning has evolved from fixed-vector CNN-LSTM pipelines to attention-based transformers and bootstrapped vision-language models. CIDEr remains the primary evaluation metric despite its TF-IDF bias toward frequent reference n-grams; SPICE better captures semantic correctness through scene graph comparison but is substantially slower to compute at scale.</p>
+<p>SCST reward training is essential for achieving competitive CIDEr scores on COCO, but requires careful reward normalization and a stable greedy baseline. In practice, models are pre-trained with cross-entropy loss to ensure linguistic fluency, then fine-tuned with SCST to directly align generation behavior with the target evaluation metric used in benchmark ranking.</p>
+<p>For production captioning systems, BLIP-2 provides strong zero-shot performance without task-specific fine-tuning by querying a frozen LLM through learned visual tokens. When domain accuracy matters — such as medical imaging, product descriptions, or satellite imagery — fine-tuning on in-domain image-caption pairs with SCST reward training remains the most reliable approach.</p>
+    </article>
+  </main>
+</body>
+</html>

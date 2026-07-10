@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pooling Operations — Max, Average, Global, and Adaptive | Notes Backup</title>
+  <meta name="description" content="Compare pooling variants from max and average to global average pooling, adaptive pooling, and spatial pyramid pooling, with gradient flow and classification head analysis." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Pooling Operations — Max, Average, Global, and Adaptive</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Compare pooling variants from max and average to global average pooling, adaptive pooling, and spatial pyramid pooling, with gradient flow and classification head analysis.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Pooling Operations — Max, Average, Global, and Adaptive</h1>
+<p>Pooling aggregates spatial information, reduces feature map size, and introduces a degree of spatial invariance. The choice of pooling strategy has downstream effects on parameter count, gradient flow, spatial invariance, and the ability to handle variable-size inputs. Global average pooling (GAP) replaced the fully-connected classifier in modern networks, cutting millions of parameters. Adaptive pooling enables batch inference on images of different sizes. Understanding when to pool, how much, and which variant determines whether a model is compact and generalises well or is overparameterised and brittle.</p>
+<h2>Max Pooling vs Average Pooling</h2>
+<p>Max pooling selects the maximum activation in each window: it is a hard selector, detecting whether a feature is present anywhere in the region (feature detectiveness). Average pooling computes the mean: it integrates evidence across the region (smoother, less sensitive to exact location). Max pooling has stronger spatial invariance — a shifted feature still produces the same max. Average pooling discards the peak magnitude. For early layers detecting edge and texture features, max pooling is standard. For the final global pooling before the classifier, average pooling is preferred because it uses information from all spatial locations rather than just one peak.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+
+np.random.seed(42)
+# Simulate a feature map with a sharp activation peak
+feat = torch.zeros(1, 1, 8, 8)
+feat[0, 0, 3, 4] = 5.0   # sharp peak
+feat[0, 0, :, :] += torch.randn(8, 8) * 0.1  # noise
+
+max_pool = nn.MaxPool2d(2, stride=2)
+avg_pool = nn.AvgPool2d(2, stride=2)
+
+max_out = max_pool(feat)
+avg_out = avg_pool(feat)
+
+print('Input feature map (8x8):')
+print(feat[0,0].numpy().round(2))
+print('\nAfter MaxPool2d(2,2) — 4x4:')
+print(max_out[0,0].detach().numpy().round(2))
+print('\nAfter AvgPool2d(2,2) — 4x4:')
+print(avg_out[0,0].detach().numpy().round(2))
+print('\nMax pool preserves peak magnitude; avg pool spreads it.')
+</code></pre>
+<h2>Global Average Pooling — Replacing the Classifier</h2>
+<p>Global Average Pooling (GAP) collapses the entire H×W spatial map for each channel into a single scalar by averaging. For a feature map of shape (N, C, H, W), GAP produces (N, C). A final linear layer then maps C→num_classes. This replaces the traditional flatten + FC approach: for AlexNet's 6×6×256 final conv, the FC layers had 256×6×6×4096 ≈ 37.7M parameters. GAP uses 0 extra parameters for the spatial aggregation step and only C×num_classes for the final layer. Lin et al. (2013, Network in Network) introduced GAP; it became universal with ResNet. GAP also acts as a structural regulariser: each channel must produce a class-discriminative activation map averaged over the whole spatial extent — this is the basis for class activation maps (CAM).</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class ResNetHead_FC(nn.Module):
+    &quot;&quot;&quot;Traditional: flatten + two FC layers.&quot;&quot;&quot;
+    def __init__(self, C=512, H=7, W=7, num_classes=1000):
+        super().__init__()
+        self.fc1 = nn.Linear(C * H * W, 4096)
+        self.fc2 = nn.Linear(4096, num_classes)
+        self.drop = nn.Dropout(0.5)
+    def forward(self, x):
+        x = x.flatten(1)
+        return self.fc2(self.drop(torch.relu(self.fc1(x))))
+
+class ResNetHead_GAP(nn.Module):
+    &quot;&quot;&quot;Modern: global average pool + single linear.&quot;&quot;&quot;
+    def __init__(self, C=512, num_classes=1000):
+        super().__init__()
+        self.gap = nn.AdaptiveAvgPool2d(1)
+        self.fc  = nn.Linear(C, num_classes)
+    def forward(self, x):
+        return self.fc(self.gap(x).squeeze(-1).squeeze(-1))
+
+fc_head  = ResNetHead_FC()
+gap_head = ResNetHead_GAP()
+
+p_fc  = sum(p.numel() for p in fc_head.parameters())
+p_gap = sum(p.numel() for p in gap_head.parameters())
+print(f'FC head params:  {p_fc:,}')
+print(f'GAP head params: {p_gap:,}')
+print(f'Reduction: {p_fc/p_gap:.1f}x fewer parameters')
+
+x = torch.randn(2, 512, 7, 7)
+print(f'\nFC  output: {tuple(fc_head(x).shape)}')
+print(f'GAP output: {tuple(gap_head(x).shape)}')
+</code></pre>
+<h2>Adaptive Pooling — Variable Input Sizes</h2>
+<p>nn.AdaptiveAvgPool2d(output_size) and nn.AdaptiveMaxPool2d(output_size) produce a fixed output size regardless of the input spatial dimensions. The pool window and stride are computed automatically: stride = ⌊H_in / H_out⌋, kernel = H_in - (H_out - 1)·stride. This enables a network trained on one image size to be evaluated on any other size — critical for fully-convolutional evaluation, test-time augmentation with different crop sizes, and inference on variable-resolution inputs (documents, medical scans). torchvision models use AdaptiveAvgPool2d(1) as their final pool, making them resolution-agnostic from the head onwards.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+pool = nn.AdaptiveAvgPool2d((7, 7))
+
+print(f'{'Input shape':&lt;20} {'Output shape':&lt;20} {'Pool window (approx.)'}')
+for H, W in [(7,7), (14,14), (28,28), (56,56), (224,224), (112,85)]:
+    x = torch.randn(1, 512, H, W)
+    out = pool(x)
+    stride_h = H // 7
+    kernel_h = H - (7-1)*stride_h
+    print(f'(1,512,{H},{W}){&quot;&quot;:&lt;{max(0,8-len(str(H))-len(str(W)))}} -&gt; {tuple(out.shape)!s:&lt;20} ~{kernel_h}x{kernel_h}')
+
+# Global adaptive pool: output size = (1,1)
+gap1 = nn.AdaptiveAvgPool2d(1)
+for H in [7, 14, 28]:
+    x = torch.randn(2, 256, H, H)
+    out = gap1(x).shape
+    print(f'Global: (2,256,{H},{H}) -&gt; {out}  (always (2,256,1,1))')
+</code></pre>
+<h2>Spatial Pyramid Pooling</h2>
+<p>Spatial Pyramid Pooling (SPP, He et al. 2015) pools feature maps at multiple scales — e.g., 1×1, 2×2, 4×4 — and concatenates the results. This allows a network to handle arbitrary input sizes and captures multi-scale context in a single pass. For a C-channel input, SPP produces C×(1+4+16) = 21C features (for three pyramid levels). SPP-Net was the first to apply this in CNN classification, making detection networks that resize inputs avoidable. YOLO's SPP module (three parallel max-pools with kernel 5, 9, 13 and same padding, then concat) captures multi-scale context in the backbone without spatial pyramid levels.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class SpatialPyramidPooling(nn.Module):
+    &quot;&quot;&quot;Multi-scale pooling: pools to each level then concatenates.&quot;&quot;&quot;
+    def __init__(self, levels=(1, 2, 4)):
+        super().__init__()
+        self.pools = nn.ModuleList([
+            nn.AdaptiveMaxPool2d(level) for level in levels
+        ])
+
+    def forward(self, x):
+        # x: (N, C, H, W)
+        parts = [pool(x).flatten(2) for pool in self.pools]  # each: (N,C,level^2)
+        return torch.cat(parts, dim=2).flatten(1)             # (N, C*(1+4+16+...))
+
+    def out_features(self, C, levels=(1,2,4)):
+        return C * sum(l*l for l in levels)
+
+spp = SpatialPyramidPooling(levels=(1, 2, 4))
+C = 512
+# Same network output with different input sizes
+for H in [7, 14, 19, 28]:
+    x = torch.randn(2, C, H, H)
+    out = spp(x)
+    print(f'Input (2,{C},{H},{H}) -&gt; SPP output {tuple(out.shape)}')
+print(f'\nOutput dim always: {C} * (1+4+16) = {C*21}')
+</code></pre>
+<blockquote>
+<p><strong>Strided Conv as a Pooling Alternative</strong>: A 3×3 conv with stride 2 achieves the same spatial downsampling as a 2×2 max pool but with learnable weights, no information bottleneck from the hard-max operation, and better gradient flow. ResNet's design replaced the early pooling layers with strided convolutions, enabling gradients to flow through the spatial downsampling step without the dead-gradient problem of max pool's hard selection. For modern architectures, strided conv (or strided depthwise conv in MobileNet) is generally preferred over max pooling for downsampling.</p>
+</blockquote>
+<h2>Gradient Flow Through Pooling</h2>
+<p>Max pooling has a switch mechanism: during the backward pass, gradient flows only to the maximum element in each window, while all other elements receive zero gradient. This can lead to sparse gradients in early layers if max pooling is applied aggressively. Average pooling distributes gradient equally across all window elements. Global average pooling distributes gradient across the entire H×W feature map — the smoothest option, ensuring all spatial locations receive training signal. Strided conv has the most flexible gradient routing because the 3×3 kernel weights are learned. When diagnosing vanishing gradients in early layers, check whether aggressive max pooling is blocking gradient flow.</p>
+<table>
+<thead>
+<tr>
+<th>Pooling Type</th>
+<th>Spatial Invariance</th>
+<th>Gradient Flow</th>
+<th>Params</th>
+<th>Handles Variable Size</th>
+<th>Typical Use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Max pool 2×2 s2</td>
+<td>High (hard select)</td>
+<td>Sparse (max only)</td>
+<td>0</td>
+<td>No (fixed stride)</td>
+<td>Early CNN layers (VGG, AlexNet)</td>
+</tr>
+<tr>
+<td>Average pool 2×2 s2</td>
+<td>Medium (smooth)</td>
+<td>Dense (equal)</td>
+<td>0</td>
+<td>No</td>
+<td>Rare — global avg preferred</td>
+</tr>
+<tr>
+<td>Global avg pool</td>
+<td>Full spatial avg</td>
+<td>Fully distributed</td>
+<td>0</td>
+<td>Yes (collapses any HxW)</td>
+<td>Final pool before classifier</td>
+</tr>
+<tr>
+<td>Adaptive avg pool</td>
+<td>Configurable</td>
+<td>Distributed</td>
+<td>0</td>
+<td>Yes</td>
+<td>Transfer learning, variable res</td>
+</tr>
+<tr>
+<td>Spatial pyramid</td>
+<td>Multi-scale</td>
+<td>Distributed</td>
+<td>0</td>
+<td>Yes</td>
+<td>Detection (SPP-Net, YOLO)</td>
+</tr>
+<tr>
+<td>Strided conv 3×3 s2</td>
+<td>Learned</td>
+<td>Full (via conv)</td>
+<td>k²×C×C</td>
+<td>No</td>
+<td>Modern ResNet, MobileNet</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>F.max_pool2d(x, kernel_size=2) and nn.MaxPool2d(2) are equivalent; use the module for nn.Sequential.</li>
+<li>Global max pooling (not average) is used in TextCNN: takes the most activated feature per filter across all positions.</li>
+<li>ROI pooling (Fast R-CNN) is adaptive max pool applied to region proposals of variable size.</li>
+<li>ROI align (Mask R-CNN) fixes the quantisation error of ROI pooling using bilinear interpolation.</li>
+<li>For 1D inputs (time series), nn.AdaptiveAvgPool1d(1) is the GAP equivalent — collapses the sequence to one value per channel.</li>
+</ul>
+<h2>Attention Pooling and Learned Aggregation</h2>
+<p>Attention pooling generalises average pooling by assigning learned weights to each spatial location before aggregating. Given feature map F ∈ ℝᶜˣᴴˣᵂ, attention pooling computes a weight map A = softmax(Wf(F)) and returns Σᵢⱼ Aᵢⱼ · Fᵢⱼ. This is used in CLIP's image encoder (multi-head attention pooling over ViT patch tokens), in DINO self-supervised features (attention from [CLS] token), and in medical imaging models where global average pooling loses localised pathology signals. The output is still a single vector per sample — same shape as GAP — but with spatially adaptive weighting.</p>
+<p>Squeeze-and-Excitation (SE) networks apply a soft channel-wise attention after pooling: GAP → FC → ReLU → FC → Sigmoid produces a per-channel weight vector that rescales the feature map. This recalibrates channel importance globally using only 2×C²/r parameters (r is the reduction ratio, typically 16). SE blocks add ~2% extra parameters but consistently improve accuracy by ~0.5–1% top-1 on ImageNet. EfficientNet incorporates SE blocks in every MBConv layer.</p>
+<ul>
+<li>GeM (Generalised Mean Pooling): Fpool = (1/n Σ fᵖ)^(1/p) — generalises avg (p=1) and max (p→∞) pooling for retrieval.</li>
+<li>NetVLAD: soft-assignment of features to cluster centres followed by residual aggregation — differentiable VLAD pooling.</li>
+<li>Power Average Pooling (PAP): learnable per-channel p exponent for retrieval and place recognition tasks.</li>
+<li>Second-order pooling (iSQRT-COV): covariance matrix of spatial features instead of first-order mean — captures feature correlations.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

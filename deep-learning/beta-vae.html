@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>β-VAE — Disentangled Representation Learning | Notes Backup</title>
+  <meta name="description" content="How β-VAE promotes disentangled representations by increasing the KL weight β&gt;1, why higher β trades reconstruction quality for interpretable independent latent factors, and how FactorVAE and β-TCVAE isolate the total correlation penalty for better disentanglement-quality tradeoffs." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>β-VAE — Disentangled Representation Learning</h1>
+      <ul class='note-meta'><li><strong>description:</strong> How β-VAE promotes disentangled representations by increasing the KL weight β&gt;1, why higher β trades reconstruction quality for interpretable independent latent factors, and how FactorVAE and β-TCVAE isolate the total correlation penalty for better disentanglement-quality tradeoffs.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>β-VAE — Disentangled Representation Learning</h1>
+<p>β-VAE (Higgins et al. 2017) extends the standard VAE by multiplying the KL term by a scalar β &gt; 1: L = E[log p(x|z)] - β·KL(q_φ(z|x) || p(z)). When β=1 the objective is the standard ELBO. Increasing β imposes a stronger information bottleneck on the latent code, forcing the encoder to use each latent dimension sparingly and independently. The result is disentanglement: each latent dimension tends to encode one interpretable generative factor (e.g., rotation angle, object scale, x-position) independently of the others. The tradeoff is that high β degrades reconstruction quality — the stronger bottleneck leaves less capacity for precise reconstruction.</p>
+<h2>Why β &gt; 1 Promotes Disentanglement</h2>
+<p>The KL term KL(q_φ(z|x) || p(z)) = KL(q_φ(z|x) || N(0,I)) can be decomposed as: index-code mutual information I(x;z) + total correlation TC(z) + dimension-wise KL. Total correlation TC(z) = KL(q(z) || ∏ⱼ q(zⱼ)) measures statistical dependence among latent dimensions — it is zero only when all dimensions are mutually independent. Penalizing KL with β &gt; 1 implicitly penalizes TC more heavily, pushing the marginal posterior toward a factorial distribution. A factorial marginal q(z) ≈ ∏ⱼ q(zⱼ) is a necessary (but not sufficient) condition for each zⱼ to capture one independent generative factor.</p>
+<h2>β-VAE Training with Configurable β</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.optim import Adam
+
+class BetaVAE(nn.Module):
+    def __init__(self, latent_dim=10, beta=4.0):
+        super().__init__()
+        self.beta = beta
+        self.latent_dim = latent_dim
+        self.encoder = nn.Sequential(
+            nn.Conv2d(1, 32, 4, 2, 1), nn.ReLU(),
+            nn.Conv2d(32, 64, 4, 2, 1), nn.ReLU(),
+            nn.Flatten()
+        )
+        self.fc_mu     = nn.Linear(64 * 7 * 7, latent_dim)
+        self.fc_logvar = nn.Linear(64 * 7 * 7, latent_dim)
+        self.decoder_fc = nn.Linear(latent_dim, 64 * 7 * 7)
+        self.decoder = nn.Sequential(
+            nn.ConvTranspose2d(64, 32, 4, 2, 1), nn.ReLU(),
+            nn.ConvTranspose2d(32, 1, 4, 2, 1), nn.Sigmoid()
+        )
+
+    def reparameterize(self, mu, logvar):
+        return mu + torch.exp(0.5 * logvar) * torch.randn_like(mu)
+
+    def forward(self, x):
+        h = self.encoder(x)
+        mu, logvar = self.fc_mu(h), self.fc_logvar(h)
+        z = self.reparameterize(mu, logvar)
+        h2 = F.relu(self.decoder_fc(z)).view(-1, 64, 7, 7)
+        recon = self.decoder(h2)
+        return recon, mu, logvar
+
+    def loss(self, x):
+        recon, mu, logvar = self(x)
+        recon_l = F.binary_cross_entropy(recon, x, reduction='sum') / x.size(0)
+        kl      = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1).mean()
+        return recon_l + self.beta * kl, recon_l.item(), kl.item()
+
+for beta in [1, 4, 8, 16]:
+    m = BetaVAE(latent_dim=10, beta=beta)
+    x = torch.rand(4, 1, 28, 28)
+    total, recon, kl = m.loss(x)
+    print(f'β={beta:2d}: total={total:.2f}  recon={recon:.2f}  KL={kl:.2f}')
+</code></pre>
+<h2>Disentanglement Visualization</h2>
+<p>The standard way to verify disentanglement visually is latent traversal: take a reference image, encode it to get z, then fix all latent dimensions except one and vary that one dimension from -3 to +3 in steps. If the model is disentangled, varying z_j should change exactly one visual attribute (e.g., rotation) while all others remain constant. With β=1 (vanilla VAE), traversals often change multiple attributes simultaneously. With β=8 or β=16, individual traversals typically isolate single factors, at the cost of blurrier reconstructions.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+def latent_traversal(model, x_ref, dim_idx, n_steps=11, z_range=(-3.0, 3.0)):
+    &quot;&quot;&quot;
+    Fix all latent dims except dim_idx; traverse from z_range[0] to z_range[1].
+    Returns list of decoded images showing how that dim controls generation.
+    &quot;&quot;&quot;
+    model.eval()
+    with torch.no_grad():
+        mu, logvar = model.fc_mu, model.fc_logvar
+        h = model.encoder(x_ref.unsqueeze(0))
+        z_base = model.fc_mu(h).squeeze(0)  # use mean, no sampling
+        z_vals = torch.linspace(z_range[0], z_range[1], n_steps)
+        images = []
+        for val in z_vals:
+            z = z_base.clone()
+            z[dim_idx] = val
+            h2 = torch.relu(model.decoder_fc(z.unsqueeze(0))).view(1, 64, 7, 7)
+            img = model.decoder(h2).squeeze().cpu().numpy()
+            images.append(img)
+    return images
+
+def plot_traversals(model, x_ref, n_dims=5, save_path='/tmp/traversals.png'):
+    fig, axes = plt.subplots(n_dims, 11, figsize=(15, n_dims * 1.5))
+    for d in range(n_dims):
+        imgs = latent_traversal(model, x_ref, dim_idx=d)
+        for col, img in enumerate(imgs):
+            axes[d, col].imshow(img, cmap='gray', vmin=0, vmax=1)
+            axes[d, col].axis('off')
+        axes[d, 0].set_ylabel(f'z_{d}', rotation=0, labelpad=20, fontsize=9)
+    plt.suptitle('β-VAE Latent Traversals', fontsize=11)
+    plt.tight_layout(); plt.savefig(save_path, dpi=100)
+    print(f'Traversal grid saved to {save_path}')
+
+x_ref = torch.rand(1, 28, 28)
+model = BetaVAE(latent_dim=10, beta=8)
+print('Latent traversal: vary one dim, fix others to diagnose disentanglement')
+</code></pre>
+<h2>Disentanglement Metrics</h2>
+<p>Qualitative traversals are insufficient for rigorous evaluation. Three quantitative metrics are commonly used. The BetaVAE score (Higgins et al. 2017): sample pairs of images that differ in exactly one ground-truth factor; encode both; the difference of their latent codes should point along the axis for that factor; a linear classifier predicts which factor changed from the difference vector. FactorVAE score (Kim &amp; Mnih 2018): uses a majority vote classifier on the latent dimension with smallest variance across fixed-factor batches. MIG (Mutual Information Gap, Chen et al. 2018): for each ground-truth factor, compute normalized mutual information with each latent dimension; the gap between the top-1 and top-2 MI values measures how exclusively one dimension encodes that factor.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import train_test_split
+
+def betavae_score(model, generate_pair_fn, n_pairs=1000, n_factors=6):
+    &quot;&quot;&quot;
+    BetaVAE disentanglement score.
+    generate_pair_fn(factor_idx) -&gt; (img1, img2) where only factor_idx differs.
+    Score = accuracy of linear classifier predicting which factor changed.
+    &quot;&quot;&quot;
+    model.eval()
+    X_train, y_train = [], []
+    with torch.no_grad():
+        for _ in range(n_pairs):
+            factor = np.random.randint(n_factors)
+            # generate_pair_fn returns (img1, img2) as tensors
+            img1, img2 = generate_pair_fn(factor)
+            mu1, _ = model.fc_mu(model.encoder(img1.unsqueeze(0))), None
+            mu2, _ = model.fc_mu(model.encoder(img2.unsqueeze(0))), None
+            h1 = model.encoder(img1.unsqueeze(0))
+            h2 = model.encoder(img2.unsqueeze(0))
+            z1, z2 = model.fc_mu(h1).squeeze(), model.fc_mu(h2).squeeze()
+            diff = (z1 - z2).abs().cpu().numpy()
+            X_train.append(diff)
+            y_train.append(factor)
+    X = np.array(X_train)
+    y = np.array(y_train)
+    X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=0)
+    clf = LogisticRegression(max_iter=500).fit(X_tr, y_tr)
+    score = clf.score(X_te, y_te)
+    print(f'BetaVAE disentanglement score: {score:.3f} (1.0 = perfect, 1/n_factors = random)')
+    return score
+
+def mig_score(z_samples, factor_samples, bins=20):
+    &quot;&quot;&quot;Mutual Information Gap: gap between top-1 and top-2 MI per ground-truth factor.&quot;&quot;&quot;
+    n_factors = factor_samples.shape[1]
+    n_latents  = z_samples.shape[1]
+    mi_matrix = np.zeros((n_factors, n_latents))
+    for f in range(n_factors):
+        for d in range(n_latents):
+            # Discretize continuous values for MI estimation
+            f_disc = np.digitize(factor_samples[:, f], bins=np.linspace(factor_samples[:, f].min(), factor_samples[:, f].max(), bins))
+            z_disc = np.digitize(z_samples[:, d], bins=np.linspace(z_samples[:, d].min(), z_samples[:, d].max(), bins))
+            mi_matrix[f, d] = np.corrcoef(f_disc, z_disc)[0, 1] ** 2  # approx MI via R^2
+    mig = np.mean(np.sort(mi_matrix, axis=1)[:, -1] - np.sort(mi_matrix, axis=1)[:, -2])
+    print(f'MIG score: {mig:.3f} (higher = better, max=1.0)')
+    return mig
+
+print('Disentanglement metric functions ready')
+</code></pre>
+<h2>FactorVAE — Total Correlation Penalty</h2>
+<p>FactorVAE (Kim &amp; Mnih 2018) decomposes the β-VAE objective to identify the total correlation TC(z) = KL(q(z) || ∏ⱼ q(zⱼ)) as the key term driving disentanglement, and penalizes TC directly rather than the full KL. TC is estimated using a discriminator D trained to distinguish samples from the aggregated posterior q(z) = ∫ q(z|x)p(x)dx from samples from the factorial ∏ⱼ q(zⱼ). The TC term is estimated as E_{q(z)}[log D(z) - log(1-D(z))]. By penalizing TC directly while keeping the reconstruction and MI terms from the standard ELBO, FactorVAE achieves better disentanglement at the same reconstruction quality than β-VAE with equivalent β.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class TCDiscriminator(nn.Module):
+    &quot;&quot;&quot;Discriminator for FactorVAE: separates q(z) from prod_j q(z_j).&quot;&quot;&quot;
+    def __init__(self, latent_dim=10, hidden=256):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(latent_dim, hidden), nn.LeakyReLU(0.2),
+            nn.Linear(hidden, hidden), nn.LeakyReLU(0.2),
+            nn.Linear(hidden, hidden), nn.LeakyReLU(0.2),
+            nn.Linear(hidden, 2)  # logits for [real, permuted]
+        )
+
+    def forward(self, z):
+        return self.net(z)
+
+def permute_dims(z):
+    &quot;&quot;&quot;Permute each latent dim independently to sample from prod_j q(z_j).&quot;&quot;&quot;
+    B, D = z.shape
+    z_perm = torch.zeros_like(z)
+    for d in range(D):
+        idx = torch.randperm(B)
+        z_perm[:, d] = z[idx, d]
+    return z_perm
+
+def factorvae_vae_loss(recon, x, mu, logvar, D_net, gamma=10.0):
+    &quot;&quot;&quot;VAE loss for FactorVAE: recon + MI + dimension-wise KL + gamma*TC estimate.&quot;&quot;&quot;
+    recon_loss = F.binary_cross_entropy(recon, x.view(x.size(0), -1), reduction='sum') / x.size(0)
+    kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1).mean()
+    # Estimate TC using discriminator
+    std = torch.exp(0.5 * logvar)
+    z = mu + std * torch.randn_like(std)
+    d_logits = D_net(z)  # (B, 2)
+    tc_estimate = (d_logits[:, 0] - d_logits[:, 1]).mean()
+    return recon_loss + kl + gamma * tc_estimate
+
+def factorvae_disc_loss(z_real, D_net):
+    &quot;&quot;&quot;Discriminator loss: classify q(z) as real, prod_j q(z_j) as fake.&quot;&quot;&quot;
+    z_perm = permute_dims(z_real.detach())
+    real_logits = D_net(z_real.detach())
+    fake_logits = D_net(z_perm)
+    real_loss = F.cross_entropy(real_logits, torch.zeros(z_real.size(0), dtype=torch.long, device=z_real.device))
+    fake_loss = F.cross_entropy(fake_logits, torch.ones(z_perm.size(0), dtype=torch.long, device=z_perm.device))
+    return (real_loss + fake_loss) / 2
+
+D = TCDiscriminator(latent_dim=10)
+z_sample = torch.randn(32, 10)
+z_perm   = permute_dims(z_sample)
+print(f'Discriminator on q(z):          {D(z_sample).shape}')
+print(f'Permuted dims (prod_j q(z_j)):  {D(z_perm).shape}')
+</code></pre>
+<h2>β-TCVAE — Decomposing the KL</h2>
+<p>β-TCVAE (Chen et al. 2018) provides the most principled decomposition of the VAE objective. The full KL term KL(q_φ(z|x) || p(z)) can be written as: I(x;z) + TC(z) + Σⱼ KL(q(zⱼ) || p(zⱼ)), where I(x;z) is the index-code mutual information (encoding information content), TC(z) = KL(q(z) || ∏ⱼ q(zⱼ)) is the total correlation (dependency between latent dimensions), and the last term is dimension-wise KL (distance of each marginal from the prior). β-TCVAE penalizes only TC with a factor α (typically α=β-1), leaving the MI and dimension-wise KL terms weighted at 1. This surgical penalty achieves the same disentanglement effect as β-VAE while preserving more reconstruction quality, because MI and dimension-wise KL are not inflated.</p>
+<ul>
+<li>Full KL = I(x;z)  +  TC(z)  +  Σⱼ KL(q(zⱼ)||p(zⱼ)) — three distinct terms with different roles.</li>
+<li>I(x;z) should NOT be penalized heavily — it represents useful information encoded in z.</li>
+<li>TC(z) is the disentanglement term — penalizing it encourages factorial marginal q(z) ≈ ∏ⱼ q(zⱼ).</li>
+<li>β-TCVAE uses minibatch-stratified sampling to estimate TC without an adversarial discriminator.</li>
+<li>FactorVAE estimates TC adversarially; β-TCVAE estimates it via importance weighting — both target the same term.</li>
+</ul>
+<blockquote>
+<p><strong>Choosing β in Practice</strong>: Start with β=4 and increase if traversals show entanglement. β=8–16 is the typical sweet spot for dSprites and 3D Shapes benchmarks. If reconstructions become too blurry at high β, try FactorVAE (γ=10–40) or β-TCVAE instead — they achieve equivalent disentanglement with better reconstruction by penalizing total correlation more precisely rather than the full KL.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Loss</th>
+<th>β / γ</th>
+<th>Disentanglement Score</th>
+<th>Reconstruction Quality</th>
+<th>Interpretability</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>VAE (β=1)</td>
+<td>Recon + 1·KL</td>
+<td>β=1</td>
+<td>Low (~0.5 BetaVAE)</td>
+<td>High — sharp reconstructions</td>
+<td>Entangled factors, hard to interpret</td>
+</tr>
+<tr>
+<td>β-VAE (β=4)</td>
+<td>Recon + 4·KL</td>
+<td>β=4</td>
+<td>Medium (~0.7)</td>
+<td>Moderate — slightly blurry</td>
+<td>Several factors isolated</td>
+</tr>
+<tr>
+<td>β-VAE (β=16)</td>
+<td>Recon + 16·KL</td>
+<td>β=16</td>
+<td>High (~0.85)</td>
+<td>Low — blurry reconstructions</td>
+<td>Most factors isolated, some lost</td>
+</tr>
+<tr>
+<td>FactorVAE</td>
+<td>Recon + MI + dim-KL + γ·TC</td>
+<td>γ=10–40</td>
+<td>High (~0.85–0.9)</td>
+<td>Better than β-VAE at same score</td>
+<td>Independent TC penalty, cleaner</td>
+</tr>
+<tr>
+<td>β-TCVAE</td>
+<td>Recon + MI + β·TC + dim-KL</td>
+<td>β=4–8 on TC only</td>
+<td>High (~0.85–0.9)</td>
+<td>Better than β-VAE</td>
+<td>Explicit TC decomposition, principled</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>β=1 is the standard VAE — the ELBO lower bound on log p(x) with no extra disentanglement pressure.</li>
+<li>Total correlation TC(z) = KL(q(z) || ∏ⱼ q(zⱼ)) is zero if and only if all latent dimensions are mutually independent.</li>
+<li>The BetaVAE disentanglement score saturates at ~0.9 on dSprites; perfect scores are unachievable because stochastic encoding adds noise to difference vectors.</li>
+<li>FactorVAE's permute-dims trick shuffles each latent dimension independently across the batch to approximate samples from the factorial marginal ∏ⱼ q(zⱼ).</li>
+<li>β-TCVAE (Chen et al. 2018) decomposes the KL into three terms — index-code MI (I(x;z)), TC(z), and dimension-wise KL — and penalizes only TC, giving the most principled objective.</li>
+<li>Disentanglement is dataset-dependent: models with high BetaVAE scores on dSprites may not disentangle on natural images where factors are correlated.</li>
+</ul>
+<hr />
+<p>β-VAE establishes that a single scalar hyperparameter can shift the VAE from a pure generative model toward a disentangled representation learner. FactorVAE and β-TCVAE refine this insight by isolating total correlation as the operative term, yielding better disentanglement-quality tradeoffs. These models find practical use in controllable generation, scientific factor discovery, and data augmentation — anywhere that interpretable, independent latent factors are more valuable than pixel-perfect reconstruction.</p>
+    </article>
+  </main>
+</body>
+</html>

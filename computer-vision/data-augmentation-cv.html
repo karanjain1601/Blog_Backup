@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Data Augmentation for Computer Vision | Notes Backup</title>
+  <meta name="description" content="Geometric and color augmentation strategies — random crop, flip, color jitter, RandAugment, Mixup, and CutMix — and how augmentation improves generalization in image classification and detection." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Data Augmentation for Computer Vision</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Geometric and color augmentation strategies — random crop, flip, color jitter, RandAugment, Mixup, and CutMix — and how augmentation improves generalization in image classification and detection.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Data Augmentation for Computer Vision</h1>
+<h2>Overview</h2>
+<p>Data augmentation artificially expands a training dataset by applying label-preserving transformations to existing images. This prevents overfitting, improves generalization to unseen data, and reduces the need for additional labeled examples — a critical technique when labels are scarce or expensive to collect.</p>
+<p>Modern augmentation pipelines combine geometric transforms — spatial changes that preserve semantic content — with photometric transforms that shift lighting and color. Both categories force the model to learn features that are truly discriminative rather than artifacts of specific imaging conditions or camera settings.</p>
+<h2>Geometric Augmentations</h2>
+<p>Geometric augmentations apply spatial transformations: cropping, flipping, rotation, and perspective warping. They simulate variation in object scale, viewpoint, and position. RandomResizedCrop is especially effective — it randomly crops and resizes to a fixed output size, encouraging scale and location invariance in learned representations.</p>
+<pre><code class="language-python">import torchvision.transforms.v2 as T
+import torch
+
+train_transform = T.Compose([
+    T.RandomResizedCrop(224, scale=(0.08, 1.0)),
+    T.RandomHorizontalFlip(p=0.5),
+    T.ColorJitter(brightness=0.2, contrast=0.2,
+                  saturation=0.2, hue=0.05),
+    T.ToImage(),
+    T.ToDtype(torch.float32, scale=True),
+    T.Normalize(mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225]),
+])
+</code></pre>
+<p>The torchvision transforms.v2 API is the modern interface, supporting images and bounding boxes in a unified pipeline. Always normalize last: subtract dataset mean and divide by standard deviation. ImageNet defaults (mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225]) are widely reused for transfer learning.</p>
+<p>Horizontal flip is nearly always safe for natural images. Vertical flip is task-specific: suitable for satellite imagery or medical scans, but not for street scenes where gravity matters. Rotation should use moderate angles (±15°) to avoid creating unrealistic poses that mislead the model during training.</p>
+<h2>Color and Photometric Augmentations</h2>
+<p>Color augmentations change photometric properties without altering spatial structure. They simulate real-world variation in lighting conditions, camera sensors, and image processing pipelines. Common transforms include brightness, contrast, saturation, and hue shifts — all available via ColorJitter in torchvision.</p>
+<p>ColorJitter randomly perturbs brightness, contrast, and saturation by up to ±20%, and hue by ±5% (as a fraction of 0.5). Stronger jitter increases robustness; too aggressive a hue range (=0.5) creates implausible colors. Random grayscale and Gaussian blur are complementary photometric augmentation options worth exploring.</p>
+<p>AutoAugment policies learned from data can outperform hand-tuned color jitter. These include photometric ops such as Sharpness, Equalize, Posterize, and Solarize alongside geometric transforms, creating a richer augmentation space than any single manually crafted pipeline. RandAugment unifies them under two simple hyperparameters.</p>
+<h2>Mixup and CutMix</h2>
+<p>Mixup (Zhang et al., 2018) creates synthetic training samples by linearly interpolating between two images and their one-hot labels. A mixing coefficient λ is sampled from Beta(α,α), and the blended sample forces the model to predict a soft combination of both classes, reducing overconfident predictions significantly.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+
+def mixup_batch(images, labels, alpha=0.4):
+    lam = np.random.beta(alpha, alpha)
+    B = images.size(0)
+    idx = torch.randperm(B)
+    mixed_x = lam * images + (1 - lam) * images[idx]
+    y_a, y_b = labels, labels[idx]
+    return mixed_x, y_a, y_b, lam
+
+# Loss: lam * criterion(pred, y_a) + (1-lam) * criterion(pred, y_b)
+</code></pre>
+<p>CutMix (Yun et al., 2019) improves on Mixup by pasting a rectangular patch from image B into image A rather than blending pixels globally. Labels are mixed proportional to the patch area ratio. This preserves local texture realism and shows strong gains on both classification and detection benchmarks.</p>
+<pre><code class="language-python">def cutmix_batch(images, labels, alpha=1.0):
+    lam = np.random.beta(alpha, alpha)
+    B, C, H, W = images.shape
+    idx = torch.randperm(B)
+    rx, ry = np.random.randint(W), np.random.randint(H)
+    rw = int(W * np.sqrt(1 - lam))
+    rh = int(H * np.sqrt(1 - lam))
+    x1, x2 = max(0, rx-rw//2), min(W, rx+rw//2)
+    y1, y2 = max(0, ry-rh//2), min(H, ry+rh//2)
+    images[:, :, y1:y2, x1:x2] = images[idx, :, y1:y2, x1:x2]
+    lam = 1 - (x2-x1)*(y2-y1)/(W*H)
+    return images, labels, labels[idx], lam
+</code></pre>
+<h2>RandAugment</h2>
+<p>RandAugment (Cubuk et al., 2020) simplifies augmentation search by replacing complex learned per-layer policies with two global hyperparameters: N (operations per sample) and M (magnitude on a 0–30 scale). It randomly samples N transforms from a pool of 14 operations and applies them sequentially to each image.</p>
+<blockquote>
+<p><strong>tip</strong>: RandAugment with N=2, M=9 is a strong default for classification — used in EfficientNet, ViT, and ConvNeXt training. For detection, be careful: geometric augmentations require transforming bounding box coordinates too.</p>
+</blockquote>
+<pre><code class="language-python">import torchvision.transforms.v2 as T
+
+# N=2 ops from the augmentation pool, M=9 magnitude (scale 0-30)
+rand_augment = T.RandAugment(num_ops=2, magnitude=9)
+
+eval_transform = T.Compose([
+    T.Resize(256),
+    T.CenterCrop(224),
+    T.ToImage(),
+    T.ToDtype(torch.float32, scale=True),
+    T.Normalize(mean=[0.485,0.456,0.406],
+                std=[0.229,0.224,0.225]),
+])
+</code></pre>
+<p>At test time, no augmentation is applied — only center crop and normalization. For object detection, augmentation must be applied jointly to images and bounding boxes. Geometric ops require coordinate transforms; photometric ops like color jitter can be applied to the image only, leaving annotations unchanged.</p>
+<h2>Key Takeaways</h2>
+<table>
+<thead>
+<tr>
+<th>Augmentation</th>
+<th>Task</th>
+<th>Typical param</th>
+<th>Accuracy gain</th>
+<th>Cls / Det support</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Random crop</td>
+<td>All</td>
+<td>scale=(0.08,1.0)</td>
+<td>+2–4%</td>
+<td>Both</td>
+</tr>
+<tr>
+<td>H-Flip</td>
+<td>Natural images</td>
+<td>p=0.5</td>
+<td>+0.5–1%</td>
+<td>Both</td>
+</tr>
+<tr>
+<td>Color jitter</td>
+<td>All</td>
+<td>strength=0.2</td>
+<td>+0.5–1.5%</td>
+<td>Cls only</td>
+</tr>
+<tr>
+<td>Mixup</td>
+<td>Classification</td>
+<td>α=0.4</td>
+<td>+0.5–1%</td>
+<td>Cls only</td>
+</tr>
+<tr>
+<td>CutMix</td>
+<td>Both</td>
+<td>α=1.0</td>
+<td>+1–2%</td>
+<td>Both</td>
+</tr>
+<tr>
+<td>RandAugment</td>
+<td>Classification</td>
+<td>N=2, M=9</td>
+<td>+1–3%</td>
+<td>Cls (careful)</td>
+</tr>
+</tbody>
+</table>
+<p>Start with a strong geometric baseline: RandomResizedCrop plus RandomHorizontalFlip. Add ColorJitter for additional robustness. Then trial Mixup or CutMix with α=0.4 and RandAugment with N=2, M=9. Monitor validation accuracy carefully — too-strong augmentation can hurt when model capacity is insufficient for the task.</p>
+<p>Augmentation is dataset-dependent. For medical imaging, contrast enhancement and elastic deformation suit MRI and CT data, while aggressive color jitter may harm diagnostic quality. For satellite imagery, rotations and flips are safe. For scene text recognition, vertical flip is entirely inappropriate and counterproductive.</p>
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Backpropagation Through Time (BPTT) — Unrolling and Gradient Computation | Notes Backup</title>
+  <meta name="description" content="Derive BPTT by unrolling the RNN computational graph, compute gradient products across timesteps, visualise vanishing and exploding gradients, implement full vs truncated BPTT, and apply gradient clipping." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Backpropagation Through Time (BPTT) — Unrolling and Gradient Computation</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Derive BPTT by unrolling the RNN computational graph, compute gradient products across timesteps, visualise vanishing and exploding gradients, implement full vs truncated BPTT, and apply gradient clipping.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Backpropagation Through Time (BPTT) — Unrolling and Gradient Computation</h1>
+<p>Backpropagation Through Time (BPTT) is the algorithm used to train RNNs. The key idea is to unroll the RNN for T steps, creating a deep feedforward computational graph with shared weights. Standard backpropagation is then applied to this unrolled graph. The gradient of the loss with respect to the recurrent weight matrix Wₕₕ accumulates contributions from every timestep: dL/dWₕₕ = Σₜ dLₜ/dWₕₕ. Each term involves a product of Jacobians ∂hₜ/∂hₜ₋₁ = Wₕₕᵀ · diag(tanh'(hₜ)), which causes gradients to either vanish (if ‖Wₕₕ‖&lt;1) or explode (if ‖Wₕₕ‖&gt;1) exponentially with T.</p>
+<h2>Unrolling the Computational Graph</h2>
+<p>Unrolling creates T copies of the RNN cell sharing the same weights. The computational graph has T nodes for hidden states h₀, h₁, ..., hₜ₋₁ and T nodes for outputs y₀, ..., yₜ₋₁. All edges from hₜ₋₁ to hₜ pass through the same Wₕₕ. During forward pass, all T hidden states must be computed sequentially and stored in memory for the backward pass — this gives O(T·H) memory requirement. The backward pass then traverses the graph in reverse: from the final loss back through every hidden state to the first.</p>
+<pre><code class="language-python">import numpy as np
+
+np.random.seed(42)
+T, I, H, O = 10, 4, 8, 2
+
+# Initialize weights
+Wxh = np.random.randn(H, I) * 0.1
+Whh = np.random.randn(H, H) * 0.1
+Why = np.random.randn(O, H) * 0.1
+bh  = np.zeros((H, 1))
+by  = np.zeros((O, 1))
+xs  = [np.random.randn(I, 1) for _ in range(T)]
+
+# Forward pass -- store all hidden states (needed for backward)
+hs  = {-1: np.zeros((H, 1))}
+raw = {}
+for t in range(T):
+    raw[t] = Wxh @ xs[t] + Whh @ hs[t-1] + bh
+    hs[t]  = np.tanh(raw[t])
+out = Why @ hs[T-1] + by
+
+# Backward pass through time -- unroll all T steps
+dy   = out - np.ones((O, 1))   # gradient of MSE loss
+dWhy = dy @ hs[T-1].T
+dWxh = np.zeros_like(Wxh)
+dWhh = np.zeros_like(Whh)
+dbh  = np.zeros_like(bh)
+dh   = Why.T @ dy
+grad_norms = []
+
+for t in reversed(range(T)):
+    dtanh = (1 - hs[t]**2) * dh   # backprop through tanh
+    dWhh += dtanh @ hs[t-1].T     # accumulate Whh gradient
+    dWxh += dtanh @ xs[t].T
+    dbh  += dtanh
+    grad_norms.append(float(np.linalg.norm(dh)))
+    dh    = Whh.T @ dtanh          # propagate through Whh
+
+print('BPTT gradient norms flowing back through time (latest to earliest):')
+for i, n in enumerate(grad_norms):
+    print(f'  step {T-1-i:2d}: {n:.6f}')
+</code></pre>
+<h2>Gradient Flow Through Time</h2>
+<p>The gradient of the loss at step T with respect to the hidden state at step k is: dLₜ/dhₖ = (dLₜ/dhₜ) · Πⱼ₌ₖ₊₁ᵀ (∂hⱼ/∂hⱼ₋₁). Each factor ∂hⱼ/∂hⱼ₋₁ = Wₕₕᵀ · diag(1 - hⱼ²). If the largest singular value σ_max(Wₕₕ) &lt; 1, then ‖∂hⱼ/∂hⱼ₋₁‖ &lt; 1 and the product decays exponentially with T-k. If σ_max &gt; 1, the product grows exponentially. The tanh saturation factor (1-hⱼ²) ∈ [0,1] further reduces gradient magnitude, making vanishing more likely than exploding in practice.</p>
+<pre><code class="language-python">import numpy as np
+
+np.random.seed(0)
+T, H, I = 30, 16, 4
+
+def gradient_norm_profile(Whh_scale, T=30, H=16, I=4):
+    np.random.seed(0)
+    Wxh = np.random.randn(H, I) * 0.1
+    Whh = np.random.randn(H, H) * Whh_scale / np.sqrt(H)
+    bh  = np.zeros((H, 1))
+    xs  = [np.random.randn(I, 1) for _ in range(T)]
+    hs  = {-1: np.zeros((H, 1))}
+    for t in range(T):
+        hs[t] = np.tanh(Wxh @ xs[t] + Whh @ hs[t-1] + bh)
+    dh = np.ones((H, 1)) / H
+    norms = {}
+    for t in reversed(range(T)):
+        norms[t] = float(np.linalg.norm(dh))
+        dtanh    = (1 - hs[t]**2) * dh
+        dh       = Whh.T @ dtanh
+    return [norms[t] for t in range(T)]
+
+print(f'Gradient magnitude at selected timesteps (loss at t={T-1}):')
+print(f'{&quot;Scale&quot;:&gt;8} {&quot;t=T-1&quot;:&gt;10} {&quot;t=T/2&quot;:&gt;10} {&quot;t=0&quot;:&gt;10} {&quot;Regime&quot;:&gt;12}')
+for scale, label in [(0.5, 'vanishing'), (1.0, 'marginal'), (2.0, 'exploding')]:
+    norms = gradient_norm_profile(scale)
+    t_half = T // 2
+    print(f'{scale:&gt;8.1f} {norms[T-1]:&gt;10.4e} {norms[t_half]:&gt;10.4e} '
+          f'{norms[0]:&gt;10.4e} {label:&gt;12}')
+print('Ratio norms[0]/norms[T-1] shows exponential change across T steps.')
+</code></pre>
+<h2>Gradient Vanishing and Exploding Analysis</h2>
+<p>Vanishing gradient: when ‖Wₕₕ‖ &lt; 1, gradients approaching from far-away timesteps become negligibly small. The weight update dL/dWₕₕ = Σₜ dLₜ/dWₕₕ is dominated by recent timesteps; the model cannot learn dependencies longer than ~10–20 steps with random initialisation. Exploding gradient: when ‖Wₕₕ‖ &gt; 1, gradients blow up, causing NaN losses. Gradient clipping — scaling the gradient when ‖g‖ &gt; threshold — is the standard fix for explosions. Clipping does not fix vanishing gradients; that requires architectural changes (LSTM/GRU) or careful initialisation.</p>
+<h2>Full BPTT vs Truncated BPTT</h2>
+<p>Full BPTT unrolls the entire sequence of T steps. For T=1000 and H=512, storing all hidden states requires 1000×512×4 bytes ≈ 2 MB per sequence (per batch element). More importantly, the backward pass is also sequential over T steps. Truncated BPTT (TBPTT) limits the backward pass to the last k steps: the sequence is split into chunks of size k, the hidden state is carried forward (without gradient) from one chunk to the next, and backpropagation only goes k steps back. This reduces memory to O(k·H) and enables approximate but practical training.</p>
+<pre><code class="language-python">import numpy as np
+
+np.random.seed(7)
+T, I, H = 40, 4, 8
+Whh_scale = 0.5   # vanishing regime for clear demonstration
+
+Wxh = np.random.randn(H, I) * 0.1
+Whh = np.random.randn(H, H) * Whh_scale / np.sqrt(H)
+bh  = np.zeros((H, 1))
+xs  = [np.random.randn(I, 1) for _ in range(T)]
+
+def forward_all(xs, h0):
+    hs = {-1: h0}
+    for t, x in enumerate(xs):
+        hs[t] = np.tanh(Wxh @ x + Whh @ hs[t-1] + bh)
+    return hs
+
+def bptt_gradient(xs, hs, k_back):
+    dh = np.ones((H, 1)) / H; dW = np.zeros_like(Whh)
+    T_chunk = len(xs)
+    for t in reversed(range(max(0, T_chunk - k_back), T_chunk)):
+        dt = (1 - hs[t]**2) * dh
+        dW += dt @ hs[t-1].T
+        dh  = Whh.T @ dt
+    return dW
+
+hs_full = forward_all(xs, np.zeros((H, 1)))
+dW_full = bptt_gradient(xs, hs_full, T)   # full BPTT
+
+print(f'Full BPTT (k={T}): dWhh norm = {np.linalg.norm(dW_full):.6f}')
+for k in [5, 10, 20, T]:
+    dW_k = bptt_gradient(xs, hs_full, k)
+    cos  = np.dot(dW_full.ravel(), dW_k.ravel()) / (
+               np.linalg.norm(dW_full) * np.linalg.norm(dW_k) + 1e-9)
+    print(f'  Truncated k={k:2d}: cosine similarity={cos:.4f}, norm={np.linalg.norm(dW_k):.4f}')
+</code></pre>
+<h2>Detaching Hidden State</h2>
+<p>In PyTorch, h.detach() creates a new tensor that shares the same data but has no gradient tracking. When passed as the initial state to the next chunk, gradients from that chunk cannot flow back through the detached tensor into the previous chunk's computation graph. This is essential for memory-efficient training of long sequences: without detach, the backward pass would need to traverse the entire accumulated graph, defeating the purpose of chunking. The pattern is: h = h.detach() before each chunk's forward pass.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+torch.manual_seed(42)
+T, chunk, I, H, O, B = 100, 20, 8, 32, 4, 4
+
+rnn = nn.RNN(I, H, batch_first=True)
+fc  = nn.Linear(H, O)
+opt = torch.optim.Adam(list(rnn.parameters()) + list(fc.parameters()), lr=1e-3)
+x   = torch.randn(B, T, I)
+y   = torch.randn(B, T, O)
+
+total_loss = 0.0
+h = torch.zeros(1, B, H)
+for start in range(0, T, chunk):
+    xc   = x[:, start:start + chunk, :]
+    yc   = y[:, start:start + chunk, :]
+    h_in = h.detach()          # stop gradient from flowing into prev chunk
+    opt.zero_grad()
+    out, h = rnn(xc, h_in)
+    loss = nn.functional.mse_loss(fc(out), yc)
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(rnn.parameters(), max_norm=1.0)
+    opt.step()
+    total_loss += loss.item()
+
+n_chunks = T // chunk
+print(f'TBPTT training: {n_chunks} chunks x {chunk} steps')
+print(f'Avg chunk loss: {total_loss / n_chunks:.6f}')
+print('h.detach() breaks gradient graph -- memory is O(chunk * H) per step.')
+print(f'Savings vs full BPTT: {T // chunk}x less graph nodes to store.')
+</code></pre>
+<h2>Memory Requirements</h2>
+<p>Full BPTT must store all T hidden states for the backward pass: O(T·H·B·4) bytes (float32). For T=1000, H=512, B=32: 1000×512×32×4 ≈ 64 MB per layer. Truncated BPTT with chunk k stores only k hidden states: O(k·H·B·4) bytes. Additionally, storing raw pre-activation values for backpropagating through tanh doubles this estimate. Gradient checkpointing can trade recomputation for memory, storing only every √T hidden state and recomputing the rest during backward — reducing memory to O(√T·H) at the cost of ~1.5x forward passes.</p>
+<blockquote>
+<p><strong>Gradient Clipping Is Essential</strong>: Always apply gradient clipping when training RNNs. The standard threshold is max_norm=1.0 to 5.0 (use torch.nn.utils.clip_grad_norm_). Without clipping, a single step with ‖Wₕₕ‖&gt;1 can cause explosive gradient growth, resulting in NaN parameters. Clipping does not prevent vanishing gradients — for that, use LSTM/GRU architectures or gradient highway connections.</p>
+</blockquote>
+<h2>Gradient Clipping</h2>
+<p>Gradient clipping rescales the gradient vector when its norm exceeds a threshold: if ‖g‖ &gt; θ, set g ← g·(θ/‖g‖). This preserves gradient direction while bounding its magnitude. The threshold θ is a hyperparameter typically set between 1.0 and 10.0; lower values are safer but may slow convergence. Global clipping (across all parameters) is preferred over per-parameter clipping. Monitoring the fraction of steps where clipping activates is useful diagnostics: &gt;50% activation suggests the threshold is too low; 0% means it may be too high or gradients are well-behaved.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Memory</th>
+<th>Gradient Quality</th>
+<th>Parallelizable</th>
+<th>Long-Range Capture</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Full BPTT</td>
+<td>O(T·H·B) — stores all hidden states</td>
+<td>Exact gradient</td>
+<td>No — sequential unroll over T</td>
+<td>Yes — gradient flows from t=T to t=0</td>
+</tr>
+<tr>
+<td>Truncated BPTT (k)</td>
+<td>O(k·H·B) — only k states</td>
+<td>Approximation — local gradient only</td>
+<td>No — still sequential</td>
+<td>Only within k steps; no signal for lag &gt; k</td>
+</tr>
+<tr>
+<td>Real-Time Recurrent Learning</td>
+<td>O(H²) per step — online</td>
+<td>Exact but online (per-step)</td>
+<td>Yes — one step at a time</td>
+<td>Yes — H² parameter gradients per step</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>Full BPTT: exact gradients but O(T) memory and time; infeasible for T &gt; a few hundred.</li>
+<li>Truncated BPTT: standard in practice; chunk sizes of 35–256 are common; gradient is biased for long lags.</li>
+<li>Gradient checkpointing: O(sqrt(T)) memory, 1.5x compute; useful when T is large but not extreme.</li>
+<li>RTRL: online learning with exact gradients but O(H^4) compute per step — only practical for tiny H.</li>
+<li>Gradient clipping (max_norm=1-5): prevents explosions; mandatory for stable RNN training.</li>
+<li>Orthogonal Whh init: spectral radius = 1 at initialisation; delays vanishing gradient onset.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

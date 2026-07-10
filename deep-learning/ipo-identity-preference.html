@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>IPO — Identity Preference Optimization and Overcoming DPO Pitfalls | Notes Backup</title>
+  <meta name="description" content="IPO (Azar et al., 2023) directly optimizes the Psi-preference framework without assuming a Bradley-Terry probability model, using a quadratic loss that prevents DPO&#x27;s unbounded log-ratio problem and adds implicit L2 regularization on preference margins." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>IPO — Identity Preference Optimization and Overcoming DPO Pitfalls</h1>
+      <ul class='note-meta'><li><strong>description:</strong> IPO (Azar et al., 2023) directly optimizes the Psi-preference framework without assuming a Bradley-Terry probability model, using a quadratic loss that prevents DPO&#x27;s unbounded log-ratio problem and adds implicit L2 regularization on preference margins.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>IPO — Identity Preference Optimization and Overcoming DPO Pitfalls</h1>
+<p>Reinforcement learning from human feedback (RLHF) has evolved through a series of alignment algorithms — from PPO's online RL to DPO's offline closed-form solution. Each step aimed to simplify training while preserving alignment quality. IPO (Identity Preference Optimization, Azar et al. 2023) is a critical refinement of DPO that fixes a fundamental theoretical flaw: DPO's reliance on the Bradley-Terry preference model, which can lead to unbounded log-ratio growth and preference overfitting when training data contains noisy or near-tied pairs. IPO replaces DPO's logistic loss with a quadratic objective derived directly from the Psi-preference framework, providing a principled regularization that keeps policy ratios in a bounded range.</p>
+<h2>DPO's Bradley-Terry Assumption and Its Pitfalls</h2>
+<p>DPO derives its loss by assuming human preferences follow the Bradley-Terry model: P(y_w &gt; y_l | x) = sigma(r(x,y_w) - r(x,y_l)) where r is the implicit reward. This model implies a strict Thurstone-type preference ordering that may not match the actual preference data distribution. The deeper problem is that DPO's logistic loss has an asymptote at 0 — it keeps pushing the log-prob ratio of chosen over rejected responses toward +infinity. The gradient of the DPO loss only vanishes when log(pi_theta(y_w|x)/pi_ref(y_w|x)) - log(pi_theta(y_l|x)/pi_ref(y_l|x)) → +infinity, meaning the optimization has no natural stopping criterion beyond the finite data.</p>
+<p>In theory, DPO drives pi_theta(y_w)/pi_ref(y_w) → infinity while simultaneously pushing pi_theta(y_l)/pi_ref(y_l) → 0. With noisy preference labels (where some 'rejected' responses are actually reasonable), this causes the policy to catastrophically suppress those responses. The unbounded nature also makes DPO sensitive to the choice of beta: too small and the policy diverges from the reference; too large and the preference signal is overwhelmed by the KL penalty. IPO addresses all of these failure modes.</p>
+<h2>IPO Loss Function and the Psi-Preference Framework</h2>
+<p>IPO works directly with the general Psi-preference framework without specifying a particular probability model for preferences. The IPO loss is: L_IPO = E[([log pi_theta(y_w|x)/pi_ref(y_w|x) - log pi_theta(y_l|x)/pi_ref(y_l|x)] - 1/(2<em>tau))^2] where tau is an inverse-temperature hyperparameter. The key differences from DPO: (1) quadratic vs logistic loss — the squared term provides a natural stopping point at h = 1/(2</em>tau) where h is the log-ratio difference; (2) the target 1/(2*tau) acts as an L2 regularization target — neither too large nor too small; (3) tau interpolates between regimes: as tau → 0, IPO converges to DPO; as tau → infinity, it approaches REINFORCE. Typical values: tau = 0.1 gives a target h = 5.0, preventing extreme log-ratios while maintaining strong preference signal.</p>
+<h2>IPO Loss Implementation</h2>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def ipo_loss(
+    policy_chosen_logps,
+    policy_rejected_logps,
+    ref_chosen_logps,
+    ref_rejected_logps,
+    tau=0.1,
+):
+    # IPO loss (Azar et al., 2023) — quadratic regularization of log-ratio
+    chosen_logratios   = policy_chosen_logps   - ref_chosen_logps
+    rejected_logratios = policy_rejected_logps - ref_rejected_logps
+    h = chosen_logratios - rejected_logratios  # preference log-ratio difference
+    loss = (h - 1.0 / (2.0 * tau)) ** 2        # quadratic vs logistic in DPO
+    return loss.mean(), chosen_logratios.detach(), rejected_logratios.detach()
+
+bsz = 8
+pol_c = torch.randn(bsz) - 1.0
+pol_r = torch.randn(bsz) - 1.5
+ref_c = torch.randn(bsz) * 0.3 - 1.0
+ref_r = torch.randn(bsz) * 0.3 - 1.5
+loss, cr, rr = ipo_loss(pol_c, pol_r, ref_c, ref_r, tau=0.1)
+print(f'IPO loss: {loss:.4f}  chosen log-ratio: {cr.mean():.3f}  rejected: {rr.mean():.3f}')
+print(f'IPO target h = 1/(2*tau) = {1/(2*0.1):.1f}  — quadratic optimum')
+</code></pre>
+<h2>DPO vs IPO: Log-Ratio Divergence Comparison</h2>
+<p>The most revealing difference between DPO and IPO is what happens to the chosen log-ratio during gradient descent on the same data. DPO's logistic loss produces a gradient that never fully saturates — even when the model strongly prefers chosen over rejected, the gradient pushes the ratio higher. IPO's quadratic loss produces a gradient that is zero at h = 1/(2*tau) and reverses sign if h exceeds the target, creating a natural attractor that prevents runaway optimization.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def dpo_loss(chosen_lr, rejected_lr, beta=0.1):
+    return -F.logsigmoid(beta * (chosen_lr - rejected_lr)).mean()
+
+def ipo_loss_fn(chosen_lr, rejected_lr, tau=0.1):
+    h = chosen_lr - rejected_lr
+    return ((h - 1.0 / (2.0 * tau)) ** 2).mean()
+
+# Simulate gradient updates: DPO diverges, IPO converges to target
+cr_dpo = torch.tensor(0.0, requires_grad=True)
+cr_ipo = torch.tensor(0.0, requires_grad=True)
+rr = torch.tensor(-0.2)  # rejected stays near reference
+for step in range(80):
+    loss_d = dpo_loss(cr_dpo, rr)
+    loss_i = ipo_loss_fn(cr_ipo, rr)
+    grad_d = torch.autograd.grad(loss_d, cr_dpo)[0]
+    grad_i = torch.autograd.grad(loss_i, cr_ipo)[0]
+    cr_dpo = (cr_dpo - 0.05 * grad_d).detach().requires_grad_(True)
+    cr_ipo = (cr_ipo - 0.05 * grad_i).detach().requires_grad_(True)
+
+print(f'After 80 gradient steps (lr=0.05):')
+print(f'  DPO chosen log-ratio: {cr_dpo.item():.3f}  (grows toward +inf)')
+print(f'  IPO chosen log-ratio: {cr_ipo.item():.3f}  (target=1/(2*tau)={1/(2*0.1):.1f})')
+</code></pre>
+<h2>Temperature Parameter tau: Interpolating Between REINFORCE and DPO</h2>
+<p>The tau parameter in IPO is not just a scale factor — it determines the effective optimization target. At tau=0.01, the target h=50, which is so large that any reasonable training run will behave like DPO (the quadratic loss is nearly linear in the relevant range). At tau=10.0, the target h=0.05, meaning IPO prefers only a tiny margin between chosen and rejected — similar to REINFORCE which has no explicit preference margin. The practical sweet spot is tau=0.05 to tau=0.5, giving targets between 1 and 10 that prevent extreme divergence while maintaining meaningful preference signal. Cross-validation on held-out preferences is essential for tau selection.</p>
+<pre><code class="language-python">import torch
+
+def ipo_loss_tau(pol_c, pol_r, ref_c, ref_r, tau):
+    cr = pol_c - ref_c
+    rr = pol_r - ref_r
+    h  = cr - rr
+    return ((h - 1.0 / (2.0 * tau)) ** 2).mean()
+
+tau_values = [0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0]
+n = 64
+pol_c = torch.randn(n) - 0.8
+pol_r = torch.randn(n) - 1.3
+ref_c = torch.zeros(n)
+ref_r = torch.zeros(n)
+
+print(f'  tau     target_h     loss       regime')
+print('-' * 50)
+for tau in tau_values:
+    loss   = ipo_loss_tau(pol_c, pol_r, ref_c, ref_r, tau)
+    target = 1.0 / (2.0 * tau)
+    regime = 'DPO-like' if tau &lt; 0.1 else ('REINFORCE' if tau &gt; 2.0 else 'balanced')
+    print(f'  {tau:&gt;5.2f}   {target:&gt;8.2f}   {loss.item():&gt;8.4f}   {regime}')
+</code></pre>
+<h2>Monitoring Preference Overfitting During Training</h2>
+<p>A practical diagnostic for DPO vs IPO training is to monitor the absolute magnitude of log-ratios throughout training. With DPO, |log pi_theta(y_w|x)/pi_ref(y_w|x)| should plateau — if it keeps growing past 3-5, the model is overfitting to preference noise. With IPO, the log-ratio should converge near 1/(2*tau) for chosen and near 0 for rejected. Divergence from these targets signals miscalibration (wrong tau, incorrect normalization, or data quality issues).</p>
+<pre><code class="language-python">import torch
+from collections import defaultdict
+
+def track_log_ratios(step, chosen_lr, rejected_lr, metrics, threshold=3.0):
+    cr_abs = chosen_lr.abs().mean().item()
+    rr_abs = rejected_lr.abs().mean().item()
+    metrics['chosen_abs'].append(cr_abs)
+    metrics['rejected_abs'].append(rr_abs)
+    if cr_abs &gt; threshold or rr_abs &gt; threshold:
+        print(f'  Step {step}: OVERFIT |chosen|={cr_abs:.2f} |rejected|={rr_abs:.2f}')
+    return cr_abs, rr_abs
+
+metrics_dpo = defaultdict(list)
+metrics_ipo = defaultdict(list)
+for step in range(1, 21):
+    cr_dpo = torch.randn(16) * (step * 0.3)    # DPO ratios grow without bound
+    rr_dpo = torch.randn(16) * (step * 0.2)
+    track_log_ratios(step, cr_dpo, rr_dpo, metrics_dpo, threshold=3.0)
+    cr_ipo = torch.randn(16) * 0.5 + 5.0       # IPO stabilizes near 1/(2*tau)=5
+    rr_ipo = torch.randn(16) * 0.3 + 0.1
+    track_log_ratios(step, cr_ipo, rr_ipo, metrics_ipo, threshold=10.0)
+dpo_final = metrics_dpo['chosen_abs'][-1]
+ipo_final = metrics_ipo['chosen_abs'][-1]
+print(f'DPO final |chosen| log-ratio: {dpo_final:.2f}')
+print(f'IPO final |chosen| log-ratio: {ipo_final:.2f}')
+</code></pre>
+<h2>Alignment Method Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Loss Function</th>
+<th>Reference Model</th>
+<th>Regularization</th>
+<th>Pref. Assumption</th>
+<th>Stability</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DPO</td>
+<td>-log sigma(beta*h)</td>
+<td>Yes (frozen)</td>
+<td>Implicit KL via beta</td>
+<td>Bradley-Terry</td>
+<td>Can overfit</td>
+</tr>
+<tr>
+<td>IPO</td>
+<td>(h - 1/2tau)^2</td>
+<td>Yes (frozen)</td>
+<td>Quadratic L2 target</td>
+<td>Psi-preference (model-free)</td>
+<td>Stable</td>
+</tr>
+<tr>
+<td>ORPO</td>
+<td>L_SFT + lambda*L_OR</td>
+<td>No</td>
+<td>SFT objective joint</td>
+<td>Odds ratio</td>
+<td>Stable</td>
+</tr>
+<tr>
+<td>SimPO</td>
+<td>-log sigma(beta*Delta_r - gamma)</td>
+<td>No</td>
+<td>Length norm + margin</td>
+<td>None (avg log-prob)</td>
+<td>Stable</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>IPO's Quadratic Regularization</strong>: IPO's quadratic loss prevents the unbounded log-ratio problem in DPO — where DPO can drive pi_theta(y_w)/pi_ref(y_w) toward infinity, IPO's squared term provides an implicit L2 regularization that keeps ratios in a reasonable range. The equilibrium point h = 1/(2*tau) is a genuine attractor: gradients point away from it in both directions, ensuring stable convergence.</p>
+</blockquote>
+<p>Practically, IPO trains more conservatively than DPO: it produces policies with smaller log-ratio magnitudes and more moderate behavior on out-of-distribution prompts. This conservatism is a feature when preference labels are noisy (e.g., crowdsourced annotations with low inter-annotator agreement) but can be a limitation when the preference data is high quality and you want strong alignment signal. In that case, DPO with careful beta tuning may outperform IPO. The choice between them should be guided by held-out preference accuracy and log-ratio monitoring during training.</p>
+<hr />
+<p>IPO represents a principled fix to DPO's theoretical weaknesses without adding significant implementation complexity — the loss function is a one-line change. The quadratic objective, the tau temperature parameter, and the bounded log-ratio behavior make IPO the preferred choice for alignment scenarios with noisy preferences, small datasets, or situations where policy stability is critical. Understanding the DPO-IPO-ORPO-SimPO progression is essential for choosing the right alignment algorithm for a given resource and data quality constraint.</p>
+    </article>
+  </main>
+</body>
+</html>

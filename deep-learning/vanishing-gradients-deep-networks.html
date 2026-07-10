@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Vanishing Gradients — Mathematical Cause and Monitoring | Notes Backup</title>
+  <meta name="description" content="Derive why gradients vanish in deep networks via the product-of-Jacobians identity, measure the sigmoid saturation effect quantitatively, and build a complete gradient monitoring toolkit with hooks." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Vanishing Gradients — Mathematical Cause and Monitoring</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Derive why gradients vanish in deep networks via the product-of-Jacobians identity, measure the sigmoid saturation effect quantitatively, and build a complete gradient monitoring toolkit with hooks.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Vanishing Gradients — Mathematical Cause and Monitoring</h1>
+<p>Vanishing gradients are the primary obstacle to training deep neural networks with gradient descent. When the gradient of the loss with respect to early-layer parameters becomes exponentially small, those layers stop learning — the network effectively becomes shallow. Understanding the mathematical cause, measuring the effect empirically, and knowing which architectural and initialization solutions to apply are essential for anyone building deep models beyond 10 layers.</p>
+<h2>Mathematical Cause — Product of Jacobians</h2>
+<p>By the chain rule, the gradient of the loss with respect to layer 1 parameters is dL/dW₁ = (∂L/∂hₙ)·(∂hₙ/∂hₙ₋₁)·...·(∂h₂/∂h₁)·(∂h₁/∂W₁). This is a product of n−1 Jacobian matrices. If the spectral radius ρ(Jₖ) &lt; 1 for each Jacobian, the product shrinks as ρⁿ. For sigmoid activations, the maximum derivative is σ'(x) = σ(x)(1−σ(x)) ≤ 0.25. A 10-layer sigmoid network multiplies gradients by at most 0.25¹⁰ = 9.5×10⁻⁷.</p>
+<p>The critical insight is that sigmoid saturates at both extremes: when pre-activations are large in magnitude, σ'(x) ≈ 0. In practice, early layers often receive saturated activations because random initialization does not maintain activation scale, so the 0.25 bound is frequently not achieved — real gradients can vanish in just 3–5 layers.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+import torch.nn as nn
+
+def sigmoid_grad_simulation(n_layers=10, n_features=64, seed=42):
+    torch.manual_seed(seed)
+    layers = nn.ModuleList([nn.Linear(n_features, n_features) for _ in range(n_layers)])
+    for layer in layers:
+        nn.init.normal_(layer.weight, 0, 1.0)
+    x = torch.randn(32, n_features)
+    h = x
+    for layer in layers:
+        h = torch.sigmoid(layer(h))
+    h.mean().backward()
+    print('Layer | Weight grad norm')
+    for i, layer in enumerate(layers):
+        print(f'  {i+1:2d}  | {layer.weight.grad.norm().item():.4e}')
+
+sigmoid_grad_simulation(n_layers=8)
+</code></pre>
+<h2>ReLU vs Sigmoid Gradient Flow</h2>
+<p>ReLU(x) = max(0,x) has gradient 1 for x&gt;0, not bounded above. The Jacobian product does not necessarily shrink. With He initialization (std = √(2/fan_in)), the expected spectral radius is 1 — gradient magnitudes remain stable in expectation. Dying ReLU (units permanently at 0) can still cause vanishing for individual neurons; Leaky ReLU and ELU mitigate this with non-zero gradient for negative inputs.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+def gradient_flow_per_activation(n_layers=12, n_features=128, seed=0):
+    torch.manual_seed(seed)
+    for act_name, act_fn, std in [
+        ('Sigmoid', nn.Sigmoid(), 1.0),
+        ('Tanh',    nn.Tanh(),    1.0),
+        ('ReLU',    nn.ReLU(),    np.sqrt(2.0/n_features)),
+    ]:
+        layers = nn.ModuleList([nn.Linear(n_features, n_features) for _ in range(n_layers)])
+        for l in layers: nn.init.normal_(l.weight, 0, std)
+        x = torch.randn(64, n_features)
+        for l in layers:
+            x = act_fn(l(x))
+        x.mean().backward()
+        norms = [l.weight.grad.norm().item() for l in layers]
+        ratio = norms[0] / (norms[-1] + 1e-12)
+        print(f'{act_name:8s}: last={norms[-1]:.3e}, first={norms[0]:.3e}, ratio={ratio:.2e}')
+
+gradient_flow_per_activation()
+</code></pre>
+<h2>Gradient Norm Monitoring with Hooks</h2>
+<p>Detecting vanishing gradients in real training requires per-layer gradient norm logging. PyTorch hooks (register_hook on parameters) run after each backward pass and record the gradient norm. A healthy network shows roughly flat gradient norms across layers; exponential decay from last to first layer signals vanishing. Monitor gradient norm ratio: first_layer_norm / last_layer_norm &lt; 0.01 is a red flag.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from collections import defaultdict
+
+class GradMonitor:
+    def __init__(self, model):
+        self.norms = defaultdict(list)
+        self._handles = []
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self._handles.append(
+                    param.register_hook(lambda g, n=name: self.norms[n].append(g.norm().item()))
+                )
+
+    def report(self, step=None):
+        tag = f'Step {step}: ' if step else ''
+        for name, vals in self.norms.items():
+            print(f'{tag}{name}: last={vals[-1]:.3e} mean={sum(vals)/len(vals):.3e}')
+
+    def remove(self):
+        for h in self._handles: h.remove()
+
+model = nn.Sequential(
+    nn.Linear(64, 64), nn.Sigmoid(),
+    nn.Linear(64, 64), nn.Sigmoid(),
+    nn.Linear(64, 10)
+)
+monitor = GradMonitor(model)
+model(torch.randn(32, 64)).mean().backward()
+monitor.report(step=1)
+monitor.remove()
+</code></pre>
+<h2>Residual Connections Fix Vanishing Gradients</h2>
+<p>For a residual block y = F(x) + x, the gradient is ∂y/∂x = ∂F/∂x + I. Even if ∂F/∂x → 0 (deep sigmoid), the identity I ensures gradient magnitude is at least 1. This is the gradient highway — the identity term bypasses the Jacobian product bottleneck entirely.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class PlainBlock(nn.Module):
+    def __init__(self, d):
+        super().__init__()
+        self.net = nn.Sequential(nn.Linear(d, d), nn.Sigmoid(), nn.Linear(d, d))
+    def forward(self, x): return self.net(x)
+
+class ResBlock(nn.Module):
+    def __init__(self, d):
+        super().__init__()
+        self.net = nn.Sequential(nn.Linear(d, d), nn.ReLU(), nn.Linear(d, d))
+    def forward(self, x): return self.net(x) + x
+
+for name, BlockCls in [('Plain (sigmoid)', PlainBlock), ('Residual (ReLU)', ResBlock)]:
+    torch.manual_seed(0)
+    net = nn.Sequential(*[BlockCls(64) for _ in range(20)])
+    x = torch.randn(16, 64)
+    net(x).mean().backward()
+    first = list(net[0].parameters())[0].grad.norm().item()
+    last  = list(net[-1].parameters())[0].grad.norm().item()
+    print(f'{name}: first={first:.3e} last={last:.3e} ratio={first/(last+1e-12):.2f}')
+</code></pre>
+<h2>Batch Normalization and He Initialization</h2>
+<p>Batch Normalization normalizes pre-activations to zero mean and unit variance before the activation function: h_norm = (h − μ)/σ. This keeps inputs to activation functions in the linear regime where σ'(x) is near its maximum, slowing saturation. He initialization sets Var(W) = 2/n_in for ReLU networks, ensuring the activation variance remains 1 after each layer in expectation.</p>
+<p>Xavier/Glorot initialization (Var(W) = 2/(n_in+n_out)) is optimal for tanh/sigmoid. He initialization is optimal for ReLU. Using Xavier with ReLU causes the activation variance to shrink by factor 0.5 per layer because half the activations are zeroed. After 20 layers, variance is 0.5²⁰ = 10⁻⁶ — complete vanishing even without sigmoid.</p>
+<h2>Solutions Summary</h2>
+<blockquote>
+<p><strong>Gradient Norm Decay Heuristic</strong>: If the gradient norm of layer k is less than 1/100 of the last layer's norm, that layer is not learning. Check this ratio at step 100. If below 0.01 for any early layer, switch to ReLU + He init + residual connections before training longer.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Solution</th>
+<th>Mechanism</th>
+<th>Training cost</th>
+<th>When to use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ReLU activation</td>
+<td>Gradient = 1 for positive inputs</td>
+<td>None</td>
+<td>Default for feedforward and CNNs</td>
+</tr>
+<tr>
+<td>Residual connections</td>
+<td>Identity path: gradient ≥ I term always</td>
+<td>Small memory overhead</td>
+<td>Networks &gt;10 layers</td>
+</tr>
+<tr>
+<td>Batch Normalization</td>
+<td>Keeps activations off saturation plateau</td>
+<td>Forward/backward cost, extra params</td>
+<td>CNNs, large MLPs</td>
+</tr>
+<tr>
+<td>He initialization</td>
+<td>Var(W)=2/n_in preserves ReLU variance</td>
+<td>None — one-time setup</td>
+<td>All ReLU networks</td>
+</tr>
+<tr>
+<td>LSTM/GRU gates</td>
+<td>Additive cell state bypasses multiplication</td>
+<td>More params per step</td>
+<td>RNNs over long sequences</td>
+</tr>
+<tr>
+<td>Gradient clipping</td>
+<td>Prevents explosion; does not cure vanishing</td>
+<td>Negligible</td>
+<td>RNNs, LLM fine-tuning</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>Sigmoid networks: gradient ≤ 0.25 per layer; vanishes in approximately 6–8 layers.</li>
+<li>ReLU gradient = 1 for active neurons, preventing exponential shrinkage in expectation.</li>
+<li>Batch norm re-centers activations so they do not saturate; gradient flows through the normalization path.</li>
+<li>He init (std = sqrt(2/fan_in)) keeps pre-activation variance at 1 after each ReLU layer.</li>
+<li>Always log per-layer gradient norms during the first 100 steps of training a new architecture.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

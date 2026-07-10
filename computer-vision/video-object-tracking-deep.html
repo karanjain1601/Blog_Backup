@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Deep Video Object Tracking: SiamRPN, STARK, and Online Updates | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Deep Video Object Tracking: SiamRPN, STARK, and Online Updates</h1>
+      
+      <h1>Deep Video Object Tracking: SiamRPN, STARK, and Online Updates</h1>
+<p>Video object tracking localizes a target object across frames given only its bounding box in frame one. Unlike detection which runs independently per frame, tracking exploits temporal continuity — the target rarely teleports, so search can be localized around the previous position. This temporal prior makes tracking faster than detection but vulnerable to occlusion and long-term appearance drift.</p>
+<p>Modern deep trackers fall into three families: Siamese networks that compare template and search features offline; online learning trackers that update a discriminative model per video; and transformer-based trackers using attention to jointly process template and search region tokens. Each trades offline accuracy, online adaptability, and computational cost differently across short- and long-term benchmarks.</p>
+<p>Siamese trackers encode a fixed template patch (cropped from frame 1) and a large search region (centered on the last known position) through a shared-weight encoder. Cross-correlation between template and search features produces a response map; the peak location and regressed offset give the new bounding box. Offline training on large datasets replaces per-video optimization entirely at test time.</p>
+<pre><code class="language-python"># Siamese network tracking forward pass\nz_feat = encoder(template_patch)\nx_feat = encoder(search_region)\nresponse = cross_correlate(z_feat, x_feat)\nbbox = decode_response(response.argmax())
+</code></pre>
+<p>The Siamese paradigm achieves real-time speeds above 30 FPS because all heavy computation runs once per frame per region with no gradient updates at test time. AlexNet backbones in SiamFC gave way to deeper ResNets and transformer backbones in OSTrack and ARTrack. Template and search features are fused by cross-correlation or attention mechanisms rather than simple feature concatenation.</p>
+<p>SiamRPN adds a Region Proposal Network head on top of the Siamese cross-correlation. Instead of a simple response map, RPN predicts anchor classification scores and regression offsets at each spatial position in the search region. This enables aspect-ratio-aware tracking and eliminates multi-scale inference needed in SiamFC to handle target scale and shape changes across consecutive frames.</p>
+<pre><code class="language-python"># SiamRPN: anchor-based proposal from correlation\ncls_map, reg_map = rpn_head(cross_corr(z_feat, x_feat))\nanchor_proposals = decode_anchors(cls_map, reg_map)\nbest = anchor_proposals[cls_map.argmax()]
+</code></pre>
+<p>SiamRPN++ replaces AlexNet with deep ResNet50 and applies layer-wise aggregation of cross-correlations for multi-level feature fusion. Depth-wise correlation reduces computation versus full cross-correlation while maintaining accuracy. Ocean extends SiamRPN with an anchor-free approach that directly regresses distances to four box sides, eliminating the need to tune anchor scales and aspect ratios.</p>
+<table>
+<thead>
+<tr>
+<th>Tracker</th>
+<th>Backbone</th>
+<th>GOT-10k AO</th>
+<th>LaSOT AUC</th>
+<th>TrackingNet AUC</th>
+<th>Speed (FPS)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SiamRPN++</td>
+<td>ResNet50</td>
+<td>51.7</td>
+<td>49.6</td>
+<td>73.3</td>
+<td>35</td>
+</tr>
+<tr>
+<td>Ocean</td>
+<td>ResNet50</td>
+<td>61.1</td>
+<td>56.0</td>
+<td>65.1</td>
+<td>58</td>
+</tr>
+<tr>
+<td>STARK-ST50</td>
+<td>ResNet50</td>
+<td>68.0</td>
+<td>66.4</td>
+<td>81.3</td>
+<td>32</td>
+</tr>
+<tr>
+<td>OSTrack</td>
+<td>ViT-B</td>
+<td>73.7</td>
+<td>71.1</td>
+<td>83.9</td>
+<td>105</td>
+</tr>
+<tr>
+<td>ARTrack</td>
+<td>ViT-B</td>
+<td>73.5</td>
+<td>73.1</td>
+<td>85.1</td>
+<td>82</td>
+</tr>
+</tbody>
+</table>
+<p>STARK reformulates tracking as a set prediction problem: template and search features are concatenated as a token sequence and processed by a transformer encoder-decoder. The decoder attends to the most relevant regions and predicts a bounding box as four corners. This end-to-end design avoids the inductive bias of anchors and cross-correlation, achieving state-of-the-art results on the GOT-10k benchmark.</p>
+<pre><code class="language-python"># STARK transformer tracking\ntokens = cat([template_feat, search_feat], dim=0)\nout = transformer(tokens)\ncorner_pred = corner_head(out[-N:])\n# decode corner predictions as (x1, y1, x2, y2)\nx1, y1, x2, y2 = corner_pred
+</code></pre>
+<p>OSTrack uses a single ViT backbone that processes template and search patches jointly through all self-attention layers. Early feature interaction between template and search tokens eliminates the separate correlation step entirely. This simplification yields better accuracy than dual-stream models at similar speed, demonstrating that joint attention outperforms explicit cross-correlation for visual object tracking.</p>
+<blockquote>
+<p>****: Most top trackers use a fixed template from the first frame and never update — this is fast but fails on appearance change (occlusion, deformation). Online template update with high-confidence crops dramatically helps on long-term tracking benchmarks (LaSOT).</p>
+</blockquote>
+<p>Online template update is the main mechanism for handling appearance change in long-term tracking. After each frame, if tracker confidence exceeds a threshold, the current crop is added to a template memory pool. The effective template feature is computed as the running mean of encoder outputs over the memory pool, slowly shifting toward the current target appearance during the tracking sequence.</p>
+<pre><code class="language-python"># Online template update with memory pool\nif conf &gt; update_thresh:\n    template_pool.append(current_frame_crop)\n# Keep only last K templates in memory\ntemplate_pool = template_pool[-K:]\nz_feat = mean([encoder(t) for t in template_pool])\n# Update every update_interval frames
+</code></pre>
+<p>The update interval and confidence threshold are critical hyperparameters. Too-frequent updates with noisy crops cause drift — the tracker gradually shifts toward background clutter. Too-infrequent updates fail on rapid appearance changes. Alpha-Refine adds a refinement network that crops a high-resolution patch around the coarse prediction and regresses a precise bounding box independently.</p>
+<p>Long-term tracking benchmarks like LaSOT (average 2448 frames, around 5 minutes per video) and GOT-10k specifically test resilience to occlusion and re-detection capability. Short-term benchmarks like OTB-100 (average 578 frames) are dominated by Siamese methods without any online update. Performance gaps between short-term and long-term benchmarks quantify the cost of forgoing appearance adaptation.</p>
+<p>The tracking community is converging on transformer-based one-stream architectures like OSTrack and ARTrack that process template and search jointly. ViT backbones pretrained on large image or video datasets transfer exceptionally well to tracking because they learn generic spatial relationships. The next challenge is achieving real-time transformer tracking speeds on mobile or embedded edge hardware platforms.</p>
+<p>Evaluation protocol matters: GOT-10k restricts training data and measures Average Overlap on 180 test sequences; LaSOT measures AUC on very long sequences; TrackingNet is large-scale but shorter. No single tracker dominates all three benchmarks, suggesting different inductive biases suit different conditions. Multi-template pretraining and video-level self-supervision remain active research directions.</p>
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Position Interpolation for Long Context LLMs | Notes Backup</title>
+  <meta name="description" content="The Position Interpolation (PI) paper&#x27;s approach to extending context by fine-tuning with interpolated positions, establishing the recipe used by many long-context variants of Llama." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Position Interpolation for Long Context LLMs</h1>
+      <ul class='note-meta'><li><strong>description:</strong> The Position Interpolation (PI) paper&#x27;s approach to extending context by fine-tuning with interpolated positions, establishing the recipe used by many long-context variants of Llama.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Position Interpolation for Long Context LLMs</h1>
+<p>Position Interpolation (Chen et al., 2023) is a method for extending the context window of Rotary Position Embedding (RoPE)-based LLMs without full retraining. The core insight is that extrapolating beyond the trained maximum position causes catastrophic perplexity collapse: RoPE embeddings at unseen positions produce rotation angles that are entirely out-of-distribution for every attention head in every layer. Position Interpolation avoids this by down-scaling all token positions so they always lie within the original training range [0, L), then fine-tuning for a trivially small number of steps to re-adapt the model to the compressed scale. This paper established the foundational recipe that dozens of Llama variants — LongChat, LongAlpaca, CodeLlama, and LongLLaMA — adopted for affordable context extension at a fraction of the original pretraining cost.</p>
+<h2>Overview</h2>
+<p>Pre-trained RoPE models have a hard context ceiling: position indices 0 through L-1 (e.g., 0–2047 for LLaMA-1). When inference extends to position L or beyond, the RoPE rotation frequencies θ_i × p for those indices were never seen during training. The PI approach remaps position p to p_scaled = p × (L/L'), where L is the original max length and L' is the target extended length. At the last valid position L'-1, the remapped value is (L'-1) × (L/L') ≈ L-1, keeping all positions in-distribution. A brief fine-tuning run of 200–1000 steps on mixed-length next-token prediction data adapts the model to the new scale. Extending LLaMA-7B from 2K to 32K costs roughly 0.01% of the original pretraining compute — a watershed result demonstrating that context extension is a cheap engineering problem.</p>
+<h2>The PI Formula</h2>
+<p>RoPE encodes position p by rotating each pair of head dimensions (x_{2i}, x_{2i+1}) by angle p × θ_i, where θ_i = 10000^{-2i/d} and d is the head dimension. The query-key attention score contains terms proportional to cos((p-q) × θ_i) — a relative positional encoding. At positions beyond L, the angle differences (p-q) × θ_i involve values never seen during training, causing cosine/sine outputs to land in unexpected regions of the embedding space. PI replaces p with p_interp = p × (L/L') throughout all RoPE computations. The scale factor L/L' &lt; 1 compresses all positions into [0, L), preserving the model's learned rotational geometry. The relative angle difference for positions p and q becomes (p-q) × (L/L') × θ_i — smaller absolute differences but always within the trained distribution of angle magnitudes.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from transformers import LlamaForCausalLM
+
+class PIRoPE(nn.Module):
+    # Rotary Position Embedding with Position Interpolation (Chen et al., 2023)
+    # Compresses position indices into [0, orig_max_len) via a fixed scale factor
+    def __init__(self, dim: int, orig_max_len: int = 2048, new_max_len: int = 32768):
+        super().__init__()
+        self.scale = orig_max_len / new_max_len  # &lt; 1.0 for any extension
+        inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer('inv_freq', inv_freq)
+
+    def forward(self, x: torch.Tensor, seq_len: int):
+        # Interpolated positions always stay in [0, orig_max_len) regardless of seq_len
+        t = torch.arange(seq_len, device=x.device).float() * self.scale
+        freqs = torch.outer(t, self.inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        return emb.cos().unsqueeze(0).unsqueeze(0), emb.sin().unsqueeze(0).unsqueeze(0)
+
+def patch_rope_pi(model: LlamaForCausalLM, new_max_len: int = 32768) -&gt; LlamaForCausalLM:
+    # Replace all RoPE modules in-place with position-interpolating variants
+    orig = model.config.max_position_embeddings
+    for layer in model.model.layers:
+        head_dim = layer.self_attn.rotary_emb.dim
+        layer.self_attn.rotary_emb = PIRoPE(head_dim, orig, new_max_len)
+    model.config.max_position_embeddings = new_max_len
+    print(f'PI patch: scale={orig/new_max_len:.4f}, context {orig} -&gt; {new_max_len}')
+    return model
+</code></pre>
+<h2>Training Protocol</h2>
+<p>After applying the PI patch, a short fine-tuning run re-adapts the model to the compressed position scale. The Chen et al. protocol: fine-tune for 200–1000 steps with next-token prediction loss on documents up to the new maximum length. Documents shorter than the target length are concatenated to fill context windows; no padding is required. Training data should match the pretraining distribution — typically a mix of English web text and code from the same sources used for pretraining. Learning rate is set to 2e-5, consistent with standard instruction-tuning. The paper shows 200 steps suffices for 8× extension, and 1000 steps provides stability at 16×. With 8×A100 80GB GPUs and Flash Attention 2, fine-tuning LLaMA-7B to 32K context at 1000 steps takes 4–8 hours — trivial relative to thousands of GPU-hours for pretraining.</p>
+<pre><code class="language-python">import random
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM
+
+def build_passkey_prompt(passkey: str, depth: float, reps: int = 200) -&gt; str:
+    # Place a secret passkey at fractional depth inside a long filler document
+    filler = 'Researchers observed no statistically significant effect in this condition. ' * reps
+    pos = int(depth * len(filler))
+    needle = f' [THE SECRET PASSKEY IS: {passkey}] '
+    return filler[:pos] + needle + filler[pos:] + '\nQuestion: What is the secret passkey? Answer:'
+
+def eval_passkey_retrieval(model, tokenizer, ctx_len: int,
+                           depths: list, n_each: int = 5) -&gt; dict:
+    # Measure retrieval accuracy at each depth fraction for the given context length
+    results = {}
+    for depth in depths:
+        hits = 0
+        for _ in range(n_each):
+            pk = str(random.randint(10000, 99999))
+            prompt = build_passkey_prompt(pk, depth)
+            ids = tokenizer(prompt, return_tensors='pt', truncation=True,
+                            max_length=ctx_len).input_ids.to(model.device)
+            with torch.no_grad():
+                out = model.generate(ids, max_new_tokens=10)
+            text = tokenizer.decode(out[0][ids.shape[1]:], skip_special_tokens=True)
+            hits += int(pk in text)
+        results[f'{depth:.0%}'] = hits / n_each
+        print(f'  depth={depth:.0%}: {hits}/{n_each} correct')
+    return results
+
+depths = [0.0, 0.25, 0.5, 0.75, 1.0]
+print(f'Passkey benchmark depths: {[f&quot;{d:.0%}&quot; for d in depths]}')
+</code></pre>
+<h2>Effective Context Length</h2>
+<p>Perplexity is an unreliable proxy for effective context length. A model can achieve low perplexity at 32K tokens while failing to retrieve information from beyond 4K — because perplexity averages over all tokens and is dominated by local context. Passkey retrieval provides a precise binary signal: embed a random 5-digit number at a controlled fractional position in a long filler document, then query the model for it. PI-fine-tuned LLaMA-2-7B achieves near-perfect passkey retrieval up to its extended context length, while the baseline collapses beyond 4K regardless of depth. Effective context length is formally defined as the largest L at which retrieval accuracy exceeds 90% across all five depth positions (0%, 25%, 50%, 75%, 100%). This benchmark is now standard for long-context model evaluation.</p>
+<pre><code class="language-python">import numpy as np
+
+def simulate_curriculum_mixing(base_max: int = 2048, target_max: int = 32768,
+                               total_steps: int = 1000, short_frac: float = 0.8):
+    # Curriculum: 80% short docs + 20% extended docs; extended length ramps up gradually
+    schedule = []
+    for step in range(total_steps):
+        progress = step / total_steps
+        # Extended doc length grows from 2x base to target_max over training
+        ext_len = int(base_max * 2 + progress * (target_max - base_max * 2))
+        ext_len = min(ext_len, target_max)
+        if np.random.rand() &lt; short_frac:
+            doc_len = int(np.random.randint(256, base_max))
+            label = 'short'
+        else:
+            doc_len = ext_len
+            label = 'extended'
+        schedule.append({'step': step, 'len': doc_len, 'type': label})
+    ext_lens = [s['len'] for s in schedule if s['type'] == 'extended']
+    short_ct = sum(1 for s in schedule if s['type'] == 'short')
+    print(f'Short steps: {short_ct}, Extended steps: {len(ext_lens)}')
+    print(f'Mean extended length at step 1000: {np.mean(ext_lens[-100:]):.0f} tokens')
+    return schedule
+</code></pre>
+<h2>Extension Ratios and Limits</h2>
+<p>The extension ratio is L'/L — the factor by which context is extended. PI is practically tested at 2×, 4×, 8×, 16×, and 32×. Without fine-tuning, PI achieves only marginal perplexity improvement over naive extrapolation at ratios ≥4×. With fine-tuning, 8× is stable and 16× shows modest PPL degradation. Beyond 32×, the interpolation scale becomes so small (scale &lt; 0.03 for 32× extension of a 2K model) that distinct positions within the extended window map to nearly identical angle values, making it impossible for the model to distinguish nearby positions. At this point, retrieval accuracy drops sharply regardless of fine-tuning budget. The practical ceiling for uniform PI is 16–32×; for larger windows, YaRN or LongRoPE significantly outperform uniform PI.</p>
+<pre><code class="language-python">import numpy as np
+
+def extension_ratio_sweep() -&gt; None:
+    # Approximate LLaMA-7B results from Chen et al. (2023) on PG19 perplexity
+    ratios          = [1,    2,    4,    8,    16,    32    ]
+    ppl_no_finetune = [7.2,  9.8,  18.4, 42.1, 210.3, 8500.0]
+    ppl_finetuned   = [7.2,  7.4,  7.7,  8.1,  9.8,   24.5  ]
+    ppl_extrap      = [7.2,  15.6, 280.4, 5200, None,  None  ]
+    passkey_acc     = [1.00, 0.98, 0.95, 0.91, 0.74,  0.21  ]
+    print(f'{&quot;Ratio&quot;:&gt;7} | {&quot;No-FT PPL&quot;:&gt;10} | {&quot;FT PPL&quot;:&gt;8} | {&quot;PK Acc&quot;:&gt;8}')
+    print('-' * 42)
+    for r, pno, pft, pk in zip(ratios, ppl_no_finetune, ppl_finetuned, passkey_acc):
+        print(f'{r:&gt;6}x | {pno:&gt;10.1f} | {pft:&gt;8.1f} | {pk:&gt;8.2f}')
+    good = [r for r, pk in zip(ratios, passkey_acc) if pk &gt;= 0.90]
+    print(f'\nRatios with passkey accuracy &gt;= 90%: {good}')
+
+extension_ratio_sweep()
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Extension Ratio</th>
+<th>Fine-tune Steps</th>
+<th>Training Data Max Len</th>
+<th>PPL at 1x</th>
+<th>PPL at Extension</th>
+<th>Passkey Accuracy</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>2x (2K → 4K)</td>
+<td>200</td>
+<td>4096 tokens</td>
+<td>7.2</td>
+<td>7.4</td>
+<td>98%</td>
+</tr>
+<tr>
+<td>4x (2K → 8K)</td>
+<td>400</td>
+<td>8192 tokens</td>
+<td>7.2</td>
+<td>7.7</td>
+<td>95%</td>
+</tr>
+<tr>
+<td>8x (2K → 16K)</td>
+<td>800</td>
+<td>16384 tokens</td>
+<td>7.2</td>
+<td>8.1</td>
+<td>91%</td>
+</tr>
+<tr>
+<td>16x (2K → 32K)</td>
+<td>1000</td>
+<td>32768 tokens</td>
+<td>7.2</td>
+<td>9.8</td>
+<td>74%</td>
+</tr>
+<tr>
+<td>32x (2K → 64K)</td>
+<td>2000+</td>
+<td>65536 tokens</td>
+<td>7.2</td>
+<td>24.5</td>
+<td>21%</td>
+</tr>
+</tbody>
+</table>
+<h2>Comparison with Extrapolation</h2>
+<p>Naive RoPE extrapolation yields perplexity of ~280 at only 4× extension (versus 7.7 with PI fine-tuning) and diverges entirely beyond that. This is because RoPE frequency basis functions are periodic — at positions beyond the training window, patterns repeat with a different phase than expected, corrupting all attention scores simultaneously. ALiBi (Attention with Linear Biases, Press et al., 2022) enables extrapolation by replacing RoPE with a position-independent attention bias learned during pretraining; however ALiBi must be incorporated at pretraining time and cannot be patched into an existing RoPE model. YaRN (Peng et al., 2023) applies non-uniform interpolation: high-frequency RoPE components (small dimension index i, large θ_i) are scaled less aggressively than low-frequency ones, preserving short-range relative position sensitivity while extending long-range capacity. YaRN outperforms uniform PI at all extension ratios and has become the de-facto successor.</p>
+<blockquote>
+<p><strong>PI Was a Watershed Result</strong>: The PI paper showed that 1000 fine-tuning steps (trivial compute) with interpolated positions can extend context from 2K to 32K — this was a watershed result showing context extension is cheap relative to pretraining. Most long-context Llama derivatives (LongChat, LongAlpaca, CodeLlama) adopted this recipe directly.</p>
+</blockquote>
+<h2>LongLlama and Follow-on Work</h2>
+<p>LongLLaMA (Tworkowski et al., 2023) combines PI with the Focused Transformer (FoT) architecture — a memory mechanism that retrieves relevant KV pairs from a large external memory store at each forward pass — achieving effective contexts of 256K tokens on PASSKEY benchmarks. LongChat (Dacheng Li et al., 2023) applied PI to LLaMA-1 at 16K and evaluated on multi-turn conversation topic retrieval tasks. LongAlpaca (Chen et al., 2023) added PI to LLaMA-2 with instruction-tuning on summarization data, demonstrating that instruction-following quality is preserved. CodeLlama (Rozière et al., 2023) extended to 100K context using PI with 16K fine-tuning data, achieving superior performance on repository-level code completion. YaRN and LongRoPE subsequently improved position scaling with non-uniform and per-dimension methods respectively.</p>
+<ul>
+<li>LongChat (2023): PI applied to LLaMA-1 at 16K tokens, evaluated on multi-turn topic retrieval.</li>
+<li>LongAlpaca (2023): PI plus instruction tuning on summarization data at 32K with LLaMA-2 base.</li>
+<li>LongLLaMA (2023): PI combined with Focused Transformer memory, effective 256K context on PASSKEY.</li>
+<li>CodeLlama (2023): PI to 100K tokens for long-code generation on LLaMA-2 base.</li>
+<li>YaRN (2023): Non-uniform position scaling; high-frequency RoPE components scaled less aggressively.</li>
+<li>LongRoPE (2024): Learned per-dimension scaling factors for context extension up to 2M tokens.</li>
+</ul>
+<h2>Key Takeaways</h2>
+<p>Position Interpolation demonstrated that extending RoPE-based context windows is a low-cost engineering problem with a clean solution: compress positions into the trained range, then fine-tune briefly to re-adapt. The method requires no architecture changes — only the RoPE forward method is modified — making it trivially applicable to any pretrained RoPE model. Its practical ceiling is 16–32× extension with uniform scaling; YaRN and LongRoPE provide better results beyond that. PI remains the most widely deployed context extension technique due to its simplicity, strong open-source tooling, and the broad availability of PI-extended checkpoints for the LLaMA model family.</p>
+<ul>
+<li>PI formula: pos_interp(p) = p × (L/L'), where L is the original max length and L' is the extended length.</li>
+<li>Fine-tuning is mandatory: PI without fine-tuning provides minimal improvement over raw extrapolation.</li>
+<li>200 steps sufficient for 8x extension; 1000 steps recommended for 16x extension stability.</li>
+<li>Use mixed-length training data: 80% short docs + 20% extended docs during fine-tuning.</li>
+<li>Passkey retrieval accuracy is the gold standard metric, not perplexity, for effective context length.</li>
+<li>For 32x+ extension, prefer YaRN (non-uniform scaling) over uniform PI for better retrieval accuracy.</li>
+<li>The PI patch is architecture-agnostic: swap the rotary_emb module with PIRoPE to enable extension.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

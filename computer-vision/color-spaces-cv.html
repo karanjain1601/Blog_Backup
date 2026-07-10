@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Color Spaces in Computer Vision | Notes Backup</title>
+  <meta name="description" content="RGB, HSV, LAB, and grayscale color spaces — their properties, conversion formulas, and when to use each space for detection, segmentation, and preprocessing tasks." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Color Spaces in Computer Vision</h1>
+      <ul class='note-meta'><li><strong>description:</strong> RGB, HSV, LAB, and grayscale color spaces — their properties, conversion formulas, and when to use each space for detection, segmentation, and preprocessing tasks.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Color Spaces in Computer Vision</h1>
+<p>Color spaces define how colors are encoded as numeric values. Different spaces suit different tasks: RGB and BGR are natural for display and deep learning, HSV separates hue from brightness making it ideal for color selection, and LAB is designed so equal numeric distances correspond to equal perceptual differences. Choosing the right space significantly improves algorithm robustness.</p>
+<p>RGB encodes color as three channel values — Red, Green, Blue — each typically in [0, 255]. It is the most intuitive representation, matching how displays emit light. For deep learning, RGB is the standard input format. However, RGB mixes chrominance and luminance, making color selection sensitive to lighting changes. OpenCV uses BGR ordering internally by convention.</p>
+<p>Pixel values in RGB have all three channels correlated — a brighter scene increases all three values. This means simple threshold-based color detection fails under different lighting conditions. The solution is to use a color space that separates intensity from color information, such as HSV or LAB. RGB remains the default for visualization and neural network model inputs.</p>
+<p>HSV stands for Hue, Saturation, Value. Hue represents the color type as an angle (0–179 in OpenCV). Saturation measures color purity from gray to full color. Value measures brightness. Separating hue from brightness makes color detection robust to lighting changes. A red object stays in the same hue range regardless of whether it is in shadow or full sunlight.</p>
+<pre><code class="language-python">import cv2
+import numpy as np
+
+img_bgr = cv2.imread('red_object.jpg')
+img_hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+
+lower_red1 = np.array([0, 120, 70])
+upper_red1 = np.array([10, 255, 255])
+lower_red2 = np.array([170, 120, 70])
+upper_red2 = np.array([180, 255, 255])
+
+mask1 = cv2.inRange(img_hsv, lower_red1, upper_red1)
+mask2 = cv2.inRange(img_hsv, lower_red2, upper_red2)
+mask = cv2.bitwise_or(mask1, mask2)
+</code></pre>
+<p>In OpenCV, hue ranges from 0 to 179 (not 360), saturation and value from 0 to 255. Red wraps around at hue 0/179, requiring two inRange masks combined with bitwise_or. A tight saturation threshold removes achromatic grays. Value thresholding removes very dark pixels. This three-channel decomposition is far more robust than RGB thresholding under varying illumination.</p>
+<p>The LAB color space (CIELAB) models human visual perception. L is lightness (0–100), a is the green-to-red axis (-128 to 127), and b is the blue-to-yellow axis (-128 to 127). The key property is perceptual uniformity: a given numeric delta in LAB corresponds to a similar perceived color difference regardless of the base color being compared.</p>
+<pre><code class="language-python">from skimage import color
+import numpy as np
+from PIL import Image
+
+img = np.array(Image.open('sample.jpg').convert('RGB'))
+img_float = img.astype(np.float32) / 255.0
+img_lab = color.rgb2lab(img_float)
+
+color1 = img_lab[100, 100]
+color2 = img_lab[200, 200]
+
+delta_e = color.deltaE_cie76(color1, color2)
+print(f'Delta-E distance: {delta_e:.2f}')
+</code></pre>
+<p>LAB is used for computing color similarity (Delta-E metric), skin tone detection, and image quality assessment. Histogram equalization in the L channel enhances contrast without affecting hue or saturation. skimage.color.deltaE_cie76 gives the simplest Delta-E formula; deltaE_ciede2000 is perceptually more accurate for small differences near neutrals and saturated hues.</p>
+<p>Grayscale reduces a 3-channel image to a single luminance channel. The standard formula is: Y = 0.299R + 0.587G + 0.114B — these weights reflect human visual sensitivity, as we are most sensitive to green. Simple averaging (R+G+B)/3 ignores perceptual weighting and produces a different result, especially for highly saturated colors like pure red or blue.</p>
+<pre><code class="language-python">import cv2
+import numpy as np
+
+img_bgr = cv2.imread('sample.jpg')
+img_gray_cv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)  # weighted
+
+img_rgb = img_bgr[:, :, ::-1].astype(np.float32)
+img_gray_avg = img_rgb.mean(axis=2).astype(np.uint8)     # simple avg
+
+print('OpenCV weighted gray:', img_gray_cv[100, 100])
+print('Simple average gray:', img_gray_avg[100, 100])
+</code></pre>
+<p>Grayscale reduces model input size by 3x, speeding up training for tasks where color is not informative — such as edge detection, text recognition, or depth estimation. Many classic algorithms (SIFT, ORB, Canny) operate on grayscale. For color-dependent tasks like fruit ripeness detection or lesion classification, converting to grayscale discards critical discriminative information.</p>
+<blockquote>
+<p>****: Use HSV for color-based thresholding (robust to lighting), LAB for perceptually uniform distances, and RGB/BGR for most deep learning models.</p>
+</blockquote>
+<pre><code class="language-python">import cv2
+import numpy as np
+
+img_bgr = cv2.imread('low_contrast.jpg')
+img_lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2Lab)
+
+l, a, b = cv2.split(img_lab)
+clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+l_eq = clahe.apply(l)
+
+img_lab_eq = cv2.merge([l_eq, a, b])
+img_result = cv2.cvtColor(img_lab_eq, cv2.COLOR_Lab2BGR)
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Color Space</th>
+<th>Components</th>
+<th>Range</th>
+<th>Use Case</th>
+<th>Library</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>RGB</td>
+<td>R / G / B</td>
+<td>0–255 each</td>
+<td>Deep learning input</td>
+<td>PIL / torch</td>
+</tr>
+<tr>
+<td>BGR</td>
+<td>B / G / R</td>
+<td>0–255 each</td>
+<td>OpenCV default</td>
+<td>cv2</td>
+</tr>
+<tr>
+<td>HSV</td>
+<td>Hue / Sat / Val</td>
+<td>H:0–179, S/V:0–255</td>
+<td>Color thresholding</td>
+<td>cv2</td>
+</tr>
+<tr>
+<td>LAB</td>
+<td>L / a / b</td>
+<td>L:0–100, a/b:±128</td>
+<td>Color similarity</td>
+<td>skimage / cv2</td>
+</tr>
+<tr>
+<td>YCbCr</td>
+<td>Luma / ChromaB / ChromaR</td>
+<td>16–235 / 16–240</td>
+<td>Video compression</td>
+<td>cv2 / PIL</td>
+</tr>
+<tr>
+<td>Grayscale</td>
+<td>Luminance</td>
+<td>0–255</td>
+<td>Classic CV / text</td>
+<td>cv2 / PIL</td>
+</tr>
+</tbody>
+</table>
+<p>Match the color space to your task. HSV is the go-to for color-based thresholding because it separates hue from intensity. LAB is ideal when you need perceptually meaningful color distances or uniform contrast enhancement. RGB and BGR are standard for neural network inputs — most pretrained models expect RGB channel order with ImageNet normalization applied consistently.</p>
+<p>Always verify your color space after conversion. OpenCV reads BGR, but most models and display functions expect RGB. After any cv2.cvtColor call, check a known-color pixel to confirm the output is correct. Document color space assumptions in your data loader — inconsistencies here cause silent model accuracy drops that are extremely difficult to debug in production.</p>
+<p>Converting between color spaces is computationally inexpensive and should be done as early as possible in the pipeline to avoid propagating incorrect values through augmentation and normalization steps. Keep a consistent policy: decide on one canonical color space per pipeline stage and enforce it with assertions in your data loader's <strong>getitem</strong> method.</p>
+<p>When working with multiple color spaces in a single project, use clear variable naming conventions: img_rgb, img_bgr, img_hsv, img_lab. Ambiguous variable names like img or image are a leading cause of color space bugs. A lightweight validation function that checks value ranges can catch conversions applied twice or in the wrong order before they reach the model.</p>
+    </article>
+  </main>
+</body>
+</html>

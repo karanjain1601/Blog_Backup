@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VICReg — Variance, Invariance, Covariance Regularization | Notes Backup</title>
+  <meta name="description" content="VICReg (Bardes et al. 2022) extends Barlow Twins with an explicit variance hinge loss that directly prevents representational collapse, and separates the three objectives — variance, invariance, and covariance — into independently controllable terms." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>VICReg — Variance, Invariance, Covariance Regularization</h1>
+      <ul class='note-meta'><li><strong>description:</strong> VICReg (Bardes et al. 2022) extends Barlow Twins with an explicit variance hinge loss that directly prevents representational collapse, and separates the three objectives — variance, invariance, and covariance — into independently controllable terms.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>VICReg — Variance, Invariance, Covariance Regularization</h1>
+<p>VICReg (Variance-Invariance-Covariance Regularization, Bardes et al. 2022) makes the connection between Barlow Twins and collapse prevention more explicit. While Barlow Twins implicitly prevents collapse via the diagonal invariance term, VICReg introduces a dedicated variance hinge loss that directly penalises low variance in any embedding dimension. This cleaner decomposition makes the method more interpretable and easier to tune, while achieving the same level of performance.</p>
+<h2>Three-Term Loss Function</h2>
+<p>VICReg decomposes the objective into three independently weighted terms: (1) Invariance s(Z, Z') = (1/N)Σᵢ‖zᵢ - z'ᵢ‖² — MSE between embeddings of the two views (push representations together); (2) Variance v(Z) = Σⱼ max(0, γ - Std(zⱼ)) — hinge loss maintaining per-dimension standard deviation ≥ γ=1 (prevent collapse); (3) Covariance c(Z) = Σᵢ≠ⱼ [Cov(Z)]²ᵢⱼ / (d-1) — sum of squared off-diagonal covariance entries (decorrelate dimensions). Total loss: λs + μ[v(Z)+v(Z')] + ν[c(Z)+c(Z')].</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def vicreg_loss(z1, z2, lambda_=25.0, mu=25.0, nu=1.0, gamma=1.0):
+    &quot;&quot;&quot;VICReg loss with three terms: variance, invariance, covariance.
+    z1, z2: (N, D) raw embeddings (not L2-normalised, not batch-normalised).
+    lambda_: weight for invariance term.
+    mu:      weight for variance term (applied to both z1 and z2).
+    nu:      weight for covariance term (applied to both z1 and z2).
+    gamma:   target standard deviation for variance hinge.
+    &quot;&quot;&quot;
+    N, D = z1.size()
+    # 1. Invariance: MSE between embeddings of two views
+    inv_loss = F.mse_loss(z1, z2)
+    # 2. Variance: hinge loss (each dimension std &gt;= gamma)
+    var_loss = variance_loss(z1, gamma) + variance_loss(z2, gamma)
+    # 3. Covariance: off-diagonal covariance -&gt; 0
+    cov_loss = covariance_loss(z1) + covariance_loss(z2)
+    loss = lambda_ * inv_loss + mu * var_loss + nu * cov_loss
+    return loss, inv_loss.item(), var_loss.item(), cov_loss.item()
+
+# Quick test
+torch.manual_seed(0)
+z1 = torch.randn(256, 2048)
+z2 = z1 + 0.1 * torch.randn_like(z1)  # slight augmentation
+total, inv, var, cov = vicreg_loss(z1, z2)
+print(f'Total loss: {total:.2f}')
+print(f'  Invariance: {inv:.4f}')
+print(f'  Variance:   {var:.4f}')
+print(f'  Covariance: {cov:.4f}')
+</code></pre>
+<h2>Variance Term — Preventing Collapse</h2>
+<p>The variance term is a hinge loss that penalises any embedding dimension whose standard deviation across the batch falls below γ = 1: v(Z) = Σⱼ max(0, γ - √(Var(zⱼ) + ε)). If all samples collapse to the same vector, every dimension's std → 0, and this term becomes huge. Crucially, the variance is computed per-dimension independently — a dimension with std ≥ γ contributes zero penalty. This is more direct than Barlow Twins' implicit variance control via the diagonal of the cross-correlation matrix.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def variance_loss(z, gamma=1.0, eps=1e-4):
+    &quot;&quot;&quot;Variance hinge loss: penalise dimensions where std &lt; gamma.
+    z: (N, D) embedding batch.
+    Returns scalar — sum of hinge losses across D dimensions.
+    &quot;&quot;&quot;
+    # std along batch dimension for each feature
+    std = torch.sqrt(z.var(dim=0) + eps)       # (D,)
+    hinge = F.relu(gamma - std)                 # 0 if std &gt;= gamma, else gamma - std
+    return hinge.mean()  # paper uses mean over D
+
+# Demonstrate: collapse → large variance loss; spread → near-zero
+torch.manual_seed(1)
+N, D = 256, 128
+
+# Collapsed: all outputs constant
+z_collapsed = torch.ones(N, D)
+v_collapsed = variance_loss(z_collapsed)
+print(f'Variance loss (collapsed, all-ones): {v_collapsed.item():.4f}  (expected ~1.0)')
+
+# Spread: random normal has std ≈ 1
+z_spread = torch.randn(N, D)
+v_spread = variance_loss(z_spread)
+print(f'Variance loss (spread, N(0,1)):      {v_spread.item():.6f}  (expected ~0.0)')
+
+# Partial collapse: some dims collapsed
+z_partial = torch.randn(N, D)
+z_partial[:, :32] = z_partial[:, :32].mean(0, keepdim=True).expand(N, -1)  # 32 dims collapsed
+v_partial = variance_loss(z_partial)
+print(f'Variance loss (32/{D} dims collapsed): {v_partial.item():.4f}')
+</code></pre>
+<h2>Covariance Regularization</h2>
+<p>The covariance term decorrelates embedding dimensions: c(Z) = Σᵢ≠ⱼ [Cov(Z)]²ᵢⱼ / (d-1) where Cov(Z) = (Z - mean(Z))ᵀ(Z - mean(Z)) / (N-1). Off-diagonal covariance entries should be zero. Note that VICReg computes this separately for z1 and z2 (two separate covariance matrices), whereas Barlow Twins computes a cross-covariance between z1 and z2. This difference means VICReg's covariance term is applied independently to each view, which provides more stable gradients.</p>
+<pre><code class="language-python">import torch
+
+def covariance_loss(z, eps=1e-4):
+    &quot;&quot;&quot;Covariance regularisation: penalise off-diagonal covariance entries.
+    z: (N, D) embedding batch (not pre-normalised).
+    Returns scalar covariance loss.
+    &quot;&quot;&quot;
+    N, D = z.size()
+    # Centre the embeddings (subtract mean per dimension)
+    z = z - z.mean(dim=0)               # (N, D)
+    # Sample covariance matrix: (D, D)
+    cov = (z.T @ z) / (N - 1)
+    # Off-diagonal penalty: sum of squared off-diagonal elements / (D-1)
+    off_diag_mask = ~torch.eye(D, dtype=torch.bool, device=z.device)
+    cov_loss = cov[off_diag_mask].pow(2).sum() / (D - 1)
+    return cov_loss
+
+# Demo: correlated vs decorrelated embeddings
+torch.manual_seed(2)
+N, D = 256, 64
+
+# Correlated: two groups of dims that are identical
+z_corr = torch.randn(N, D // 2).repeat(1, 2)  # dims 0..31 == dims 32..63
+cov_corr = covariance_loss(z_corr)
+print(f'Covariance loss (correlated): {cov_corr.item():.4f}')
+
+# Decorrelated: independent random dims
+z_indep = torch.randn(N, D)
+cov_indep = covariance_loss(z_indep)
+print(f'Covariance loss (independent): {cov_indep.item():.4f}')
+</code></pre>
+<h2>VICRegL — Local and Global Features</h2>
+<p>VICRegL (Bardes et al. 2022, extended) introduces local regularisation for pixel-level tasks (segmentation, detection). In addition to the global VICReg loss on pooled embeddings, it computes a local invariance loss between spatially corresponding feature maps. For each patch in view 1, find the nearest patch in view 2 (via cosine similarity in feature space) and apply the invariance loss. This local term encourages the encoder to produce spatially consistent features, which is valuable for dense prediction tasks.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def vicreg_local_loss(feat_map1, feat_map2, alpha=0.9):
+    &quot;&quot;&quot;VICRegL local invariance via nearest-neighbour matching in feature space.
+    feat_map1, feat_map2: (N, C, H, W) feature maps from two augmented views.
+    alpha: weight for global VICReg vs local matching loss.
+    Returns local invariance loss (scalar).
+    &quot;&quot;&quot;
+    N, C, H, W = feat_map1.shape
+    # Reshape to (N, H*W, C) for cosine similarity computation
+    f1 = feat_map1.permute(0, 2, 3, 1).reshape(N, H * W, C)
+    f2 = feat_map2.permute(0, 2, 3, 1).reshape(N, H * W, C)
+    f1_norm = F.normalize(f1, dim=2)  # (N, H*W, C)
+    f2_norm = F.normalize(f2, dim=2)
+    # For each patch in f1, find nearest neighbour in f2
+    sim = torch.bmm(f1_norm, f2_norm.transpose(1, 2))  # (N, H*W, H*W)
+    nn_idx = sim.argmax(dim=2)                          # (N, H*W)
+    # Gather matched patches from f2
+    nn_idx_expanded = nn_idx.unsqueeze(2).expand(-1, -1, C)  # (N, H*W, C)
+    f2_matched = f2.gather(1, nn_idx_expanded)               # (N, H*W, C)
+    # Local invariance: MSE between f1 patches and their NN in f2
+    local_inv = F.mse_loss(f1, f2_matched.detach())
+    return local_inv
+
+# Demo with tiny feature maps
+torch.manual_seed(3)
+fm1 = torch.randn(4, 512, 7, 7)   # (N=4, C=512, H=7, W=7)
+fm2 = fm1 + 0.2 * torch.randn_like(fm1)
+local_loss = vicreg_local_loss(fm1, fm2)
+print(f'VICRegL local loss (slight perturbation): {local_loss.item():.4f}')
+</code></pre>
+<blockquote>
+<p><strong>VICReg vs Barlow Twins — Explicit vs Implicit Collapse Prevention</strong>: In Barlow Twins the diagonal of the cross-correlation matrix is forced to 1 — this implicitly prevents collapse because if all embeddings are constant, the diagonal is undefined (zero variance). VICReg makes this explicit with a hinge loss on per-dimension standard deviation. The practical difference: VICReg's variance term activates only when std &lt; γ and is zero otherwise; Barlow Twins' diagonal term always exerts pressure. VICReg is often easier to tune since the three terms are independently controlled by λ, μ, ν.</p>
+</blockquote>
+<h2>Hyperparameter Sensitivity</h2>
+<p>VICReg introduces three weighting coefficients: λ (invariance), μ (variance), ν (covariance). The default values λ = μ = 25, ν = 1 work well across architectures and datasets. The variance weight μ should be equal to λ to balance the two main objectives. The covariance weight ν can be much smaller (1.0) because the covariance loss is typically much larger in magnitude than the invariance loss. The γ = 1.0 target std is appropriate when embeddings are not pre-normalised.</p>
+<ul>
+<li>λ=25, μ=25, ν=1 — default hyperparameters; robust across architectures.</li>
+<li>γ=1.0 target std works when the projector has no BN on final layer.</li>
+<li>Projector: 3-layer MLP to 8192-dim, same as Barlow Twins.</li>
+<li>LARS optimizer, batch 2048, base_lr=0.2, weight_decay=1e-6, 1000 epochs.</li>
+<li>Monitor per-term losses separately — if var_loss &gt; 0, model is collapsing.</li>
+</ul>
+<h2>Multi-Modal and Other Applications</h2>
+<p>VICReg's three-term structure generalises naturally to multi-modal settings. For vision-language learning, the invariance term aligns image and text embeddings, while variance and covariance regularisation prevent degenerate solutions. Unlike contrastive methods that require hard negative mining across modalities, VICReg only needs positive pairs (image-caption pairs), making it suitable when hard negatives are expensive to mine. The local variant (VICRegL) enables pixel-aligned multi-modal pretraining for tasks like visual question answering.</p>
+<table>
+<thead>
+<tr>
+<th>Criterion</th>
+<th>Barlow Twins</th>
+<th>VICReg</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Variance control</td>
+<td>Implicit (diagonal C → 1)</td>
+<td>Explicit hinge: max(0, γ-std)</td>
+</tr>
+<tr>
+<td>Invariance</td>
+<td>Diagonal cross-correlation → 1</td>
+<td>Direct MSE between z and z'</td>
+</tr>
+<tr>
+<td>Covariance</td>
+<td>Off-diagonal cross-corr → 0</td>
+<td>Off-diagonal of per-view cov → 0</td>
+</tr>
+<tr>
+<td>Hyperparameters</td>
+<td>λ=0.005</td>
+<td>λ=25, μ=25, ν=1</td>
+</tr>
+<tr>
+<td>Local variant</td>
+<td>No</td>
+<td>VICRegL — NN matching on feature maps</td>
+</tr>
+<tr>
+<td>Multi-modal support</td>
+<td>Limited</td>
+<td>Natural fit via separate variance/inv/cov</td>
+</tr>
+</tbody>
+</table>
+<h2>Implementation Guide</h2>
+<p>A complete VICReg implementation requires four components: (1) encoder (any ResNet or ViT backbone), (2) 3-layer MLP projector to 8192-dim without BN on the final layer, (3) three loss functions (variance, invariance, covariance) with separate monitoring of each term, and (4) LARS optimizer with base_lr=0.2, weight_decay=1e-6, 1000-epoch cosine decay schedule. During training, log all three loss terms separately — a rising invariance term indicates augmentations are too strong; a rising variance term indicates the model is approaching collapse; a rising covariance term indicates dimensional redundancy. VICReg is robust to moderate hyperparameter variation: halving or doubling λ and μ typically causes less than 0.5% top-1 regression.</p>
+    </article>
+  </main>
+</body>
+</html>

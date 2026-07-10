@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ResNet — Residual Connections and Bottleneck Blocks | Notes Backup</title>
+  <meta name="description" content="ResNet (He et al., 2015) introduces skip connections y=F(x)+x that let very deep networks learn residual functions instead of unreferenced mappings, solving the degradation problem and enabling networks of 50–1000+ layers. Bottleneck blocks and pre-activation variants extend the core idea." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>ResNet — Residual Connections and Bottleneck Blocks</h1>
+      <ul class='note-meta'><li><strong>description:</strong> ResNet (He et al., 2015) introduces skip connections y=F(x)+x that let very deep networks learn residual functions instead of unreferenced mappings, solving the degradation problem and enabling networks of 50–1000+ layers. Bottleneck blocks and pre-activation variants extend the core idea.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>ResNet — Residual Connections and Bottleneck Blocks</h1>
+<p>The degradation problem — where adding more layers to an already deep network increases training error, not just test error — suggests that deeper plain networks are harder to optimise, not that they overfit. He et al. (2015) hypothesised that learning the identity mapping through multiple nonlinear layers is difficult. Their solution: add an explicit shortcut y = F(x, W) + x so the network only needs to learn the residual F(x) ≈ 0 when the identity is optimal. This simple change enabled networks of 152 layers to outperform all prior architectures while being easier to optimise.</p>
+<h2>The Degradation Problem in Deep Networks</h2>
+<p>A 56-layer plain network has higher training error than a 20-layer network on CIFAR-10 — counterintuitively worse despite having strictly more capacity. The 56-layer network could, in principle, learn the same function as the 20-layer network by setting extra layers to identity (F(x) = x). But in practice, random initialisation and SGD cannot find this solution efficiently. The optimisation landscape of deep networks without skip connections has many local minima and vanishing gradients make it hard to update early layers. Batch normalisation helps but does not fully solve the problem at 56+ layers.</p>
+<h2>Residual Learning: y = F(x) + x</h2>
+<p>The residual formulation y = F(x, W) + x has two components: F(x, W) is the residual to be learned (a stack of conv-BN-ReLU layers), and x is the identity shortcut. When the optimal mapping is the identity, the network only needs to push F(x) → 0, which is easy — weights near zero is the natural initialisation. Gradient flow analysis reveals why this works: ∂L/∂x = ∂L/∂y · (∂F/∂x + I). The identity term I ensures gradients always flow backward without vanishing, regardless of the learned F. When input and output dimensions differ (due to stride or channel change), a projection shortcut uses a 1×1 conv to match dimensions.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class BasicBlock(nn.Module):
+    '''ResNet basic block: two 3x3 convs + identity/projection shortcut.'''
+    expansion = 1
+    def __init__(self, in_ch, out_ch, stride=1):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, stride=stride, padding=1, bias=False)
+        self.bn1   = nn.BatchNorm2d(out_ch)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False)
+        self.bn2   = nn.BatchNorm2d(out_ch)
+        self.relu  = nn.ReLU(inplace=True)
+        self.shortcut = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, 1, stride=stride, bias=False),
+            nn.BatchNorm2d(out_ch)) if (stride != 1 or in_ch != out_ch) else nn.Identity()
+
+    def forward(self, x):
+        return self.relu(self.bn2(self.conv2(self.relu(self.bn1(self.conv1(x))))) + self.shortcut(x))
+
+class Bottleneck(nn.Module):
+    '''ResNet bottleneck: 1x1 reduce -&gt; 3x3 -&gt; 1x1 expand + shortcut.'''
+    expansion = 4
+    def __init__(self, in_ch, mid_ch, stride=1):
+        super().__init__()
+        out_ch = mid_ch * self.expansion
+        self.conv1 = nn.Conv2d(in_ch, mid_ch, 1, bias=False)
+        self.bn1   = nn.BatchNorm2d(mid_ch)
+        self.conv2 = nn.Conv2d(mid_ch, mid_ch, 3, stride=stride, padding=1, bias=False)
+        self.bn2   = nn.BatchNorm2d(mid_ch)
+        self.conv3 = nn.Conv2d(mid_ch, out_ch, 1, bias=False)
+        self.bn3   = nn.BatchNorm2d(out_ch)
+        self.relu  = nn.ReLU(inplace=True)
+        self.shortcut = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, 1, stride=stride, bias=False),
+            nn.BatchNorm2d(out_ch)) if (in_ch != out_ch or stride != 1) else nn.Identity()
+
+    def forward(self, x):
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.relu(self.bn2(self.conv2(out)))
+        return self.relu(self.bn3(self.conv3(out)) + self.shortcut(x))
+
+for B, args in [(BasicBlock, (64, 64)), (Bottleneck, (64, 64))]:
+    m = B(*args)
+    p = sum(x.numel() for x in m.parameters())
+    print('{}: {:,} params'.format(B.__name__, p))
+</code></pre>
+<h2>Pre-Activation ResNet</h2>
+<p>He et al. (2016) revisited the residual block and found that moving BatchNorm and ReLU before the convolutions (pre-activation) improves gradient flow and regularisation. The pre-activation ordering is BN → ReLU → Conv → BN → ReLU → Conv, and the shortcut carries the raw (pre-activation) input. This ensures the shortcut path is always a clean identity with no activations applied, allowing gradient to flow through the skip path without any transformation. Experimentally, pre-activation ResNet-1001 achieves 4.62% error on CIFAR-10 vs 7.61% for the original ResNet-1202.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class PostActivBlock(nn.Module):
+    '''Original ResNet: Conv-&gt;BN-&gt;ReLU-&gt;Conv-&gt;BN, then add shortcut, then ReLU.'''
+    def __init__(self, ch):
+        super().__init__()
+        self.seq = nn.Sequential(
+            nn.Conv2d(ch, ch, 3, padding=1, bias=False), nn.BatchNorm2d(ch), nn.ReLU(inplace=True),
+            nn.Conv2d(ch, ch, 3, padding=1, bias=False), nn.BatchNorm2d(ch))
+        self.relu = nn.ReLU(inplace=True)
+    def forward(self, x): return self.relu(self.seq(x) + x)
+
+class PreActivBlock(nn.Module):
+    '''Pre-activation ResNet (He 2016): BN-&gt;ReLU-&gt;Conv-&gt;BN-&gt;ReLU-&gt;Conv, then add shortcut.'''
+    def __init__(self, ch):
+        super().__init__()
+        self.seq = nn.Sequential(
+            nn.BatchNorm2d(ch), nn.ReLU(inplace=True), nn.Conv2d(ch, ch, 3, padding=1, bias=False),
+            nn.BatchNorm2d(ch), nn.ReLU(inplace=True), nn.Conv2d(ch, ch, 3, padding=1, bias=False))
+    def forward(self, x): return self.seq(x) + x
+
+def grad_norm(block, x):
+    x = x.clone().detach().requires_grad_(True)
+    block(x).sum().backward()
+    return x.grad.norm().item()
+
+torch.manual_seed(0)
+x = torch.randn(4, 64, 28, 28)
+post10 = nn.Sequential(*[PostActivBlock(64) for _ in range(10)])
+pre10  = nn.Sequential(*[PreActivBlock(64)  for _ in range(10)])
+print('10-block post-activation grad norm: {:.4f}'.format(grad_norm(post10, x)))
+print('10-block pre-activation  grad norm: {:.4f}'.format(grad_norm(pre10, x)))
+print('Pre-activation maintains gradient magnitude through deep stacks.')
+</code></pre>
+<blockquote>
+<p><strong>The Identity Shortcut Is the Key Insight</strong>: The skip connection y = F(x) + x is computationally free (just addition) yet fundamentally changes optimisation. Veit et al. (2016) showed that a ResNet with n blocks implicitly ensembles 2^n paths of varying depths — most gradient flows through the shorter paths during early training, gradually engaging deeper paths as the network converges. This ensemble view explains why residual networks are much more robust to removing individual layers than plain networks, where layer removal completely disrupts information flow.</p>
+</blockquote>
+<h2>ResNet-50 from Scratch</h2>
+<p>ResNet-50 uses bottleneck blocks exclusively: each block has a 1×1 conv reducing channels by 4×, a 3×3 conv at the reduced size, and a 1×1 conv expanding back to 4× the mid channels. The architecture: stem (7×7 conv + max pool), then four stages with (3, 4, 6, 3) bottleneck blocks and channel counts (64, 128, 256, 512) — the actual output channels are 4× these values (256, 512, 1024, 2048). Global average pooling replaces the large FC layers of AlexNet/VGG, giving only 2048→1000 at the head. Total: 25M parameters — vs 138M for VGG-16 at better accuracy.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class Bottleneck(nn.Module):
+    expansion = 4
+    def __init__(self, in_ch, mid_ch, stride=1):
+        super().__init__()
+        out_ch = mid_ch * self.expansion
+        self.body = nn.Sequential(
+            nn.Conv2d(in_ch, mid_ch, 1, bias=False), nn.BatchNorm2d(mid_ch), nn.ReLU(inplace=True),
+            nn.Conv2d(mid_ch, mid_ch, 3, stride=stride, padding=1, bias=False),
+            nn.BatchNorm2d(mid_ch), nn.ReLU(inplace=True),
+            nn.Conv2d(mid_ch, out_ch, 1, bias=False), nn.BatchNorm2d(out_ch))
+        self.shortcut = (nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, 1, stride=stride, bias=False), nn.BatchNorm2d(out_ch))
+            if in_ch != out_ch or stride != 1 else nn.Identity())
+        self.relu = nn.ReLU(inplace=True)
+    def forward(self, x): return self.relu(self.body(x) + self.shortcut(x))
+
+def make_layer(in_ch, mid_ch, n_blocks, stride=1):
+    layers = [Bottleneck(in_ch, mid_ch, stride)]
+    out_ch = mid_ch * 4
+    for _ in range(1, n_blocks):
+        layers.append(Bottleneck(out_ch, mid_ch))
+    return nn.Sequential(*layers)
+
+class ResNet50(nn.Module):
+    def __init__(self, num_classes=1000):
+        super().__init__()
+        self.stem   = nn.Sequential(
+            nn.Conv2d(3, 64, 7, stride=2, padding=3, bias=False),
+            nn.BatchNorm2d(64), nn.ReLU(inplace=True), nn.MaxPool2d(3, stride=2, padding=1))
+        self.layer1 = make_layer(64,   64,  3)
+        self.layer2 = make_layer(256,  128, 4, stride=2)
+        self.layer3 = make_layer(512,  256, 6, stride=2)
+        self.layer4 = make_layer(1024, 512, 3, stride=2)
+        self.head   = nn.Sequential(nn.AdaptiveAvgPool2d(1), nn.Flatten(), nn.Linear(2048, num_classes))
+    def forward(self, x):
+        return self.head(self.layer4(self.layer3(self.layer2(self.layer1(self.stem(x))))))
+
+model = ResNet50()
+x = torch.randn(2, 3, 224, 224)
+params = sum(p.numel() for p in model.parameters()) / 1e6
+print('ResNet-50 output: {}  params: {:.1f}M'.format(model(x).shape, params))
+</code></pre>
+<h2>Width vs Depth: WideResNet</h2>
+<p>Zagoruyko &amp; Komodakis (2016) showed that widening residual networks — increasing channels by a widening factor k — can outperform depth increases while being more computationally efficient. WRN-28-10 (28 layers, k=10) achieves 3.89% error on CIFAR-10, better than ResNet-1001. Wide networks benefit more from parallelism on modern GPUs than deep-but-thin networks whose sequential bottlenecks are hard to parallelise. The trade-off: WideResNet has more parameters for a given depth but fewer training steps to convergence. Dropout in wide blocks acts as effective regularisation when channels are large.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class WideBlock(nn.Module):
+    '''Wide ResNet block: pre-activation + dropout for regularisation.'''
+    def __init__(self, in_ch, out_ch, stride=1, dropout=0.3):
+        super().__init__()
+        self.bn1  = nn.BatchNorm2d(in_ch)
+        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, stride=stride, padding=1, bias=False)
+        self.drop  = nn.Dropout(dropout)
+        self.bn2   = nn.BatchNorm2d(out_ch)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False)
+        self.relu  = nn.ReLU(inplace=True)
+        self.shortcut = (nn.Conv2d(in_ch, out_ch, 1, stride=stride, bias=False)
+                         if in_ch != out_ch or stride != 1 else nn.Identity())
+
+    def forward(self, x):
+        out = self.conv1(self.relu(self.bn1(x)))
+        out = self.conv2(self.drop(self.relu(self.bn2(out))))
+        return out + self.shortcut(x)
+
+def wrn(depth=16, k=10, num_classes=10):
+    return nn.Sequential(
+        nn.Conv2d(3, 16, 3, padding=1, bias=False),
+        WideBlock(16, 16*k), WideBlock(16*k, 32*k, stride=2), WideBlock(32*k, 64*k, stride=2),
+        nn.BatchNorm2d(64*k), nn.ReLU(inplace=True),
+        nn.AdaptiveAvgPool2d(1), nn.Flatten(), nn.Linear(64*k, num_classes))
+
+print('{:&lt;12} {:&gt;10} {:&gt;14}'.format('Model', 'Params', 'GFLOPs (est)'))
+for k in [1, 4, 8, 10]:
+    m = wrn(k=k)
+    p = sum(x.numel() for x in m.parameters()) / 1e6
+    print('WRN-16-{:&lt;4} {:&gt;9.2f}M'.format(k, p))
+</code></pre>
+<h2>Why Skip Connections Work</h2>
+<p>Multiple theoretical perspectives explain the effectiveness of residual connections. The ensemble view (Veit et al.) shows that a ResNet with n blocks implicitly represents a 2^n-path ensemble, where gradients primarily flow through shorter paths early in training. The unrolled iterative estimation view interprets each residual block as one refinement step in an iterative estimation of the target representation. Information-theoretic analysis shows that skip connections provide an information superhighway that prevents bottlenecks in early layers. Empirically, residual networks with removed intermediate layers degrade gracefully, while plain networks fail catastrophically when layers are removed.</p>
+<ul>
+<li>Gradient flow: skip connection contributes +I to the Jacobian, ensuring non-vanishing gradients at all depths.</li>
+<li>Ensemble effect: 2^n implicit paths of varying depths — shorter paths dominate early training, longer paths refine later.</li>
+<li>Identity initialisation: at initialisation F(x) ≈ 0 (small weights), so the block is approximately identity — a sensible starting point.</li>
+<li>Shattered gradients (Balduzzi et al.): plain networks have near-zero gradient correlation between adjacent layers; residuals preserve it.</li>
+<li>Loss landscape (Li et al.): skip connections create smoother loss landscapes with fewer local minima and sharper global minima.</li>
+</ul>
+<h2>ResNet Variants Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Blocks</th>
+<th>Params</th>
+<th>GFLOPs</th>
+<th>Top-1 Acc</th>
+<th>Key Variant</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ResNet-18</td>
+<td>8 basic</td>
+<td>11M</td>
+<td>1.8</td>
+<td>69.8%</td>
+<td>Baseline, used as lightweight backbone</td>
+</tr>
+<tr>
+<td>ResNet-34</td>
+<td>16 basic</td>
+<td>21M</td>
+<td>3.7</td>
+<td>73.3%</td>
+<td>Larger basic-block network</td>
+</tr>
+<tr>
+<td>ResNet-50</td>
+<td>16 bottleneck</td>
+<td>25M</td>
+<td>4.1</td>
+<td>76.1%</td>
+<td>Standard bottleneck design</td>
+</tr>
+<tr>
+<td>ResNet-101</td>
+<td>33 bottleneck</td>
+<td>44M</td>
+<td>7.9</td>
+<td>77.4%</td>
+<td>Deeper backbone for segmentation</td>
+</tr>
+<tr>
+<td>ResNet-152</td>
+<td>50 bottleneck</td>
+<td>60M</td>
+<td>11.6</td>
+<td>78.3%</td>
+<td>ILSVRC 2015 winner</td>
+</tr>
+<tr>
+<td>WideResNet-28-10</td>
+<td>12 wide basic</td>
+<td>36M</td>
+<td>5.2</td>
+<td>95.8% CIFAR</td>
+<td>Wider, shallower, dropout</td>
+</tr>
+<tr>
+<td>ResNeXt-50 (32×4d)</td>
+<td>16 grouped bottleneck</td>
+<td>25M</td>
+<td>4.3</td>
+<td>77.8%</td>
+<td>Grouped convolutions, multi-branch</td>
+</tr>
+</tbody>
+</table>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ring Attention — Sequence Parallelism for Long Contexts | Notes Backup</title>
+  <meta name="description" content="Simulate ring attention with Python lists, implement online softmax normalisation for distributed attention, combine ring attention with FlashAttention blocks, and analyse per-GPU memory scaling with sequence length and device count." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Ring Attention — Sequence Parallelism for Long Contexts</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Simulate ring attention with Python lists, implement online softmax normalisation for distributed attention, combine ring attention with FlashAttention blocks, and analyse per-GPU memory scaling with sequence length and device count.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Ring Attention — Sequence Parallelism for Long Contexts</h1>
+<p>Ring Attention (Liu et al. 2023) enables training on sequences far longer than a single GPU can hold by distributing the sequence across multiple GPUs. Each GPU holds a contiguous segment of Q, K, and V. The GPUs are arranged in a logical ring: at each step a GPU computes local attention between its Q segment and its current K,V segment, then passes its K,V to the next GPU in the ring. After N steps (N = number of GPUs), every Q has attended to every K and V. Crucially, the K,V communication overlaps with local FlashAttention computation, hiding most of the network latency.</p>
+<h2>Sequence Parallelism and the Ring Communication Pattern</h2>
+<p>Tensor parallelism (Megatron-LM) splits model weights across GPUs. Data parallelism splits the batch. Sequence parallelism splits the sequence dimension L across GPUs. For N GPUs each holding L/N tokens, the local attention matrix is (L/N) × (L/N) instead of L × L — an N² reduction in per-GPU memory. Ring Attention implements sequence parallelism for attention: at step s, GPU i computes attention between its Q_i and the K,V block it currently holds (initially from GPU i, then cycled from GPU (i+s) mod N). After N steps, the partial attention outputs are combined using online softmax normalisation.</p>
+<h2>Ring Attention Forward Pass</h2>
+<p>The ring attention algorithm: initialise output O_i = 0, running log-sum-exp lse_i = -∞ for each GPU i. For s = 0 to N-1: compute local attention scores A_{i,j} = Q_i K_jᵀ / √d where j = (i+s) mod N; update the running softmax using online normalisation (FlashAttention-style); send K_j, V_j to GPU (i+1) mod N while computing; receive K_{j-1}, V_{j-1} from GPU (i-1) mod N. After N steps each GPU holds O_i = softmax(Q_i [K_0; K_1; ...; K_{N-1}]ᵀ) V — the correct full-sequence attention output for its Q segment.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+import math
+
+def ring_attention_simulate(Q_segs, K_segs, V_segs):
+    &quot;&quot;&quot;Simulate ring attention with Python lists (no actual multi-GPU comms).
+    Q_segs, K_segs, V_segs: lists of tensors, one per GPU, shape (B,h,Ls,d).
+    Returns: list of output segments, one per GPU.
+    &quot;&quot;&quot;
+    N = len(Q_segs)  # number of GPUs
+    B, h, Ls, d = Q_segs[0].shape
+    # Each GPU maintains running output O and log-sum-exp for online softmax
+    Os   = [torch.zeros(B, h, Ls, d) for _ in range(N)]
+    lses = [torch.full((B, h, Ls, 1), float('-inf')) for _ in range(N)]
+    kv_ring = list(zip(K_segs, V_segs))  # initial K,V assignment
+    for step in range(N):
+        for i in range(N):
+            j = (i + step) % N          # which K,V block GPU i holds
+            K_j, V_j = kv_ring[j]
+            scores = Q_segs[i] @ K_j.transpose(-2,-1) / math.sqrt(d)  # (B,h,Ls,Ls)
+            block_max = scores.max(dim=-1, keepdim=True).values
+            exp_scores = torch.exp(scores - block_max)
+            block_lse  = block_max + torch.log(exp_scores.sum(-1, keepdim=True))
+            # Merge with running lse (online softmax)
+            lse_new = torch.logaddexp(lses[i], block_lse)
+            alpha = torch.exp(lses[i] - lse_new)
+            beta  = torch.exp(block_lse - lse_new)
+            Os[i]   = alpha * Os[i] + beta * (exp_scores / exp_scores.sum(-1,keepdim=True) @ V_j)
+            lses[i] = lse_new
+        # Simulate ring rotation: each GPU sends K,V to next
+        kv_ring = [kv_ring[(i - 1) % N] for i in range(N)]
+    return Os
+
+N, B, h, Ls, d = 4, 1, 2, 8, 16  # 4 GPUs, 8 tokens each = 32 total
+Q_segs = [torch.randn(B,h,Ls,d) for _ in range(N)]
+K_segs = [torch.randn(B,h,Ls,d) for _ in range(N)]
+V_segs = [torch.randn(B,h,Ls,d) for _ in range(N)]
+Os = ring_attention_simulate(Q_segs, K_segs, V_segs)
+Q_full = torch.cat(Q_segs, dim=2)
+K_full = torch.cat(K_segs, dim=2)
+V_full = torch.cat(V_segs, dim=2)
+O_ref  = F.scaled_dot_product_attention(Q_full, K_full, V_full)
+O_ring = torch.cat(Os, dim=2)
+print(f'Ring output shape: {O_ring.shape}')
+print(f'Max diff vs full attention: {(O_ring - O_ref).abs().max().item():.6f}')
+</code></pre>
+<h2>Online Normalisation for Distributed Softmax</h2>
+<p>The key algorithmic challenge in ring attention is combining partial softmax results computed on different K,V blocks. Standard softmax requires seeing all keys to compute the denominator Σ_j exp(q·kⱼ/√d). Online normalisation (from FlashAttention) maintains a running log-sum-exp (lse) that allows updating the output incrementally. For each new K block: compute block_lse, merge with running lse using logaddexp, rescale the previous output by exp(old_lse - new_lse), add the contribution from the new block scaled by exp(block_lse - new_lse). After all N ring steps, the output is numerically equivalent to full softmax attention.</p>
+<pre><code class="language-python">import torch
+import math
+
+def online_softmax_accumulate(q, k_blocks, v_blocks):
+    &quot;&quot;&quot;Accumulate attention over K,V blocks using online (log-sum-exp) normalisation.
+    q: (L_q, d)  k_blocks/v_blocks: list of (L_k, d) tensors.
+    Returns output (L_q, d) equivalent to full softmax attention.
+    &quot;&quot;&quot;
+    d = q.shape[-1]
+    L_q = q.shape[0]
+    O   = torch.zeros(L_q, d)
+    lse = torch.full((L_q, 1), float('-inf'))
+    for K_b, V_b in zip(k_blocks, v_blocks):
+        scores    = q @ K_b.T / math.sqrt(d)              # (L_q, L_k)
+        block_max = scores.max(dim=-1, keepdim=True).values
+        e_scores  = torch.exp(scores - block_max)          # numerically stable
+        block_lse = block_max + torch.log(e_scores.sum(-1, keepdim=True))
+        lse_new   = torch.logaddexp(lse, block_lse)
+        alpha     = torch.exp(lse - lse_new)               # rescale old contribution
+        beta      = torch.exp(block_lse - lse_new)         # scale new contribution
+        O         = alpha * O + beta * (e_scores / e_scores.sum(-1,keepdim=True) @ V_b)
+        lse       = lse_new
+    return O
+
+torch.manual_seed(1)
+L, d = 32, 16
+q = torch.randn(L, d)
+K = torch.randn(L, d)
+V = torch.randn(L, d)
+# Split K, V into 4 blocks as if distributed across 4 GPUs
+k_blocks = K.chunk(4, dim=0)
+v_blocks = V.chunk(4, dim=0)
+O_online = online_softmax_accumulate(q, k_blocks, v_blocks)
+import torch.nn.functional as F
+O_full = F.scaled_dot_product_attention(q.unsqueeze(0).unsqueeze(0),
+             K.unsqueeze(0).unsqueeze(0), V.unsqueeze(0).unsqueeze(0)).squeeze()
+print(f'Online norm max diff: {(O_online - O_full).abs().max().item():.8f}')
+print('Numerically identical to full softmax attention across 4 blocks.')
+</code></pre>
+<h2>Combining Ring Attention with FlashAttention</h2>
+<p>In practice, ring attention does not compute naive local attention — it uses FlashAttention within each ring step for memory efficiency. FlashAttention tiles the local (L/N) × (L/N) attention matrix to avoid materialising it, keeping per-GPU memory O(L/N) rather than O((L/N)²). The combination: ring attention handles the sequence distribution across GPUs (inter-GPU level), FlashAttention handles the memory-efficient tiling within each GPU (intra-GPU level). Together they achieve O(L/N) memory per GPU in both sequence length and attention scores, enabling contexts of L = N × L_GPU where L_GPU is the per-GPU FlashAttention limit (~128K on an 80 GB A100).</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+import math
+
+def flash_attention_block(Q, K, V, block_size=32):
+    &quot;&quot;&quot;Simplified FlashAttention: tiled computation to avoid O(L^2) memory.
+    Q: (B,h,Lq,d)  K,V: (B,h,Lk,d). Returns (B,h,Lq,d).
+    &quot;&quot;&quot;
+    B, h, Lq, d = Q.shape
+    Lk = K.shape[2]
+    O   = torch.zeros_like(Q)
+    lse = torch.full((B, h, Lq, 1), float('-inf'))
+    for j in range(0, Lk, block_size):
+        Kj = K[:, :, j:j+block_size]
+        Vj = V[:, :, j:j+block_size]
+        s  = Q @ Kj.transpose(-2,-1) / math.sqrt(d)
+        bm = s.max(-1, keepdim=True).values
+        e  = torch.exp(s - bm)
+        bl = bm + torch.log(e.sum(-1, keepdim=True))
+        lse_new = torch.logaddexp(lse, bl)
+        O = torch.exp(lse - lse_new) * O + torch.exp(bl - lse_new) * (e / e.sum(-1,keepdim=True) @ Vj)
+        lse = lse_new
+    return O
+
+def ring_flash_attention(Q_segs, K_segs, V_segs, block_size=16):
+    &quot;&quot;&quot;Ring attention with FlashAttention as the local compute kernel.&quot;&quot;&quot;
+    N = len(Q_segs)
+    Os   = [torch.zeros_like(q) for q in Q_segs]
+    lses = [torch.full((*q.shape[:3], 1), float('-inf')) for q in Q_segs]
+    kv   = list(zip(K_segs, V_segs))
+    for step in range(N):
+        for i in range(N):
+            j = (i + step) % N
+            Kj, Vj = kv[j]
+            block_out = flash_attention_block(Q_segs[i], Kj, Vj, block_size)
+            # Merge using online normalisation at segment level
+            bl = torch.log(torch.ones(*Q_segs[i].shape[:3], 1))  # simplified
+            lse_new = torch.logaddexp(lses[i], bl)
+            Os[i] = 0.5 * Os[i] + 0.5 * block_out  # simplified merge for demo
+            lses[i] = lse_new
+        kv = [kv[(i - 1) % N] for i in range(N)]
+    return Os
+
+N, B, h, Ls, d = 2, 1, 1, 16, 8
+Q_segs = [torch.randn(B,h,Ls,d) for _ in range(N)]
+K_segs = [torch.randn(B,h,Ls,d) for _ in range(N)]
+V_segs = [torch.randn(B,h,Ls,d) for _ in range(N)]
+Os = ring_flash_attention(Q_segs, K_segs, V_segs)
+print(f'Ring+Flash: {N} GPUs, {Ls} tokens/GPU = {N*Ls} total tokens')
+print(f'Output seg 0: {Os[0].shape}')
+print(f'Per-GPU attn memory: O((Ls/block)^2) = O({Ls}^2) vs O({N*Ls}^2) full')
+</code></pre>
+<h2>Scaling Analysis: Memory per GPU</h2>
+<p>Ring attention's memory advantage is linear in N. With N GPUs, each holding L/N tokens, the local attention matrix is (L/N)² — N² smaller than the full L² matrix. Combined with FlashAttention (which avoids materialising even the local matrix), per-GPU memory for attention is O(L/N) in sequence length. Parameter memory remains the same across GPUs (model weights are replicated or tensor-partitioned separately). Communication cost per ring step is sending K and V of shape (B × h × L/N × d_head) to the neighbouring GPU — proportional to L/N, not L².</p>
+<pre><code class="language-python">import math
+
+def ring_attention_memory(L, N, h, d_head, dtype_bytes=2):
+    &quot;&quot;&quot;Estimate per-GPU memory for ring attention (attention tensors only).&quot;&quot;&quot;
+    Ls = L // N  # tokens per GPU
+    # Q, K, V segments: each (h, Ls, d_head)
+    qkv_mem = 3 * h * Ls * d_head * dtype_bytes
+    # Local attention score block (with FlashAttention, never fully materialised)
+    # FlashAttention tiles with block_size b: max block = h * Ls * b
+    b = min(128, Ls)
+    flash_tile = h * Ls * b * dtype_bytes
+    # Output buffer O: same shape as Q
+    out_mem = h * Ls * d_head * dtype_bytes
+    # Communication: one K,V send per step
+    comm_per_step = 2 * h * Ls * d_head * dtype_bytes
+    return qkv_mem + flash_tile + out_mem, comm_per_step
+
+h, d_head = 16, 64
+print(f&quot;{'L':&gt;8} {'N GPUs':&gt;8} {'Mem/GPU MB':&gt;12} {'Comm/step MB':&gt;14} {'Full-attn MB':&gt;14}&quot;)
+for L in [8192, 32768, 131072, 524288]:
+    for N in [1, 4, 8, 16]:
+        if L // N &lt; 64:
+            continue
+        mem, comm = ring_attention_memory(L, N, h, d_head)
+        full_attn = h * L * L * 2 / 1024**2  # full L^2 attention, float16
+        print(f'{L:&gt;8} {N:&gt;8} {mem/1024**2:&gt;12.1f} {comm/1024**2:&gt;14.2f} {full_attn:&gt;14.1f}')
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Strategy</th>
+<th>Dimension parallelized</th>
+<th>Communication pattern</th>
+<th>Max sequence length</th>
+<th>Use case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Data parallelism</td>
+<td>Batch (B)</td>
+<td>AllReduce gradients</td>
+<td>Single-GPU limit</td>
+<td>Standard training with large batch</td>
+</tr>
+<tr>
+<td>Tensor parallelism</td>
+<td>Model weights (h or d_model)</td>
+<td>AllReduce per layer forward</td>
+<td>Single-GPU limit</td>
+<td>Large models that don't fit on one GPU</td>
+</tr>
+<tr>
+<td>Sequence parallelism (non-ring)</td>
+<td>Sequence (L) — non-attention layers</td>
+<td>AllGather / ReduceScatter</td>
+<td>Modest improvement</td>
+<td>Used in Megatron-LM for LayerNorm, Dropout</td>
+</tr>
+<tr>
+<td>Ring attention</td>
+<td>Sequence (L) — attention layer</td>
+<td>P2P K,V ring rotation (N steps)</td>
+<td>L × N (linear in GPU count)</td>
+<td>Very long contexts: 128K–1M tokens</td>
+</tr>
+<tr>
+<td>Combined (all four)</td>
+<td>B, h, d_model, L simultaneously</td>
+<td>All of the above</td>
+<td>Product of all axes</td>
+<td>Gemini/LLaMA 3 long-context training</td>
+</tr>
+</tbody>
+</table>
+<h2>Communication Overhead and Overlap</h2>
+<p>Ring attention requires N ring steps where N is the number of GPUs. At each step GPU i sends its current K,V block (L/N × h × d_head floats) to GPU (i+1) while simultaneously computing local attention with its current K,V block. If the NVLink or InfiniBand bandwidth is sufficient to send L/N × h × d_head floats in the time it takes to run FlashAttention on L/N × L/N tokens, communication is fully hidden. In practice, for NVLink at 600 GB/s and A100 at ~300 TFLOPS, communication is hidden for L/N ≥ 4096 with typical model dimensions. Blocking Ring Attention reduces communication rounds to ⌈N/2⌉ by bidirectional ring rotation.</p>
+<blockquote>
+<p><strong>Ring Attention Enables Million-Token Contexts</strong>: Ring attention scales sequence length linearly with GPU count: 8 × A100 GPUs each handling 128K tokens = 1M total context. This is how long-context LLaMA variants (LLaMA 3.1 with 128K context) and Gemini (1M context) are trained. The communication overhead is bounded by L/N (not L²), and overlaps with compute. For inference, ring attention is less common — KV cache compression (GQA, MLA) is preferred because inference is typically single-GPU or uses pipeline parallelism.</p>
+</blockquote>
+<h2>Long-Context Training in Practice</h2>
+<p>Ring attention is primarily a training technique — it enables fitting long sequences into GPU memory during the forward and backward pass. At inference, the full sequence typically fits in a single GPU's memory if KV cache compression (GQA or MLA) is used, making ring attention unnecessary. Production long-context training pipelines combine ring attention (sequence parallelism) with tensor parallelism (split heads across GPUs) and data parallelism (split batch) — all three dimensions partitioned simultaneously. The code changes required to add ring attention to an existing transformer are isolated to the attention layer; the rest of the transformer operates on L/N token segments without modification.</p>
+<ul>
+<li>Ring attention paper (Liu et al. 2023): first paper to demonstrate O(L/N) per-GPU memory for attention across N GPUs.</li>
+<li>LLaMA 3.1 (128K context): trained with ring attention across 8 GPUs per sequence for long-context variants.</li>
+<li>Gemini (1M context): uses a combination of ring-style sequence parallelism and tensor parallelism.</li>
+<li>BlockingRingAttention: reduces communication steps from N to ⌈N/2⌉ using bidirectional ring rotation.</li>
+<li>EasyContext (open source): PyTorch implementation of ring attention with DeepSpeed and FSDP integration.</li>
+<li>Ring attention is orthogonal to FlashAttention — each ring step uses FlashAttention internally for memory-efficient local compute.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

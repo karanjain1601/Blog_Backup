@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MAP Estimation and Its Connection to Regularization | Notes Backup</title>
+  <meta name="description" content="MAP estimation as penalised MLE, Gaussian prior yields L2 regularisation, Laplace prior yields L1 (Lasso), empirical Bayes for hyperparameter selection, and when MAP differs from the posterior mean." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>MAP Estimation and Its Connection to Regularization</h1>
+      <ul class='note-meta'><li><strong>description:</strong> MAP estimation as penalised MLE, Gaussian prior yields L2 regularisation, Laplace prior yields L1 (Lasso), empirical Bayes for hyperparameter selection, and when MAP differs from the posterior mean.</li><li><strong>topic:</strong> math-foundations</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>MAP Estimation and Its Connection to Regularization</h1>
+<p>Maximum a posteriori (MAP) estimation is the most common bridge between Bayesian statistics and practical ML. It adds a prior p(θ) to the MLE objective and maximises the unnormalised posterior p(D|θ) p(θ). The remarkable insight is that this is equivalent to regularised maximum likelihood: the Gaussian prior produces exactly L2 (ridge) regularisation, and the Laplace prior produces exactly L1 (Lasso) regularisation. Understanding MAP estimation shows that regularisation is not an ad hoc trick but a principled Bayesian choice of prior, and that the regularisation strength λ controls the prior scale.</p>
+<h2>Core Definition</h2>
+<p>MAP estimation finds the mode of the posterior distribution:</p>
+<p>θ̂_MAP = argmax_θ p(θ|D)
+       = argmax_θ [log p(D|θ) + log p(θ)]
+       = argmax_θ [ℓ(θ) + log p(θ)]</p>
+<p>Because p(D) does not depend on θ, we maximise the unnormalised posterior. MAP equals MLE when the prior p(θ) is uniform (flat/uninformative) — uniform prior contributes a constant log prior and does not change the argmax.</p>
+<p>In contrast to full Bayesian inference (which computes the entire posterior distribution p(θ|D)), MAP returns only a point estimate — the peak of the posterior. This makes MAP computationally tractable (optimisation rather than integration) but discards uncertainty information.</p>
+<h2>Gaussian Prior = L2 Regularisation</h2>
+<p>Suppose the prior on weights w is an isotropic Gaussian: p(w) = N(0, σ_p² I).</p>
+<p>log p(w) = −‖w‖² / (2σ_p²) + const</p>
+<p>MAP objective:
+θ̂_MAP = argmax_w [ℓ(w) − ‖w‖² / (2σ_p²)]
+       = argmin_w [−ℓ(w) + λ‖w‖²]   where λ = 1/(2σ_p²)</p>
+<p>This is exactly ridge regression (L2-regularised linear regression) or weight decay in neural networks. The regularisation strength λ is the inverse of twice the prior variance:
+- Large σ_p (diffuse prior) → small λ → weak regularisation → approaches MLE
+- Small σ_p (tight prior near 0) → large λ → strong regularisation → shrinks weights to 0</p>
+<p>This reveals that weight decay in neural network training is equivalent to placing a Gaussian prior on the weights — a fundamental Bayesian justification for this universal heuristic.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.linear_model import Ridge, Lasso, LinearRegression
+
+rng = np.random.default_rng(42)
+
+# Generate regression data
+n, d = 100, 20
+X = rng.standard_normal((n, d))
+w_true = rng.standard_normal(d) * 0.5
+w_true[10:] = 0.0   # last 10 coefficients are zero (sparse)
+y = X @ w_true + rng.normal(0, 0.5, n)
+
+# MLE = OLS (uniform prior)
+ols = LinearRegression(fit_intercept=False).fit(X, y)
+
+# MAP with Gaussian prior (sigma_p = 1) =&gt; L2 reg with lambda = 1/(2*1^2) = 0.5
+# But sklearn Ridge uses alpha = lambda, so alpha = 0.5
+sigma_p = 1.0
+lam_ridge = 1 / (2 * sigma_p**2)
+ridge = Ridge(alpha=lam_ridge, fit_intercept=False).fit(X, y)
+
+# MAP with Laplace prior (b=1) =&gt; L1 reg with lambda = 1/b = 1
+b_laplace = 1.0
+lam_lasso = 1 / b_laplace
+lasso = Lasso(alpha=lam_lasso / n, fit_intercept=False, max_iter=10000).fit(X, y)
+
+print(&quot;=== MAP vs MLE: coefficient recovery ===&quot;)
+print(f&quot;True w (first 5):  {np.round(w_true[:5], 3)}&quot;)
+print(f&quot;OLS  w (first 5):  {np.round(ols.coef_[:5], 3)}&quot;)
+print(f&quot;Ridge w (first 5): {np.round(ridge.coef_[:5], 3)}&quot;)
+print(f&quot;Lasso w (first 5): {np.round(lasso.coef_[:5], 3)}&quot;)
+print()
+print(f&quot;True w (last 5, should be 0): {np.round(w_true[15:], 3)}&quot;)
+print(f&quot;OLS  w (last 5):  {np.round(ols.coef_[15:], 3)}&quot;)
+print(f&quot;Ridge w (last 5): {np.round(ridge.coef_[15:], 3)}&quot;)
+print(f&quot;Lasso w (last 5): {np.round(lasso.coef_[15:], 3)}&quot;)
+
+print(&quot;\n=== Number of zero coefficients (sparsity) ===&quot;)
+eps = 1e-4
+print(f&quot;OLS   zeros: {np.sum(np.abs(ols.coef_)   &lt; eps)}/20&quot;)
+print(f&quot;Ridge zeros: {np.sum(np.abs(ridge.coef_) &lt; eps)}/20&quot;)
+print(f&quot;Lasso zeros: {np.sum(np.abs(lasso.coef_) &lt; eps)}/20&quot;)
+</code></pre>
+<h2>Laplace Prior = L1 Regularisation</h2>
+<p>The Laplace (double exponential) prior: p(w) ∝ exp(−λ|w|)</p>
+<p>log p(w) = −λ‖w‖₁ + const</p>
+<p>MAP objective:
+θ̂_MAP = argmin_w [−ℓ(w) + λ‖w‖₁]</p>
+<p>This is the Lasso (Least Absolute Shrinkage and Selection Operator) for linear regression. The Laplace prior has heavier tails than the Gaussian but a sharp peak at zero, which encourages exact sparsity: many weights are set to exactly 0. In contrast, the Gaussian prior shrinks weights toward zero but almost never sets them exactly to zero.</p>
+<p>Intuitively: at a weight w = ε near zero, the L2 penalty gradient is 2λε (small), not pushing strongly toward zero. The L1 penalty gradient is λ (constant), always pushing toward zero with the same force regardless of the weight magnitude. This constant push is what creates exact zeros through the subdifferential at w = 0.</p>
+<h2>Empirical Bayes</h2>
+<p>How do we choose the regularisation strength λ (equivalently, the prior hyperparameter σ_p)? Several approaches:</p>
+<ol>
+<li>
+<p><strong>Cross-validation</strong>: grid search over λ values, select by held-out loss. Practical and model-agnostic.</p>
+</li>
+<li>
+<p><strong>Empirical Bayes (Type-II MLE)</strong>: maximise the marginal likelihood p(D|λ) = ∫ p(D|w, λ) p(w|λ) dw over λ. This marginalises out w, so λ is chosen by the data itself — 'letting the data choose the prior'.</p>
+</li>
+<li>
+<p><strong>Evidence maximisation</strong>: for Gaussian linear models, the marginal likelihood has a closed form. For neural networks, it is approximated via Laplace approximation or ELBO methods.</p>
+</li>
+</ol>
+<p>Empirical Bayes can overfit (especially for small datasets) because we are choosing the prior based on the data — technically a frequentist method despite the Bayesian framing. Use cross-validation as a sanity check.</p>
+<pre><code class="language-python">import numpy as np
+from scipy.optimize import minimize_scalar
+from scipy.linalg import solve
+
+rng = np.random.default_rng(42)
+
+# Empirical Bayes for Gaussian linear regression
+# Model: y = Xw + eps, w ~ N(0, alpha^{-1} I), eps ~ N(0, beta^{-1} I)
+# Marginal likelihood: p(y|X, alpha, beta) = N(y; 0, beta^{-1}I + alpha^{-1} XX^T)
+# Here we find alpha (prior precision) via marginal likelihood maximisation
+
+n, d = 50, 5
+X = rng.standard_normal((n, d))
+w_true = rng.standard_normal(d)
+beta = 25.0  # noise precision (known for simplicity)
+y = X @ w_true + rng.normal(0, 1/np.sqrt(beta), n)
+
+def log_marginal_likelihood(log_alpha):
+    alpha = np.exp(log_alpha)
+    # Covariance of y: C = (1/beta) I + (1/alpha) X X^T
+    C = (1/beta) * np.eye(n) + (1/alpha) * X @ X.T
+    sign, logdet = np.linalg.slogdet(C)
+    y_Cinv_y = y @ np.linalg.solve(C, y)
+    return -0.5 * (n * np.log(2*np.pi) + logdet + y_Cinv_y)
+
+# Search over alpha values
+alpha_grid = np.logspace(-3, 3, 100)
+lml_vals = [log_marginal_likelihood(np.log(a)) for a in alpha_grid]
+best_alpha = alpha_grid[np.argmax(lml_vals)]
+print(f&quot;Empirical Bayes best alpha (prior precision) = {best_alpha:.4f}&quot;)
+print(f&quot;Corresponding lambda = alpha/beta = {best_alpha/beta:.4f}&quot;)
+print(f&quot;Corresponding sigma_prior = 1/sqrt(alpha) = {1/np.sqrt(best_alpha):.4f}&quot;)
+
+# MAP estimate with empirical Bayes prior
+A = beta * X.T @ X + best_alpha * np.eye(d)
+w_map = beta * solve(A, X.T @ y)
+w_mle = np.linalg.lstsq(X, y, rcond=None)[0]
+print(f&quot;\nTrue w:       {np.round(w_true, 3)}&quot;)
+print(f&quot;MLE w:        {np.round(w_mle, 3)}&quot;)
+print(f&quot;Emp. Bayes w: {np.round(w_map, 3)}&quot;)
+print(f&quot;\nMSE(MLE):    {np.mean((w_mle - w_true)**2):.4f}&quot;)
+print(f&quot;MSE(EB-MAP): {np.mean((w_map - w_true)**2):.4f}&quot;)
+</code></pre>
+<h2>MAP vs MLE vs Posterior Mean</h2>
+<p>For a Gaussian posterior (e.g., Bayesian linear regression with Gaussian prior and Gaussian likelihood), the MAP estimate equals the posterior mean. This is because a Gaussian is symmetric and unimodal, so its mode equals its mean.</p>
+<p>For non-Gaussian posteriors (logistic regression, complex models), MAP differs from the posterior mean:
+- MAP is the mode: the single most probable parameter value
+- Posterior mean: the probability-weighted average over all parameter values
+- Posterior mean minimises expected squared loss, MAP minimises 0-1 loss (finds the most probable point)</p>
+<p>For asymmetric or multimodal posteriors (common in deep learning), the MAP estimate may be a poor summary of the posterior. For example, if the posterior has two roughly equal modes, the MAP picks one and ignores the other — the posterior mean might fall between the modes in a low-probability region. In deep learning, many local minima are approximately equally good (flat loss landscape), and MAP just finds one of them.</p>
+<pre><code class="language-python">import numpy as np
+from scipy import stats
+
+rng = np.random.default_rng(42)
+
+# Beta-Binomial: MAP vs posterior mean
+# Posterior: Beta(a + k, b + n - k) where prior is Beta(a, b)
+# MAP = (a + k - 1) / (a + b + n - 2)   (mode of Beta)
+# Mean = (a + k) / (a + b + n)
+
+n_flips, k_heads = 10, 3
+a_prior, b_prior = 2.0, 2.0  # Beta(2,2) symmetric prior
+
+a_post = a_prior + k_heads
+b_post = b_prior + (n_flips - k_heads)
+
+map_est  = (a_post - 1) / (a_post + b_post - 2)
+post_mean = a_post / (a_post + b_post)
+mle_est  = k_heads / n_flips
+
+print(&quot;=== Beta-Bernoulli: MAP vs MLE vs Posterior Mean ===&quot;)
+print(f&quot;Data: {k_heads}/{n_flips} heads, Prior: Beta({a_prior}, {b_prior})&quot;)
+print(f&quot;Posterior: Beta({a_post}, {b_post})&quot;)
+print(f&quot;MLE:            {mle_est:.4f}&quot;)
+print(f&quot;MAP:            {map_est:.4f}  (mode of Beta)&quot;)
+print(f&quot;Posterior mean: {post_mean:.4f}  (mean of Beta)&quot;)
+
+# Effect of sample size on MAP vs posterior mean gap
+print(&quot;\n=== MAP vs Posterior Mean as n grows ===&quot;)
+for n in [5, 20, 100, 1000]:
+    k = round(0.3 * n)  # 30% heads
+    ap, bp = a_prior + k, b_prior + (n - k)
+    map_e  = (ap - 1) / (ap + bp - 2)
+    mean_e = ap / (ap + bp)
+    print(f&quot;  n={n:&gt;5}: k={k:&gt;3}  MAP={map_e:.4f}  E[theta|D]={mean_e:.4f}  diff={abs(map_e-mean_e):.4f}&quot;)
+print(&quot;  -&gt; MAP and posterior mean converge as n -&gt; inf&quot;)
+
+# Visualise: MAP vs posterior mean for skewed posterior
+print(&quot;\n=== Skewed Gamma posterior ===&quot;)
+# Posterior ~ Gamma(shape, rate) — asymmetric, MAP != mean
+shape, rate = 2.5, 3.0
+from scipy.stats import gamma
+mode_gamma = (shape - 1) / rate if shape &gt;= 1 else 0.0
+mean_gamma = shape / rate
+print(f&quot;Gamma({shape}, {rate}): mode(MAP)={mode_gamma:.4f}, mean={mean_gamma:.4f}, diff={abs(mean_gamma-mode_gamma):.4f}&quot;)
+</code></pre>
+<h2>Pitfalls</h2>
+<p>Common MAP estimation pitfalls:</p>
+<ol>
+<li>
+<p><strong>Confusing prior scale with regularisation strength</strong>: λ = 1/(2σ_p²) for L2; doubling the prior variance halves λ. Always be clear which parameterisation you're using.</p>
+</li>
+<li>
+<p><strong>MAP ignores posterior uncertainty</strong>: a single point estimate discards the shape, width, and multimodality of the posterior. For safety-critical applications, compute posterior credible intervals.</p>
+</li>
+<li>
+<p><strong>Mode vs mean mismatch</strong>: for skewed posteriors (Gamma, Beta with low counts), the MAP (mode) can be far from the posterior mean. The MAP minimises 0-1 loss; the mean minimises squared loss.</p>
+</li>
+<li>
+<p><strong>Flat regions in deep learning</strong>: neural networks often have large flat regions in loss landscape where many configurations are approximately equally good. 'MAP' in this context is just one of many equivalent solutions — the invariance of overparameterised models makes the prior choice particularly important for implicit regularisation.</p>
+</li>
+</ol>
+<blockquote>
+<p><strong>TIP: L2 Regularisation ≠ Weight Decay in Adaptive Methods</strong></p>
+<p>For SGD with momentum, L2 regularisation (adding λ‖w‖² to the loss) and weight decay (multiplying weights by (1−λ·lr) after each step) are equivalent. For Adam and other adaptive methods, they are NOT equivalent: L2 reg rescales the gradient, which is then divided by the adaptive step size, reducing the effective regularisation for parameters with large gradients. AdamW (decoupled weight decay) applies weight decay directly to the weights, not through the gradient, restoring the intended Bayesian prior interpretation.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Prior</th>
+<th>Regularisation</th>
+<th>Effect</th>
+<th>Typical λ</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Uniform (improper)</td>
+<td>None (MLE)</td>
+<td>No shrinkage</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Gaussian N(0,σ²I)</td>
+<td>L2 / Ridge / weight decay</td>
+<td>Shrinks all weights toward 0</td>
+<td>0.01–0.1</td>
+</tr>
+<tr>
+<td>Laplace(0,b)</td>
+<td>L1 / Lasso</td>
+<td>Exact sparsity, feature selection</td>
+<td>0.001–0.1</td>
+</tr>
+<tr>
+<td>Student-t</td>
+<td>Robust (heavy tails)</td>
+<td>Allows occasional large weights</td>
+<td>Application-specific</td>
+</tr>
+<tr>
+<td>Spike-and-slab</td>
+<td>Hard sparsity</td>
+<td>Binary mask on each weight</td>
+<td>Variational or MCMC</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>Key Takeaways</h2>
+<ul>
+<li>MAP = argmax_θ [log p(D|θ) + log p(θ)] — it is MLE plus a log-prior penalty; uniform prior recovers MLE.</li>
+<li>Gaussian prior N(0, σ_p²I) ↔ L2 regularisation λ‖w‖² with λ = 1/(2σ_p²); large prior variance = weak regularisation.</li>
+<li>Laplace prior exp(−λ|w|) ↔ L1 regularisation λ‖w‖₁; the sharp zero-peak creates exact sparsity unlike the Gaussian.</li>
+<li>Empirical Bayes selects the prior hyperparameter λ by maximising the marginal likelihood p(D|λ) — letting data choose the prior.</li>
+<li>MAP equals the posterior mean only for Gaussian posteriors (symmetric, unimodal); for asymmetric or multimodal posteriors they differ.</li>
+<li>AdamW implements decoupled weight decay — equivalent to a Gaussian prior under Adam — while L2 regularisation in Adam is not equivalent due to adaptive step rescaling.</li>
+<li>Regularisation in deep learning is implicit MAP: L2 weight decay encodes a Gaussian prior on all weights; dropout approximates a Bernoulli spike-and-slab prior.</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

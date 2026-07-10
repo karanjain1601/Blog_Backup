@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Multi-Object Tracking: SORT, DeepSORT, and HOTA Evaluation | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Multi-Object Tracking: SORT, DeepSORT, and HOTA Evaluation</h1>
+      
+      <h1>Multi-Object Tracking: SORT, DeepSORT, and HOTA Evaluation</h1>
+<p>Multi-object tracking (MOT) requires detecting objects in each frame and linking detections across frames into consistent trajectories. The tracking-by-detection paradigm — detect first, then associate — dominates modern MOT. Quality depends on both the detector (for missed detections) and the association algorithm (for ID switches and fragmented tracks over time).</p>
+<blockquote>
+<p>****: MOTA (the old standard MOT metric) weights false negatives and ID switches equally — but an ID switch is far less harmful than a missed detection for most applications. HOTA separates detection accuracy (DetA) from association accuracy (AssA), giving a more informative evaluation.</p>
+</blockquote>
+<p>The standard tracking-by-detection pipeline processes each frame through an object detector (typically YOLO or Faster R-CNN) to produce bounding boxes and confidence scores. These detections are associated with existing tracks using a cost matrix combining spatial overlap (IoU) and optionally appearance similarity from a re-ID model for robustness.</p>
+<p>Track management handles three states: active tracks receiving matched detections, tentative tracks for new detections not yet confirmed, and lost tracks awaiting re-association. A track is confirmed after N consecutive matches and deleted after M missed frames. Typical values are N=3 and M=30 at standard video frame rates for pedestrian tracking.</p>
+<p>The Kalman filter models each track as a state vector (x, y, w, h, vx, vy, vw, vh) — bounding box center, dimensions, and velocities. It predicts the next state before observing any detection, providing a prior for association. The update step corrects the state with the matched detection, balancing prediction vs. measurement by their respective covariances.</p>
+<pre><code class="language-python"># SORT: Kalman predict then IoU associate
+for track in active_tracks:
+    track.kalman_filter.predict()
+    predicted_bbox = state_to_bbox(track.kf.x)
+
+# Compute IoU cost matrix
+cost_matrix = 1 - iou_matrix(predicted_bboxes, detections)
+assignments = hungarian(cost_matrix)
+
+for t_idx, d_idx in assignments:
+    active_tracks[t_idx].kalman_filter.update(
+        bbox_to_obs(detections[d_idx]))
+</code></pre>
+<p>IoU-based association works well when objects move slowly relative to frame rate. The Hungarian algorithm finds the globally optimal assignment minimizing total cost. Unmatched tracks are marked lost; unmatched detections become new tentative tracks. SORT achieves competitive accuracy with simple motion but struggles with occlusion and fast-moving objects.</p>
+<p>DeepSORT augments SORT's motion-based association with appearance features from a re-ID network, typically a ResNet or lightweight MobileNet trained on person re-ID datasets. The appearance feature vector is computed for each detection crop and compared to a gallery of features stored per track, enabling re-association after long occlusions in video.</p>
+<pre><code class="language-python"># DeepSORT: appearance + motion cost fusion
+reid_feat = reid_model(det_crop)  # shape: (1, 128)
+
+# Cosine distance to stored track features
+cost_app = 1 - cosine_sim(reid_feat, track_feats)
+cost_mot = mahalanobis(predicted_bbox, det_bbox)
+cost = cost_app + lambda_val * cost_mot
+assign = hungarian(cost)
+
+# Update appearance memory with moving average
+track.feats = 0.9 * track.feats + 0.1 * reid_feat
+</code></pre>
+<pre><code class="language-python"># ByteTrack: two-stage matching strategy
+high_dets, low_dets = split_by_confidence(
+    detections, thresh=0.5)
+
+# Stage 1: match all tracks to high-conf detections
+assign1 = hungarian(iou_cost(tracks, high_dets))
+unmatched_tracks = get_unmatched(tracks, assign1)
+
+# Stage 2: match remaining tracks to low-conf dets
+assign2 = hungarian(iou_cost(
+    unmatched_tracks, low_dets))
+# Prevents ID switch on occluded/distant objects
+</code></pre>
+<p>ByteTrack's two-stage matching is a key innovation: it first matches high-confidence detections to all tracks, then attempts to recover tracks using low-confidence detections that might correspond to occluded or distant objects. This significantly reduces ID switches and track fragmentation compared to simply discarding low-confidence detections outright.</p>
+<p>MOTA (Multiple Object Tracking Accuracy) was the primary MOT metric for years but conflates detection and association errors in a way that obscures their relative contributions. HOTA (Higher Order Tracking Accuracy) decomposes performance into DetA (detection accuracy) and AssA (association accuracy), offering cleaner diagnostic information for tracker development.</p>
+<table>
+<thead>
+<tr>
+<th>Tracker</th>
+<th>Detector</th>
+<th>MOT17 HOTA %</th>
+<th>IDF1 %</th>
+<th>FPS</th>
+<th>ID Switches</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SORT</td>
+<td>FRCNN</td>
+<td>43.1</td>
+<td>45.1</td>
+<td>143</td>
+<td>4852</td>
+</tr>
+<tr>
+<td>DeepSORT</td>
+<td>FRCNN</td>
+<td>45.6</td>
+<td>53.6</td>
+<td>40</td>
+<td>3013</td>
+</tr>
+<tr>
+<td>ByteTrack</td>
+<td>YOLOX-X</td>
+<td>63.1</td>
+<td>77.3</td>
+<td>29</td>
+<td>2196</td>
+</tr>
+<tr>
+<td>BoT-SORT</td>
+<td>YOLOX-X</td>
+<td>65.0</td>
+<td>79.5</td>
+<td>12</td>
+<td>1212</td>
+</tr>
+<tr>
+<td>OC-SORT</td>
+<td>YOLOX-X</td>
+<td>63.9</td>
+<td>77.5</td>
+<td>28</td>
+<td>1950</td>
+</tr>
+</tbody>
+</table>
+<p>IDF1 measures the ratio of correctly identified detections to the mean of ground truth and computed detections. It is sensitive to identity consistency over long tracks. MOTA penalizes false positives, false negatives, and ID switches additively — making it straightforward to game by tuning detection thresholds toward high recall at the expense of precision.</p>
+<pre><code class="language-python"># HOTA metric decomposition
+TP = true_positive_detections
+FP = false_positive_detections
+FN = false_negative_detections
+
+# Detection accuracy component
+DetA = TP / (TP + FP + FN)
+
+# Association accuracy (averaged over IoU thresholds)
+# TPA/FPA/FNA: matched/extra/missed trajectory pairs
+AssA = mean_over_alpha(TPA / (TPA + FPA + FNA))
+
+HOTA = math.sqrt(DetA * AssA)
+print(f'HOTA: {HOTA:.3f}')
+</code></pre>
+<p>HOTA is computed at multiple IoU thresholds (alpha from 0.05 to 0.95) and averaged, similar to COCO mAP. This makes it robust to bounding box localization quality. The geometric mean of DetA and AssA ensures neither metric dominates — a tracker cannot achieve high HOTA by sacrificing association quality for detection accuracy or vice versa.</p>
+<p>Modern MOT trackers are evaluated on MOT17 and MOT20 benchmarks, which provide sequences in diverse settings. HOTA has become the preferred primary metric because it balances detection and association quality equally. ByteTrack-style two-stage matching is now standard practice, significantly outperforming single-stage IoU matching in crowded and occluded sequences.</p>
+<p>Re-ID appearance features are critical for handling long occlusions and crowded scenes but add latency and require domain-specific training to generalize across different cameras. For real-time applications, motion-only trackers like SORT remain competitive when combined with high-quality detectors and appropriately tuned Kalman filter noise covariance parameters.</p>
+    </article>
+  </main>
+</body>
+</html>

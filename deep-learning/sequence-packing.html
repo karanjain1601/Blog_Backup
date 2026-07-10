@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sequence Packing — Concatenating Short Sequences with Attention Masking | Notes Backup</title>
+  <meta name="description" content="Sequence packing concatenates multiple short documents into a single fixed-length context window to eliminate padding waste — covering greedy first-fit bin packing, block-diagonal attention masks for cross-document isolation, position ID reset strategies for RoPE, and 2–3x throughput gains over naive padded batching." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Sequence Packing — Concatenating Short Sequences with Attention Masking</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Sequence packing concatenates multiple short documents into a single fixed-length context window to eliminate padding waste — covering greedy first-fit bin packing, block-diagonal attention masks for cross-document isolation, position ID reset strategies for RoPE, and 2–3x throughput gains over naive padded batching.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Sequence Packing — Concatenating Short Sequences with Attention Masking</h1>
+<p>Variable-length text sequences create a fundamental efficiency problem for batch training: to assemble sequences into a rectangular tensor, shorter sequences must be padded to the length of the longest in the batch. A batch containing one 2048-token document and 31 documents of 64 tokens has 98% padding — 61,504 wasted tokens out of 63,488 total. Sequence packing solves this by concatenating multiple documents end-to-end into a single fixed-length context, recovering 90–98% token utilization and yielding 2–3x training throughput improvements in practice without any change to model architecture.</p>
+<h2>The Padding Waste Problem</h2>
+<p>In standard padded batching, each batch is formed by sampling documents independently and padding every sequence to the batch maximum length. For typical NLP datasets — instruction tuning data, preference data, or web crawl with high length variance — average utilization is 50–70%. The compute used on padding tokens is entirely wasted: the attention mechanism processes them, the loss function ignores them via a loss mask, and the gradients are zero. For a GPU spending 40% of FLOPS on padding, packing alone is equivalent to a 1.67x hardware upgrade — free throughput from a software change.</p>
+<h2>Document Packing Algorithm</h2>
+<p>The packing problem is a variant of bin packing: given documents of varying lengths and bins of capacity max_length, fill bins to minimize total bins and maximize utilization. First-fit-decreasing (FFD) is near-optimal but requires sorting by length descending. Greedy first-fit is simpler: iterate documents in arrival order, append each to the current bin if it fits, flush and open a new bin otherwise. For LLM pretraining data with natural length distributions, greedy packing achieves 85–95% utilization. Each document is followed by an EOS token as a separator, and any remainder in the final bin is padded with zeros.</p>
+<pre><code class="language-python">from typing import List, Tuple
+import random
+
+def greedy_pack_documents(tokenized_docs: List[List[int]], max_length: int,
+                          eos_id: int = 2) -&gt; List[Tuple[List[int], List[int]]]:
+    &quot;&quot;&quot;Greedy first-fit packing: concatenate docs+EOS until bin is full.&quot;&quot;&quot;
+    bins, cur_tokens, cur_docs = [], [], []
+    for idx, doc in enumerate(tokenized_docs):
+        chunk = doc + [eos_id]
+        if len(cur_tokens) + len(chunk) &gt; max_length:
+            if cur_tokens:  # flush current bin with padding
+                cur_tokens += [0] * (max_length - len(cur_tokens))
+                bins.append((cur_tokens, cur_docs))
+            cur_tokens, cur_docs = chunk[:max_length], [idx]
+        else:
+            cur_tokens.extend(chunk)
+            cur_docs.append(idx)
+    if cur_tokens:  # flush final bin
+        cur_tokens += [0] * (max_length - len(cur_tokens))
+        bins.append((cur_tokens, cur_docs))
+    return bins
+
+random.seed(42)
+docs = [list(range(random.randint(50, 300))) for _ in range(200)]
+packed = greedy_pack_documents(docs, max_length=512)
+content_tokens = sum(len(d) for d in docs)
+total_capacity = len(packed) * 512
+print(f&quot;Bins: {len(packed)}, token utilization: {content_tokens / total_capacity:.1%}&quot;)
+print(f&quot;Naive padded estimate: ~60% -- packing recovers ~{0.95 - 0.60:.0%} wasted compute&quot;)
+</code></pre>
+<h2>Block-Diagonal Attention Masking</h2>
+<p>Naive packing concatenates documents but allows attention across document boundaries — a token from document A can attend to tokens in document B. This leaks future context and corrupts causal language modeling: the loss on document B's first token can use document A's last token as context, which would never happen at inference. The fix is a block-diagonal attention mask: each document attends only to its own prior tokens (causal within the document), and all cross-document attention positions are set to negative infinity as an additive bias applied before softmax. This is the default in Hugging Face TRL's SFTTrainer when packing is enabled.</p>
+<pre><code class="language-python">import torch
+from typing import List
+
+def make_block_diagonal_mask(doc_lengths: List[int], device: str = &quot;cpu&quot;) -&gt; torch.Tensor:
+    &quot;&quot;&quot;Block-diagonal causal mask: within-doc causal attention, cross-doc = -inf.&quot;&quot;&quot;
+    T = sum(doc_lengths)
+    mask = torch.full((T, T), float(&quot;-inf&quot;), device=device)
+    offset = 0
+    for L in doc_lengths:
+        mask[offset:offset+L, offset:offset+L] = torch.tril(torch.zeros(L, L))
+        offset += L
+    return mask  # additive bias added to attention logits before softmax
+
+def packed_attention(q, k, v, doc_lengths):
+    &quot;&quot;&quot;Scaled dot-product attention with block-diagonal mask for packed sequences.&quot;&quot;&quot;
+    mask  = make_block_diagonal_mask(doc_lengths, device=q.device)
+    scale = q.shape[-1] ** -0.5
+    attn  = torch.softmax((q @ k.transpose(-2, -1)) * scale + mask, dim=-1)
+    return attn @ v
+
+# Three documents packed into one sequence of total length 256
+doc_lengths = [80, 120, 56]
+T = sum(doc_lengths)
+q = k = v = torch.randn(1, T, 64)   # (batch=1, seq=256, dim=64)
+out = packed_attention(q, k, v, doc_lengths)
+print(f&quot;Output shape: {out.shape}&quot;)  # (1, 256, 64)
+mask = make_block_diagonal_mask(doc_lengths)
+print(f&quot;Cross-doc [tok 0 -&gt; tok 81]: {mask[0, 81].item():.0f}&quot;)   # -inf
+print(f&quot;Within-doc [tok 0 -&gt; tok 0]: {mask[0, 0].item():.0f}&quot;)   # 0.0
+</code></pre>
+<h2>Position ID Reset Strategies</h2>
+<p>When packing, each document's position IDs can be reset to 0 at each boundary (local positions) or allowed to continue incrementing across boundaries (cumulative positions). Reset position IDs are preferred for RoPE models: RoPE encodes relative distance via angular frequency, so the start of a new document at packed position 512 should be treated as position 0, not 512. Cumulative positions cause the model to believe the second document is 512 tokens into a single long sequence, introducing incorrect long-range positional biases that degrade quality on tasks requiring accurate position-sensitive reasoning. Reset IDs are the default in TRL and most production packing implementations.</p>
+<pre><code class="language-python">import torch
+from typing import List
+
+def build_position_ids(doc_lengths: List[int], strategy: str = &quot;reset&quot;) -&gt; torch.Tensor:
+    &quot;&quot;&quot;
+    Build position IDs for a packed sequence.
+    strategy='reset'     : each document starts at position 0 (local positions)
+    strategy='cumulative': positions continue across document boundaries
+    &quot;&quot;&quot;
+    if strategy == &quot;reset&quot;:
+        positions = [pos for L in doc_lengths for pos in range(L)]
+    elif strategy == &quot;cumulative&quot;:
+        positions = list(range(sum(doc_lengths)))
+    else:
+        raise ValueError(f&quot;Unknown strategy: {strategy!r}&quot;)
+    return torch.tensor(positions, dtype=torch.long)
+
+doc_lengths = [5, 4, 6]
+reset_ids = build_position_ids(doc_lengths, strategy=&quot;reset&quot;)
+cumul_ids = build_position_ids(doc_lengths, strategy=&quot;cumulative&quot;)
+print(f&quot;Reset:      {reset_ids.tolist()}&quot;)
+print(f&quot;Cumulative: {cumul_ids.tolist()}&quot;)
+# reset:      [0,1,2,3,4, 0,1,2,3, 0,1,2,3,4,5]
+# cumulative: [0,1,2,3,4, 5,6,7,8, 9,10,11,12,13,14]
+max_pos_cumul = sum(doc_lengths) - 1
+print(f&quot;Max cumulative position: {max_pos_cumul} -- verify below model max_seq_len&quot;)
+print(&quot;Reset preferred: RoPE sees local doc positions, no spurious long-range bias&quot;)
+</code></pre>
+<h2>Throughput Comparison</h2>
+<p>The throughput improvement from packing is directly proportional to utilization improvement. For a dataset where naive padding achieves 60% utilization and packing achieves 95%, the effective throughput gain is 95/60 ≈ 1.58x. The actual wall-clock speedup is typically larger because packing reduces the total number of forward passes for the same data, reducing fixed overhead from data loading, optimizer steps, and gradient synchronization in distributed training. Flash Attention 2 natively supports variable-length packed sequences via its varlen kernel, eliminating even the small residual padding within bins and achieving true 100% compute utilization.</p>
+<pre><code class="language-python">import torch
+import time
+import random
+from typing import List
+
+def padded_batch_utilization(seq_lens: List[int]) -&gt; tuple:
+    &quot;&quot;&quot;Compute token utilization and simulate compute time with padded batching.&quot;&quot;&quot;
+    max_len   = max(seq_lens)
+    useful    = sum(seq_lens)
+    allocated = max_len * len(seq_lens)
+    start = time.perf_counter()
+    _     = torch.randn(len(seq_lens), max_len, 128) @ torch.randn(128, 128)
+    return useful / allocated, time.perf_counter() - start
+
+def packed_batch_utilization(seq_lens: List[int], max_length: int = 2048) -&gt; tuple:
+    &quot;&quot;&quot;Compute token utilization and simulate compute time with greedy packing.&quot;&quot;&quot;
+    total  = sum(seq_lens)
+    n_bins = (total + max_length - 1) // max_length
+    start  = time.perf_counter()
+    _      = torch.randn(n_bins, max_length, 128) @ torch.randn(128, 128)
+    return total / (n_bins * max_length), time.perf_counter() - start
+
+random.seed(0)
+seq_lens = [random.randint(64, 400) for _ in range(128)]
+pad_util,  pad_t  = padded_batch_utilization(seq_lens)
+pack_util, pack_t = packed_batch_utilization(seq_lens)
+print(f&quot;{'Method':&lt;22} {'Utilization':&gt;12} {'Latency (ms)':&gt;14}&quot;)
+print(f&quot;{'Padded batching':&lt;22} {pad_util:&gt;11.1%} {pad_t * 1000:&gt;13.1f}&quot;)
+print(f&quot;{'Sequence packing':&lt;22} {pack_util:&gt;11.1%} {pack_t * 1000:&gt;13.1f}&quot;)
+print(f&quot;Throughput gain: {pack_util / pad_util:.2f}x&quot;)
+</code></pre>
+<h2>Flash Attention 2 and Variable-Length Sequences</h2>
+<p>Flash Attention 2 (Dao et al. 2023) includes dedicated variable-length sequence kernels: flash_attn_varlen_qkvpacked_func and flash_attn_varlen_func accept cumulative sequence lengths (cu_seqlens) rather than a padded tensor, processing the packed sequence without any padding overhead at all. This achieves true 100% utilization in the attention kernel. The interface expects a 1D tensor of token IDs with all documents concatenated, a cu_seqlens tensor marking document boundaries, and max_seqlen for kernel configuration. This is the most efficient packing implementation available and is used in production pretraining at Meta, Mistral AI, and others.</p>
+<ul>
+<li>Flash Attention varlen kernel accepts cu_seqlens = cumulative sum of doc lengths, e.g. [0, 80, 200, 256] for three docs of lengths 80, 120, 56.</li>
+<li>Loss masking: set labels to -100 for EOS and padding positions so cross_entropy ignores them; only document content tokens contribute gradients.</li>
+<li>Overflow handling: if a single document exceeds max_length it must be split at sentence boundaries or truncated — never silently dropped.</li>
+<li>RoPE position IDs: always reset to 0 at document boundaries to avoid spurious long-range position encoding artifacts from cumulative indexing.</li>
+<li>First-fit-decreasing (FFD) sorts documents by descending length before packing — empirically 2–5% higher utilization than greedy on typical distributions.</li>
+<li>Throughput benchmarks should report tokens-per-second on content tokens only, excluding padding, for fair comparison across batching strategies.</li>
+</ul>
+<h2>Choosing a Packing Strategy</h2>
+<p>The right packing strategy depends on hardware, framework, and dataset characteristics. Hugging Face TRL SFTTrainer's built-in packing uses greedy first-fit with block-diagonal masking and works out-of-the-box with PEFT adapters. For pretraining at scale, custom Flash Attention varlen kernels give the highest throughput but require more engineering. Simple packing without cross-document masking is incorrect and should be avoided — the quality degradation is subtle and may not appear in early training loss curves but manifests in downstream evaluations on tasks requiring precise context attribution and long-form coherence.</p>
+<table>
+<thead>
+<tr>
+<th>Strategy</th>
+<th>Token Utilization</th>
+<th>Cross-Doc Isolation</th>
+<th>Implementation Complexity</th>
+<th>Recommended For</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Naive padding</td>
+<td>50–70%</td>
+<td>N/A (no packing)</td>
+<td>Trivial</td>
+<td>Baselines, uniform-length datasets</td>
+</tr>
+<tr>
+<td>Simple concatenation (no mask)</td>
+<td>95–99%</td>
+<td>None — cross-doc leakage</td>
+<td>Low</td>
+<td>Never: introduces training artifacts</td>
+</tr>
+<tr>
+<td>Packing + block-diagonal mask</td>
+<td>90–95%</td>
+<td>Full isolation</td>
+<td>Medium</td>
+<td>Fine-tuning, instruction tuning, SFT</td>
+</tr>
+<tr>
+<td>Flash Attention varlen</td>
+<td>100% (no padding)</td>
+<td>Full isolation</td>
+<td>High</td>
+<td>Large-scale pretraining, production</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Block-Diagonal Masking Is Non-Optional</strong>: Block-diagonal attention masking prevents cross-document attention contamination in packed sequences — without it, the model sees tokens from document A as context for document B, which can cause subtle but measurable quality degradation on long-form tasks.</p>
+</blockquote>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

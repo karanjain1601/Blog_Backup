@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Transformer-Based Forecasting — Informer, Autoformer, PatchTST | Notes Backup</title>
+  <meta name="description" content="Understand how vanilla Transformer attention fails for long sequences, how Informer, Autoformer, FEDformer, and PatchTST address the quadratic bottleneck, and how PatchTST enables transfer learning across time-series datasets." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Transformer-Based Forecasting — Informer, Autoformer, PatchTST</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Understand how vanilla Transformer attention fails for long sequences, how Informer, Autoformer, FEDformer, and PatchTST address the quadratic bottleneck, and how PatchTST enables transfer learning across time-series datasets.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Transformer-Based Forecasting — Informer, Autoformer, PatchTST</h1>
+<p>The vanilla Transformer encoder applies full self-attention over all L input tokens, requiring O(L²) memory and compute — prohibitive for long time series (L=1000 or more). A wave of specialised architectures addressed this: Informer introduced ProbSparse attention with O(L log L) complexity; Autoformer replaced attention with an auto-correlation mechanism; FEDformer moved to frequency-domain mixing; PatchTST took a different approach, grouping time steps into patches to reduce sequence length dramatically and enabling large-scale pretraining and fine-tuning across datasets.</p>
+<h2>Vanilla Transformer for Time Series</h2>
+<p>The standard Transformer self-attention is Attention(Q,K,V) = softmax(QKᵀ/√d)V. For a sequence of length L, the attention matrix is L×L, requiring O(L²) time and memory. Positional encoding is needed because self-attention is permutation-invariant: sin(pos/10000^(2i/d)) and cos(pos/10000^(2i/d)) are concatenated to token embeddings. The encoder processes the input window; the decoder uses encoder-decoder cross-attention to generate the output sequence autoregressively. For L=720 (a common long-horizon benchmark), the attention matrix has 518,400 elements per head — barely tractable even on GPU.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import math
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=5000, dropout=0.1):
+        super().__init__()
+        self.dropout = nn.Dropout(dropout)
+        pe = torch.zeros(max_len, d_model)
+        pos = torch.arange(0, max_len).unsqueeze(1).float()
+        div = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(pos * div)
+        pe[:, 1::2] = torch.cos(pos * div)
+        self.register_buffer('pe', pe.unsqueeze(0))  # (1, max_len, d_model)
+
+    def forward(self, x):
+        return self.dropout(x + self.pe[:, :x.size(1)])
+
+class TSTransformerEncoder(nn.Module):
+    def __init__(self, input_dim, d_model=64, nhead=4, num_layers=2, horizon=24):
+        super().__init__()
+        self.embed  = nn.Linear(input_dim, d_model)
+        self.pos_enc = PositionalEncoding(d_model)
+        enc_layer   = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward=128, batch_first=True)
+        self.encoder = nn.TransformerEncoder(enc_layer, num_layers=num_layers)
+        self.head    = nn.Linear(d_model, horizon)
+
+    def forward(self, x):
+        # x: (batch, seq_len, input_dim)
+        z = self.pos_enc(self.embed(x))   # (batch, seq_len, d_model)
+        z = self.encoder(z)               # (batch, seq_len, d_model)
+        return self.head(z[:, -1, :])     # (batch, horizon) — use last token
+
+model = TSTransformerEncoder(input_dim=1, d_model=64, nhead=4, num_layers=2, horizon=24)
+x = torch.randn(8, 96, 1)    # batch=8, seq=96, features=1
+out = model(x)
+print(f'Input: {x.shape}  Output: {out.shape}')
+</code></pre>
+<h2>Informer: ProbSparse Attention</h2>
+<p>Informer (Zhou et al., 2021) introduces ProbSparse self-attention to reduce complexity from O(L²) to O(L log L). The key observation: in full attention, most query vectors have nearly uniform attention distributions and contribute little information. Informer measures query sparsity as M(qᵢ, K) = max_j(qᵢkⱼᵀ/√d) - 1/L·Σⱼ(qᵢkⱼᵀ/√d), selects the top-u=O(L log L) queries with highest M (most non-uniform), and computes full attention only for those, replacing the rest with the average value V̄. The distilling encoder further halves the sequence length between consecutive encoder layers.</p>
+<h2>FEDformer: Frequency-Enhanced Decomposed Transformer</h2>
+<p>FEDformer (Zhou et al., 2022) applies decomposition (seasonal-trend) before each Transformer block and replaces the self-attention with a frequency-enhanced mechanism: randomly select a fixed subset of Fourier or wavelet modes, mix them with learned weights, and transform back. This achieves O(L) complexity per layer — linear in sequence length — while capturing global periodic structure that local attention misses. The random mode selection acts as a form of regularisation, preventing the model from memorising specific frequency components. FEDformer achieves competitive benchmark performance at significantly lower compute than full-attention variants.</p>
+<h2>Autoformer: Auto-Correlation Mechanism</h2>
+<p>Autoformer (Wu et al., 2021) replaces attention entirely with an Auto-Correlation mechanism. The correlation between the query sequence xₜ and a lagged version of the key sequence xₜ₋τ is computed via Fast Fourier Transform: R(τ) = IFFT(FFT(x)·FFT*(x)). This captures periodic dependencies directly in the frequency domain in O(L log L). Instead of softmax over positions, Autoformer aggregates the top-k most correlated lags, preserving the series structure. Series decomposition (trend-cyclical + residual blocks) is applied before each attention and feedforward layer to stabilise learning.</p>
+<h2>PatchTST: Patching and Channel Independence</h2>
+<p>PatchTST (Nie et al., 2023) dramatically simplifies Transformer-based forecasting by dividing the input window into non-overlapping (or slightly overlapping) patches of length P. A window of L time steps becomes L/P tokens, reducing the attention computation from O(L²) to O((L/P)²). With L=512 and P=16, sequence length drops from 512 to 32 — a 256× reduction in attention cost. Each univariate channel is processed independently (channel independence), allowing the model to be pretrained on one set of series and fine-tuned on another with a different number of channels.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import math
+
+class PatchEmbedding(nn.Module):
+    def __init__(self, patch_len, d_model, stride=None):
+        super().__init__()
+        self.patch_len = patch_len
+        self.stride    = stride or patch_len
+        self.proj      = nn.Linear(patch_len, d_model)
+
+    def forward(self, x):
+        # x: (batch, time) — single channel
+        B, T = x.shape
+        # Unfold into patches
+        patches = x.unfold(1, self.patch_len, self.stride)  # (B, n_patches, patch_len)
+        return self.proj(patches)                            # (B, n_patches, d_model)
+
+class PatchTST(nn.Module):
+    def __init__(self, seq_len=512, patch_len=16, d_model=128, nhead=8,
+                 num_layers=3, horizon=96, dropout=0.1):
+        super().__init__()
+        self.patch_embed = PatchEmbedding(patch_len, d_model)
+        n_patches = (seq_len - patch_len) // patch_len + 1
+        enc_layer  = nn.TransformerEncoderLayer(
+            d_model, nhead, dim_feedforward=d_model * 4,
+            dropout=dropout, batch_first=True)
+        self.encoder = nn.TransformerEncoder(enc_layer, num_layers)
+        self.head    = nn.Linear(n_patches * d_model, horizon)
+
+    def forward(self, x):
+        # x: (batch, channels, time)
+        B, C, T = x.shape
+        outs = []
+        for c in range(C):           # channel independence
+            z = self.patch_embed(x[:, c, :])   # (B, n_patches, d_model)
+            z = self.encoder(z)                 # (B, n_patches, d_model)
+            outs.append(self.head(z.flatten(1)))# (B, horizon)
+        return torch.stack(outs, dim=1)         # (B, C, horizon)
+
+model = PatchTST(seq_len=512, patch_len=16, d_model=128, nhead=8, horizon=96)
+x = torch.randn(4, 7, 512)   # batch=4, channels=7, time=512
+out = model(x)
+print(f'Input: {x.shape}  Output: {out.shape}')
+</code></pre>
+<h2>Pretraining and Fine-Tuning with PatchTST</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class MaskedPatchTST(nn.Module):
+    &quot;&quot;&quot;
+    PatchTST pretraining via masked patch prediction (analogous to BERT MLM).
+    Randomly masks some patches; predicts their original values.
+    &quot;&quot;&quot;
+    def __init__(self, seq_len=512, patch_len=16, d_model=128, nhead=8,
+                 num_layers=3, mask_ratio=0.4):
+        super().__init__()
+        self.patch_len  = patch_len
+        self.mask_ratio = mask_ratio
+        stride = patch_len
+        n_patches = (seq_len - patch_len) // stride + 1
+        self.patch_proj  = nn.Linear(patch_len, d_model)
+        self.mask_token  = nn.Parameter(torch.zeros(1, 1, d_model))
+        enc_layer = nn.TransformerEncoderLayer(
+            d_model, nhead, d_model * 4, batch_first=True)
+        self.encoder  = nn.TransformerEncoder(enc_layer, num_layers)
+        self.head     = nn.Linear(d_model, patch_len)  # reconstruct patch
+
+    def forward(self, x):
+        B, T = x.shape
+        patches = x.unfold(1, self.patch_len, self.patch_len)  # (B, N, P)
+        N = patches.shape[1]
+        z = self.patch_proj(patches)  # (B, N, d_model)
+        mask = torch.rand(B, N) &lt; self.mask_ratio
+        z[mask] = self.mask_token.expand(B, N, -1)[mask]
+        z = self.encoder(z)
+        recon = self.head(z)          # (B, N, P)
+        loss  = ((recon[mask] - patches.detach()[mask]) ** 2).mean()
+        return loss, recon
+
+model = MaskedPatchTST(seq_len=512, patch_len=16, d_model=128, nhead=8, num_layers=3)
+x = torch.randn(4, 512)
+loss, recon = model(x)
+print(f'Pretraining reconstruction loss: {loss.item():.4f}')
+print(f'Reconstructed patches shape: {recon.shape}')
+</code></pre>
+<blockquote>
+<p><strong>PatchTST Pretraining Empirical Findings</strong>: PatchTST pretrained on ETTh1 and fine-tuned on ETTh2 achieves lower MSE than training from scratch on ETTh2 alone, demonstrating meaningful transfer across datasets. The channel-independent design means the pretrained encoder can be applied to any univariate channel regardless of the number of variates in the target dataset — only the linear head needs replacement and fine-tuning.</p>
+</blockquote>
+<p>The training recipe for PatchTST pretraining: (1) use masked patch ratio 0.4–0.6; (2) pretrain for 100 epochs with AdamW (lr=1e-4, weight_decay=1e-2) on the source dataset; (3) replace the reconstruction head with a forecasting head (linear layer mapping flattened patch embeddings to H outputs); (4) fine-tune the full model at lr=1e-5 for 20 epochs. Applying instance normalisation (RevIN) — normalise each input window to zero mean and unit variance, then reverse at output — is critical for stabilising training across series with different scales.</p>
+<h2>Complexity and Architecture Comparison</h2>
+<pre><code class="language-python">import numpy as np
+import pandas as pd
+
+def attention_complexity(L, d_model, n_heads, model='full'):
+    &quot;&quot;&quot;Approximate FLOPs for one self-attention layer.&quot;&quot;&quot;
+    if model == 'full':
+        return L * L * d_model          # O(L^2 * d)
+    elif model == 'probsparse':
+        u = int(L * np.log(L))          # selected queries
+        return u * L * d_model          # O(L log L * d)
+    elif model == 'autocorr':
+        return L * np.log(L) * d_model  # FFT-based O(L log L * d)
+    elif model == 'patch':
+        n_patches = L // 16             # patch size P=16
+        return n_patches**2 * d_model   # O((L/P)^2 * d)
+    elif model == 'fed':
+        modes = min(L // 2, 64)         # selected frequency modes
+        return L * modes * d_model      # O(L * modes * d) ≈ O(L)
+
+L_values = [96, 336, 720]
+d_model = 512
+results = []
+for L in L_values:
+    row = {'L': L}
+    for name in ['full', 'probsparse', 'autocorr', 'patch', 'fed']:
+        row[name] = int(attention_complexity(L, d_model, 8, name))
+    results.append(row)
+
+df = pd.DataFrame(results).set_index('L')
+print('Self-attention FLOPs (relative to Full at L=96):')
+base = df.loc[96, 'full']
+print((df / base).round(1).to_string())
+</code></pre>
+<h2>Long-Horizon Forecasting Benchmark</h2>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Attention Mechanism</th>
+<th>Complexity</th>
+<th>Key Innovation</th>
+<th>ETTh1 MSE (h=720)</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Informer</td>
+<td>ProbSparse (top-u queries)</td>
+<td>O(L log L)</td>
+<td>Sparse attention + distilling encoder</td>
+<td>~0.865</td>
+<td>Best for very long inputs (L &gt; 1000)</td>
+</tr>
+<tr>
+<td>Autoformer</td>
+<td>Auto-Correlation (FFT)</td>
+<td>O(L log L)</td>
+<td>Frequency-domain series decomposition</td>
+<td>~0.683</td>
+<td>Strong seasonal pattern capture</td>
+</tr>
+<tr>
+<td>FEDformer</td>
+<td>Frequency-enhanced decomp.</td>
+<td>O(L)</td>
+<td>Fourier/Wavelet random mode mixing</td>
+<td>~0.611</td>
+<td>Efficient; frequency mixing layer</td>
+</tr>
+<tr>
+<td>PatchTST</td>
+<td>Full attention on patches</td>
+<td>O((L/P)²)</td>
+<td>Patching + channel independence + pretrain</td>
+<td>~0.413</td>
+<td>State-of-the-art across ETT benchmarks</td>
+</tr>
+<tr>
+<td>Vanilla Transformer</td>
+<td>Full self-attention</td>
+<td>O(L²)</td>
+<td>Baseline — quadratic bottleneck</td>
+<td>~0.941</td>
+<td>Only practical for short L</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>PatchTST with patch size P=16 and stride P=16 reduces attention cost by P² = 256× versus full-sequence Transformer.</li>
+<li>Channel independence (separate encoder per variate) outperforms channel mixing on most long-horizon benchmarks — multivariate mixing can introduce noise.</li>
+<li>Pretraining with masked patch reconstruction (analogous to BERT MLM) provides a useful initialisation even with limited labelled data.</li>
+<li>FEDformer and Autoformer decompose series into trend and residual before each layer, making them more interpretable than end-to-end black boxes.</li>
+<li>For short-to-medium horizons (h ≤ 48), LightGBM with lag features and NHITS often outperform all Transformer variants at a fraction of the compute cost.</li>
+</ul>
+<p>The 'Are Transformers Effective for Time Series Forecasting?' paper (Zeng et al., 2023) showed that a single linear layer (DLinear) matches or outperforms all Transformer-based models on the ETT benchmarks, suggesting that temporal dependency — not complex attention — drives most of the signal. PatchTST's improvement is partly attributed to its larger effective input window (L=512 vs L=96 for earlier models) rather than the Transformer architecture itself. The lesson: always include a linear baseline and an NHITS/NBEATS baseline before deploying a Transformer for time series.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

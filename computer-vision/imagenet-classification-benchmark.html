@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ImageNet Classification: Benchmark and Protocol | Notes Backup</title>
+  <meta name="description" content="The ImageNet ILSVRC dataset — 1.28M training images, 1000 classes, top-1/top-5 evaluation, training protocol, and how accuracy milestones drove deep learning progress." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>ImageNet Classification: Benchmark and Protocol</h1>
+      <ul class='note-meta'><li><strong>description:</strong> The ImageNet ILSVRC dataset — 1.28M training images, 1000 classes, top-1/top-5 evaluation, training protocol, and how accuracy milestones drove deep learning progress.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>ImageNet Classification: Benchmark and Protocol</h1>
+<p>ImageNet Large Scale Visual Recognition Challenge (ILSVRC) ran from 2010 to 2017 and defined a generation of computer vision research. The challenge benchmarked object classification and detection on a curated subset of the ImageNet database, forcing the field to develop scalable deep learning pipelines that generalize across diverse visual categories.</p>
+<p>AlexNet's 2012 victory — cutting top-5 error from 26% to 15% — marked the inflection point where GPUs and deep convolutional networks became the dominant paradigm. Each subsequent year brought new architectures: VGG deepened the stack, InceptionNet widened it, ResNets introduced skip connections, and transformers eventually matched or surpassed CNN baselines.</p>
+<p>ILSVRC-2012 — the canonical ImageNet-1K split — contains 1,281,167 training images, 50,000 validation images, and 100,000 test images distributed across 1,000 WordNet synset classes. The class hierarchy ranges from fine-grained animal species to vehicles and household objects, with roughly 732 to 1,300 images per training class.</p>
+<p>Images vary in resolution; the standard preprocessing pipeline resizes the shorter edge to 256 pixels, then takes a 224x224 center crop for validation or a random crop for training. Mean-and-std normalization uses ImageNet channel statistics: mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], enabling fair cross-paper comparison.</p>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Top-1 %</th>
+<th>Top-5 %</th>
+<th>Params (M)</th>
+<th>Year</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>AlexNet</td>
+<td>56.5</td>
+<td>79.1</td>
+<td>61</td>
+<td>2012</td>
+</tr>
+<tr>
+<td>VGG-16</td>
+<td>71.6</td>
+<td>90.4</td>
+<td>138</td>
+<td>2014</td>
+</tr>
+<tr>
+<td>ResNet-50</td>
+<td>76.0</td>
+<td>92.9</td>
+<td>25</td>
+<td>2015</td>
+</tr>
+<tr>
+<td>EfficientNet-B4</td>
+<td>83.0</td>
+<td>96.3</td>
+<td>19</td>
+<td>2019</td>
+</tr>
+<tr>
+<td>ViT-L/16</td>
+<td>87.8</td>
+<td>98.3</td>
+<td>307</td>
+<td>2021</td>
+</tr>
+<tr>
+<td>ConvNeXt-L</td>
+<td>87.5</td>
+<td>98.5</td>
+<td>198</td>
+<td>2022</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-python">import torchvision.datasets as dsets
+import torchvision.transforms as T
+from torch.utils.data import DataLoader
+from collections import Counter
+
+transform = T.Compose([T.Resize(256), T.CenterCrop(224), T.ToTensor()])
+ds = dsets.ImageNet(root=&quot;/data/imagenet&quot;, split=&quot;train&quot;, transform=transform)
+loader = DataLoader(ds, batch_size=64, shuffle=True, num_workers=4)
+
+print(f&quot;Classes: {len(ds.classes)}&quot;)
+labels = [ds.targets[i] for i in range(1000)]
+dist = Counter(labels)
+print(f&quot;Min/Max per class: {min(dist.values())}/{max(dist.values())}&quot;)
+</code></pre>
+<p>Top-1 accuracy measures whether the model's single highest-confidence prediction matches the ground-truth label. Top-5 accuracy checks whether the correct label appears in the five highest-scoring predictions. Because many ImageNet classes are visually similar or semantically overlapping, top-5 has historically been the primary leaderboard metric.</p>
+<p>Human-level top-5 error on ImageNet-1K is estimated at around 5%, a threshold ResNets crossed in 2015. Top-1 accuracy climbed more slowly — from AlexNet's 56.5% to modern ViT and ConvNeXt models above 87% — driven by improved regularization, larger model capacity, and better training recipes including mixup, RandAugment, and repeated augmentation.</p>
+<pre><code class="language-python">import torch
+
+def accuracy(logits, targets, topk=(1, 5)):
+    maxk = max(topk)
+    batch = targets.size(0)
+    _, pred = logits.topk(maxk, dim=1, largest=True, sorted=True)
+    pred = pred.t()
+    correct = pred.eq(targets.view(1, -1).expand_as(pred))
+    results = {}
+    for k in topk:
+        correct_k = correct[:k].reshape(-1).float().sum()
+        results[k] = (correct_k / batch).item()
+    return results
+
+# acc = accuracy(logits, targets); print(acc[1], acc[5])
+</code></pre>
+<p>The standard ImageNet training protocol uses SGD with momentum 0.9, initial learning rate 0.1, and a cosine or step decay schedule over 90 to 300 epochs. Batch size is typically 256 per GPU; multi-GPU training scales the learning rate linearly with effective batch size following the widely adopted linear scaling rule.</p>
+<p>Data augmentation is critical: random resized crop to 224x224, random horizontal flip, color jitter, and optional RandAugment or AutoAugment policies are standard. Weight decay of 1e-4 and dropout in dense layers guard against overfitting on the 1.28M training examples. Modern recipes add mixup (alpha=0.8) and CutMix for additional regularization.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def label_smooth_loss(logits, targets, num_classes=1000, eps=0.1):
+    &quot;&quot;&quot;Cross-entropy with label smoothing (eps=0.1).&quot;&quot;&quot;
+    log_probs = F.log_softmax(logits, dim=-1)
+    # Hard targets -&gt; soft targets
+    soft = torch.full_like(log_probs, eps / (num_classes - 1))
+    soft.scatter_(1, targets.unsqueeze(1), 1.0 - eps)
+    loss = -(soft * log_probs).sum(dim=-1).mean()
+    return loss
+
+# logits: (B, 1000), targets: (B,) integer class indices
+# loss = label_smooth_loss(logits, targets)
+</code></pre>
+<pre><code class="language-python">import copy, torch
+
+class ModelEMA:
+    def __init__(self, model, decay=0.9999):
+        self.ema = copy.deepcopy(model).eval()
+        self.decay = decay
+
+    @torch.no_grad()
+    def update(self, model):
+        # theta_ema &lt;- decay * theta_ema + (1 - decay) * theta
+        for ema_p, p in zip(self.ema.parameters(), model.parameters()):
+            ema_p.data.mul_(self.decay).add_(p.data, alpha=1 - self.decay)
+
+# Call ema.update(model) after each optimizer step
+# Evaluate with ema.ema for better accuracy
+</code></pre>
+<p>ImageNet-1K top-1 accuracy has plateaued near 90%, making it a poor discriminator between state-of-the-art models. Harder variants expose robustness gaps that standard accuracy hides. ImageNet-A contains natural adversarial examples — images where ResNet-50 fails but humans succeed — while ImageNet-R covers artistic renditions, sketches, and cartoons.</p>
+<p>ObjectNet tests out-of-distribution generalization by collecting images with controlled viewpoints and backgrounds not seen during training. ImageNet-C benchmarks corruption robustness across 19 perturbation types at 5 severity levels. Performance on these variants, rather than clean ImageNet-1K, is increasingly used to rank models in production-readiness assessments.</p>
+<blockquote>
+<p><strong>info</strong>: Top-1 on ImageNet-1K is near-saturated at ~90%. Modern benchmarks — ImageNet-A (adversarial), ImageNet-R (renditions), ObjectNet — better reveal real-world robustness gaps.</p>
+</blockquote>
+<p>ImageNet-1K established the first reproducible large-scale benchmark for visual recognition, catalyzing the deep learning era. The top-1/top-5 protocol, 224x224 crop convention, and channel-normalization statistics remain embedded in virtually every pretrained vision model released today, making ImageNet not just a dataset but a de facto interface standard.</p>
+<p>Modern training recipes — label smoothing, EMA evaluation, mixup, RandAugment, cosine schedules — collectively contribute 3-5 percentage points beyond the architecture change alone. Separating recipe improvements from architectural advances is essential when interpreting benchmark claims, as a strong recipe on an older architecture often outperforms a weak recipe on a newer one.</p>
+<p>To meaningfully compare models, report ImageNet-1K top-1 and top-5, but supplement with at least one robustness benchmark such as ImageNet-A or ImageNet-C mCE. Standardize on the same input resolution and crop ratio. When fine-tuning on downstream tasks, ImageNet pretraining remains a strong default, though self-supervised and CLIP-style pretraining increasingly challenge its dominance.</p>
+    </article>
+  </main>
+</body>
+</html>

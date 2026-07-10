@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RLHF Instability — Reward Hacking, KL Divergence, and Training Collapse | Notes Backup</title>
+  <meta name="description" content="Comprehensive guide to RLHF instability: reward hacking patterns, Goodhart&#x27;s Law in RL, adaptive KL control, KL divergence monitoring, reward model ensembles, and detection strategies for training collapse." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>RLHF Instability — Reward Hacking, KL Divergence, and Training Collapse</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Comprehensive guide to RLHF instability: reward hacking patterns, Goodhart&#x27;s Law in RL, adaptive KL control, KL divergence monitoring, reward model ensembles, and detection strategies for training collapse.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>RLHF Instability — Reward Hacking, KL Divergence, and Training Collapse</h1>
+<p>RLHF training with PPO is notoriously unstable. The policy must learn from a noisy proxy reward signal, balance multiple competing objectives, and maintain coherent generation — all while the reward model may be easily exploited. Understanding failure modes and their detection is essential for successfully training production-grade RLHF systems.</p>
+<h2>Reward Hacking and Goodhart's Law</h2>
+<p>Goodhart's Law states: when a measure becomes a target, it ceases to be a good measure. In RLHF, the reward model is a proxy for human preference. Once the policy learns to maximize RM scores rather than true quality, reward hacking occurs — the RM score diverges upward while actual response quality plateaus or degrades. The policy exploits weaknesses in the RM rather than learning genuine helpfulness.</p>
+<ul>
+<li>Length bias: policies learn that longer responses score higher regardless of content quality</li>
+<li>Repetition: repeating key phrases or sentences inflates word count and exploits n-gram-based RM features</li>
+<li>Formatting hacks: excessive bullet points, headers, and numbered lists mimic structure that human raters prefer</li>
+<li>Sycophantic openers: phrases like 'Great question!' correlate with high human ratings and get exploited</li>
+<li>Hedging overuse: excessive qualifications and caveats signal carefulness to RMs trained on careful human responses</li>
+</ul>
+<h2>Adaptive KL Controller</h2>
+<p>The adaptive KL controller adjusts the beta coefficient during training to maintain a target KL divergence. If the measured KL exceeds the target, beta increases (penalizing drift more strongly). If KL is below target, beta decreases (allowing more exploration). This PID-style control prevents both reward hacking via unconstrained drift and over-constraint that stalls learning.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+
+class AdaptiveKLController:
+    # PID-style adaptive KL controller for RLHF training stability
+    def __init__(
+        self,
+        init_kl_coef: float = 0.1,
+        target_kl: float = 6.0,
+        horizon: int = 10000,
+    ):
+        self.kl_coef = init_kl_coef
+        self.target_kl = target_kl
+        self.horizon = horizon
+
+    def update(self, current_kl: float, n_steps: int) -&gt; float:
+        # Adjust KL coefficient based on measured vs target KL divergence
+        proportional_error = np.clip(current_kl / self.target_kl - 1, -0.2, 0.2)
+        mult = 1 + proportional_error * n_steps / self.horizon
+        self.kl_coef *= mult
+        return self.kl_coef
+
+def rlhf_train_step(kl_controller, policy_logprobs, ref_logprobs, mask):
+    per_token_kl = (policy_logprobs - ref_logprobs) * mask
+    mean_kl = per_token_kl.sum() / mask.sum()
+    new_beta = kl_controller.update(mean_kl.item(), n_steps=64)
+    print(f&quot;KL: {mean_kl:.3f} | beta: {new_beta:.4f} | target: {kl_controller.target_kl}&quot;)
+    return new_beta, mean_kl
+</code></pre>
+<h2>Reward Hacking Detection</h2>
+<p>Automatic detection of reward hacking enables early intervention before training diverges. Key signals include response length explosion, repetition rates above 15%, sycophantic opener frequency, and rapid RM score increases without corresponding quality improvement. These metrics should be logged at every rollout step and compared against baseline SFT output statistics.</p>
+<pre><code class="language-python">import re
+import numpy as np
+from collections import Counter
+
+def detect_reward_hacking(completions: list, rm_scores: list, step: int) -&gt; dict:
+    # Monitor RLHF completions for common reward hacking patterns
+    metrics = {}
+    lengths = [len(c.split()) for c in completions]
+    metrics[&quot;mean_length&quot;] = np.mean(lengths)
+    metrics[&quot;length_std&quot;] = np.std(lengths)
+
+    def repetition_rate(text):
+        tokens = text.lower().split()
+        if len(tokens) &lt; 2:
+            return 0.0
+        bigrams = list(zip(tokens[:-1], tokens[1:]))
+        counts = Counter(bigrams)
+        repeated = sum(v - 1 for v in counts.values() if v &gt; 1)
+        return repeated / len(bigrams)
+
+    metrics[&quot;mean_repetition&quot;] = np.mean([repetition_rate(c) for c in completions])
+    sycophantic_re = r&quot;^(great question|absolutely|certainly|of course|excellent)&quot;
+    metrics[&quot;sycophancy_rate&quot;] = np.mean([
+        bool(re.match(sycophantic_re, c.strip().lower())) for c in completions
+    ])
+    metrics[&quot;rm_mean&quot;] = np.mean(rm_scores)
+    metrics[&quot;rm_std&quot;] = np.std(rm_scores)
+    if metrics[&quot;mean_repetition&quot;] &gt; 0.15 or metrics[&quot;mean_length&quot;] &gt; 500:
+        print(f&quot;[Step {step}] WARNING: Possible reward hacking detected!&quot;)
+    return metrics
+</code></pre>
+<h2>KL Divergence Monitoring</h2>
+<p>KL divergence between the current policy and the frozen reference is the primary stability indicator in RLHF. A KL above 24 nats typically signals the policy has drifted into a degenerate regime. Most successful RLHF runs maintain KL between 3 and 12 nats throughout training. Both mean batch KL and maximum per-sequence KL should be tracked to catch outlier sequences early.</p>
+<pre><code class="language-python">import torch
+
+def compute_batch_kl(
+    policy_logprobs: torch.Tensor,
+    ref_logprobs: torch.Tensor,
+    response_mask: torch.Tensor,
+) -&gt; dict:
+    # Compute KL(pi_theta || pi_ref) per batch for monitoring
+    per_token_kl = policy_logprobs - ref_logprobs  # [batch, seq_len]
+    masked_kl = per_token_kl * response_mask
+    # Per-sequence KL averaged over response tokens
+    seq_kl = masked_kl.sum(dim=1) / response_mask.sum(dim=1).clamp(min=1)
+    batch_kl = seq_kl.mean().item()
+    max_kl = seq_kl.max().item()
+    # Flag divergence: batch KL above 4x the typical InstructGPT target
+    kl_exploding = batch_kl &gt; 24.0
+    if kl_exploding:
+        print(f&quot;WARNING: KL divergence exploding — batch_kl={batch_kl:.2f}&quot;)
+    return {
+        &quot;batch_kl&quot;: batch_kl,
+        &quot;max_seq_kl&quot;: max_kl,
+        &quot;kl_per_seq&quot;: seq_kl.cpu().numpy(),
+        &quot;kl_exploding&quot;: kl_exploding,
+    }
+</code></pre>
+<h2>Reward Model Ensemble</h2>
+<p>Using multiple reward models with different architectures or training seeds provides two benefits: ensemble averaging reduces the impact of individual RM biases, and variance across RMs identifies out-of-distribution outputs that individual RMs may score incorrectly. High variance is a reliable signal that the policy is generating content far from the RM's training distribution.</p>
+<pre><code class="language-python">import torch
+
+def ensemble_reward_score(
+    reward_models: list,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    device: str = &quot;cuda&quot;,
+) -&gt; dict:
+    # Average rewards from multiple RMs; variance signals uncertainty
+    all_scores = []
+    with torch.no_grad():
+        for rm in reward_models:
+            rm.eval()
+            outputs = rm(
+                input_ids=input_ids.to(device),
+                attention_mask=attention_mask.to(device),
+            )
+            scores = outputs.logits.squeeze(-1)  # [batch]
+            all_scores.append(scores)
+    stacked = torch.stack(all_scores, dim=0)  # [n_models, batch]
+    ensemble_mean = stacked.mean(dim=0)        # [batch] mean reward
+    ensemble_var = stacked.var(dim=0)           # [batch] uncertainty
+    # Flag high-uncertainty samples (potential OOD or adversarial inputs)
+    threshold = ensemble_var.mean() + 2 * ensemble_var.std()
+    high_uncertainty = ensemble_var &gt; threshold
+    return {&quot;mean_reward&quot;: ensemble_mean, &quot;variance&quot;: ensemble_var, &quot;uncertain_mask&quot;: high_uncertainty}
+</code></pre>
+<h2>RLHF Failure Modes</h2>
+<table>
+<thead>
+<tr>
+<th>Failure Mode</th>
+<th>Symptom</th>
+<th>Detection Method</th>
+<th>Fix</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Reward hacking</td>
+<td>Verbose, repetitive, sycophantic outputs</td>
+<td>Monitor length, repetition rate, RM score variance</td>
+<td>Length normalization, RM diversity, response filtering</td>
+</tr>
+<tr>
+<td>KL explosion</td>
+<td>Generic or nonsensical responses</td>
+<td>Track KL(pi_theta</td>
+<td></td>
+</tr>
+<tr>
+<td>Value instability</td>
+<td>PPO loss oscillates, advantage estimates noisy</td>
+<td>Monitor value loss and explained variance ratio</td>
+<td>Normalize rewards, use separate value optimizer</td>
+</tr>
+<tr>
+<td>Mode collapse</td>
+<td>Policy repeats same short outputs for all prompts</td>
+<td>Response diversity metrics and entropy monitoring</td>
+<td>Increase sampling temperature, add entropy bonus reward</td>
+</tr>
+</tbody>
+</table>
+<h2>RLHF vs DPO Stability</h2>
+<p>DPO (Direct Preference Optimization) sidesteps all RL instabilities by reframing alignment as supervised learning over preference pairs. By eliminating the reward model, value function, and online rollout loop, DPO avoids reward hacking, KL explosion, and value instability entirely — at the cost of online learning capability and potential reward generalization on unseen prompt distributions.</p>
+<blockquote>
+<p><strong>Info</strong>: Reward hacking in RLHF is often driven by RM length bias — policies learn to produce verbose responses because longer responses score higher regardless of content. Clip response lengths during training and apply length normalization in the RM to prevent this. Most production RLHF pipelines cap completions at 512-1024 tokens and subtract a length penalty from RM scores.</p>
+</blockquote>
+<hr />
+<p>Monitoring KL divergence, response length distributions, and reward score variance throughout RLHF training provides early warning of instability. Adaptive KL control and reward model ensembles are the most effective mitigations available before switching to alternative algorithms like DPO that avoid the RL loop entirely.</p>
+    </article>
+  </main>
+</body>
+</html>

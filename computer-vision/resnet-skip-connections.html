@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ResNet and Residual Skip Connections | Notes Backup</title>
+  <meta name="description" content="How skip connections solve the vanishing gradient problem — residual block math, bottleneck block design, ResNet-18/50/101 architectures, and gradient flow analysis." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>ResNet and Residual Skip Connections</h1>
+      <ul class='note-meta'><li><strong>description:</strong> How skip connections solve the vanishing gradient problem — residual block math, bottleneck block design, ResNet-18/50/101 architectures, and gradient flow analysis.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>ResNet and Residual Skip Connections</h1>
+<p>ResNet (He et al., 2015) introduced residual skip connections to train networks with 50–152 layers reliably. Before ResNet, deeper networks paradoxically performed worse than shallower ones — not due to overfitting, but because gradients vanished during backpropagation. Skip connections allow the network to learn residual mappings F(x) = H(x) − x rather than direct mappings H(x).</p>
+<p>The key insight is that identity mappings are easy to learn: if the optimal function is close to identity, the residual F(x) ≈ 0 is easier to push toward zero than to fit an entire transformation. This reformulation ensures that adding more layers cannot worsen performance — the network can always route through the skip connection to approximate identity.</p>
+<p>A BasicBlock stacks two 3×3 convolutional layers, each followed by BatchNorm and ReLU. The shortcut connection adds the input x directly to the output of the second conv before the final ReLU. When spatial dimensions or channel counts change — due to downsampling strides — a 1×1 projection conv adapts the shortcut to match shapes before addition.</p>
+<pre><code class="language-python">import torch; import torch.nn as nn\nclass BasicBlock(nn.Module):\n    def __init__(self, in_ch, out_ch, stride=1):\n        super().__init__()\n        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, stride, 1, bias=False)\n        self.bn1 = nn.BatchNorm2d(out_ch)\n        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, 1, 1, bias=False)\n        self.bn2 = nn.BatchNorm2d(out_ch)\n        self.skip = nn.Sequential()\n        if stride != 1 or in_ch != out_ch:\n            self.skip = nn.Sequential(nn.Conv2d(in_ch, out_ch, 1, stride, bias=False), nn.BatchNorm2d(out_ch))\n    def forward(self, x):\n        out = torch.relu(self.bn1(self.conv1(x)))\n        return torch.relu(self.bn2(self.conv2(out)) + self.skip(x))
+</code></pre>
+<p>The residual formulation is H(x) = F(x) + x, where F is the stack of weight layers and x is the shortcut. At initialisation, weights near zero mean F(x) ≈ 0, so H(x) ≈ x — the block starts as identity. During training the residual F(x) is nudged away from zero only when a non-identity transformation adds value. This aids optimisation in very deep stacks.</p>
+<p>The BottleneckBlock replaces BasicBlock in deeper ResNets (50, 101, 152 layers). It uses three convolutions: a 1×1 to compress channels, a 3×3 on the compressed representation, and a 1×1 to expand back. The expand factor is 4 — a stage with 64 base channels produces 256-channel output. This keeps the costly 3×3 conv cheap by operating on fewer channels.</p>
+<pre><code class="language-python">class BottleneckBlock(nn.Module):\n    expansion = 4\n    def __init__(self, in_ch, planes, stride=1):\n        super().__init__()\n        out_ch = planes * self.expansion\n        self.c1 = nn.Conv2d(in_ch, planes, 1, bias=False); self.b1 = nn.BatchNorm2d(planes)\n        self.c2 = nn.Conv2d(planes, planes, 3, stride, 1, bias=False); self.b2 = nn.BatchNorm2d(planes)\n        self.c3 = nn.Conv2d(planes, out_ch, 1, bias=False); self.b3 = nn.BatchNorm2d(out_ch)\n        self.skip = nn.Sequential()\n        if stride != 1 or in_ch != out_ch:\n            self.skip = nn.Sequential(nn.Conv2d(in_ch, out_ch, 1, stride, bias=False), nn.BatchNorm2d(out_ch))\n    def forward(self, x):\n        out = torch.relu(self.b1(self.c1(x)))\n        out = torch.relu(self.b2(self.c2(out)))\n        return torch.relu(self.b3(self.c3(out)) + self.skip(x))
+</code></pre>
+<p>A projection shortcut (1×1 conv + BN) is inserted whenever the input channel count differs from the output, which happens at each stage boundary. This bottleneck design reduces FLOPs by roughly 8× compared to stacking two 3×3 convolutions at the same channel width, enabling much deeper networks to be trained within practical memory and compute budgets.</p>
+<p>Backpropagating through L layers multiplies gradients by the Jacobian of each layer. In plain networks this product often collapses toward zero (vanishing) or diverges (exploding). The skip connection introduces additive bypass: the gradient at layer l is the sum of a residual-branch term and a direct shortcut term — the shortcut term preserves magnitude regardless of residual branch behaviour.</p>
+<blockquote>
+<p><strong>info</strong>: The skip connection guarantees at least one gradient path back to early layers — this prevents vanishing gradients in very deep networks and is the single most impactful architectural innovation in CNNs.</p>
+</blockquote>
+<pre><code class="language-python">import torch\ndef compare_gradient_norms(depth=50):\n    results = {}\n    for use_skip in [False, True]:\n        x = torch.randn(1, 3, requires_grad=True)\n        out = x\n        for _ in range(depth):\n            w = torch.randn(3, 3)\n            res = out @ w\n            out = res + out if use_skip else res\n        out.sum().backward()\n        results[use_skip] = x.grad.norm().item()\n    print(f&quot;No skip: {results[False]:.4f} | With skip: {results[True]:.4f}&quot;)\ncompare_gradient_norms()
+</code></pre>
+<p>With skip connections, gradient norms remain in a useful range across all 50 layers; without them, norms fall near zero by layer 10. This is why plain networks effectively stop updating lower layers. BatchNorm helps mitigate but does not solve the problem — it is the additive shortcut that provides a direct high-magnitude gradient path regardless of network depth.</p>
+<p>All ResNet variants share the same stem: a 7×7 conv with stride 2, BatchNorm, ReLU, and 3×3 max-pool to reduce spatial size from 224 to 56 before the residual stages. Variants differ in the number and type of blocks per stage. ResNet-18 and ResNet-34 use BasicBlock; ResNet-50, 101, and 152 use BottleneckBlock. All end with global average pooling and a linear classifier.</p>
+<pre><code class="language-python">def build_resnet50_stages():\n    # [n_blocks, planes] for each of the 4 residual stages\n    cfg = [(3, 64), (4, 128), (6, 256), (3, 512)]\n    in_ch = 64  # output channels of the stem (7x7 conv + maxpool)\n    stages = []\n    for n_blocks, planes in cfg:\n        blocks = []\n        for i in range(n_blocks):\n            stride = 2 if i == 0 and planes != 64 else 1\n            blocks.append(BottleneckBlock(in_ch, planes, stride))\n            in_ch = planes * 4\n        stages.append(nn.Sequential(*blocks))\n    return stages  # 16 bottleneck blocks total -&gt; 50 weighted layers
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Variant</th>
+<th>Layers</th>
+<th>Params (M)</th>
+<th>Top-1 %</th>
+<th>FLOPs (G)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ResNet-18</td>
+<td>18</td>
+<td>11.7</td>
+<td>69.8</td>
+<td>1.8</td>
+</tr>
+<tr>
+<td>ResNet-34</td>
+<td>34</td>
+<td>21.8</td>
+<td>73.3</td>
+<td>3.7</td>
+</tr>
+<tr>
+<td>ResNet-50</td>
+<td>50</td>
+<td>25.6</td>
+<td>76.1</td>
+<td>4.1</td>
+</tr>
+<tr>
+<td>ResNet-101</td>
+<td>101</td>
+<td>44.5</td>
+<td>77.4</td>
+<td>7.8</td>
+</tr>
+<tr>
+<td>ResNet-152</td>
+<td>152</td>
+<td>60.2</td>
+<td>78.3</td>
+<td>11.6</td>
+</tr>
+</tbody>
+</table>
+<p>ResNet-50 is the most popular trade-off: 25.6M params, 4.1G FLOPs, and 76.1% ImageNet Top-1 accuracy make it a strong baseline for transfer learning. ResNet-101 and 152 offer 1–2% accuracy gains at roughly 2× the FLOPs. ResNet-18 and 34 suit resource-constrained settings such as mobile inference, edge deployment, or real-time video processing pipelines.</p>
+<p>Skip connections are not merely regularisers — they fundamentally reshape the loss landscape. Empirically, ResNets exhibit loss surfaces without sharp local minima, allowing SGD to find good solutions reliably from random initialisation. This is why extremely deep ResNets (hundreds of layers) can be trained without pre-training or careful learning-rate warm-up schemes required by plain networks.</p>
+<p>ResNet's influence extends to every major architecture since 2015. DenseNet connects every layer to all subsequent ones. EfficientNet scales a ResNet-like backbone. Vision Transformers apply the identical formula H(x) = F(x) + x in every attention and MLP block. Understanding the residual formulation is foundational for reasoning about any modern deep learning architecture.</p>
+<p>For practitioners: prefer ResNet-50 as a transfer learning starting point using torchvision.models.resnet50(weights='IMAGENET1K_V2') for best pre-trained weights. Freeze layer1 and layer2 during initial fine-tuning to preserve low-level feature detectors, then unfreeze progressively with a decaying learning rate to adapt the full network to your target domain.</p>
+    </article>
+  </main>
+</body>
+</html>

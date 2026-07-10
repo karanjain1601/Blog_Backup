@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Gradient Boosting — Additive Model and Stage-Wise Fitting | Notes Backup</title>
+  <meta name="description" content="How gradient boosting builds an additive model by fitting new trees to the negative gradient of the loss, functional gradient descent in function space, shrinkage, and the bias-variance contrast with bagging." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Gradient Boosting — Additive Model and Stage-Wise Fitting</h1>
+      <ul class='note-meta'><li><strong>description:</strong> How gradient boosting builds an additive model by fitting new trees to the negative gradient of the loss, functional gradient descent in function space, shrinkage, and the bias-variance contrast with bagging.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Gradient Boosting — Additive Model and Stage-Wise Fitting</h1>
+<h2>Additive Model and Stage-Wise Fitting</h2>
+<p>Gradient boosting builds an additive model F_M(x) = F_0(x) + Σ_{m=1}^{M} η·h_m(x) where each h_m is a weak learner (typically a shallow tree) and η is the learning rate (shrinkage). Unlike neural networks that adjust all parameters simultaneously, stage-wise fitting is greedy — each new tree is added to minimise the current loss without modifying previous trees. This greedy, non-parametric approach is what makes gradient boosting so flexible: any differentiable loss function can be optimised.</p>
+<h2>Gradient Boosting as Functional Gradient Descent</h2>
+<p>Standard gradient descent moves parameters θ in the direction −∇_θ L. Gradient boosting instead does gradient descent in function space: the negative gradient −∂L/∂F evaluated at the current predictions tells us the direction to move the function F. For MSE loss L = (1/2)(y − F)², the negative gradient is y − F — the residual. So residual boosting is a special case of gradient boosting. For log-loss (binary classification) L = −y log p − (1−y) log(1−p), the negative gradient is y − p where p = σ(F). Each new tree is fitted to these pseudo-residuals.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.datasets import make_regression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error
+
+class GradientBoostingMSE:
+    def __init__(self, n_estimators=100, learning_rate=0.1, max_depth=3):
+        self.n = n_estimators; self.lr = learning_rate
+        self.max_depth = max_depth; self.trees = []; self.F0 = None
+
+    def fit(self, X, y):
+        self.F0 = y.mean()           # initial prediction = global mean
+        F = np.full(len(y), self.F0)
+        for _ in range(self.n):
+            residuals = y - F        # negative gradient of MSE
+            tree = DecisionTreeRegressor(max_depth=self.max_depth)
+            tree.fit(X, residuals)
+            F += self.lr * tree.predict(X)
+            self.trees.append(tree)
+        return self
+
+    def predict(self, X):
+        pred = np.full(X.shape[0], self.F0)
+        for tree in self.trees:
+            pred += self.lr * tree.predict(X)
+        return pred
+
+X, y = make_regression(n_samples=600, n_features=10, noise=20, random_state=42)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
+gb = GradientBoostingMSE(n_estimators=150, learning_rate=0.1, max_depth=3)
+gb.fit(X_tr, y_tr)
+rmse = np.sqrt(mean_squared_error(y_te, gb.predict(X_te)))
+print(f'Custom GB RMSE: {rmse:.4f}')
+</code></pre>
+<h2>Loss Functions and Their Gradients</h2>
+<p>Gradient boosting's power comes from plugging in any differentiable loss. MSE loss gives gradient = y − F (residuals). Log-loss for binary classification gives gradient = y − σ(F) where σ is the sigmoid — trees are fitted to the difference between true labels and current predicted probabilities. Huber loss (robust regression) gives gradient that is linear for small residuals and bounded for outliers. Quantile loss enables prediction intervals.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import log_loss
+
+def sigmoid(x):
+    return 1.0 / (1.0 + np.exp(-np.clip(x, -10, 10)))
+
+X, y = load_breast_cancer(return_X_y=True)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
+
+F = np.zeros(len(y_tr))     # start at F=0 (sigmoid gives p=0.5)
+trees, lr = [], 0.1
+
+for m in range(100):
+    p = sigmoid(F)
+    gradient = y_tr - p       # negative gradient of log-loss
+    tree = DecisionTreeRegressor(max_depth=3)
+    tree.fit(X_tr, gradient)
+    F += lr * tree.predict(X_tr)
+    trees.append(tree)
+
+# Evaluate on test set
+F_te = np.zeros(len(y_te))
+for tree in trees:
+    F_te += lr * tree.predict(X_te)
+
+preds = (sigmoid(F_te) &gt; 0.5).astype(int)
+print(f'Custom log-loss GB accuracy: {(preds == y_te).mean():.4f}')
+print(f'Log-loss on test set:        {log_loss(y_te, sigmoid(F_te)):.4f}')
+</code></pre>
+<blockquote>
+<p><strong>Why Residuals Equal Negative Gradient for MSE</strong>: MSE loss is L(y, F) = (1/2)(y − F)². Its derivative with respect to F is ∂L/∂F = F − y = −(y − F). So the negative gradient is y − F, which is exactly the residual. Fitting a tree to residuals and adding it to F is gradient descent in function space — residual boosting was invented before the gradient interpretation was formalised.</p>
+</blockquote>
+<h2>sklearn GradientBoostingClassifier</h2>
+<p>sklearn's GradientBoostingClassifier implements the original Friedman (2001) stochastic gradient boosting algorithm. Key parameters: n_estimators (number of trees), learning_rate (shrinkage η), max_depth (typical 3-5 for boosting), subsample (stochastic GB — use 0.5-0.8 to add variance reduction alongside bias reduction). The deviance (log-loss) and exponential (AdaBoost) loss functions are both supported.</p>
+<pre><code class="language-python">from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split, cross_val_score
+import numpy as np
+
+X, y = load_breast_cancer(return_X_y=True)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
+
+gb = GradientBoostingClassifier(
+    n_estimators=200,
+    learning_rate=0.05,    # shrinkage — smaller = more regularisation
+    max_depth=3,           # shallow trees preferred for boosting
+    subsample=0.8,         # stochastic GB: 80% of data per tree
+    min_samples_leaf=5,
+    random_state=42
+)
+gb.fit(X_tr, y_tr)
+
+print(f'Train: {gb.score(X_tr, y_tr):.4f}  Test: {gb.score(X_te, y_te):.4f}')
+cv = cross_val_score(gb, X, y, cv=5)
+print(f'5-fold CV: {cv.mean():.4f} +/- {cv.std():.4f}')
+top3 = gb.feature_importances_.argsort()[::-1][:3]
+print(f'Top-3 features by MDI: {top3}')
+</code></pre>
+<h2>Learning Rate vs n_estimators Trade-off</h2>
+<p>Shrinkage (small learning rate η) is the most effective regulariser in gradient boosting. A smaller η requires more trees to fit the training data — the relationship is roughly n_estimators ∝ 1/η. This means a model with lr=0.05 and 400 trees tends to match lr=0.1 and 200 trees in accuracy while being more robust to overfitting. The computational cost is identical. Finding the right n_estimators for a given lr is best done with early stopping.</p>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split
+
+X, y = load_breast_cancer(return_X_y=True)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
+
+configs = [(0.50, 50), (0.10, 200), (0.05, 400), (0.01, 1000)]
+results = []
+for lr, n_est in configs:
+    gb = GradientBoostingClassifier(
+        n_estimators=n_est, learning_rate=lr, max_depth=3, random_state=42)
+    gb.fit(X_tr, y_tr)
+    results.append({'lr': lr, 'n': n_est,
+                    'train': gb.score(X_tr, y_tr),
+                    'test':  gb.score(X_te, y_te)})
+    print(f'lr={lr:5.2f}  n={n_est:4d}  '
+          f'train={results[-1][&quot;train&quot;]:.4f}  test={results[-1][&quot;test&quot;]:.4f}')
+
+best = max(results, key=lambda r: r['test'])
+print(f'Best config: lr={best[&quot;lr&quot;]}, n_estimators={best[&quot;n&quot;]}, test={best[&quot;test&quot;]:.4f}')
+</code></pre>
+<h2>Bagging vs Boosting</h2>
+<table>
+<thead>
+<tr>
+<th>Aspect</th>
+<th>Bagging (Random Forest)</th>
+<th>Boosting (Gradient Boosting)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Primary effect</td>
+<td>Reduces variance</td>
+<td>Reduces bias</td>
+</tr>
+<tr>
+<td>Tree depth</td>
+<td>Deep (unconstrained)</td>
+<td>Shallow (depth 3-5 typical)</td>
+</tr>
+<tr>
+<td>Tree training</td>
+<td>Parallel (independent)</td>
+<td>Sequential (dependent)</td>
+</tr>
+<tr>
+<td>Overfitting risk</td>
+<td>Low (averaging regularises)</td>
+<td>High if lr too large or too many trees</td>
+</tr>
+<tr>
+<td>Noise sensitivity</td>
+<td>Low (averaging dilutes outliers)</td>
+<td>High (fits residuals including noise</td>
+</tr>
+<tr>
+<td>Parallelisable</td>
+<td>Yes (trivially)</td>
+<td>No (each tree depends on previous)</td>
+</tr>
+<tr>
+<td>Default use case</td>
+<td>High-variance datasets</td>
+<td>Low-bias requirement, structured data</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>Boosting reduces bias; bagging reduces variance — they are complementary strategies</li>
+<li>Shallow trees (depth 3-5) work best for boosting; deep trees work best inside forests</li>
+<li>Smaller learning rate + more trees is almost always better than large lr + few trees</li>
+<li>Stochastic GB (subsample &lt; 1) adds variance reduction on top of bias reduction</li>
+<li>Gradient boosting can fit any differentiable loss by changing the gradient target</li>
+<li>Unlike neural networks, gradient boosting requires no feature normalisation</li>
+</ul>
+<blockquote>
+<p><strong>Gradient Boosting Overfits Without Shrinkage</strong>: Without shrinkage (learning_rate=1.0), gradient boosting aggressively fits the training data and overfits quickly. Always use learning_rate &lt; 0.1 in production. Use early stopping on a validation set to automatically find the right n_estimators.</p>
+<p><strong>Starting Configuration for sklearn GB</strong>: A reliable starting point: learning_rate=0.05, max_depth=4, n_estimators=300, subsample=0.8, min_samples_leaf=5. Then tune n_estimators with early stopping. This beats default settings on most tabular datasets.</p>
+</blockquote>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

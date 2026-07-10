@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Exponential Smoothing — Holt-Winters and ETS Models | Notes Backup</title>
+  <meta name="description" content="Implement Simple Exponential Smoothing, Holt linear, and Holt-Winters from first principles, use the ETS state-space framework to compare model configurations by AIC, and trace the connection SES = ARIMA(0,1,1)." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Exponential Smoothing — Holt-Winters and ETS Models</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Implement Simple Exponential Smoothing, Holt linear, and Holt-Winters from first principles, use the ETS state-space framework to compare model configurations by AIC, and trace the connection SES = ARIMA(0,1,1).</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Exponential Smoothing — Holt-Winters and ETS Models</h1>
+<p>Exponential smoothing weights recent observations more heavily than distant ones using geometrically decaying weights: the observation k steps back receives weight α(1-α)^k, so the forecast ŷₜ₊₁ = αΣₖ(1-α)^k yₜ₋ₖ is an exponentially weighted average of all past values. The ETS (Error-Trend-Seasonal) state-space framework unifies Simple Exponential Smoothing, Holt linear, and Holt-Winters under a single likelihood, enabling principled selection among 30 model configurations by AIC.</p>
+<h2>Simple Exponential Smoothing</h2>
+<p>SES applies to series with no trend and no seasonality. The update equation ŷₜ₊₁ = αyₜ + (1-α)ŷₜ, with α ∈ (0,1), places weight α on the latest observation and (1-α) on the previous forecast. Expanding recursively yields the weighted average form. Small α (near 0) smooths heavily and reacts slowly; large α (near 1) tracks the series nearly observation-by-observation. The optimal α minimises the sum of squared one-step-ahead forecast errors, solved numerically or by grid search.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.metrics import mean_squared_error
+
+def simple_exp_smoothing(series, alpha):
+    &quot;&quot;&quot;SES from scratch — returns in-sample one-step-ahead fitted values.&quot;&quot;&quot;
+    n = len(series)
+    fitted = np.zeros(n)
+    fitted[0] = series[0]
+    for t in range(1, n):
+        fitted[t] = alpha * series[t - 1] + (1 - alpha) * fitted[t - 1]
+    return fitted
+
+def optimise_alpha(series):
+    &quot;&quot;&quot;Grid search for alpha minimising in-sample SSE.&quot;&quot;&quot;
+    best_alpha, best_sse = 0.1, np.inf
+    for alpha in np.arange(0.05, 1.0, 0.05):
+        fitted = simple_exp_smoothing(series, alpha)
+        sse = np.sum((series[1:] - fitted[1:]) ** 2)
+        if sse &lt; best_sse:
+            best_sse, best_alpha = sse, alpha
+    return best_alpha
+
+np.random.seed(42)
+y = np.cumsum(np.random.randn(120)) + 50
+alpha_opt = optimise_alpha(y)
+fitted = simple_exp_smoothing(y, alpha_opt)
+next_step = alpha_opt * y[-1] + (1 - alpha_opt) * fitted[-1]
+rmse = np.sqrt(mean_squared_error(y[1:], fitted[1:]))
+print(f'Optimal alpha = {alpha_opt:.2f}')
+print(f'In-sample RMSE = {rmse:.4f}')
+print(f'One-step-ahead forecast = {next_step:.4f}')
+</code></pre>
+<h2>Holt's Linear Method</h2>
+<p>Holt's linear method adds a trend component bₜ to SES. Level: lₜ = αyₜ + (1-α)(lₜ₋₁ + bₜ₋₁). Trend: bₜ = β(lₜ - lₜ₋₁) + (1-β)bₜ₋₁. h-step forecast: ŷₜ₊ₕ = lₜ + h·bₜ. The damped variant multiplies each trend step by φ ∈ (0,1): ŷₜ₊ₕ = lₜ + (φ + φ² + ... + φʰ)bₜ, preventing linear extrapolation from overshooting on long horizons. Damped trend is empirically the best single method across major forecasting competitions.</p>
+<h2>Holt-Winters Seasonal Model</h2>
+<p>Holt-Winters adds a seasonal component sₜ with period m. Additive form (constant seasonal amplitude): level lₜ = α(yₜ - sₜ₋ₘ) + (1-α)(lₜ₋₁ + bₜ₋₁), seasonal sₜ = γ(yₜ - lₜ) + (1-γ)sₜ₋ₘ, forecast ŷₜ₊ₕ = lₜ + h·bₜ + sₜ₋ₘ₊ₕ. Multiplicative form (amplitude scales with level): forecast ŷₜ₊ₕ = (lₜ + h·bₜ)·sₜ₋ₘ₊ₕ. Use additive when seasonal swing is constant over time; multiplicative when seasonal swing grows proportionally with the level.</p>
+<pre><code class="language-python">import numpy as np
+import pandas as pd
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
+from sklearn.metrics import mean_absolute_error
+
+np.random.seed(0)
+t = np.arange(120)
+y = pd.Series(
+    50 + 0.3 * t + 10 * np.sin(2 * np.pi * t / 12) + np.random.randn(120) * 2
+)
+train, test = y[:96], y[96:]
+
+hw_add = ExponentialSmoothing(
+    train, trend='add', seasonal='add', seasonal_periods=12
+).fit(optimized=True)
+
+shift = abs(train.min()) + 10
+hw_mul = ExponentialSmoothing(
+    train + shift, trend='add', seasonal='mul', seasonal_periods=12
+).fit(optimized=True)
+
+fcst_add = hw_add.forecast(24)
+fcst_mul = hw_mul.forecast(24) - shift
+
+print(f'HW Additive    MAE = {mean_absolute_error(test, fcst_add):.3f}')
+print(f'HW Multiplicative MAE = {mean_absolute_error(test, fcst_mul):.3f}')
+p = hw_add.params
+print(f'alpha={p[&quot;smoothing_level&quot;]:.3f}  beta={p[&quot;smoothing_trend&quot;]:.3f}  gamma={p[&quot;smoothing_seasonal&quot;]:.3f}')
+</code></pre>
+<h2>ETS State-Space Framework</h2>
+<p>ETS reformulates exponential smoothing as a state-space model with a single source of error (innovations). Each component — Error (E), Trend (T), Seasonal (S) — can be None (N), Additive (A), or Multiplicative (M), giving up to 30 valid combinations. SES = ETS(A,N,N), Holt linear = ETS(A,A,N), Holt-Winters additive = ETS(A,A,A). The innovations form enables exact likelihood computation, so models are compared by AIC = -2ℓ + 2k, where k is the parameter count.</p>
+<pre><code class="language-python">import numpy as np
+import pandas as pd
+from statsmodels.tsa.exponential_smoothing.ets import ETSModel
+import warnings
+warnings.filterwarnings('ignore')
+
+np.random.seed(1)
+t = np.arange(96)
+y = pd.Series(50 + 0.2 * t + 8 * np.sin(2 * np.pi * t / 12) + np.random.randn(96))
+
+configurations = [
+    ('ETS(A,N,N)', dict(error='add', trend=None,   seasonal=None)),
+    ('ETS(A,A,N)', dict(error='add', trend='add',  seasonal=None)),
+    ('ETS(A,Ad,N)',dict(error='add', trend='add',  seasonal=None, damped_trend=True)),
+    ('ETS(A,A,A)', dict(error='add', trend='add',  seasonal='add')),
+    ('ETS(M,A,M)', dict(error='mul', trend='add',  seasonal='mul')),
+]
+
+results = []
+for label, cfg in configurations:
+    try:
+        m = ETSModel(y, seasonal_periods=12, **cfg).fit(disp=False)
+        results.append((label, m.aic, m.bic))
+    except Exception:
+        pass
+
+results.sort(key=lambda x: x[1])
+print(f'{&quot;Model&quot;:&lt;14} {&quot;AIC&quot;:&gt;9} {&quot;BIC&quot;:&gt;9}')
+for label, aic, bic in results:
+    print(f'{label:&lt;14} {aic:&gt;9.2f} {bic:&gt;9.2f}')
+print(f'Best by AIC: {results[0][0]}')
+</code></pre>
+<blockquote>
+<p><strong>SES = ARIMA(0,1,1)</strong>: Simple Exponential Smoothing is algebraically equivalent to ARIMA(0,1,1). The SES forecast ŷₜ₊₁ = ŷₜ - (1-α)eₜ matches the ARIMA(0,1,1) forecast with MA coefficient θ = -(1-α). If auto-ARIMA selects ARIMA(0,1,1) for a series, SES with α = 1 + θ gives identical point forecasts in a more interpretable parameterisation.</p>
+</blockquote>
+<h2>Parameter Estimation via MLE</h2>
+<p>For additive-error ETS models the concentrated log-likelihood simplifies to minimising Σeₜ² over smoothing parameters and initial states. For multiplicative-error models the likelihood is ℓ = -n/2·(1 + ln(2π) + ln(Σ(eₜ/μₜ)²/n)), where μₜ is the conditional mean. Statsmodels uses L-BFGS-B with box constraints 0 &lt; α, β, γ &lt; 1. Seasonal initial states are estimated from the first 1–2 cycles, substantially reducing sensitivity to starting values for n ≥ 2m.</p>
+<h2>Forecast Comparison: SES vs Holt vs Holt-Winters</h2>
+<pre><code class="language-python">import numpy as np
+import pandas as pd
+from statsmodels.tsa.holtwinters import ExponentialSmoothing, SimpleExpSmoothing, Holt
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+np.random.seed(42)
+t = np.arange(144)
+y = pd.Series(40 + 0.5 * t + 12 * np.sin(2 * np.pi * t / 12) + np.random.randn(144) * 3)
+train, test = y[:120], y[120:]
+
+models = {
+    'SES':    SimpleExpSmoothing(train).fit(optimized=True),
+    'Holt':   Holt(train, damped_trend=False).fit(optimized=True),
+    'Holt-D': Holt(train, damped_trend=True).fit(optimized=True),
+    'HW-Add': ExponentialSmoothing(
+        train, trend='add', seasonal='add', seasonal_periods=12).fit(),
+}
+
+print(f'{&quot;Model&quot;:&lt;10} {&quot;MAE&quot;:&gt;8} {&quot;RMSE&quot;:&gt;8}')
+print('-' * 28)
+for name, fit in models.items():
+    fcst = fit.forecast(24)
+    mae  = mean_absolute_error(test, fcst)
+    rmse = np.sqrt(mean_squared_error(test, fcst))
+    print(f'{name:&lt;10} {mae:&gt;8.3f} {rmse:&gt;8.3f}')
+</code></pre>
+<h2>ETS Model Reference</h2>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>ETS Code</th>
+<th>Trend</th>
+<th>Seasonal</th>
+<th>Free Params</th>
+<th>Best For</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SES</td>
+<td>ETS(A,N,N)</td>
+<td>None</td>
+<td>None</td>
+<td>α, l₀</td>
+<td>Stationary or random-walk series</td>
+</tr>
+<tr>
+<td>Holt Linear</td>
+<td>ETS(A,A,N)</td>
+<td>Additive</td>
+<td>None</td>
+<td>α, β, l₀, b₀</td>
+<td>Trending non-seasonal series</td>
+</tr>
+<tr>
+<td>Holt Damped</td>
+<td>ETS(A,Ad,N)</td>
+<td>Damped</td>
+<td>None</td>
+<td>α, β, φ, l₀, b₀</td>
+<td>Trending, uncertain long horizon</td>
+</tr>
+<tr>
+<td>HW Additive</td>
+<td>ETS(A,A,A)</td>
+<td>Additive</td>
+<td>Additive</td>
+<td>α, β, γ + m init</td>
+<td>Seasonal with constant swing amplitude</td>
+</tr>
+<tr>
+<td>HW Multiplicative</td>
+<td>ETS(A,A,M)</td>
+<td>Additive</td>
+<td>Multiplicative</td>
+<td>α, β, γ + m init</td>
+<td>Seasonal with growing swing amplitude</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>Select models using AIC, not training RMSE — AIC penalises parameter count and prevents overfitting.</li>
+<li>Damped trend (φ ≈ 0.98) empirically outperforms linear trend for horizons h ≥ 6.</li>
+<li>Multiplicative seasonality requires strictly positive values — add a constant offset if necessary.</li>
+<li>For very short series (n &lt; 2m) fix the seasonal period; avoid estimating it from fewer than two full cycles.</li>
+<li>The auto_arima function from pmdarima can serve as a baseline alongside ETS for model selection.</li>
+</ul>
+<p>Exponential smoothing remains highly competitive in practice. The M3 and M4 forecasting competitions showed ETS with damped trend ranking in the top tier across thousands of heterogeneous series, often outperforming far more complex ML models. The complete pipeline — data ingestion, ETS model selection via AIC, and interval forecast generation from the innovations state-space representation — can be expressed in under ten lines of statsmodels code, making ETS the default baseline to beat before adding complexity.</p>
+<p>Prediction intervals for ETS models are derived analytically from the innovations variance: for h-step-ahead forecasts, the interval width grows with h under additive errors. For multiplicative-error models, simulation-based intervals (drawing from the fitted error distribution) are recommended. The ets.simulate() method in statsmodels draws sample paths from the fitted state-space model, enabling empirical coverage assessment that does not rely on Gaussian error assumptions.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

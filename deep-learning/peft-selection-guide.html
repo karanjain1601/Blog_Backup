@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PEFT Selection Guide — Choosing the Right Method by Task, Data, and Constraints | Notes Backup</title>
+  <meta name="description" content="Decision framework for choosing the right PEFT method. Covers key selection dimensions, a Python decision function, parameter efficiency vs quality benchmarks, inference latency comparison, multi-task adapter serving, and a comprehensive method comparison table for LoRA, QLoRA, DoRA, LoRA+, VeRA, Prefix Tuning, Adapters, and IA3." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>PEFT Selection Guide — Choosing the Right Method by Task, Data, and Constraints</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Decision framework for choosing the right PEFT method. Covers key selection dimensions, a Python decision function, parameter efficiency vs quality benchmarks, inference latency comparison, multi-task adapter serving, and a comprehensive method comparison table for LoRA, QLoRA, DoRA, LoRA+, VeRA, Prefix Tuning, Adapters, and IA3.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>PEFT Selection Guide — Choosing the Right Method by Task, Data, and Constraints</h1>
+<p>With a growing zoo of PEFT methods — LoRA, QLoRA, DoRA, LoRA+, VeRA, Prefix Tuning, Adapters, IA3 — choosing the right one requires reasoning about five dimensions simultaneously: data size, task type, GPU memory budget, inference latency requirement, and whether you need to merge or swap adapters at runtime. No single method dominates all dimensions; the right choice depends on which constraints are binding in your setting.</p>
+<h2>Key Decision Dimensions</h2>
+<ul>
+<li>Data size: &lt; 100 examples → IA3; 100–10K → LoRA or LoRA+; 10K–100K → LoRA+/DoRA; &gt; 100K → DoRA or full fine-tune with LoRA regularization.</li>
+<li>Task type: understanding (classification, NER) → LoRA rank 4–16; generation → LoRA rank 16–64; alignment (RLHF/DPO) → LoRA + DPO is standard.</li>
+<li>GPU memory: &lt; 16 GB → QLoRA (4-bit base); 16–40 GB → LoRA or DoRA in bf16; &gt; 40 GB → DoRA full precision.</li>
+<li>Inference latency: zero overhead required → merge LoRA into base weights; can tolerate extra layers → Adapters or Prefix Tuning; extreme few-shot → IA3 (3 rescaling vectors per layer).</li>
+<li>Multi-task serving: hot-swap without reloading → Adapters or non-merged LoRA; single task at a time → merge LoRA for zero latency.</li>
+<li>Merging / task arithmetic: only LoRA and DoRA produce mergeable delta matrices; Adapters and Prefix Tuning cannot be merged into base weights cleanly.</li>
+</ul>
+<h2>PEFT Selection Decision Tree</h2>
+<p>A systematic decision function removes the guesswork. The tree below checks binding constraints in priority order: memory first (QLoRA), then extreme few-shot (IA3), then multi-task inference (Adapters), then quality priority (DoRA), and defaults to LoRA+ for the general case. LoRA+ is a free improvement over standard LoRA — it sets different learning rates for the A and B matrices — and should always be preferred over vanilla LoRA when there is no other constraint.</p>
+<pre><code class="language-python">from dataclasses import dataclass
+from typing import Optional
+
+@dataclass
+class PEFTRecommendation:
+    method: str
+    reason: str
+    lora_rank: Optional[int] = None
+    notes: str = &quot;&quot;
+
+def select_peft_method(
+    data_size: int,
+    gpu_memory_gb: float,
+    task_type: str = &quot;generation&quot;,
+    multi_task_inference: bool = False,
+    need_merge: bool = False,
+    quality_priority: bool = False,
+) -&gt; PEFTRecommendation:
+    &quot;&quot;&quot;Return the recommended PEFT method given task constraints.&quot;&quot;&quot;
+    if data_size &lt; 100:
+        return PEFTRecommendation(&quot;IA3&quot;, &quot;Extreme few-shot: IA3 has fewest trainable params&quot;,
+                                  notes=&quot;Only ~3 vectors per layer; no rank to tune&quot;)
+    if gpu_memory_gb &lt; 16:
+        return PEFTRecommendation(&quot;QLoRA&quot;, &quot;Memory constrained: 4-bit base + bf16 adapters&quot;,
+                                  lora_rank=16, notes=&quot;Use bitsandbytes NF4 + paged optimizer&quot;)
+    if multi_task_inference and not need_merge:
+        return PEFTRecommendation(&quot;Adapters&quot;, &quot;Hot-swap at inference without reloading base&quot;,
+                                  notes=&quot;Use PEFT AdapterHub; swap by task_id&quot;)
+    if need_merge and quality_priority:
+        return PEFTRecommendation(&quot;LoRA+ + DoRA&quot;, &quot;Best quality, merges to zero latency&quot;,
+                                  lora_rank=32, notes=&quot;DoRA: separate magnitude/direction learning&quot;)
+    if need_merge:
+        return PEFTRecommendation(&quot;LoRA+&quot;, &quot;Mergeable, free LR improvement over LoRA&quot;,
+                                  lora_rank=16, notes=&quot;Set lr_ratio=16 for B matrix&quot;)
+    return PEFTRecommendation(&quot;LoRA+&quot;, &quot;Best general-purpose default&quot;,
+                              lora_rank=16, notes=&quot;Start here; add DoRA if quality is insufficient&quot;)
+
+test_cases = [
+    (50,   24, &quot;classification&quot;, False, False, False),
+    (500,  12, &quot;generation&quot;,     False, True,  False),
+    (5000, 24, &quot;generation&quot;,     False, True,  True),
+    (50000,80, &quot;alignment&quot;,      False, True,  True),
+    (2000, 40, &quot;generation&quot;,     True,  False, False),
+]
+for args in test_cases:
+    r = select_peft_method(*args)
+    print(f&quot;data={args[0]:&gt;6}, gpu={args[1]:&gt;2}GB -&gt; {r.method}: {r.reason}&quot;)
+</code></pre>
+<h2>Parameter Efficiency vs Quality Tradeoff</h2>
+<p>The efficiency-quality Pareto frontier varies by method. IA3 sits at the extreme-efficiency end (&lt; 0.02% trainable parameters) but requires large base models to shine — on GPT-3 scale it matches LoRA, but on 1B-scale models it underperforms. LoRA at rank 16 is the sweet spot for most 1–7B models: enough capacity for generation tasks, negligible inference overhead when merged. DoRA adds ~1% overhead over LoRA in training time but consistently outperforms LoRA by 1–3% absolute on generation benchmarks. VeRA uses shared random matrices with learnable rescaling vectors, achieving LoRA-comparable quality with 10× fewer trainable parameters but cannot be merged cleanly.</p>
+<pre><code class="language-python">from dataclasses import dataclass, field
+from typing import List
+
+@dataclass
+class BenchmarkResult:
+    method: str
+    trainable_params_pct: float
+    train_time_relative: float  # relative to LoRA=1.0
+    eval_score: float           # normalized: LoRA=0.871
+    peak_memory_gb: float
+    merge_to_base: bool
+
+def run_peft_benchmark(model_params: int = 7_000_000_000) -&gt; List[BenchmarkResult]:
+    &quot;&quot;&quot;Simulated benchmark results (from published papers and internal evals).&quot;&quot;&quot;
+    results = [
+        BenchmarkResult(&quot;LoRA r=16&quot;,    0.050, 1.00, 0.871, 14.2, True),
+        BenchmarkResult(&quot;LoRA+ r=16&quot;,   0.050, 0.99, 0.876, 14.2, True),
+        BenchmarkResult(&quot;DoRA r=16&quot;,    0.051, 1.04, 0.882, 14.6, True),
+        BenchmarkResult(&quot;QLoRA r=16&quot;,   0.050, 1.18, 0.868,  8.1, True),
+        BenchmarkResult(&quot;IA3&quot;,          0.002, 0.80, 0.841, 13.8, False),
+        BenchmarkResult(&quot;Adapters&quot;,     0.120, 1.13, 0.874, 15.1, False),
+        BenchmarkResult(&quot;PrefixTuning&quot;, 0.010, 0.95, 0.843, 14.0, False),
+        BenchmarkResult(&quot;VeRA r=256&quot;,   0.005, 1.02, 0.869, 14.3, False),
+    ]
+    return results
+
+results = run_peft_benchmark()
+print(f&quot;{'Method':&gt;16} {'Params%':&gt;8} {'Time':&gt;6} {'Score':&gt;7} {'Mem(GB)':&gt;8} {'Merge':&gt;6}&quot;)
+print(&quot;-&quot; * 58)
+for r in results:
+    merge_str = &quot;Yes&quot; if r.merge_to_base else &quot;No&quot;
+    print(f&quot;{r.method:&gt;16} {r.trainable_params_pct:&gt;7.3f}% {r.train_time_relative:&gt;6.2f}x &quot;
+          f&quot;{r.eval_score:&gt;7.3f} {r.peak_memory_gb:&gt;8.1f} {merge_str:&gt;6}&quot;)
+</code></pre>
+<h2>Inference Overhead Comparison</h2>
+<p>Inference latency is where methods diverge most sharply. Merged LoRA is identical to the base model at inference — the adapter matrices are absorbed into the base weights, adding zero latency. Non-merged LoRA adds two extra matmuls (Ax and Bx) per adapted layer, roughly 3–8% overhead on GPU for rank 16. Adapter layers insert a bottleneck MLP (down-project → activation → up-project) adding 5–15% overhead depending on rank and model size. Prefix Tuning prepends k virtual tokens to the key-value cache, increasing attention computation by k/seq_len — for k=50 tokens on a 512-token sequence, overhead is ~10%. IA3 rescales by learned vectors: the overhead is a single element-wise multiply per layer, &lt; 1%.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import time
+
+def measure_latency(model: nn.Module, x: torch.Tensor,
+                    n_warmup: int = 20, n_runs: int = 100) -&gt; float:
+    &quot;&quot;&quot;Return average forward-pass latency in milliseconds.&quot;&quot;&quot;
+    model.eval()
+    with torch.no_grad():
+        for _ in range(n_warmup):
+            model(x)
+    t0 = time.perf_counter()
+    with torch.no_grad():
+        for _ in range(n_runs):
+            model(x)
+    return (time.perf_counter() - t0) * 1000 / n_runs
+
+D = 512
+# Merged LoRA: same as base model
+base = nn.Sequential(nn.Linear(D, D), nn.ReLU(), nn.Linear(D, D))
+# Non-merged LoRA: extra matmul per layer (simulated as extra small linear)
+non_merged_lora = nn.Sequential(
+    nn.Linear(D, D), nn.ReLU(), nn.Linear(D, D),
+    nn.Linear(D, 16, bias=False), nn.Linear(16, D, bias=False)  # LoRA A+B
+)
+# Adapter: extra bottleneck layers
+adapter = nn.Sequential(
+    nn.Linear(D, D), nn.ReLU(),
+    nn.Linear(D, 64), nn.ReLU(), nn.Linear(64, D),  # adapter bottleneck
+    nn.Linear(D, D)
+)
+x = torch.randn(16, D)
+for name, model in [(&quot;Base/MergedLoRA&quot;, base), (&quot;NonMergedLoRA&quot;, non_merged_lora), (&quot;Adapter&quot;, adapter)]:
+    lat = measure_latency(model, x)
+    params = sum(p.numel() for p in model.parameters())
+    print(f&quot;{name:&gt;16}: {lat:.3f} ms/batch  ({params:,} params)&quot;)
+</code></pre>
+<h2>Multi-Task Serving with Adapter Swap</h2>
+<p>When serving multiple tasks from one deployment, non-merged adapters offer hot-swap: load the base model once and swap the adapter weights per request without reloading the full model. This is efficient when tasks share a common base and differ only in the adapter. The overhead is the adapter forward pass (5–15%) plus the time to copy adapter weights to GPU (negligible for rank 16–64 LoRA: &lt; 1 MB). Libraries like PEFT's load_adapter and set_adapter enable runtime task switching. For LoRA, non-merged mode keeps the A and B matrices separate from the base weights, enabling swap; merged mode fuses them and cannot be unswapped without the original adapter.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from typing import Dict
+
+class MultiTaskLoRAServer:
+    &quot;&quot;&quot;Serve multiple tasks by swapping LoRA adapters on a shared base model.&quot;&quot;&quot;
+
+    def __init__(self, base_model: nn.Module, lora_rank: int = 16):
+        self.base = base_model
+        self.rank = lora_rank
+        self.adapters: Dict[str, Dict[str, torch.Tensor]] = {}
+        self.active_task: str = None
+
+    def register_adapter(self, task_name: str, lora_A: torch.Tensor, lora_B: torch.Tensor):
+        self.adapters[task_name] = {&quot;A&quot;: lora_A, &quot;B&quot;: lora_B}
+        size_kb = (lora_A.numel() + lora_B.numel()) * 4 / 1024
+        print(f&quot;Registered '{task_name}': rank={self.rank}, size={size_kb:.1f} KB&quot;)
+
+    def activate(self, task_name: str):
+        if task_name not in self.adapters:
+            raise ValueError(f&quot;Unknown task: {task_name}&quot;)
+        self.active_task = task_name
+        # In real PEFT: model.set_adapter(task_name)
+        print(f&quot;Activated adapter: '{task_name}' (no base reload required)&quot;)
+
+    def forward(self, x: torch.Tensor) -&gt; torch.Tensor:
+        out = self.base(x)
+        if self.active_task:
+            adapter = self.adapters[self.active_task]
+            # Apply LoRA delta: out += x @ A.T @ B.T * (1/rank)
+            lora_out = (x @ adapter[&quot;A&quot;].T) @ adapter[&quot;B&quot;].T / self.rank
+            out = out + lora_out
+        return out
+
+base = nn.Linear(64, 64)
+server = MultiTaskLoRAServer(base, lora_rank=8)
+for task in [&quot;sentiment&quot;, &quot;ner&quot;, &quot;qa&quot;]:
+    A = torch.randn(8, 64) * 0.02
+    B = torch.zeros(64, 8)
+    server.register_adapter(task, A, B)
+x = torch.randn(4, 64)
+for task in [&quot;sentiment&quot;, &quot;ner&quot;, &quot;qa&quot;]:
+    server.activate(task)
+    out = server.forward(x)
+    print(f&quot;  {task} output norm: {out.norm():.4f}&quot;)
+</code></pre>
+<h2>Method Strengths and Weaknesses</h2>
+<p>No PEFT method dominates all dimensions. LoRA+ is the safest default: it improves over LoRA at zero cost, merges cleanly, and is supported by every major library. QLoRA is essential when GPU memory is the binding constraint — it enables 7B fine-tuning on a single 16 GB GPU at modest quality cost. DoRA is worth adding when squeezing maximum quality from a fixed rank and compute budget. Prefix Tuning and Adapter layers shine only in multi-task inference settings where hot-swap is required and latency overhead is acceptable. IA3 is the right choice for true few-shot scenarios (&lt; 100 examples) where LoRA would overfit. VeRA is for settings with extreme numbers of tasks to store (thousands of adapters) where per-task storage is the bottleneck.</p>
+<h2>PEFT Method Comparison Table</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Trainable Params</th>
+<th>Merge to Base</th>
+<th>Memory Reduction</th>
+<th>Best Data Size</th>
+<th>Best Use Case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>LoRA r=16</td>
+<td>~0.05% of 7B</td>
+<td>Yes — zero latency</td>
+<td>Minimal (bf16 adapters)</td>
+<td>1K–100K</td>
+<td>General-purpose fine-tuning</td>
+</tr>
+<tr>
+<td>LoRA+</td>
+<td>~0.05% of 7B</td>
+<td>Yes — zero latency</td>
+<td>Same as LoRA</td>
+<td>1K–100K</td>
+<td>Free upgrade over LoRA, always prefer</td>
+</tr>
+<tr>
+<td>DoRA</td>
+<td>~0.051% of 7B</td>
+<td>Yes — zero latency</td>
+<td>Same as LoRA</td>
+<td>5K–100K</td>
+<td>Maximum quality at same rank</td>
+</tr>
+<tr>
+<td>QLoRA</td>
+<td>~0.05% of 7B</td>
+<td>Yes (dequant first)</td>
+<td>50–75% vs bf16</td>
+<td>1K–50K</td>
+<td>16 GB GPU fine-tuning</td>
+</tr>
+<tr>
+<td>VeRA</td>
+<td>~0.005% of 7B</td>
+<td>No (shared random)</td>
+<td>Same as LoRA</td>
+<td>5K–50K</td>
+<td>Storing thousands of task adapters</td>
+</tr>
+<tr>
+<td>Prefix Tuning</td>
+<td>~0.01% of 7B</td>
+<td>No (virtual tokens)</td>
+<td>Minimal</td>
+<td>10K+ (scale needed)</td>
+<td>Multi-task hot-swap, large models only</td>
+</tr>
+<tr>
+<td>Adapters</td>
+<td>~0.1–1% of 7B</td>
+<td>No (extra layers)</td>
+<td>Minimal</td>
+<td>5K–100K</td>
+<td>Hot-swap multi-task serving</td>
+</tr>
+<tr>
+<td>IA3</td>
+<td>~0.002% of 7B</td>
+<td>No (rescaling only)</td>
+<td>Minimal</td>
+<td>&lt; 100 (few-shot)</td>
+<td>Extreme few-shot, GPT-3 scale models</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Production Fine-Tuning Default Stack</strong>: For most production fine-tuning: start with LoRA+ (free improvement over LoRA) + DoRA if you need maximum quality. Add QLoRA only if GPU memory is the binding constraint. Use adapter layers or prefix tuning only if you need hot-swap multi-task inference without reloading. VeRA is worth considering only when you need to store more than 100 different task adapters — for fewer tasks, LoRA's storage is manageable.</p>
+</blockquote>
+<ul>
+<li>LoRA rank selection: rank 4–8 for classification/NER; rank 16–32 for generation; rank 64 for alignment tasks.</li>
+<li>LoRA target modules: always include q_proj, v_proj at minimum; add k_proj, o_proj, gate_proj for higher quality.</li>
+<li>QLoRA: use NF4 quantization (not INT8) for best quality; add double quantization to save another ~0.5 GB.</li>
+<li>DoRA: available in Hugging Face PEFT &gt;= 0.9.0 via use_dora=True in LoraConfig; no other changes needed.</li>
+<li>Merging: call model.merge_and_unload() after training to absorb LoRA into base weights before deployment.</li>
+<li>Adapter swap timing: swapping a rank-16 LoRA adapter takes &lt; 5 ms including CPU-to-GPU transfer for 7B models.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

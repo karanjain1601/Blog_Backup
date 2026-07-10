@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Unstructured Pruning — Weight Magnitude and Gradual Pruning | Notes Backup</title>
+  <meta name="description" content="Unstructured pruning zeros individual weights by magnitude, producing sparse models. Covers global vs local pruning, the Zhu &amp; Gupta polynomial gradual schedule, prune-retrain cycles, the PyTorch prune API, GPU acceleration limitations, and the lottery ticket hypothesis connection." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Unstructured Pruning — Weight Magnitude and Gradual Pruning</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Unstructured pruning zeros individual weights by magnitude, producing sparse models. Covers global vs local pruning, the Zhu &amp; Gupta polynomial gradual schedule, prune-retrain cycles, the PyTorch prune API, GPU acceleration limitations, and the lottery ticket hypothesis connection.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Unstructured Pruning — Weight Magnitude and Gradual Pruning</h1>
+<p>Unstructured pruning removes individual weights from a neural network based on their magnitude: weights with small absolute values contribute little to the network's output and can be zeroed without large accuracy loss. Unlike structured pruning, which removes entire filters or layers, unstructured pruning is architecture-agnostic and can achieve very high sparsity (90-99%) with surprisingly small accuracy drops when combined with a gradual schedule and fine-tuning. The trade-off is that the resulting sparse weight matrices do not accelerate inference on standard GPU hardware without specialised support.</p>
+<h2>Global vs Local Magnitude Pruning</h2>
+<p>Global pruning ranks all weights across the entire network by |w_i| and prunes the bottom p% regardless of layer. This allows sparsity to concentrate in redundant layers — fully connected layers typically accumulate much higher sparsity than convolutional layers under global pruning. Local pruning applies the same ratio p% independently within each layer. Local pruning avoids layer collapse (a single layer losing too many weights) but is less accurate than global pruning at high sparsity because it cannot reallocate the sparsity budget from redundant to important layers.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.utils.prune as prune
+
+def apply_global_magnitude_pruning(model: nn.Module, sparsity: float):
+    &quot;&quot;&quot;Prune globally: rank all weights together, zero the bottom sparsity%.&quot;&quot;&quot;
+    params = [(m, 'weight') for m in model.modules()
+               if isinstance(m, (nn.Linear, nn.Conv2d))]
+    prune.global_unstructured(params, pruning_method=prune.L1Unstructured, amount=sparsity)
+    total = sum(m.weight.numel() for m, _ in params)
+    zero  = sum((m.weight == 0).sum().item() for m, _ in params)
+    print(f'Global pruning: target={sparsity:.0%}  actual={zero/total:.1%}  ({zero}/{total} zeros)')
+
+def apply_local_magnitude_pruning(model: nn.Module, sparsity: float):
+    &quot;&quot;&quot;Prune locally: zero bottom sparsity% within each layer independently.&quot;&quot;&quot;
+    for module in model.modules():
+        if isinstance(module, (nn.Linear, nn.Conv2d)):
+            prune.l1_unstructured(module, name='weight', amount=sparsity)
+    mods  = [m for m in model.modules() if isinstance(m, (nn.Linear, nn.Conv2d))]
+    total = sum(m.weight.numel() for m in mods)
+    zero  = sum((m.weight == 0).sum().item() for m in mods)
+    print(f'Local pruning:  target={sparsity:.0%}  actual={zero/total:.1%}  ({zero}/{total} zeros)')
+
+def remove_masks(model: nn.Module):
+    &quot;&quot;&quot;Make pruning permanent by removing reparameterisation masks.&quot;&quot;&quot;
+    for m in model.modules():
+        if isinstance(m, (nn.Linear, nn.Conv2d)):
+            try: prune.remove(m, 'weight')
+            except ValueError: pass
+
+model = nn.Sequential(nn.Linear(784, 256), nn.ReLU(), nn.Linear(256, 10))
+apply_global_magnitude_pruning(model, 0.7)
+remove_masks(model)
+print('prune.remove() converts weight_orig + weight_mask -&gt; weight (permanent).')
+</code></pre>
+<h2>Weight Distribution After Pruning</h2>
+<p>Before pruning, neural network weights follow an approximately Gaussian distribution centred near zero. After magnitude pruning, the distribution becomes bimodal: a sharp spike at exactly zero (the pruned weights) and a broader distribution of large-magnitude survivors. The bimodal signature can be detected by plotting weight histograms. The PyTorch prune API implements pruning via reparameterisation: it stores weight_orig (original values) and a binary weight_mask, computing weight = weight_orig * weight_mask on each forward pass. Calling prune.remove() collapses this into a single sparse weight tensor.</p>
+<h2>Gradual Pruning Schedule (Zhu &amp; Gupta 2018)</h2>
+<p>One-shot pruning — removing all target weights at once — causes a large accuracy drop that fine-tuning may not recover. Zhu &amp; Gupta (2018) proposed gradual pruning with a polynomial schedule: s(t) = s_f + (s_i - s_f)(1 - (t-t₀)/(n·Δt))³, where t₀ is the start step, n is the number of pruning steps, and Δt is the step interval. The cubic polynomial gives a slow start (minimal early pruning), aggressive middle phase, and slow finish (fine-grained tuning at high sparsity). Pruning is applied every Δt training steps, with normal gradient updates continuing between steps so the network can redistribute information after each pruning event.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.utils.prune as prune
+
+def polynomial_sparsity(step: int, t0: int, n_steps: int, delta_t: int,
+                         s_i: float = 0.0, s_f: float = 0.9) -&gt; float:
+    &quot;&quot;&quot;
+    Zhu &amp; Gupta (2018) cubic polynomial pruning schedule.
+    s(t) = s_f + (s_i - s_f) * (1 - (t - t0) / (n * delta_t))^3
+    &quot;&quot;&quot;
+    if step &lt; t0:
+        return 0.0
+    if step &gt;= t0 + n_steps * delta_t:
+        return s_f
+    progress = (step - t0) / (n_steps * delta_t)
+    return s_f + (s_i - s_f) * (1.0 - progress) ** 3
+
+def gradual_prune_step(model: nn.Module, step: int, t0: int,
+                        n_steps: int, delta_t: int, s_f: float = 0.9):
+    &quot;&quot;&quot;Apply pruning to reach the scheduled sparsity at this training step.&quot;&quot;&quot;
+    if step % delta_t != 0:
+        return 0.0  # only prune at scheduled intervals
+    current_s = polynomial_sparsity(step, t0, n_steps, delta_t, s_f=s_f)
+    if current_s &gt; 0:
+        params = [(m, 'weight') for m in model.modules()
+                   if isinstance(m, (nn.Linear, nn.Conv2d))]
+        prune.global_unstructured(params, prune.L1Unstructured, amount=current_s)
+    return current_s
+
+# Visualise schedule: t0=100, n=10, delta_t=100, s_f=0.9
+print(f'{&quot;Step&quot;:&gt;6}  {&quot;Scheduled Sparsity&quot;:&gt;20}')
+for step in [0, 100, 200, 400, 700, 1000, 1100, 1200]:
+    s = polynomial_sparsity(step, t0=100, n_steps=10, delta_t=100, s_f=0.9)
+    print(f'{step:&gt;6}  {s:&gt;20.1%}')
+</code></pre>
+<h2>Prune-Retrain Cycles and Weight Recovery</h2>
+<p>Between each scheduled pruning step, the network is trained normally via backpropagation. Pruned weights receive zero gradient (they are masked), but surviving weights can grow in magnitude to compensate. This redistribution is the key mechanism behind gradual pruning's accuracy advantage: surviving weights specialise to cover the functions of the removed ones. The learning rate during gradual pruning should be 10-30% of the original training LR — too high causes instability when the mask suddenly changes, too low prevents recovery. After reaching target sparsity, a final fine-tuning phase at 1% of original LR polishes the sparse model.</p>
+<h2>GPU Acceleration Limitations</h2>
+<p>A common misconception is that a 90% sparse model runs 10x faster. This is false for standard GPU hardware. GPU matrix multiplication is implemented as dense GEMM via cuBLAS. A weight matrix with 90% zeros still performs the full M×K×N multiply-add operations — the hardware does not skip zero multiplications. Zero weights are multiplied by activations, producing zero products that accumulate normally: wasted compute, not skipped compute. Real speedup from unstructured sparsity requires: (1) NVIDIA A100+ with N:M sparsity (50% sparsity, 2x speedup), (2) custom SpMM kernels on CPU, or (3) structured pruning that reduces matrix dimensions.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.utils.prune as prune
+import time
+
+def timed_inference(model: nn.Module, x: torch.Tensor,
+                     n_warmup: int = 5, n_runs: int = 30) -&gt; float:
+    &quot;&quot;&quot;Return average inference time (ms) over n_runs forward passes.&quot;&quot;&quot;
+    model.eval()
+    if x.is_cuda: torch.cuda.synchronize()
+    for _ in range(n_warmup):
+        with torch.no_grad(): _ = model(x)
+    if x.is_cuda: torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    for _ in range(n_runs):
+        with torch.no_grad(): _ = model(x)
+    if x.is_cuda: torch.cuda.synchronize()
+    return (time.perf_counter() - t0) / n_runs * 1000
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model  = nn.Sequential(nn.Linear(1024, 2048), nn.ReLU(), nn.Linear(2048, 10)).to(device)
+x      = torch.randn(64, 1024, device=device)
+
+dense_ms = timed_inference(model, x)
+
+params = [(m, 'weight') for m in model.modules() if isinstance(m, nn.Linear)]
+prune.global_unstructured(params, prune.L1Unstructured, amount=0.9)
+sparse_ms = timed_inference(model, x)
+
+print(f'Device: {device}')
+print(f'Dense model (0% sparsity):    {dense_ms:.3f} ms/batch')
+print(f'Sparse model (90% sparsity):  {sparse_ms:.3f} ms/batch')
+print(f'Speedup: {dense_ms/sparse_ms:.2f}x  (expected ~1.0x without hardware support)')
+print('Unstructured sparsity: zeros still participate in dense matmul on standard GPU.')
+print('Need N:M sparsity (A100 Sparse Tensor Cores) or structured pruning for speedup.')
+</code></pre>
+<h2>Accuracy vs Sparsity Curve</h2>
+<p>Empirical studies show that with gradual magnitude pruning, ResNet-20 on CIFAR-10 maintains accuracy within 1% of the baseline up to ~80% sparsity. Beyond 90%, accuracy drops steeply — the accuracy cliff. The cliff location depends on model size: larger models (ResNet-50 on ImageNet) maintain accuracy up to 95% sparsity due to higher over-parameterisation. Local pruning shifts the cliff to lower sparsity than global pruning because it cannot reallocate the budget from redundant to critical layers. Gradual pruning extends the cliff by ~5% absolute sparsity compared to one-shot pruning.</p>
+<pre><code class="language-python">import numpy as np
+
+# ResNet-20 on CIFAR-10: accuracy under different pruning strategies
+sparsity  = [0.0,  0.5,  0.7,  0.9,  0.95, 0.99]
+mag_glob  = [91.8, 91.3, 90.7, 87.9, 82.1, 60.3]  # global magnitude, one-shot
+mag_local = [91.8, 90.8, 89.5, 84.8, 76.5, 51.2]  # local magnitude, one-shot
+gradual   = [91.8, 91.6, 91.2, 89.7, 85.4, 66.8]  # gradual schedule (Zhu &amp; Gupta)
+
+print(f'{&quot;Sparsity&quot;:&gt;10}  {&quot;Global Mag&quot;:&gt;12}  {&quot;Local Mag&quot;:&gt;11}  {&quot;Gradual&quot;:&gt;9}  {&quot;Gradual Gain&quot;:&gt;14}')
+print('-' * 64)
+for s, g, l, gr in zip(sparsity, mag_glob, mag_local, gradual):
+    gain = gr - g
+    print(f'{s:&gt;10.0%}  {g:&gt;12.1f}  {l:&gt;11.1f}  {gr:&gt;9.1f}  {gain:&gt;+14.1f}')
+
+baseline = mag_glob[0]
+cliff_global  = next((s for s, a in zip(sparsity, mag_glob)  if baseline - a &gt; 2), None)
+cliff_gradual = next((s for s, a in zip(sparsity, gradual)   if baseline - a &gt; 2), None)
+print(f'\nAccuracy cliff (&gt;2pp drop): global={cliff_global:.0%}  gradual={cliff_gradual:.0%}')
+mean_benefit = np.mean([gr - g for gr, g in zip(gradual[1:], mag_glob[1:])])
+print(f'Mean accuracy benefit of gradual over one-shot: +{mean_benefit:.1f} pp')
+</code></pre>
+<h2>Lottery Ticket Hypothesis Connection</h2>
+<p>Frankle &amp; Carlin (2019) observed that within a large dense network there exist sparse subnetworks — winning tickets — that, when trained from the original weight initialisation, match the full network's accuracy. These are identified by training the full network, pruning the smallest weights, and resetting surviving weights to their initial values. Critically, the lottery ticket must be trained from the same initialisation — randomly reinitialising the surviving weights fails. Iterative magnitude pruning (IMP) is the practical algorithm: prune 20% of remaining weights per cycle, reset to original init, retrain.</p>
+<blockquote>
+<p><strong>When Unstructured Pruning Is the Right Choice</strong>: Choose unstructured pruning when: (1) targeting a CPU with a sparse linear algebra library (MKL sparse BLAS, oneDNN), (2) you have an A100+ GPU and can use 2:4 N:M sparsity for 2x throughput, (3) experimenting with lottery tickets and need extreme sparsity (&gt;90%) with minimal accuracy loss, or (4) model storage and memory footprint are the bottleneck rather than inference latency. For raw GPU inference speedup on standard hardware, structured pruning or INT8 quantisation are more effective choices.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Sparsity</th>
+<th>Accuracy (ResNet-20 CIFAR-10)</th>
+<th>Non-Zero Params</th>
+<th>Model Size</th>
+<th>GPU Speedup</th>
+<th>CPU Speedup (SpMM)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0% (dense)</td>
+<td>91.8%</td>
+<td>100%</td>
+<td>1.0x</td>
+<td>1.0x</td>
+<td>1.0x</td>
+</tr>
+<tr>
+<td>50%</td>
+<td>91.3%</td>
+<td>50%</td>
+<td>~0.6x</td>
+<td>~1.0x (no benefit)</td>
+<td>~1.2x</td>
+</tr>
+<tr>
+<td>70%</td>
+<td>90.7%</td>
+<td>30%</td>
+<td>~0.4x</td>
+<td>~1.0x</td>
+<td>~1.8x</td>
+</tr>
+<tr>
+<td>90%</td>
+<td>87.9%</td>
+<td>10%</td>
+<td>~0.2x</td>
+<td>~1.0x</td>
+<td>~3.5x</td>
+</tr>
+<tr>
+<td>90% N:M (A100)</td>
+<td>91.2%</td>
+<td>50% (structured)</td>
+<td>~0.6x</td>
+<td>~2.0x</td>
+<td>N/A</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>Global pruning concentrates sparsity in over-parameterised layers; local pruning applies a uniform ratio per layer.</li>
+<li>PyTorch prune API: prune.l1_unstructured for local, prune.global_unstructured for global magnitude pruning.</li>
+<li>prune.remove() collapses weight_orig + weight_mask into a single sparse weight tensor permanently.</li>
+<li>Zhu &amp; Gupta cubic schedule: slow start, aggressive middle, slow finish — better than linear or step schedules.</li>
+<li>Accuracy cliff: above ~80-90% sparsity for most architectures, accuracy drops sharply with magnitude pruning.</li>
+<li>Lottery ticket: winning ticket subnetworks require the exact original initialisation — random reset fails.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

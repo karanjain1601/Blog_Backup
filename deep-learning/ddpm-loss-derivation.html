@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DDPM Loss — VLB, Simplified Objective, and x₀ vs ε Prediction | Notes Backup</title>
+  <meta name="description" content="Derives the DDPM training objective from the ELBO: each KL term is a Gaussian-vs-Gaussian comparison with tractable posterior. Ho et al. simplify to predict noise epsilon. Covers x0- vs eps- vs v-prediction, SNR weighting, and min-SNR-gamma for stable training." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>DDPM Loss — VLB, Simplified Objective, and x₀ vs ε Prediction</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Derives the DDPM training objective from the ELBO: each KL term is a Gaussian-vs-Gaussian comparison with tractable posterior. Ho et al. simplify to predict noise epsilon. Covers x0- vs eps- vs v-prediction, SNR weighting, and min-SNR-gamma for stable training.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>DDPM Loss — VLB, Simplified Objective, and x₀ vs ε Prediction</h1>
+<p>The DDPM training objective is derived from the evidence lower bound (ELBO) on log p(x_0). Because the forward process is a fixed Markov chain with Gaussian conditionals, every term in the ELBO reduces to a KL divergence between Gaussians, which has a closed-form expression. Ho et al. further simplify by dropping reweighting and predicting noise ε instead of the mean, arriving at a standard MSE loss. Understanding the full derivation illuminates why ε-prediction works, how SNR shapes the loss landscape, and how min-SNR weighting improves training stability.</p>
+<h2>Evidence Lower Bound (VLB) for Diffusion Models</h2>
+<p>The log-likelihood log p_θ(x_0) is intractable. Instead we maximize the ELBO: L = E_q[log p_θ(x_0|x_1)] - KL[q(x_T|x_0) || p(x_T)] - Σ_{t=2}^{T} E_q[KL[q(x_{t-1}|x_t, x_0) || p_θ(x_{t-1}|x_t)]]. The first term is the reconstruction loss, the second is a boundary term (fixed, since p(x_T) = N(0,I) and q(x_T|x_0) ≈ N(0,I) for large T), and the sum of KL terms is the main training signal. Each KL is between two Gaussians: the tractable posterior q(x_{t-1}|x_t, x_0) and the learned p_θ(x_{t-1}|x_t).</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def kl_gaussian(mu1, log_var1, mu2, log_var2):
+    &quot;&quot;&quot;KL(N(mu1,exp(lv1)) || N(mu2,exp(lv2))) -- closed form.&quot;&quot;&quot;
+    return 0.5 * (log_var2 - log_var1
+                  + (log_var1.exp() + (mu1 - mu2)**2) / log_var2.exp() - 1)
+
+def q_posterior(x0, xt, t, alpha_bar, beta):
+    &quot;&quot;&quot;Tractable posterior q(x_{t-1}|x_t,x_0): mean and log-variance.&quot;&quot;&quot;
+    alpha  = 1.0 - beta
+    ab_t   = alpha_bar[t]
+    ab_p   = alpha_bar[t - 1] if t &gt; 0 else torch.ones_like(ab_t)
+    c1 = ab_p.sqrt() * beta[t] / (1 - ab_t)
+    c2 = alpha[t].sqrt() * (1 - ab_p) / (1 - ab_t)
+    mu_q   = c1 * x0 + c2 * xt
+    var_q  = beta[t] * (1 - ab_p) / (1 - ab_t)
+    return mu_q, var_q.log()
+
+def vlb_term(model, x0, t, alpha_bar, beta):
+    &quot;&quot;&quot;Single VLB term L_t = E[KL(q(x_{t-1}|x_t,x0) || p_theta(x_{t-1}|x_t))].&quot;&quot;&quot;
+    noise = torch.randn_like(x0)
+    ab_t  = alpha_bar[t]
+    xt    = ab_t.sqrt() * x0 + (1 - ab_t).sqrt() * noise
+    mu_q, lv_q = q_posterior(x0, xt, t, alpha_bar, beta)
+    t_b   = torch.full((x0.shape[0],), t, dtype=torch.long)
+    eps_p = model(xt, t_b)
+    x0_p  = (xt - (1 - ab_t).sqrt() * eps_p) / ab_t.sqrt()
+    mu_p, _ = q_posterior(x0_p.detach(), xt, t, alpha_bar, beta)
+    kl = kl_gaussian(mu_q, lv_q, mu_p, lv_q)
+    return kl.mean()
+
+print(&quot;VLB = E[log p(x0|x1)] - KL[q(xT|x0)||p(xT)]&quot;)
+print(&quot;    - sum_{t=2}^{T} E[KL[q(x_{t-1}|x_t,x0) || p_theta(x_{t-1}|x_t)]]&quot;)
+print(&quot;Each KL is Gaussian-vs-Gaussian -- closed form, no MC needed&quot;)
+</code></pre>
+<h2>Tractable Posterior q(x_{t-1} | x_t, x_0)</h2>
+<p>Conditioning on x_0 makes the reverse posterior tractable. By Bayes' rule and the Markov property: q(x_{t-1} | x_t, x_0) ∝ q(x_t | x_{t-1}) q(x_{t-1} | x_0). Both factors are Gaussian, so their product is also Gaussian. The resulting posterior has mean μ̃<em t-1="t-1">t = (√α̅</em> β_t x_0 + √α_t (1-α̅<em t-1="t-1">{t-1}) x_t) / (1-α̅_t) and variance β̃_t = β_t (1-α̅</em>) / (1-α̅_t). Crucially, β̃_t depends only on the fixed schedule, not on the data. This means the KL term simplifies to a comparison of means only (the variances match), reducing each L_t to a weighted MSE between μ̃_t and μ_θ.</p>
+<h2>Simplified ε-Prediction Loss</h2>
+<p>Reparameterizing μ_θ in terms of the predicted noise ε_θ: μ_θ(x_t, t) = (x_t - β_t / √(1-α̅<em simple="simple">t) ε_θ(x_t, t)) / √α_t. Substituting into the KL, each L_t becomes proportional to ||ε - ε_θ(x_t, t)||^2 with a weight β_t² / (2α_t(1-α̅_t)). Ho et al. drop this per-timestep weight (set all weights to 1) and find that the unweighted loss: L</em>[||ε - ε_θ(√α̅_t x_0 + √(1-α̅_t)ε, t)||^2] achieves better sample quality. The weight dropping implicitly up-weights high-noise timesteps (large t, small SNR) relative to the VLB.} = E_{t,x_0,ε</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def ddpm_loss_simple(model, x0, alpha_bar, device='cpu'):
+    &quot;&quot;&quot;
+    Simplified DDPM loss (Ho et al. 2020, Eq. 14).
+    L_simple = E[||eps - eps_theta(sqrt(ab_t)*x0 + sqrt(1-ab_t)*eps, t)||^2]
+    Uniform weighting over t -- drops VLB weights, empirically better.
+    &quot;&quot;&quot;
+    B   = x0.shape[0]
+    t   = torch.randint(0, len(alpha_bar), (B,), device=device)
+    eps = torch.randn_like(x0)
+    ab  = alpha_bar[t].view(-1, 1, 1, 1)
+    xt  = ab.sqrt() * x0 + (1 - ab).sqrt() * eps
+    eps_hat = model(xt, t)
+    return F.mse_loss(eps_hat, eps)
+
+import torch
+T         = 1000
+beta      = torch.linspace(1e-4, 0.02, T)
+alpha_bar = torch.cumprod(1 - beta, dim=0)
+model     = SimpleUNet()
+optimizer = torch.optim.Adam(model.parameters(), lr=2e-4)
+
+for step in range(3):
+    x0   = torch.randn(4, 3, 32, 32)
+    loss = ddpm_loss_simple(model, x0, alpha_bar)
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    print(f&quot;Step {step}: L_simple={loss.item():.4f}&quot;)
+print(&quot;Uniform t weighting: implicitly up-weights high-noise (large t) terms&quot;)
+</code></pre>
+<h2>x₀ vs ε vs v Prediction</h2>
+<p>Three parameterizations are equivalent at infinite capacity but differ in bias and gradient scaling in practice. ε-prediction predicts the noise: target ε has unit scale, stable at high noise (large t), but at low noise (small t, high SNR) the loss is dominated by fine details. x_0-prediction predicts the clean image directly: natural at low noise, but noisy at high noise where x_0 is barely recoverable. v-prediction (Salimans &amp; Ho, 2022) predicts v = √α̅_t ε - √(1-α̅_t) x_0, an interpolation that balances well across all noise levels. Imagen and latent diffusion models often use v-prediction for high resolution.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def loss_eps(model, x0, alpha_bar):
+    &quot;&quot;&quot;eps-prediction: predict the added noise.&quot;&quot;&quot;
+    B, t  = x0.shape[0], torch.randint(0, len(alpha_bar), (x0.shape[0],))
+    eps   = torch.randn_like(x0)
+    ab    = alpha_bar[t].view(-1, 1, 1, 1)
+    xt    = ab.sqrt() * x0 + (1 - ab).sqrt() * eps
+    return F.mse_loss(model(xt, t), eps)
+
+def loss_x0(model, x0, alpha_bar):
+    &quot;&quot;&quot;x0-prediction: predict the original clean image.&quot;&quot;&quot;
+    B, t  = x0.shape[0], torch.randint(0, len(alpha_bar), (x0.shape[0],))
+    eps   = torch.randn_like(x0)
+    ab    = alpha_bar[t].view(-1, 1, 1, 1)
+    xt    = ab.sqrt() * x0 + (1 - ab).sqrt() * eps
+    return F.mse_loss(model(xt, t), x0)
+
+def loss_v(model, x0, alpha_bar):
+    &quot;&quot;&quot;v-prediction: v = sqrt(ab_t)*eps - sqrt(1-ab_t)*x0.&quot;&quot;&quot;
+    B, t  = x0.shape[0], torch.randint(0, len(alpha_bar), (x0.shape[0],))
+    eps   = torch.randn_like(x0)
+    ab    = alpha_bar[t].view(-1, 1, 1, 1)
+    xt    = ab.sqrt() * x0 + (1 - ab).sqrt() * eps
+    v_tgt = ab.sqrt() * eps - (1 - ab).sqrt() * x0
+    return F.mse_loss(model(xt, t), v_tgt)
+
+T = 1000
+beta = torch.linspace(1e-4, 0.02, T)
+alpha_bar = torch.cumprod(1 - beta, dim=0)
+model = SimpleUNet()
+
+for name, fn in [('eps-pred', loss_eps), ('x0-pred ', loss_x0), ('v-pred  ', loss_v)]:
+    losses = [fn(model, torch.randn(4, 3, 32, 32), alpha_bar).item() for _ in range(4)]
+    print(f&quot;{name}: mean loss = {sum(losses)/len(losses):.4f}&quot;)
+</code></pre>
+<h2>Signal-to-Noise Ratio Perspective</h2>
+<p>The SNR at timestep t is SNR_t = α̅<em t-1="t-1">t / (1 - α̅_t). The full VLB weights each L_t by SNR_t - SNR</em> implicitly assigns weight 1 to all timesteps, which means high-SNR (low-noise) timesteps are under-weighted compared to the VLB and low-SNR (high-noise) timesteps are over-weighted. Under x_0-prediction, the implicit weight is proportional to SNR_t, severely up-weighting low-noise steps. The VLB and simplified losses have different empirical behavior because they put different importance on different noise levels.} ≈ ∂SNR/∂t. Under ε-prediction, L_{simple</p>
+<blockquote>
+<p><strong>SNR Weighting in Diffusion Loss</strong>: VLB weight for L_t under x_0-prediction is proportional to SNR_t, which spans many orders of magnitude: SNR at t=1 (near-clean) can be ~10,000 while SNR at t=999 (near-noise) is ~0.0001. This 10^8 dynamic range makes the VLB extremely sensitive to low-noise terms and numerically unstable. The simplified loss with uniform weights avoids this but loses the theoretical grounding of the ELBO.</p>
+</blockquote>
+<h2>Min-SNR Weighting</h2>
+<p>Min-SNR-γ (Hang et al., 2023) proposes a principled compromise: weight each L_t by min(SNR_t, γ) / SNR_t. This caps the contribution of low-noise (high-SNR) timesteps to at most γ times the weight of high-noise steps. With γ=5, the loss becomes more uniform than x_0-prediction while still respecting the SNR structure. Empirically this reduces the gap between VLB and simplified objectives and stabilizes training, especially for large models.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def compute_snr(alpha_bar):
+    &quot;&quot;&quot;SNR_t = alpha_bar_t / (1 - alpha_bar_t).&quot;&quot;&quot;
+    return alpha_bar / (1.0 - alpha_bar)
+
+def min_snr_loss(model, x0, alpha_bar, gamma=5.0):
+    &quot;&quot;&quot;
+    Min-SNR-gamma loss (Hang et al. 2023).
+    weight_t = min(SNR_t, gamma) / SNR_t
+    Caps influence of high-SNR (low-noise) timesteps.
+    &quot;&quot;&quot;
+    B   = x0.shape[0]
+    t   = torch.randint(0, len(alpha_bar), (B,))
+    eps = torch.randn_like(x0)
+    ab  = alpha_bar[t].view(-1, 1, 1, 1)
+    xt  = ab.sqrt() * x0 + (1 - ab).sqrt() * eps
+    eps_hat = model(xt, t)
+    mse  = F.mse_loss(eps_hat, eps, reduction='none').mean(dim=[1, 2, 3])
+    snr  = compute_snr(alpha_bar[t])
+    w    = torch.minimum(snr, torch.full_like(snr, gamma)) / snr
+    return (w * mse).mean()
+
+T    = 1000
+beta = torch.linspace(1e-4, 0.02, T)
+ab   = torch.cumprod(1 - beta, dim=0)
+snr  = compute_snr(ab)
+model = SimpleUNet()
+x0    = torch.randn(8, 3, 32, 32)
+
+l_simple  = F.mse_loss(model(ab[500].sqrt()*x0, torch.full((8,),500,dtype=torch.long)), torch.randn_like(x0))
+l_minsnr  = min_snr_loss(model, x0, ab, gamma=5.0)
+print(f&quot;Simple loss:    {l_simple.item():.4f}&quot;)
+print(f&quot;Min-SNR-5 loss: {l_minsnr.item():.4f}&quot;)
+print(f&quot;SNR range: {snr.min():.5f} (t={T-1}) to {snr.max():.1f} (t=0)&quot;)
+print(&quot;Min-SNR-5: weights capped at gamma=5 -- reduces 10^8 dynamic range&quot;)
+</code></pre>
+<h2>Objective Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Objective</th>
+<th>Network output</th>
+<th>Implicit weight</th>
+<th>High-noise behavior</th>
+<th>Low-noise behavior</th>
+<th>Used in</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Full VLB (eps-pred)</td>
+<td>Noise eps</td>
+<td>SNR_t - SNR_{t-1}</td>
+<td>Accurate, high variance</td>
+<td>Accurate, high weight</td>
+<td>DDPM theoretical analysis</td>
+</tr>
+<tr>
+<td>L_simple (eps-pred)</td>
+<td>Noise eps</td>
+<td>Uniform (1 per t)</td>
+<td>Stable unit-scale targets</td>
+<td>Under-weighted vs VLB</td>
+<td>DDPM, DDPM++, most models</td>
+</tr>
+<tr>
+<td>x0-prediction</td>
+<td>Clean image x0</td>
+<td>Proportional to SNR_t</td>
+<td>Noisy -- low SNR makes x0 hard</td>
+<td>Natural and stable</td>
+<td>Some improved DDPMs</td>
+</tr>
+<tr>
+<td>v-prediction</td>
+<td>v = sqrt(ab) eps - sqrt(1-ab) x0</td>
+<td>Balanced across SNR</td>
+<td>Handles well (v ~ eps)</td>
+<td>Handles well (v ~ -x0)</td>
+<td>Imagen, latent diffusion</td>
+</tr>
+<tr>
+<td>Min-SNR-gamma</td>
+<td>Noise eps</td>
+<td>min(SNR_t, gamma)/SNR_t</td>
+<td>Similar to simple</td>
+<td>Capped contribution</td>
+<td>SD3, improved training</td>
+</tr>
+</tbody>
+</table>
+<p>The choice of prediction target and loss weighting significantly affects training dynamics, final sample quality, and the difficulty of the optimization landscape. ε-prediction with L_{simple} is the dominant choice for its simplicity and empirical performance. v-prediction is preferred for high-resolution synthesis and cascaded diffusion models where SNR spans a very wide range. Min-SNR weighting is a drop-in improvement applicable to any prediction target.</p>
+<ul>
+<li>VLB: principled ELBO with per-t weights -- theoretically grounded but high variance in practice.</li>
+<li>L_simple: drop VLB weights, uniform weighting -- simpler and empirically better (Ho et al.).</li>
+<li>eps vs x0: mathematically equivalent, differ in implicit SNR weighting and training stability.</li>
+<li>v-prediction: interpolates eps and x0, balanced at all noise levels, preferred for high-res.</li>
+<li>Min-SNR-gamma: caps SNR weight at gamma -- reduces 10^8 dynamic range to O(gamma) range.</li>
+<li>Key insight: the choice of parameterization encodes an implicit prior on which noise levels matter most.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

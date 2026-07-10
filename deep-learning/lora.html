@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LoRA — Low-Rank Adaptation for Parameter-Efficient LLM Fine-Tuning | Notes Backup</title>
+  <meta name="description" content="Deep dive into LoRA (Hu et al., 2021): freeze pretrained weights W0, inject low-rank perturbation ΔW=BA, scale by α/r, and merge at inference for zero overhead. Covers math, scratch implementation, PEFT integration, weight merging, and rank ablation." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>LoRA — Low-Rank Adaptation for Parameter-Efficient LLM Fine-Tuning</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Deep dive into LoRA (Hu et al., 2021): freeze pretrained weights W0, inject low-rank perturbation ΔW=BA, scale by α/r, and merge at inference for zero overhead. Covers math, scratch implementation, PEFT integration, weight merging, and rank ablation.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>LoRA — Low-Rank Adaptation for Parameter-Efficient LLM Fine-Tuning</h1>
+<p>LoRA (Low-Rank Adaptation, Hu et al. 2021) is the dominant parameter-efficient fine-tuning (PEFT) method for LLMs. Instead of updating all 7B+ parameters of a pretrained model, LoRA freezes the original weights W₀ and injects a trainable low-rank perturbation ΔW = BA into each target layer. The entire update is parameterized by two small matrices — B ∈ ℝ^(d×r) and A ∈ ℝ^(r×k) — where r ≪ min(d, k). This yields a 10,000× reduction in trainable parameters with near-zero quality loss on most tasks.</p>
+<h2>Motivation and Background</h2>
+<p>Full fine-tuning a 7B model requires storing a separate 14GB checkpoint per task — infeasible at scale. LoRA's key hypothesis (supported by Aghajanyan et al. 2020) is that weight updates during fine-tuning have a low intrinsic rank: the delta ΔW lives in a low-dimensional subspace even though W₀ is high-dimensional. LoRA makes this explicit by constraining ΔW = BA where rank(BA) ≤ r. At inference, BA can be merged into W₀ eliminating all adapter overhead: W_merged = W₀ + (α/r)·BA.</p>
+<p>$$h = W_0 x + \Delta W x = W_0 x + \frac{\alpha}{r} B A x,\quad B \in \mathbb{R}^{d \times r},\ A \in \mathbb{R}^{r \times k},\ r \ll \min(d,k)$$</p>
+<h2>LoRA Architecture and Key Parameters</h2>
+<p>The forward pass runs the frozen base W₀ and the low-rank branch BA in parallel, then sums their outputs scaled by α/r. Initialization: A ~ N(0, σ²) (Kaiming uniform in practice), B = 0 — so ΔW = 0 at the start of training, preserving the pretrained model's behavior exactly. The scaling α/r decouples rank from effective learning rate: keeping α fixed while searching over r makes rank a pure capacity knob.</p>
+<ul>
+<li>rank r: expressivity of the adapter — r=4,8,16,32 cover most tasks; diminishing returns after r=32</li>
+<li>alpha α: scaling constant; setting α=2r keeps the effective step size of ΔW constant across rank choices</li>
+<li>target_modules: which weight matrices to adapt — Q and V projections are the default; adding K, O, up, down, gate improves performance at higher param cost</li>
+<li>lora_dropout: regularization applied to adapter inputs — 0.05 to 0.1 is typical; helps with smaller datasets</li>
+<li>bias: whether to train bias parameters alongside adapters — 'none' is the standard default for LoRA</li>
+</ul>
+<h2>LoRA Layer — Implementation from Scratch</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import math
+
+class LoRALayer(nn.Module):
+    &quot;&quot;&quot;Low-Rank Adaptation: h = W0 @ x + (alpha/r) * B @ A @ x.&quot;&quot;&quot;
+
+    def __init__(self, in_features: int, out_features: int,
+                 rank: int = 4, alpha: float = 16.0, dropout: float = 0.0):
+        super().__init__()
+        self.rank = rank
+        self.alpha = alpha
+        self.scaling = alpha / rank
+
+        # A ~ Kaiming uniform, B = 0 guarantees delta_W = 0 at training start
+        self.lora_A = nn.Parameter(torch.empty(rank, in_features))
+        self.lora_B = nn.Parameter(torch.zeros(out_features, rank))
+        self.dropout = nn.Dropout(p=dropout)
+        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+
+    def forward(self, x: torch.Tensor, pretrained_weight: torch.Tensor) -&gt; torch.Tensor:
+        # Frozen base path: W0 @ x
+        base_out = x @ pretrained_weight.T
+        # LoRA branch: (alpha/r) * B @ A @ x
+        lora_out = self.dropout(x) @ self.lora_A.T @ self.lora_B.T
+        return base_out + self.scaling * lora_out
+
+# Test with a typical attention Q-projection (d_model=768)
+layer = LoRALayer(in_features=768, out_features=768, rank=8, alpha=16)
+x = torch.randn(2, 10, 768)  # batch=2, seq_len=10, d_model=768
+W0 = nn.Linear(768, 768, bias=False).weight.data
+output = layer(x, W0)
+print(f&quot;Output shape: {output.shape}&quot;)
+print(f&quot;Trainable params: {sum(p.numel() for p in layer.parameters()):,}&quot;)
+</code></pre>
+<p>B = 0 at initialization is non-negotiable: it ensures the adapted model is identical to the pretrained model before any gradient updates, making the fine-tuning stable and predictable. A is initialized with Kaiming uniform rather than pure Gaussian to match PyTorch's Linear layer initialization, which provides better gradient flow in early training steps.</p>
+<h2>LoRA with HuggingFace PEFT</h2>
+<pre><code class="language-python">from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import LoraConfig, get_peft_model, TaskType
+import torch
+
+model_name = &quot;meta-llama/Llama-2-7b-hf&quot;
+model = AutoModelForCausalLM.from_pretrained(
+    model_name,
+    torch_dtype=torch.float16,
+    device_map=&quot;auto&quot;,
+)
+
+# LoRA configuration targeting Q, K, V, O attention projections
+lora_config = LoraConfig(
+    task_type=TaskType.CAUSAL_LM,
+    r=16,                    # Rank of the update matrices
+    lora_alpha=32,           # Scaling: effective factor alpha/r = 2.0
+    target_modules=[&quot;q_proj&quot;, &quot;v_proj&quot;, &quot;k_proj&quot;, &quot;o_proj&quot;],
+    lora_dropout=0.05,
+    bias=&quot;none&quot;,
+)
+
+peft_model = get_peft_model(model, lora_config)
+
+# Report parameter efficiency
+total = sum(p.numel() for p in peft_model.parameters())
+trainable = sum(p.numel() for p in peft_model.parameters() if p.requires_grad)
+print(f&quot;Total parameters:     {total:,}&quot;)
+print(f&quot;Trainable parameters: {trainable:,}&quot;)
+print(f&quot;Trainable fraction:   {100 * trainable / total:.4f}%&quot;)
+peft_model.print_trainable_parameters()
+</code></pre>
+<p>For a 7B LLaMA model with r=16 targeting Q, K, V, O across 32 transformer layers: trainable params ≈ 4 × 2 × 4096 × 16 × 32 = 134M, roughly 1.9% of 7B total. Targeting only Q and V halves this to ~67M (0.96%). The PEFT library handles adapter injection, weight freezing, and checkpoint management automatically via get_peft_model().</p>
+<h2>Weight Merging for Zero-Overhead Inference</h2>
+<pre><code class="language-python">import torch
+from peft import PeftModel
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+# Load base model and LoRA adapter separately
+base_model = AutoModelForCausalLM.from_pretrained(
+    &quot;meta-llama/Llama-2-7b-hf&quot;,
+    torch_dtype=torch.float16,
+    device_map=&quot;auto&quot;,
+)
+peft_model = PeftModel.from_pretrained(base_model, &quot;./lora-adapter-checkpoint&quot;)
+
+# Measure outputs before merging
+tokenizer = AutoTokenizer.from_pretrained(&quot;meta-llama/Llama-2-7b-hf&quot;)
+inputs = tokenizer(&quot;Hello, world!&quot;, return_tensors=&quot;pt&quot;).to(&quot;cuda&quot;)
+with torch.no_grad():
+    out_peft = peft_model(**inputs).logits
+
+# Merge: W_merged = W0 + (alpha/r) * B @ A  (done offline once)
+merged_model = peft_model.merge_and_unload()
+with torch.no_grad():
+    out_merged = merged_model(**inputs).logits
+
+# Outputs are numerically identical within fp16 rounding
+diff = (out_peft - out_merged).abs().max().item()
+print(f&quot;Max logit difference after merge: {diff:.2e}&quot;)  # ~1e-5
+merged_model.save_pretrained(&quot;./merged-model&quot;)
+print(&quot;Merged model saved - inference has zero LoRA overhead&quot;)
+</code></pre>
+<p>merge_and_unload() iterates over all LoRA layers and computes W_merged = W₀ + (α/r)·BA in place, then removes the adapter modules. The resulting model has identical architecture to the original pretrained model — no extra parameters, no extra compute, no latency penalty. The ~1e-5 maximum logit difference is pure fp16 rounding noise, not a correctness issue.</p>
+<h2>Rank Ablation Study</h2>
+<pre><code class="language-python">import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import LoraConfig, get_peft_model, TaskType
+from datasets import load_dataset
+
+def count_trainable(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+def run_rank_ablation(base_model_name: str, ranks: list) -&gt; dict:
+    &quot;&quot;&quot;Train LoRA at different ranks; report trainable params and eval metrics.&quot;&quot;&quot;
+    results = {}
+    tokenizer = AutoTokenizer.from_pretrained(base_model_name)
+    tokenizer.pad_token = tokenizer.eos_token
+
+    for r in ranks:
+        model = AutoModelForCausalLM.from_pretrained(
+            base_model_name, torch_dtype=torch.float16, device_map=&quot;auto&quot;
+        )
+        config = LoraConfig(
+            task_type=TaskType.CAUSAL_LM, r=r, lora_alpha=r * 2,
+            target_modules=[&quot;q_proj&quot;, &quot;v_proj&quot;], lora_dropout=0.05,
+        )
+        peft_model = get_peft_model(model, config)
+        trainable = count_trainable(peft_model)
+        # ... training and evaluation on downstream task omitted ...
+        print(f&quot;rank={r:2d} | trainable={trainable:&gt;8,} | eval_loss=&lt;run training&gt;&quot;)
+        results[r] = {&quot;trainable_params&quot;: trainable}
+    return results
+
+ranks = [1, 2, 4, 8, 16, 32]
+results = run_rank_ablation(&quot;meta-llama/Llama-2-7b-hf&quot;, ranks)
+for r, info in results.items():
+    print(f&quot;r={r:2d}: {info['trainable_params']:,} trainable params&quot;)
+</code></pre>
+<p>Empirical findings across instruction-following benchmarks: r=1 is often sufficient for simple style transfer tasks. r=8 to r=16 is the sweet spot for general instruction following. r=32 helps for complex reasoning (code, math) where the update subspace is larger. Beyond r=64, LoRA approaches the cost of full fine-tuning with diminishing returns — at that point, full fine-tuning or large-rank PEFT alternatives are worth considering.</p>
+<table>
+<thead>
+<tr>
+<th>Rank (r)</th>
+<th>Trainable Params (M)</th>
+<th>% of 7B Total</th>
+<th>Typical Task Suitability</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>4</td>
+<td>8.4</td>
+<td>0.12%</td>
+<td>Narrow domain adaptation, small datasets (&lt;5K examples)</td>
+</tr>
+<tr>
+<td>8</td>
+<td>16.8</td>
+<td>0.24%</td>
+<td>General instruction following, chat — balanced default</td>
+</tr>
+<tr>
+<td>16</td>
+<td>33.6</td>
+<td>0.48%</td>
+<td>Multi-task, instruction + chat — recommended starting point</td>
+</tr>
+<tr>
+<td>32</td>
+<td>67.1</td>
+<td>0.96%</td>
+<td>Complex reasoning, coding, math — larger datasets (&gt;50K)</td>
+</tr>
+<tr>
+<td>64</td>
+<td>134.2</td>
+<td>1.92%</td>
+<td>Near-full-finetune quality — use with large datasets (100K+)</td>
+</tr>
+</tbody>
+</table>
+<h2>Practical Guidelines and Best Practices</h2>
+<p>Start with r=16, alpha=32, target Q and V projections, learning rate 2e-4 with cosine decay, and 3 epochs. If the model underfits (eval loss plateaus high), increase rank or add K, O, and FFN target modules. If it overfits (train loss falls but eval loss rises), reduce rank or add dropout. Always inspect the adapter checkpoint size — it should be under 100MB for r=16 on a 7B model.</p>
+<ul>
+<li>Start small: r=16 covers most tasks — scale up only when downstream performance plateaus</li>
+<li>Set alpha=2*rank to keep the adapter update scale constant across rank sweeps</li>
+<li>Use a learning rate 5-10x higher than full fine-tuning (2e-4 vs 2e-5) — the adapter is randomly initialized</li>
+<li>Save only adapter weights with peft_model.save_pretrained() — saves ~100x storage vs full model checkpoints</li>
+<li>For multi-task serving: store separate LoRA adapters (few MB each) and hot-swap them at inference time</li>
+<li>Merge and unload before deployment to eliminate all runtime overhead</li>
+</ul>
+<blockquote>
+<p><strong>Alpha/r Scaling Insight</strong>: LoRA's α/r scaling factor is crucial — keeping α constant while varying r ensures the effective learning rate of ΔW = (α/r)BA stays consistent regardless of rank, making rank hyperparameter searches more interpretable. For example, with α=16: r=4 → scaling=4.0, r=8 → scaling=2.0, r=16 → scaling=1.0. Using α=2r keeps scaling=2.0 across all ranks, decoupling rank from effective step size and making rank a pure capacity knob.</p>
+</blockquote>
+<p>LoRA remains the gold standard PEFT method because of its simplicity, zero inference overhead after merging, and strong empirical performance across NLP benchmarks. Extensions like QLoRA (4-bit quantization + LoRA), DoRA (weight decomposition into magnitude and direction), and LoRA+ (asymmetric learning rates for A vs B) have pushed the Pareto frontier further, but vanilla LoRA is still the first tool to reach for when adapting a pretrained LLM to a new task.</p>
+    </article>
+  </main>
+</body>
+</html>

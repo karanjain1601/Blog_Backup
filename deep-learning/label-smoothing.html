@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Label Smoothing — Soft Targets and Calibration | Notes Backup</title>
+  <meta name="description" content="Derive label smoothing from first principles, measure calibration via ECE and reliability diagrams, implement temperature scaling for post-hoc calibration, and compare calibration methods." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Label Smoothing — Soft Targets and Calibration</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Derive label smoothing from first principles, measure calibration via ECE and reliability diagrams, implement temperature scaling for post-hoc calibration, and compare calibration methods.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Label Smoothing — Soft Targets and Calibration</h1>
+<p>Hard one-hot targets [0, 0, 1, 0, ...] train the model to output log(0) for incorrect classes, pushing the logit for the correct class toward +∞ relative to others. This makes the model overconfident: at test time it assigns probabilities close to 1.0 even for difficult examples it should be uncertain about. Label smoothing (Szegedy et al. 2016, Inception V3) replaces hard targets with soft targets, capping the maximum probability the model is trained to assign and improving calibration significantly.</p>
+<h2>Label Smoothing Formula</h2>
+<p>Label smoothing with parameter ε ∈ [0, 1) replaces: hard target yᵢ = 1 → ỹᵢ = 1 − ε, hard target yᵢ = 0 → ỹᵢ = ε/(K−1) where K is the number of classes. The smoothed cross-entropy is: CE_smooth = (1−ε) · CE(hard target) + ε · CE(uniform target) = −Σᵢ ỹᵢ · log(pᵢ). Equivalently: CE_smooth = CE(hard) − ε · (CE(hard) − H(uniform)) where H(uniform) = log(K) is a constant. The KL divergence interpretation: label smoothing minimizes KL(ỹ ‖ p) instead of KL(y ‖ p), which prevents the model from fitting the extremely peaked distribution required by hard targets.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+def label_smoothing_loss(logits, targets, eps=0.1, reduction='mean'):
+    n_classes = logits.size(-1)
+    # Soft target: 1-eps for correct class, eps/(K-1) for others
+    with torch.no_grad():
+        smooth_targets = torch.full_like(logits, eps / (n_classes - 1))
+        smooth_targets.scatter_(1, targets.unsqueeze(1), 1.0 - eps)
+    log_probs = F.log_softmax(logits, dim=-1)
+    loss = -(smooth_targets * log_probs).sum(dim=-1)
+    return loss.mean() if reduction == 'mean' else loss
+
+# Compare with PyTorch built-in
+torch.manual_seed(42)
+logits  = torch.randn(32, 10)
+targets = torch.randint(0, 10, (32,))
+eps = 0.1
+
+loss_scratch = label_smoothing_loss(logits, targets, eps=eps)
+ce_builtin   = nn.CrossEntropyLoss(label_smoothing=eps)
+loss_builtin = ce_builtin(logits, targets)
+
+print(f'Scratch label smoothing loss : {loss_scratch.item():.6f}')
+print(f'PyTorch built-in LS loss     : {loss_builtin.item():.6f}')
+print(f'Difference                   : {abs(loss_scratch.item()-loss_builtin.item()):.2e}')
+
+hard_ce = nn.CrossEntropyLoss()(logits, targets)
+print(f'Hard CE loss                 : {hard_ce.item():.6f}')
+print(f'Label smoothing reduces loss by discouraging overconfidence.')
+</code></pre>
+<h2>Calibration and Overconfidence</h2>
+<p>A perfectly calibrated model satisfies: P(correct | confidence = p) = p for all p. In other words, when the model says it is 80% confident, it should be correct 80% of the time. Models trained with hard targets are systematically overconfident: they predict 95%+ confidence on samples where their actual accuracy is much lower. A reliability diagram plots model confidence (x-axis) against observed accuracy (y-axis) — a perfectly calibrated model falls on the diagonal. Models trained with label smoothing stay much closer to the diagonal.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+
+np.random.seed(42)
+torch.manual_seed(42)
+X, y = make_classification(n_samples=3000, n_features=20, n_classes=5,
+                            n_informative=15, random_state=42)
+X = torch.tensor(X, dtype=torch.float32)
+y = torch.tensor(y, dtype=torch.long)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.4, random_state=0)
+
+def train_model(eps, epochs=60):
+    net = nn.Sequential(nn.Linear(20, 64), nn.ReLU(), nn.Linear(64, 5))
+    opt = torch.optim.Adam(net.parameters(), lr=1e-3)
+    loss_fn = nn.CrossEntropyLoss(label_smoothing=eps)
+    for _ in range(epochs):
+        net.train()
+        loss = loss_fn(net(X_tr), y_tr)
+        opt.zero_grad(); loss.backward(); opt.step()
+    net.eval()
+    with torch.no_grad():
+        probs = F.softmax(net(X_te), dim=-1)
+    return probs.numpy()
+
+probs_hard = train_model(eps=0.0)
+probs_smooth = train_model(eps=0.1)
+max_conf_hard = probs_hard.max(axis=1).mean()
+max_conf_smooth = probs_smooth.max(axis=1).mean()
+print(f'Hard targets   — avg max confidence: {max_conf_hard:.3f}')
+print(f'Label smoothing — avg max confidence: {max_conf_smooth:.3f}')
+</code></pre>
+<p>The output above shows that label smoothing lowers the average maximum confidence compared to hard-target training. To quantify this improvement rigorously, we compute the Expected Calibration Error (ECE), which measures the gap between predicted confidence and actual accuracy across confidence bins. A perfectly calibrated model has ECE=0.</p>
+<h2>Expected Calibration Error</h2>
+<p>The Expected Calibration Error (ECE) quantifies miscalibration. Sort predictions by confidence and divide into M equal-width bins B₁, ..., Bₘ. For each bin: acc(Bₘ) = fraction correct in bin, conf(Bₘ) = mean confidence in bin. ECE = Σₘ (|Bₘ|/N) · |acc(Bₘ) − conf(Bₘ)|. Weighted average of confidence-accuracy gap across bins. A model with ECE=0 is perfectly calibrated. Typical ECE for ResNet-50 with hard targets on CIFAR-100: ~0.15 to 0.20. With label smoothing ε=0.1: ~0.05 to 0.08.</p>
+<pre><code class="language-python">import numpy as np
+
+def compute_ece(probs, labels, n_bins=10):
+    confidences = probs.max(axis=1)
+    predictions = probs.argmax(axis=1)
+    correct = (predictions == labels).astype(float)
+    bin_edges = np.linspace(0, 1, n_bins + 1)
+    ece = 0.0
+    for i in range(n_bins):
+        lo, hi = bin_edges[i], bin_edges[i + 1]
+        mask = (confidences &gt;= lo) &amp; (confidences &lt; hi)
+        if mask.sum() == 0:
+            continue
+        bin_acc  = correct[mask].mean()
+        bin_conf = confidences[mask].mean()
+        ece += (mask.sum() / len(labels)) * abs(bin_acc - bin_conf)
+    return ece
+
+np.random.seed(42)
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+X, y = make_classification(n_samples=2000, n_features=20, n_classes=5,
+                            n_informative=15, random_state=42)
+
+# Simulate overconfident predictions (hard targets)
+confident_probs = np.random.dirichlet([10, 1, 1, 1, 1], size=len(y))
+# Simulate well-calibrated predictions (smoothed)
+calibrated_probs = np.random.dirichlet([3, 1, 1, 1, 1], size=len(y))
+
+ece_overconf = compute_ece(confident_probs, y)
+ece_calibrated = compute_ece(calibrated_probs, y)
+print(f'ECE (overconfident / hard targets): {ece_overconf:.4f}')
+print(f'ECE (calibrated / label smoothing): {ece_calibrated:.4f}')
+print('Lower ECE = better calibrated = confidence matches accuracy.')
+</code></pre>
+<blockquote>
+<p><strong>Label Smoothing Hurts Knowledge Distillation</strong>: When using a label-smoothed teacher to generate soft targets for student training (knowledge distillation), the smoothed softmax outputs carry less information than standard temperature-scaled probabilities. Hinton et al. recommend using a high temperature T (e.g., T=4 to T=20) without label smoothing for the teacher during distillation. Label smoothing is best applied only during the final training run of a model that will serve as an endpoint, not as a teacher.</p>
+</blockquote>
+<h2>Temperature Scaling for Post-Hoc Calibration</h2>
+<p>Temperature scaling (Guo et al. 2017) is the simplest and most effective post-hoc calibration method. After training, learn a single scalar T &gt; 1 that divides the logits: p̂ = softmax(z/T). T &gt; 1 makes the distribution softer (less confident); T &lt; 1 makes it sharper (more confident). T is fit by minimizing NLL on a held-out calibration set. This does not change accuracy (argmax is preserved) but dramatically reduces ECE — often from 0.10–0.15 to 0.01–0.03. Temperature scaling generalizes better than vector or matrix scaling methods.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+
+class TemperatureScaling(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.temperature = nn.Parameter(torch.ones(1) * 1.5)
+
+    def forward(self, logits):
+        return logits / self.temperature.clamp(min=0.05)
+
+def fit_temperature(logits, labels, lr=0.01, n_steps=200):
+    ts = TemperatureScaling()
+    optimizer = torch.optim.LBFGS([ts.temperature], lr=lr, max_iter=n_steps)
+    def closure():
+        optimizer.zero_grad()
+        scaled = ts(logits)
+        loss = F.cross_entropy(scaled, labels)
+        loss.backward()
+        return loss
+    optimizer.step(closure)
+    return ts.temperature.item()
+
+torch.manual_seed(42)
+logits_cal = torch.randn(500, 10) * 3  # overconfident logits
+labels_cal = torch.randint(0, 10, (500,))
+
+T_opt = fit_temperature(logits_cal.clone(), labels_cal)
+print(f'Optimal temperature T = {T_opt:.4f}')
+
+probs_before = F.softmax(logits_cal, dim=-1).detach().numpy()
+probs_after  = F.softmax(logits_cal / T_opt, dim=-1).detach().numpy()
+print(f'Avg max confidence before scaling: {probs_before.max(axis=1).mean():.3f}')
+print(f'Avg max confidence after  scaling: {probs_after.max(axis=1).mean():.3f}')
+</code></pre>
+<h2>When to Use Label Smoothing</h2>
+<p>Label smoothing with ε=0.1 is a reliable default for image classification, multi-class NLP tasks, and speech recognition. It helps most when: the training set has noisy labels (smoothing absorbs label noise), the model is large relative to the dataset (reduces overfitting to exact labels), and calibration quality is important for downstream decision making. Avoid label smoothing when: training a teacher model for knowledge distillation, when the task requires hard decisions (binary classification with balanced classes), or when classes genuinely have no inter-class similarity.</p>
+<ul>
+<li>ε=0.1 is the standard default from Inception V3 — works well for most classification tasks.</li>
+<li>ε=0.2 can help with very noisy labels but may reduce top-1 accuracy.</li>
+<li>Label smoothing reduces the maximum logit difference — indirectly regularizes the weight magnitude.</li>
+<li>Combine with mixup training: both operate on soft targets and they are complementary regularization strategies.</li>
+<li>Post-hoc fix: if label smoothing was not used during training, temperature scaling achieves similar calibration improvement without retraining.</li>
+</ul>
+<h2>Calibration Methods Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>When Applied</th>
+<th>Requires Retraining</th>
+<th>ECE Impact</th>
+<th>Accuracy Impact</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Hard targets (baseline)</td>
+<td>Training</td>
+<td>N/A</td>
+<td>Poor calibration (high ECE)</td>
+<td>Reference</td>
+<td>Model trained to be overconfident</td>
+</tr>
+<tr>
+<td>Label smoothing (ε=0.1)</td>
+<td>Training</td>
+<td>Yes — train from scratch</td>
+<td>Good — reduces ECE 40–60%</td>
+<td>Neutral to +0.1%</td>
+<td>Standard default for classification</td>
+</tr>
+<tr>
+<td>Temperature scaling</td>
+<td>Post-hoc on calibration set</td>
+<td>No</td>
+<td>Excellent — reduces ECE 70–90%</td>
+<td>Zero change</td>
+<td>Best single-parameter post-hoc method</td>
+</tr>
+<tr>
+<td>Mixup (α=0.2)</td>
+<td>Training</td>
+<td>Yes</td>
+<td>Good — interpolated targets</td>
+<td>+0.5–1.0% top-1</td>
+<td>Also improves accuracy; soft boundaries</td>
+</tr>
+<tr>
+<td>Dirichlet calibration</td>
+<td>Post-hoc</td>
+<td>No</td>
+<td>Good — flexible</td>
+<td>Zero change</td>
+<td>More parameters than temp scaling; can overfit</td>
+</tr>
+</tbody>
+</table>
+<p>For most production models, the recommended strategy is: train with label smoothing ε=0.1, then apply temperature scaling on a held-out calibration set. This two-step approach combines the training-time regularization benefits of label smoothing with the post-hoc ECE reduction of temperature scaling, achieving calibration close to the theoretical optimum with minimal engineering effort.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

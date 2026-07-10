@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Receptive Field Analysis in Convolutional Networks | Notes Backup</title>
+  <meta name="description" content="Theoretical vs effective receptive field, how stride and dilation affect coverage, and why large receptive fields matter for detecting context-dependent patterns." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Receptive Field Analysis in Convolutional Networks</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Theoretical vs effective receptive field, how stride and dilation affect coverage, and why large receptive fields matter for detecting context-dependent patterns.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Receptive Field Analysis in Convolutional Networks</h1>
+<h2>Overview</h2>
+<p>The receptive field of a neuron in a CNN is the region of the input image that influences its activation. Understanding receptive fields is critical for architecture design: too small and the network misses context; too large and it wastes capacity on irrelevant regions. Modern detectors depend on carefully engineered RF coverage.</p>
+<p>Two distinct notions dominate the literature: the theoretical receptive field, derived analytically from kernel sizes and strides, and the effective receptive field, measured empirically as the gradient of a center output neuron with respect to each input pixel. These two quantities differ substantially and have different implications for design.</p>
+<h2>Theoretical Receptive Field</h2>
+<p>For a stack of convolutional layers each with kernel size k_i and stride s_i, the theoretical RF of the final feature map pixel is computed recursively. The formula accumulates contributions from each layer, weighted by the product of all prior strides. Adding layers grows the RF, but deeper contributions are diluted by repeated downsampling.</p>
+<pre><code class="language-python">def compute_theoretical_rf(layers):
+    # layers: list of (kernel_size, stride) tuples
+    rf = 1
+    total_stride = 1
+    for k, s in layers:
+        rf = rf + (k - 1) * total_stride
+        total_stride *= s
+    return rf
+
+layers = [(3,1),(3,1),(3,2),(3,1),(3,2),(3,1)]
+print(f&quot;Theoretical RF: {compute_theoretical_rf(layers)}&quot;)
+</code></pre>
+<p>For three sequential 3x3 convolutions with stride 1, the TRF is 7. Adding a stride-2 layer doubles the effective jump, rapidly extending coverage. The formula shows that stride has a multiplicative effect: a single stride-4 layer contributes 4x more per kernel position than a stride-1 layer at the same depth in the network.</p>
+<h2>Effective Receptive Field</h2>
+<p>Luo et al. (2016) showed that the effective receptive field follows a Gaussian distribution over the theoretical RF area. Central pixels contribute exponentially more than peripheral ones due to the combinatorial path count in the computational graph. As depth increases, the ERF grows only as O(sqrt(depth)) rather than linearly with depth.</p>
+<pre><code class="language-python">import torch
+import matplotlib.pyplot as plt
+
+def effective_rf(model, input_size=(1, 3, 224, 224)):
+    x = torch.zeros(*input_size, requires_grad=True)
+    out = model(x)
+    h, w = out.shape[-2], out.shape[-1]
+    out[0, 0, h // 2, w // 2].backward()
+    erf = x.grad[0].abs().sum(0)
+    plt.imshow(erf.detach().numpy(), cmap='hot')
+    plt.title('Effective Receptive Field')
+    plt.colorbar()
+    return erf
+</code></pre>
+<p>Visualizing the ERF reveals that only the central ~40% of the theoretical RF carries substantial gradient magnitude. This has architectural consequences: simply stacking more layers does not guarantee that distant context is actually used. Skip connections and attention mechanisms compensate by creating shortcuts for long-range information flow.</p>
+<blockquote>
+<p><strong>warning</strong>: The theoretical receptive field grows quadratically with depth, but the <em>effective</em> receptive field follows a Gaussian distribution — only the central ~40% of the theoretical RF contributes meaningfully. Depth alone doesn't guarantee global context.</p>
+</blockquote>
+<h2>Dilation and Atrous Convolutions</h2>
+<p>Dilated (atrous) convolutions insert zeros between kernel weights, expanding the receptive field without increasing parameters or reducing resolution. A 3x3 conv with dilation rate r covers a (2r+1)x(2r+1) region using only 9 weights. This makes them ideal for dense prediction tasks like semantic segmentation and depth estimation.</p>
+<pre><code class="language-python">import torch.nn as nn
+
+C = 64
+# Dilated 3x3 with rate=2: covers 5x5 region, only 9 params
+dilated = nn.Conv2d(C, C, kernel_size=3, padding=2, dilation=2)
+
+# Standard 5x5 conv: same spatial coverage, 25 params per channel
+standard_5x5 = nn.Conv2d(C, C, kernel_size=5, padding=2)
+
+d_params = sum(p.numel() for p in dilated.parameters())
+s_params = sum(p.numel() for p in standard_5x5.parameters())
+print(f&quot;Dilated 3x3: {d_params} | Standard 5x5: {s_params} params&quot;)
+</code></pre>
+<p>A dilated 3x3 with rate=2 spans 5x5 input positions, matching a standard 5x5 conv but using only 9 weights instead of 25. Stacking dilations exponentially (1, 2, 4, 8) achieves RF=15 in four layers with 36 parameters. DeepLabv3+ uses atrous spatial pyramid pooling with rates (6, 12, 18) to capture multi-scale context simultaneously.</p>
+<h2>Receptive Field vs Task Scale</h2>
+<p>Object detection performance varies with RF-to-object-size alignment. Small objects (COCO area &lt; 32^2) require fine-grained, small-RF features preserved through FPN lateral connections. Large objects (area &gt; 96^2) benefit from global context captured by deep layers. Mismatched RF and object scale is a primary source of AP degradation in one-stage detectors.</p>
+<table>
+<thead>
+<tr>
+<th>Architecture</th>
+<th>Layers</th>
+<th>Theoretical RF</th>
+<th>Effective RF (approx)</th>
+<th>AP_s</th>
+<th>AP_l</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>VGG-16</td>
+<td>13 conv</td>
+<td>212</td>
+<td>~32</td>
+<td>12.3</td>
+<td>51.1</td>
+</tr>
+<tr>
+<td>ResNet-50</td>
+<td>49 conv</td>
+<td>483</td>
+<td>~48</td>
+<td>16.4</td>
+<td>56.2</td>
+</tr>
+<tr>
+<td>ResNet-50 + FPN</td>
+<td>49 conv + FPN</td>
+<td>483 (multi-scale)</td>
+<td>~48 multi</td>
+<td>23.7</td>
+<td>55.3</td>
+</tr>
+<tr>
+<td>DeepLabv3+</td>
+<td>49 + ASPP</td>
+<td>1025+</td>
+<td>~96</td>
+<td>—</td>
+<td>—</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-python">import json
+import numpy as np
+
+def rf_vs_coco_ap(results_path):
+    with open(results_path) as f:
+        results = json.load(f)
+    rf_sizes = [r['theoretical_rf'] for r in results]
+    ap_s = [r['AP_small'] for r in results]
+    ap_l = [r['AP_large'] for r in results]
+    corr_s = np.corrcoef(rf_sizes, ap_s)[0, 1]
+    corr_l = np.corrcoef(rf_sizes, ap_l)[0, 1]
+    print(f&quot;RF vs AP_small corr: {corr_s:.3f}&quot;)
+    print(f&quot;RF vs AP_large corr: {corr_l:.3f}&quot;)
+    return corr_s, corr_l
+</code></pre>
+<p>Architectures with FPN achieve the best AP balance by aggregating features from multiple RF scales. Plain deep networks excel at AP_l but sacrifice AP_s because early high-resolution features are discarded. The RF-scale mismatch explains why naive depth scaling fails to uniformly improve detection across all object sizes in the COCO benchmark.</p>
+<h2>Key Takeaways</h2>
+<p>Theoretical RF provides a design ceiling but not operational guarantees. Always measure the ERF empirically on representative inputs and compare it to the scale of structures you need to detect. For large-context tasks, combine dilation, FPN, and attention rather than relying solely on depth to extend coverage across the input image.</p>
+<p>Dilation expands RF cheaply without resolution loss, making it the preferred tool for segmentation backbones. FPN provides multi-scale RF coverage for detection. Attention layers replace fixed RF with dynamic, content-dependent coverage. Modern architectures increasingly combine all three strategies for robust multi-scale reasoning across diverse visual tasks.</p>
+    </article>
+  </main>
+</body>
+</html>

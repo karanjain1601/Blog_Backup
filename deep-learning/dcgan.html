@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DCGAN — Deep Convolutional GAN Architecture Guidelines | Notes Backup</title>
+  <meta name="description" content="DCGAN (Radford 2015) architecture guidelines for stable GAN training: strided convolutions, BatchNorm placement, LeakyReLU in D, ReLU+tanh in G, no FC layers, Adam with beta1=0.5, plus spectral normalization and latent space arithmetic." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>DCGAN — Deep Convolutional GAN Architecture Guidelines</h1>
+      <ul class='note-meta'><li><strong>description:</strong> DCGAN (Radford 2015) architecture guidelines for stable GAN training: strided convolutions, BatchNorm placement, LeakyReLU in D, ReLU+tanh in G, no FC layers, Adam with beta1=0.5, plus spectral normalization and latent space arithmetic.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>DCGAN — Deep Convolutional GAN Architecture Guidelines</h1>
+<p>DCGAN (Radford et al., 2015) introduced a set of architectural guidelines that made convolutional GANs reliably trainable for the first time. Prior to DCGAN, GAN training was highly sensitive to architecture choices, and convolutional architectures frequently failed to converge. The DCGAN guidelines — strided convolutions, careful BatchNorm placement, specific activation functions, and no fully-connected layers — became the de facto starting point for nearly all subsequent GAN research.</p>
+<h2>Architecture Overview</h2>
+<p>DCGAN's five guidelines are: (1) replace pooling with strided convolutions in D and transposed convolutions in G; (2) use BatchNorm in both G and D, except at the G output layer and D input layer; (3) use ReLU activations in G (all layers) and tanh at the G output; (4) use LeakyReLU(0.2) in D (all layers); (5) remove fully-connected layers — connect the latent vector z directly to the first convolutional layer of G via reshape, and flatten to a single logit in D. These five rules together create a stable training setup across a wide range of datasets.</p>
+<h2>Generator Architecture</h2>
+<p>The generator maps a 100-dimensional latent vector z to a 64x64 RGB image through a series of transposed convolution (fractionally-strided convolution) layers: z(100) → reshape to 1x1x1024 → 4x4x512 → 8x8x256 → 16x16x128 → 32x32x64 → 64x64x3. Each intermediate layer uses BatchNorm and ReLU. The final layer uses tanh (output in [-1,1]) with no BatchNorm — adding BN at the output layer causes oscillation because it modifies the exact pixel value distribution that the discriminator trains on.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class DCGANGenerator(nn.Module):
+    '''z (100-d latent) -&gt; transposed-conv stack -&gt; 64x64 RGB via tanh.
+    Guidelines: transposed conv (no pooling), BN on all layers except output, ReLU.
+    '''
+    def __init__(self, latent_dim=100, ngf=64, nc=3):
+        super().__init__()
+        self.net = nn.Sequential(
+            # z -&gt; 4x4 feature map (ngf*16 = 1024 channels with ngf=64)
+            nn.ConvTranspose2d(latent_dim, ngf * 16, 4, 1, 0, bias=False),
+            nn.BatchNorm2d(ngf * 16), nn.ReLU(True),
+            # 4x4 -&gt; 8x8
+            nn.ConvTranspose2d(ngf * 16, ngf * 8, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ngf * 8), nn.ReLU(True),
+            # 8x8 -&gt; 16x16
+            nn.ConvTranspose2d(ngf * 8, ngf * 4, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ngf * 4), nn.ReLU(True),
+            # 16x16 -&gt; 32x32
+            nn.ConvTranspose2d(ngf * 4, ngf * 2, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ngf * 2), nn.ReLU(True),
+            # 32x32 -&gt; 64x64, NO BN at output layer, tanh activation
+            nn.ConvTranspose2d(ngf * 2, nc, 4, 2, 1, bias=False),
+            nn.Tanh()
+        )
+    def forward(self, z):
+        return self.net(z.view(z.size(0), z.size(1), 1, 1))
+
+g = DCGANGenerator()
+z = torch.randn(4, 100)
+print('Generator output:', g(z).shape)   # torch.Size([4, 3, 64, 64])
+</code></pre>
+<h2>Discriminator Architecture</h2>
+<p>The discriminator is a mirror of the generator using strided convolutions instead of transposed convolutions: 64x64x3 → 32x32x64 → 16x16x128 → 8x8x256 → 4x4x512 → 1x1x1 → sigmoid. The first layer has no BatchNorm (the input layer's statistics should not be normalised — the discriminator needs to compare raw pixel distributions). All intermediate layers use BatchNorm and LeakyReLU(0.2). The final conv layer reduces to a single logit followed by sigmoid.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class DCGANDiscriminator(nn.Module):
+    '''64x64 RGB -&gt; real/fake probability via strided convolutions.
+    Guidelines: strided conv (no pooling), BN except at input, LeakyReLU(0.2).
+    '''
+    def __init__(self, ndf=64, nc=3):
+        super().__init__()
+        self.net = nn.Sequential(
+            # NO BN at input layer — discriminator must see raw pixel statistics
+            nn.Conv2d(nc, ndf, 4, 2, 1, bias=False),           # 64-&gt;32
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(ndf, ndf * 2, 4, 2, 1, bias=False),      # 32-&gt;16
+            nn.BatchNorm2d(ndf * 2), nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(ndf * 2, ndf * 4, 4, 2, 1, bias=False),  # 16-&gt;8
+            nn.BatchNorm2d(ndf * 4), nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(ndf * 4, ndf * 8, 4, 2, 1, bias=False),  # 8-&gt;4
+            nn.BatchNorm2d(ndf * 8), nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(ndf * 8, 1, 4, 1, 0, bias=False),        # 4-&gt;1x1
+            nn.Sigmoid()
+        )
+    def forward(self, img):
+        return self.net(img).view(-1, 1)
+
+d = DCGANDiscriminator()
+x = torch.randn(4, 3, 64, 64)
+print('Discriminator output:', d(x).shape)   # torch.Size([4, 1])
+print('Sample probs:', d(x).detach().numpy().flatten().round(3))
+</code></pre>
+<h2>Design Choices and Rationale</h2>
+<table>
+<thead>
+<tr>
+<th>Design Choice</th>
+<th>Old Approach</th>
+<th>DCGAN Approach</th>
+<th>Why It Matters</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Downsampling in D</td>
+<td>Max pooling</td>
+<td>Strided conv (stride=2)</td>
+<td>Learnable downsampling; pooling discards spatial information the discriminator needs</td>
+</tr>
+<tr>
+<td>Upsampling in G</td>
+<td>Nearest-neighbour + conv</td>
+<td>Transposed conv (fractionally-strided)</td>
+<td>Learnable upsampling avoids checkerboard artifacts from fixed interpolation</td>
+</tr>
+<tr>
+<td>BN in G</td>
+<td>None or everywhere</td>
+<td>All layers except output (tanh)</td>
+<td>BN stabilises training; excluding output layer prevents normalising the pixel distribution G is optimising</td>
+</tr>
+<tr>
+<td>BN in D</td>
+<td>None or everywhere</td>
+<td>All layers except input</td>
+<td>BN in D helps gradient flow; excluding input prevents normalising the raw pixel statistics D must discriminate</td>
+</tr>
+<tr>
+<td>Activations in G</td>
+<td>ReLU everywhere with sigmoid output</td>
+<td>ReLU (hidden), tanh (output)</td>
+<td>Tanh bounds output to [-1,1] matching normalised data; ReLU hidden layers learn sparse features</td>
+</tr>
+<tr>
+<td>Activations in D</td>
+<td>ReLU everywhere</td>
+<td>LeakyReLU(0.2) everywhere</td>
+<td>Leaky slope prevents dying ReLU; discriminator needs to flow gradients for all input values</td>
+</tr>
+<tr>
+<td>Fully-connected layers</td>
+<td>Dense layers between conv and output</td>
+<td>Removed entirely</td>
+<td>FC layers add parameters that overfit and destabilise; direct spatial flattening is sufficient</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>BN Placement Rule</strong>: The BatchNorm rule in DCGAN is: use BN everywhere except (1) the G output layer — tanh output should not be batch-normalised, as this would destroy the pixel-level signal G is optimising — and (2) the D input layer — the discriminator must compare raw pixel distributions from real and fake images without normalisation that would erase the statistics it is trying to distinguish.</p>
+</blockquote>
+<h2>Training Configuration</h2>
+<p>The DCGAN paper trains with Adam optimiser, learning rate 0.0002, and beta1=0.5 (not the default 0.9). The reduced beta1 is critical — standard Adam accumulates gradient momentum that causes oscillation in adversarial training. Batch size 128 is standard. Images are normalised to [-1,1] to match the generator's tanh output. Weights are initialised from a zero-mean Gaussian with std=0.02, which prevents the discriminator from dominating early in training.</p>
+<ul>
+<li>Optimiser: Adam with lr=0.0002, beta1=0.5, beta2=0.999 for both G and D</li>
+<li>Batch size: 128 (larger batches stabilise BN statistics)</li>
+<li>Image normalisation: mean=0.5, std=0.5 per channel to map [0,1] images to [-1,1]</li>
+<li>Weight init: Normal(0, 0.02) — the small std prevents early training instability</li>
+<li>Latent dim: 100 (uniform or Gaussian prior, both work)</li>
+<li>Training ratio: k=1 (one D step per G step) — sufficient for DCGAN's stable architecture</li>
+<li>No learning rate scheduling — DCGAN trains stably at constant lr=0.0002</li>
+</ul>
+<h2>Latent Space Arithmetic</h2>
+<p>A key finding of DCGAN is that the latent space has meaningful structure. Arithmetic in z space transfers to semantic image attributes: z_smiling_man - z_neutral_man + z_neutral_woman ≈ z_smiling_woman. Interpolation between two z vectors produces smooth visual transitions rather than discontinuous jumps, demonstrating that G learns a smooth, continuous mapping. This structure emerges from training alone — no explicit disentanglement objective is needed in DCGAN.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+
+def encode_images(encoder, images, n_samples=50):
+    '''Encode images to a mean latent vector (requires a pre-trained encoder).'''
+    encoder.eval()
+    with torch.no_grad():
+        if images.dim() == 3:
+            images = images.unsqueeze(0).expand(n_samples, -1, -1, -1)
+        latents = encoder(images)
+        if isinstance(latents, tuple):
+            latents = latents[0]   # VAE encoder returns (mu, logvar)
+    return latents.mean(dim=0)
+
+def latent_arithmetic(generator, encoder, img_a, img_b, img_c, n_interp=8):
+    '''Vector arithmetic in latent space: result = z_a - z_b + z_c.
+    Classic: smiling_man - neutral_man + neutral_woman ≈ smiling_woman.
+    '''
+    z_a = encode_images(encoder, img_a)
+    z_b = encode_images(encoder, img_b)
+    z_c = encode_images(encoder, img_c)
+    z_result = z_a - z_b + z_c
+    generator.eval()
+    with torch.no_grad():
+        img_result = generator(z_result.unsqueeze(0))
+        # Interpolate from z_c to z_result
+        alphas = torch.linspace(0.0, 1.0, n_interp)
+        interp_imgs = [
+            generator(((1 - a) * z_c + a * z_result).unsqueeze(0))
+            for a in alphas
+        ]
+    print(f'Latent dim: {z_a.shape[0]}  |  Result shape: {img_result.shape}')
+    print(f'Interpolation: {n_interp} steps from z_c to z_arithmetic_result')
+    return img_result, interp_imgs
+</code></pre>
+<h2>Spectral Normalization</h2>
+<p>Spectral normalization (Miyato et al., 2018) improves upon DCGAN's BatchNorm by normalising each weight matrix by its largest singular value sigma_max(W), enforcing a per-layer 1-Lipschitz constraint. Unlike WGAN weight clipping (which clips all weights uniformly) or BatchNorm (which normalises activations and thus depends on batch size), spectral norm constrains the weight matrix directly and is independent of batch statistics. It works well with any batch size including batch size 1, making it suitable for instance-conditioned generation.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from torch.nn.utils import spectral_norm
+
+class SpectralNormDiscriminator(nn.Module):
+    '''Discriminator with Spectral Normalization (Miyato et al. 2018).
+    SN divides weights by sigma_max(W) after each step via power iteration,
+    enforcing 1-Lipschitz constraint independently of batch size.
+    '''
+    def __init__(self, ndf=64, nc=3):
+        super().__init__()
+        self.net = nn.Sequential(
+            spectral_norm(nn.Conv2d(nc, ndf, 4, 2, 1)),
+            nn.LeakyReLU(0.2, inplace=True),
+            spectral_norm(nn.Conv2d(ndf, ndf * 2, 4, 2, 1)),
+            nn.LeakyReLU(0.2, inplace=True),
+            spectral_norm(nn.Conv2d(ndf * 2, ndf * 4, 4, 2, 1)),
+            nn.LeakyReLU(0.2, inplace=True),
+            spectral_norm(nn.Conv2d(ndf * 4, ndf * 8, 4, 2, 1)),
+            nn.LeakyReLU(0.2, inplace=True),
+            spectral_norm(nn.Conv2d(ndf * 8, 1, 4, 1, 0)),
+        )
+    def forward(self, img):
+        return self.net(img).view(-1, 1)
+
+def inspect_spectral_norms(model):
+    '''Verify that spectral norm constrains sigma_max to approximately 1.'''
+    for name, m in model.named_modules():
+        if hasattr(m, 'weight_orig'):
+            W = m.weight_orig.data.view(m.weight_orig.size(0), -1)
+            sigma = torch.linalg.svdvals(W).max().item()
+            print(f'{name}: sigma_max = {sigma:.4f}  (should be close to 1.0)')
+
+d_sn = SpectralNormDiscriminator()
+inspect_spectral_norms(d_sn)
+</code></pre>
+<h2>Key Takeaways</h2>
+<p>DCGAN's guidelines remain relevant because they encode hard-won empirical knowledge about stable adversarial training. The strided/transposed conv pattern, careful BN placement, LeakyReLU in D, and Adam with beta1=0.5 collectively address the most common failure modes of early convolutional GANs. Modern architectures (WGAN-GP, StyleGAN) extend these foundations but rarely discard them outright.</p>
+<ul>
+<li>Strided convolutions (not pooling) allow the discriminator to learn its own downsampling — critical for capturing distribution statistics at multiple scales</li>
+<li>BatchNorm placement rules (no BN at G output, no BN at D input) prevent the network from normalising exactly the signals it needs to preserve</li>
+<li>LeakyReLU(0.2) in D ensures gradient flow for all input values, while ReLU in G encourages sparse, structured representations</li>
+<li>Adam with beta1=0.5 is essential — default beta1=0.9 accumulates stale gradient momentum that causes oscillation</li>
+<li>Latent space arithmetic works because DCGAN learns a smooth generative manifold — a property that carries forward to all subsequent GAN architectures</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

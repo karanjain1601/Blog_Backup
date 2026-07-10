@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Stable Diffusion Architecture — VAE, U-Net, and CLIP | Notes Backup</title>
+  <meta name="description" content="A detailed walkthrough of Stable Diffusion&#x27;s three core components — the KL-regularized VAE, the CLIP text encoder, and the time-conditioned U-Net denoiser — covering cross-attention conditioning, timestep embeddings, and ControlNet structural conditioning." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Stable Diffusion Architecture — VAE, U-Net, and CLIP</h1>
+      <ul class='note-meta'><li><strong>description:</strong> A detailed walkthrough of Stable Diffusion&#x27;s three core components — the KL-regularized VAE, the CLIP text encoder, and the time-conditioned U-Net denoiser — covering cross-attention conditioning, timestep embeddings, and ControlNet structural conditioning.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Stable Diffusion Architecture — VAE, U-Net, and CLIP</h1>
+<p>Stable Diffusion (Rombach et al. 2022) performs diffusion in a compressed latent space rather than pixel space, reducing computation by roughly 64×. The architecture couples three independently updateable components: a KL-regularized VAE that compresses images to a 4-channel latent grid at 1/8 resolution, a CLIP text encoder that converts prompts to sequence embeddings, and a time-conditioned U-Net that iteratively denoises the latent under text guidance. Understanding how cross-attention wires text into spatial features — and how ControlNet adds structural conditioning — is essential for adapting or extending Stable Diffusion.</p>
+<h2>Stable Diffusion Component Overview</h2>
+<p>The inference pipeline flows: encode prompt with CLIP → sample Gaussian noise z_T in latent space → run denoiser U-Net for T steps with text conditioning → decode latent z_0 with VAE decoder. The VAE encoder is used only during training, not inference. CLIP produces per-token embeddings (not a single pooled vector) so that individual tokens can attend to different spatial regions via cross-attention. The U-Net operates entirely at 1/8 pixel resolution, making 512×512 generation feasible on consumer hardware.</p>
+<h2>VAE Encoder and Decoder</h2>
+<p>The VAE uses a KL-divergence regularisation term with a small weight (λ=1e-6) to keep the latent distribution close to a standard Gaussian while prioritising reconstruction quality. The encoder E maps H×W×3 images to (H/8)×(W/8)×4 latents: a 512×512 image becomes 64×64×4. The four latent channels provide richer per-location representation than a single channel. At encode time σ≈0, so latents are nearly deterministic. The decoder D uses symmetric residual blocks with self-attention at the bottleneck to upsample 64×64×4 back to 512×512×3.</p>
+<h2>CLIP Text Encoder</h2>
+<p>SD 1.x uses OpenAI CLIP ViT-L/14, producing 77×768 sequence embeddings. SD 2.x uses OpenCLIP ViT-H/14 (77×1024). SDXL concatenates embeddings from CLIP-L/14 and OpenCLIP-G/14 to produce 77×2048 conditioning with richer semantics. SD3 and FLUX additionally incorporate T5-XXL for better language understanding. The entire token sequence (not just the pooled CLS embedding) is passed to cross-attention so each text token can influence different spatial positions independently.</p>
+<h2>U-Net Denoiser and Cross-Attention</h2>
+<p>The U-Net has three paths: a downsampling encoder (ResBlocks + self-attention at lower resolutions), a bottleneck (self + cross-attention), and an upsampling decoder that receives skip connections from the encoder. Cross-attention injects text: queries Q come from flattened spatial features, keys K and values V come from CLIP embeddings. Each spatial token attends to all 77 text tokens, allowing text to control which region shows which concept. The spatial dimension of the U-Net varies by resolution level — 64×64 at the first level to 8×8 at the bottleneck.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class CrossAttentionBlock(nn.Module):
+    &quot;&quot;&quot;Q from image latent features, K/V from CLIP text embeddings.&quot;&quot;&quot;
+    def __init__(self, dim_q, dim_kv, n_heads=8):
+        super().__init__()
+        self.n_heads = n_heads
+        self.head_dim = dim_q // n_heads
+        self.scale = self.head_dim ** -0.5
+        self.to_q = nn.Linear(dim_q, dim_q, bias=False)
+        self.to_k = nn.Linear(dim_kv, dim_q, bias=False)
+        self.to_v = nn.Linear(dim_kv, dim_q, bias=False)
+        self.proj = nn.Linear(dim_q, dim_q)
+        self.norm_q = nn.LayerNorm(dim_q)
+
+    def forward(self, x, context):
+        B, N, C = x.shape  # N = H*W spatial tokens
+        q = self.to_q(self.norm_q(x)).reshape(B, N, self.n_heads, self.head_dim).transpose(1, 2)
+        k = self.to_k(context).reshape(B, -1, self.n_heads, self.head_dim).transpose(1, 2)
+        v = self.to_v(context).reshape(B, -1, self.n_heads, self.head_dim).transpose(1, 2)
+        attn = torch.softmax(q @ k.transpose(-2, -1) * self.scale, dim=-1)
+        out = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        return x + self.proj(out)
+
+block = CrossAttentionBlock(dim_q=320, dim_kv=768, n_heads=8)
+x   = torch.randn(2, 64, 320)    # 8x8 spatial tokens, U-Net channels
+ctx = torch.randn(2, 77, 768)   # CLIP text embeddings (SD 1.x, 768-dim)
+print('Cross-attn output:', block(x, ctx).shape)  # (2, 64, 320)
+</code></pre>
+<h2>Timestep Embedding</h2>
+<p>The U-Net must know the current noise level t to denoise appropriately. Timestep t ∈ {0,...,T} is first encoded with sinusoidal embeddings (identical to Transformer positional encodings) then projected through a 2-layer SiLU MLP. The resulting vector conditions each residual block via Adaptive Group Normalization (AdaGN): the timestep MLP predicts per-channel scale α(t) and shift δ(t) that modulate the normalised activations before the convolution, allowing the U-Net to behave differently at every noise level.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import math
+
+class TimestepEmbedding(nn.Module):
+    &quot;&quot;&quot;Sinusoidal positional encoding -&gt; MLP -&gt; injected into ResBlocks via AdaGN.&quot;&quot;&quot;
+    def __init__(self, dim, out_dim=None):
+        super().__init__()
+        out_dim = out_dim or dim * 4
+        self.dim = dim
+        self.mlp = nn.Sequential(nn.Linear(dim, out_dim), nn.SiLU(), nn.Linear(out_dim, out_dim))
+
+    def forward(self, t):
+        half = self.dim // 2
+        freqs = torch.exp(-math.log(10000) * torch.arange(half, dtype=torch.float32, device=t.device) / half)
+        args = t[:, None].float() * freqs[None]
+        return self.mlp(torch.cat([args.sin(), args.cos()], dim=-1))
+
+def ada_gn_forward(x, t_emb, norm, time_proj):
+    &quot;&quot;&quot;Apply Adaptive GroupNorm: t_emb -&gt; (scale, shift) modulate norm output.&quot;&quot;&quot;
+    scale, shift = time_proj(t_emb).chunk(2, dim=-1)
+    return norm(x) * (1 + scale[:, :, None, None]) + shift[:, :, None, None]
+
+ts = TimestepEmbedding(dim=128, out_dim=512)
+t = torch.randint(0, 1000, (4,))
+t_emb = ts(t)
+print(f'Timestep {t.tolist()} -&gt; embedding shape: {t_emb.shape}')  # (4, 512)
+
+norm = nn.GroupNorm(32, 256)
+time_proj = nn.Linear(512, 512)  # predicts scale+shift for 256 channels
+x = torch.randn(4, 256, 16, 16)
+x_cond = ada_gn_forward(x, t_emb, norm, time_proj)
+print(f'After AdaGN: mean={x_cond.mean():.4f} std={x_cond.std():.4f}')
+</code></pre>
+<h2>SD Inference Pipeline</h2>
+<pre><code class="language-python">import torch
+from diffusers import StableDiffusionPipeline, DDIMScheduler
+
+def run_sd_inference(prompt, neg_prompt='', n_steps=30, guidance_scale=7.5, seed=42):
+    &quot;&quot;&quot;Run SD 1.5: encode prompt -&gt; denoise latent -&gt; decode to image.&quot;&quot;&quot;
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    dtype  = torch.float16 if device == 'cuda' else torch.float32
+    pipe = StableDiffusionPipeline.from_pretrained(
+        'runwayml/stable-diffusion-v1-5',
+        scheduler=DDIMScheduler.from_pretrained(
+            'runwayml/stable-diffusion-v1-5', subfolder='scheduler'),
+        torch_dtype=dtype,
+    ).to(device)
+    pipe.safety_checker = None
+    generator = torch.Generator(device=device).manual_seed(seed)
+    with torch.inference_mode():
+        result = pipe(
+            prompt, negative_prompt=neg_prompt,
+            num_inference_steps=n_steps,
+            guidance_scale=guidance_scale,
+            generator=generator, height=512, width=512,
+        )
+    img = result.images[0]
+    print(f'Generated {img.size} with {n_steps} DDIM steps, CFG={guidance_scale}')
+    return img
+
+# Pipeline stages in order:
+print('1. CLIP encodes prompt -&gt; 77x768 text embeddings')
+print('2. Sample z_T ~ N(0,I) in 64x64x4 latent space')
+print('3. U-Net denoises z_T -&gt; z_0 over 30 DDIM steps (CFG doubles each step)')
+print('4. VAE decoder maps z_0 (64x64x4) -&gt; image (512x512x3)')
+</code></pre>
+<h2>ControlNet Integration</h2>
+<p>ControlNet (Zhang &amp; Agrawala 2023) adds spatial conditioning — edge maps, depth maps, human pose skeletons — to a frozen SD U-Net without touching the original weights. It copies the U-Net encoder blocks, processes a conditioning image through those copied blocks, and injects the outputs into the original U-Net decoder via learned zero convolutions (1×1 conv initialised to zero weight and bias). Zero initialisation ensures that at training start the ControlNet branch contributes nothing, preserving the base model's behaviour and enabling stable fine-tuning from the pretrained checkpoint.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from diffusers import StableDiffusionControlNetPipeline, ControlNetModel, UniPCMultistepScheduler
+from PIL import Image
+
+class ZeroConv2d(nn.Module):
+    &quot;&quot;&quot;1x1 conv initialised to zero — ControlNet injection layer.&quot;&quot;&quot;
+    def __init__(self, channels):
+        super().__init__()
+        self.conv = nn.Conv2d(channels, channels, 1)
+        nn.init.zeros_(self.conv.weight)
+        nn.init.zeros_(self.conv.bias)
+    def forward(self, x):
+        return self.conv(x)
+
+def controlnet_injection(unet_feat, ctrl_feat, zero_conv):
+    &quot;&quot;&quot;Add ControlNet encoder output (after zero conv) to U-Net decoder feature.&quot;&quot;&quot;
+    return unet_feat + zero_conv(ctrl_feat)
+
+# Demonstrate zero conv starts as identity (contributes nothing)
+zc = ZeroConv2d(channels=64)
+x = torch.randn(2, 64, 32, 32)
+print(f'ZeroConv output max at init: {zc(x).abs().max().item():.6f}')  # ~0.0
+
+# Conceptual ControlNet pipeline
+print('ControlNet pipeline:')
+print('  1. Canny edge detector  -&gt; 512x512 edge map')
+print('  2. Copied U-Net encoder -&gt; intermediate feature maps')
+print('  3. Zero convolutions    -&gt; scale features to zero at init')
+print('  4. Add to U-Net decoder -&gt; structural constraint on generation')
+</code></pre>
+<blockquote>
+<p><strong>Choosing the Right SD Version</strong>: For general text-to-image with 8-16 GB VRAM: SD 1.5 runs at 512×512, supports the widest LoRA/ControlNet ecosystem, and fine-tunes in hours. SDXL gives best 1024×1024 quality with a two-stage refiner but needs 16+ GB. SD3 and FLUX have superior prompt adherence for complex scenes but require 24+ GB for full quality. Always match your LoRA or ControlNet adapter to the exact base model version.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Version</th>
+<th>Text Encoder</th>
+<th>Latent Channels</th>
+<th>Backbone Size</th>
+<th>Default Resolution</th>
+<th>Key Improvement</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SD 1.x</td>
+<td>CLIP ViT-L/14 (768-dim, 77 tok)</td>
+<td>4</td>
+<td>860M U-Net</td>
+<td>512×512</td>
+<td>Foundation latent diffusion model</td>
+</tr>
+<tr>
+<td>SD 2.x</td>
+<td>OpenCLIP ViT-H (1024-dim)</td>
+<td>4</td>
+<td>865M U-Net</td>
+<td>768×768</td>
+<td>Better NSFW filtering, depth model, v-prediction</td>
+</tr>
+<tr>
+<td>SDXL</td>
+<td>CLIP-L + OpenCLIP-G (2048-dim)</td>
+<td>4</td>
+<td>2.6B (base+refiner)</td>
+<td>1024×1024</td>
+<td>Dual encoder, two-stage refiner pipeline</td>
+</tr>
+<tr>
+<td>SD3</td>
+<td>T5-XXL + CLIP-L + CLIP-G</td>
+<td>16</td>
+<td>MM-DiT 2B</td>
+<td>1024×1024</td>
+<td>Flow matching, multi-modal DiT, 16-channel latent</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>The VAE's 8× spatial compression reduces U-Net compute by 64× compared to pixel-space diffusion.</li>
+<li>Cross-attention is asymmetric: Q dimension = U-Net channels; K/V dimension = text encoder output (768, 1024, or 2048).</li>
+<li>Classifier-Free Guidance doubles the U-Net forward pass: conditional and unconditional runs combined as ε_cfg = ε_uncond + w·(ε_cond − ε_uncond).</li>
+<li>ControlNet zero convolutions ensure the pretrained U-Net is not perturbed at training step 0 — the adapter branch starts as a no-op.</li>
+<li>SDXL concatenates (not averages) two text encoder outputs so each encoder contributes independently to the 2048-dim conditioning.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

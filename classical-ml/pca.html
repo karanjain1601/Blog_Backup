@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PCA — SVD Derivation, Explained Variance, and Reconstruction | Notes Backup</title>
+  <meta name="description" content="Principal Component Analysis from the ground up: SVD decomposition, explained variance ratio, k selection, reconstruction error, whitening, and randomized SVD for large sparse matrices." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>PCA — SVD Derivation, Explained Variance, and Reconstruction</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Principal Component Analysis from the ground up: SVD decomposition, explained variance ratio, k selection, reconstruction error, whitening, and randomized SVD for large sparse matrices.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>PCA — SVD Derivation, Explained Variance, and Reconstruction</h1>
+<p>PCA is the workhorse of linear dimensionality reduction, used everywhere from data exploration to preprocessing for downstream models. Understanding it through the lens of SVD rather than just eigendecomposition unlocks intuition about reconstruction, noise, and approximation quality.</p>
+<h2>Core Idea: Directions of Maximum Variance</h2>
+<p>Given a centered data matrix X ∈ ℝⁿˣᵈ, PCA seeks an ordered set of orthogonal directions that capture maximum variance. The first principal component w₁ maximises Var(Xw₁) = wᵀXᵀXw/n subject to ‖w‖=1. The solution is the top eigenvector of the sample covariance XᵀX/(n-1).</p>
+<h2>SVD Derivation</h2>
+<p>The singular value decomposition X = UΣVᵀ decomposes X into left singular vectors U ∈ ℝⁿˣⁿ, singular values Σ = diag(σ₁,…,σₙ), and right singular vectors V ∈ ℝᵈˣᵈ. The columns of V are the principal components. Projecting onto k components: Z = XVₖ. Covariance connection: XᵀX = VΣ²Vᵀ, so eigenvalues λᵢ = σᵢ²/(n-1).</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.datasets import load_iris
+from sklearn.decomposition import PCA
+
+# Load and center data
+data = load_iris()
+X = data.data.astype(float)
+X_centered = X - X.mean(axis=0)
+
+# Full SVD: X = U * Sigma * Vt
+U, sigma, Vt = np.linalg.svd(X_centered, full_matrices=False)
+# Rows of Vt are principal components (columns of V)
+
+# Project onto k=2 principal components
+k = 2
+X_pca = X_centered @ Vt[:k].T  # shape (n_samples, k)
+
+# Verify against sklearn (may differ only in sign)
+skpca = PCA(n_components=k)
+X_sk = skpca.fit_transform(X_centered)
+diff = np.abs(np.abs(X_pca) - np.abs(X_sk)).max()
+print(f'Max deviation from sklearn: {diff:.2e}')
+
+# Explained variance from singular values
+explained_var = (sigma ** 2) / (len(X) - 1)
+explained_ratio = explained_var / explained_var.sum()
+print('Explained variance ratio:', np.round(explained_ratio, 3))
+print('Cumulative:', np.round(np.cumsum(explained_ratio), 3))
+</code></pre>
+<h2>Explained Variance Ratio and Choosing k</h2>
+<p>The explained variance ratio for component i is σᵢ²/Σⱼσⱼ². A scree plot shows the elbow where marginal gains diminish. The cumulative curve lets you choose k to retain a target fraction (e.g. 95%). There is no universally correct k — it depends on the downstream task's noise tolerance.</p>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.datasets import fetch_openml
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+
+# MNIST subset — 5000 samples
+mnist = fetch_openml('mnist_784', version=1, as_frame=False)
+X = mnist.data[:5000].astype(float)
+X = StandardScaler().fit_transform(X)
+
+pca = PCA()
+pca.fit(X)
+evr = pca.explained_variance_ratio_
+cumulative = np.cumsum(evr)
+
+# k for 95% and 99% variance
+k_95 = np.argmax(cumulative &gt;= 0.95) + 1
+k_99 = np.argmax(cumulative &gt;= 0.99) + 1
+print(f'k for 95% variance: {k_95},  k for 99%: {k_99}')
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+axes[0].plot(range(1, 51), evr[:50], 'o-', ms=4)
+axes[0].set(xlabel='Component', ylabel='Explained Variance Ratio', title='Scree Plot')
+
+axes[1].plot(range(1, len(cumulative) + 1), cumulative)
+axes[1].axhline(0.95, color='red', ls='--', label='95%')
+axes[1].axhline(0.99, color='orange', ls='--', label='99%')
+axes[1].axvline(k_95, color='red', ls=':', alpha=0.5)
+axes[1].set(xlabel='k', ylabel='Cumulative Explained Variance')
+axes[1].legend()
+plt.tight_layout()
+plt.show()
+</code></pre>
+<blockquote>
+<p><strong>Scale Sensitivity</strong>: PCA is not scale-invariant. Features with large magnitudes dominate the principal components. Always standardise (zero mean, unit variance) before applying PCA unless the features are genuinely on the same scale with meaningful variance differences.</p>
+</blockquote>
+<h2>Reconstruction and Reconstruction Error</h2>
+<p>Reconstruction projects back from the k-dimensional subspace: x̂ = VₖVₖᵀ(x - μ) + μ. This is the best rank-k approximation in Frobenius norm (Eckart-Young theorem). Reconstruction error equals variance in discarded dimensions: Σᵢ₌ₖ₊₁ᵈ σᵢ²/(n-1). Lower k means more compression and higher reconstruction error.</p>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.datasets import load_digits
+from sklearn.decomposition import PCA
+
+X, y = load_digits(return_X_y=True)
+X = X / 16.0  # scale to [0, 1]
+mu = X.mean(axis=0)
+
+ks = [2, 5, 10, 20, 40, 64]
+errors = []
+for k in ks:
+    pca = PCA(n_components=k)
+    X_r = pca.fit_transform(X)
+    X_hat = pca.inverse_transform(X_r)
+    errors.append(np.mean((X - X_hat) ** 2))
+
+plt.figure(figsize=(8, 4))
+plt.plot(ks, errors, 'o-')
+plt.xlabel('Number of Components k')
+plt.ylabel('Mean Squared Reconstruction Error')
+plt.title('PCA Reconstruction Error vs k')
+plt.grid(True, alpha=0.3)
+plt.show()
+
+# Manual projection: x_hat = Vk.T @ (Vk @ (x - mu)) + mu
+pca10 = PCA(n_components=10).fit(X)
+Vk = pca10.components_  # (k, d)
+x = X[0]
+z = Vk @ (x - mu)        # encode to latent space
+x_hat = Vk.T @ z + mu    # decode back to pixel space
+print(f'Manual reconstruction MSE: {np.mean((x - x_hat) ** 2):.6f}')
+</code></pre>
+<h2>Whitening</h2>
+<p>Whitening transforms projected data to identity covariance: z_white = Σₖ⁻¹Uₖᵀx. This standardises each PC to unit variance. Required before FastICA (which assumes uncorrelated, equal-variance inputs). ZCA whitening (= UΣ⁻¹Uᵀx) preserves the original feature space orientation while decorrelating — useful for preserving spatial structure in images.</p>
+<h2>PCA as Matrix Factorization</h2>
+<p>PCA produces the best rank-k approximation X ≈ UₖΣₖVₖᵀ = WₖHₖ, where Wₖ = UₖΣₖ are the scores and Hₖ = Vₖᵀ are the loadings. No other rank-k matrix achieves a smaller Frobenius norm residual. NMF and Sparse PCA relax orthogonality and add non-negativity or sparsity constraints, yielding more interpretable but sub-optimal factorizations.</p>
+<h2>Randomized SVD for Large Matrices</h2>
+<p>Full SVD costs O(min(n²d, nd²)), prohibitive for large sparse matrices. Randomized SVD uses random projections to approximate the k-dimensional range of X in O(ndk + (n+d)k²) — orders of magnitude faster when k ≪ min(n,d). sklearn's TruncatedSVD implements this natively for sparse inputs and is the basis for Latent Semantic Analysis.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.decomposition import TruncatedSVD
+from sklearn.datasets import fetch_20newsgroups
+from sklearn.feature_extraction.text import TfidfVectorizer
+import time
+
+news = fetch_20newsgroups(subset='train', remove=('headers', 'footers', 'quotes'))
+vec = TfidfVectorizer(max_features=20000, stop_words='english', min_df=5)
+X_sparse = vec.fit_transform(news.data)
+print(f'Matrix: {X_sparse.shape}, nnz: {X_sparse.nnz}')
+
+# Randomized SVD — Latent Semantic Analysis
+k = 100
+t0 = time.time()
+svd = TruncatedSVD(n_components=k, algorithm='randomized', random_state=42, n_iter=5)
+X_lsa = svd.fit_transform(X_sparse)
+print(f'TruncatedSVD: {time.time() - t0:.2f}s')
+print(f'Explained variance: {svd.explained_variance_ratio_.sum():.3f}')
+print(f'Reduced shape: {X_lsa.shape}')
+
+# Top words per latent topic
+terms = np.array(vec.get_feature_names_out())
+for i in range(3):
+    top_idx = np.argsort(svd.components_[i])[-10:][::-1]
+    top_str = ' '.join(terms[top_idx])
+    print(f'Topic {i}: {top_str}')
+</code></pre>
+<h2>Limitations</h2>
+<ul>
+<li>Linear only — cannot capture nonlinear manifolds (use Kernel PCA, UMAP, or autoencoders)</li>
+<li>Scale-sensitive — must standardise before applying</li>
+<li>Maximising variance is not always the right objective; ICA maximises independence, NMF maximises parts-based structure</li>
+<li>Discards correlated noise along with signal when truncating</li>
+<li>Principal components may not be interpretable — Sparse PCA or ICA produce sparser, more meaningful components</li>
+<li>Sensitive to outliers — a single outlier can rotate a principal component significantly</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Linear</th>
+<th>Interpretable</th>
+<th>Non-negative</th>
+<th>Robust to Outliers</th>
+<th>Reconstruction</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>PCA</td>
+<td>Yes</td>
+<td>Moderate</td>
+<td>No</td>
+<td>No</td>
+<td>Optimal (Frobenius)</td>
+</tr>
+<tr>
+<td>ICA</td>
+<td>Yes</td>
+<td>Yes (independent)</td>
+<td>No</td>
+<td>No</td>
+<td>Not the goal</td>
+</tr>
+<tr>
+<td>NMF</td>
+<td>Yes</td>
+<td>Yes (parts-based)</td>
+<td>Yes</td>
+<td>Moderate</td>
+<td>Good</td>
+</tr>
+<tr>
+<td>Autoencoder</td>
+<td>No</td>
+<td>No</td>
+<td>No</td>
+<td>Yes (denoising)</td>
+<td>Excellent</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<p>PCA remains the first tool to reach for when exploring high-dimensional data. Its closed-form solution, optimality guarantees, and computational efficiency are unmatched among linear methods. For nonlinear structure, Kernel PCA or UMAP are natural extensions; for interpretability, Sparse PCA or ICA provide sparser, more meaningful decompositions.</p>
+    </article>
+  </main>
+</body>
+</html>

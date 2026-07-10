@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>EfficientNet — Compound Scaling and NAS Design | Notes Backup</title>
+  <meta name="description" content="EfficientNet (Tan &amp; Le 2019): systematically scale depth, width, and resolution together using compound coefficient φ. Covers NAS-derived B0 baseline, MBConv with Squeeze-Excitation, compound scaling B0→B7, EfficientNetV2 progressive learning, and EfficientDet." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>EfficientNet — Compound Scaling and NAS Design</h1>
+      <ul class='note-meta'><li><strong>description:</strong> EfficientNet (Tan &amp; Le 2019): systematically scale depth, width, and resolution together using compound coefficient φ. Covers NAS-derived B0 baseline, MBConv with Squeeze-Excitation, compound scaling B0→B7, EfficientNetV2 progressive learning, and EfficientDet.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>EfficientNet — Compound Scaling and NAS Design</h1>
+<p>EfficientNet (Tan &amp; Le, NeurIPS 2019) revolutionized CNN design by asking a fundamental question: given a fixed compute budget, how should you scale network depth, width, and input resolution together? The answer — compound scaling — yields a family of models from B0 (5.3M params) to B7 (66M params) that outperformed every prior CNN at the time of publication. EfficientNet models are derived from a NAS-found B0 baseline and systematically scaled, making them both principled and highly efficient.</p>
+<h2>What Is EfficientNet?</h2>
+<p>EfficientNet is a family of CNNs whose architecture and scaling strategy were co-designed by Neural Architecture Search (NAS). The NAS process optimized for accuracy and FLOPs simultaneously on a small proxy task, yielding the B0 baseline architecture. B0 uses Mobile Inverted Bottleneck Convolutions (MBConv) with Squeeze-Excitation attention as the core block. From B0, the B1–B7 variants are obtained by increasing a compound coefficient φ that jointly scales depth, width, and resolution. At equal accuracy, EfficientNet used up to 8.4× fewer parameters and 16× fewer FLOPs than the best competing models such as GPipe.</p>
+<h2>Compound Scaling — Depth, Width, and Resolution</h2>
+<p>Naively scaling any single dimension (depth only, width only, or resolution only) quickly hits diminishing returns. Tan &amp; Le propose scaling all three simultaneously using a compound coefficient φ. Baseline multipliers α (depth), β (width), γ (resolution) are found by grid search at φ=1 subject to the constraint α·β²·γ²≈2, so that doubling φ roughly doubles FLOPs. The scaled model at coefficient φ has: depth d = α^φ, width w = β^φ, resolution r = γ^φ. For EfficientNet, α=1.2, β=1.1, γ=1.15 — giving α·β²·γ² ≈ 1.2×1.21×1.3225 ≈ 1.92 ≈ 2. This means one unit of φ costs approximately 2× the FLOPs of the previous step.</p>
+<h2>Squeeze-Excitation Blocks</h2>
+<p>The SE block (Hu et al., 2018) reweights channels adaptively using global context. It has three steps: (1) Squeeze — global average pool across spatial dimensions, yielding a (B, C) descriptor; (2) Excitation — two fully-connected layers with ReLU and Sigmoid, forming a bottleneck C → C/r → C that learns channel importance weights; (3) Scale — multiply the feature map channel-wise by the learned weights ∈ (0, 1). The SE block adds approximately 2·C²/r parameters (r=4 typical), a small overhead that consistently provides +1–2% accuracy. EfficientNet places one SE block inside every MBConv block.</p>
+<blockquote>
+<p><strong>Why SE Blocks Work</strong>: The SE block is a lightweight channel attention mechanism. The global average pool squeezes spatial information into a channel descriptor; the FC bottleneck excites informative channels and suppresses less useful ones. Because the learned weights depend on global image content (not local patches), the network can selectively suppress background-activated channels even when those channels fire strongly locally. SE adds &lt;1% parameter overhead while consistently improving accuracy.</p>
+</blockquote>
+<h2>MBConv — Mobile Inverted Bottleneck</h2>
+<p>MBConv (also used in MobileNetV2 and V3) is an inverted bottleneck: channels are first expanded (by factor expand_ratio=6) then reduced — opposite to the classic bottleneck. EfficientNet's MBConv block: (1) pointwise expansion conv (in → in×expand), (2) depthwise 3×3 or 5×5 conv with stride, (3) Squeeze-Excitation, (4) pointwise projection conv (in×expand → out), (5) skip connection when stride=1 and in_channels=out_channels. The depthwise separable structure dramatically reduces FLOPs versus standard convolution: a k×k depthwise + 1×1 pointwise uses k² + C_out times fewer FLOPs than a k×k standard conv.</p>
+<h2>Code Examples</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class SqueezeExcitation(nn.Module):
+    &quot;&quot;&quot;SE block: global avg pool -&gt; FC -&gt; ReLU -&gt; FC -&gt; Sigmoid -&gt; channel scaling.&quot;&quot;&quot;
+    def __init__(self, in_channels, reduction_ratio=4):
+        super().__init__()
+        reduced = max(1, in_channels // reduction_ratio)
+        self.gap  = nn.AdaptiveAvgPool2d(1)
+        self.fc1  = nn.Linear(in_channels, reduced)
+        self.fc2  = nn.Linear(reduced, in_channels)
+        self.relu = nn.ReLU(inplace=True)
+        self.sig  = nn.Sigmoid()
+
+    def forward(self, x):
+        s = self.gap(x).flatten(1)           # (B, C): squeeze
+        s = self.relu(self.fc1(s))           # FC -&gt; ReLU
+        s = self.sig(self.fc2(s))            # FC -&gt; Sigmoid: weights in (0,1)
+        return x * s.unsqueeze(-1).unsqueeze(-1)  # channel-wise scale
+
+se = SqueezeExcitation(64, reduction_ratio=4)
+x  = torch.randn(2, 64, 28, 28)
+out = se(x)
+print(f&quot;Input:  {x.shape}&quot;)
+print(f&quot;Output: {out.shape}  (same shape, channels re-weighted)&quot;)
+print(f&quot;SE params: {sum(p.numel() for p in se.parameters()):,}&quot;)
+print(&quot;reduction_ratio=4 -&gt; bottleneck: 64-&gt;16-&gt;64; small overhead, large gain&quot;)
+</code></pre>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class MBConv(nn.Module):
+    &quot;&quot;&quot;Mobile Inverted Bottleneck + SE block (EfficientNet core building block).&quot;&quot;&quot;
+    def __init__(self, in_ch, out_ch, expand=6, stride=1, se_ratio=0.25):
+        super().__init__()
+        mid, se_ch = in_ch * expand, max(1, int(in_ch * se_ratio))
+        self.skip  = (stride == 1 and in_ch == out_ch)
+        self.expand = nn.Sequential(nn.Conv2d(in_ch, mid, 1, bias=False),
+                                    nn.BatchNorm2d(mid), nn.SiLU())
+        self.dw = nn.Sequential(
+            nn.Conv2d(mid, mid, 3, stride=stride, padding=1, groups=mid, bias=False),
+            nn.BatchNorm2d(mid), nn.SiLU())
+        self.se_pool = nn.AdaptiveAvgPool2d(1)
+        self.se_fc   = nn.Sequential(nn.Linear(mid, se_ch), nn.ReLU(),
+                                     nn.Linear(se_ch, mid), nn.Sigmoid())
+        self.proj = nn.Sequential(nn.Conv2d(mid, out_ch, 1, bias=False),
+                                  nn.BatchNorm2d(out_ch))
+
+    def forward(self, x):
+        h = self.expand(x)
+        h = self.dw(h)
+        h = h * self.se_fc(self.se_pool(h).flatten(1)).view(h.size(0), h.size(1), 1, 1)
+        h = self.proj(h)
+        return h + x if self.skip else h
+
+m = MBConv(32, 32, expand=6, stride=1)
+x = torch.randn(2, 32, 28, 28)
+print(f&quot;Output: {m(x).shape}, Params: {sum(p.numel() for p in m.parameters()):,}&quot;)
+print(&quot;Pattern: expand(pw) -&gt; depthwise -&gt; SE -&gt; project(pw) + skip&quot;)
+</code></pre>
+<pre><code class="language-python"># EfficientNet compound scaling: depth=alpha^phi, width=beta^phi, resolution=gamma^phi
+ALPHA, BETA, GAMMA = 1.2, 1.1, 1.15
+B0_PARAMS_M, B0_FLOPS_B, B0_RES = 5.3, 0.39, 224
+
+print(f&quot;Constraint: alpha*beta**2*gamma**2 = {ALPHA * BETA**2 * GAMMA**2:.4f} (target ~2)&quot;)
+
+def compound_scale(phi):
+    d = ALPHA ** phi
+    w = BETA  ** phi
+    r = GAMMA ** phi
+    return (d, w, r,
+            B0_PARAMS_M * d * w**2,
+            B0_FLOPS_B  * d * w**2 * r**2,
+            int(B0_RES * r / 32) * 32)
+
+names = ['B0', 'B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7']
+header = f&quot;{'Model':&lt;8} {'phi':&gt;3}  {'depth':&gt;6}  {'width':&gt;6}  {'res':&gt;5}  {'Params(M)':&gt;9}  {'GFLOPs':&gt;7}&quot;
+print(header)
+print('-' * len(header))
+for phi, name in enumerate(names):
+    d, w, r, p, f, res = compound_scale(phi)
+    print(f&quot;{name:&lt;8} {phi:&gt;3}  {d:&gt;6.2f}  {w:&gt;6.2f}  {res:&gt;5}  {p:&gt;9.1f}  {f:&gt;7.2f}&quot;)
+print()
+print(&quot;Compound scaling is more FLOPs-efficient than single-dimension scaling.&quot;)
+print(&quot;B0-&gt;B7 increases FLOPs by ~95x; accuracy rises from 77.3% to 84.4%.&quot;)
+</code></pre>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from torchvision import models, transforms
+
+model = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1)
+
+# Freeze entire backbone
+for param in model.parameters():
+    param.requires_grad = False
+
+# Replace classification head (in_features=1280 for B0)
+num_classes = 10
+model.classifier = nn.Sequential(
+    nn.Dropout(p=0.2, inplace=True),
+    nn.Linear(model.classifier[1].in_features, num_classes)
+)
+
+trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+total     = sum(p.numel() for p in model.parameters())
+print(f&quot;Trainable: {trainable:,} / {total:,} ({100*trainable/total:.2f}%)&quot;)
+
+optimizer = torch.optim.Adam(model.classifier.parameters(), lr=1e-3)
+criterion = nn.CrossEntropyLoss()
+
+# Standard EfficientNet-B0 preprocessing
+transform = transforms.Compose([
+    transforms.Resize(256),
+    transforms.CenterCrop(224),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+])
+print(&quot;To fine-tune more layers: set param.requires_grad=True for model.features[-3:]&quot;)
+</code></pre>
+<h2>EfficientNetV2 and Progressive Learning</h2>
+<p>EfficientNetV2 (Tan &amp; Le, 2021) revisited the design with three improvements: (1) Fused-MBConv replaces the expand+depthwise combination in early layers with a single regular 3×3 convolution — faster on accelerators (TPU/GPU) despite more FLOPs because fused ops have better hardware utilization; (2) Progressive learning: training starts with small images (e.g., 128px) and weak augmentation, then gradually increases both to the full resolution — cuts training time by ~4× versus training on large images throughout; (3) Improved scaling: S/M/L/XL variants replace B0-B7, achieving 85.7% on ImageNet for EfficientNetV2-L with 3.1× faster training than EfficientNet-B7.</p>
+<h2>EfficientDet — Compound Scaling for Detection</h2>
+<p>EfficientDet applies compound scaling to object detection. The backbone is EfficientNet-Bφ; the neck is BiFPN (bidirectional feature pyramid network) scaled by depth and channel count; the detection head is also scaled with φ. BiFPN applies weighted bidirectional feature fusion across P3–P7 scales, learning a softmax importance weight at each connection. The compound scaling coefficient φ controls all three components simultaneously. EfficientDet D0–D7 set new efficiency records on COCO — EfficientDet-D7 achieves 55.1 AP at 52M parameters versus AmoebaNet+NAS-FPN at 55.7 AP with 167M parameters.</p>
+<h2>B0–B7 Scaling Reference</h2>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>φ</th>
+<th>Input Res</th>
+<th>Params (M)</th>
+<th>GFLOPs</th>
+<th>Top-1 Acc (%)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>B0</td>
+<td>0</td>
+<td>224</td>
+<td>5.3</td>
+<td>0.39</td>
+<td>77.3</td>
+</tr>
+<tr>
+<td>B1</td>
+<td>1</td>
+<td>240</td>
+<td>7.8</td>
+<td>0.70</td>
+<td>79.2</td>
+</tr>
+<tr>
+<td>B2</td>
+<td>2</td>
+<td>260</td>
+<td>9.2</td>
+<td>1.0</td>
+<td>80.3</td>
+</tr>
+<tr>
+<td>B3</td>
+<td>3</td>
+<td>300</td>
+<td>12.0</td>
+<td>1.8</td>
+<td>81.7</td>
+</tr>
+<tr>
+<td>B4</td>
+<td>4</td>
+<td>380</td>
+<td>19.0</td>
+<td>4.2</td>
+<td>83.0</td>
+</tr>
+<tr>
+<td>B5</td>
+<td>5</td>
+<td>456</td>
+<td>30.0</td>
+<td>9.9</td>
+<td>83.7</td>
+</tr>
+<tr>
+<td>B6</td>
+<td>6</td>
+<td>528</td>
+<td>43.0</td>
+<td>19.0</td>
+<td>84.1</td>
+</tr>
+<tr>
+<td>B7</td>
+<td>7</td>
+<td>600</td>
+<td>66.0</td>
+<td>37.0</td>
+<td>84.4</td>
+</tr>
+</tbody>
+</table>
+<h2>Design Conclusions</h2>
+<p>The central contribution of EfficientNet is the compound scaling methodology, not the B0 architecture itself. By constraining α·β²·γ²≈2, scaling becomes calibrated: each unit of φ costs a predictable 2× in FLOPs. The grid search for α, β, γ is cheap (run at φ=1 on a small dataset) and the result is a clean scaling law from B0 to B7. This methodology is architecture-agnostic and has influenced many subsequent models — EfficientDet, EfficientNetV2, and many detection/segmentation backbones all adopt the same principle.</p>
+<ul>
+<li>NAS finds B0 baseline; compound scaling with φ multiplies it into B1-B7.</li>
+<li>Constraint α·β²·γ²≈2 ensures doubling φ doubles FLOPs (clean scaling law).</li>
+<li>MBConv: expand (pointwise) -&gt; depthwise -&gt; SE -&gt; project (pointwise) + skip.</li>
+<li>SE block: global avg pool -&gt; FC bottleneck -&gt; Sigmoid -&gt; channel-wise scale.</li>
+<li>EfficientNetV2: Fused-MBConv for early layers, progressive image size training.</li>
+<li>At equal accuracy, EfficientNet uses up to 8.4× fewer parameters than prior CNNs.</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

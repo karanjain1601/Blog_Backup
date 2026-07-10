@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GCG: Gradient-Based Adversarial Prompts | Notes Backup</title>
+  <meta name="description" content="The Greedy Coordinate Gradient attack that optimizes suffix tokens via gradient descent to bypass safety alignment — and how perplexity filtering and adversarial training defend against it." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>GCG: Gradient-Based Adversarial Prompts</h1>
+      <ul class='note-meta'><li><strong>description:</strong> The Greedy Coordinate Gradient attack that optimizes suffix tokens via gradient descent to bypass safety alignment — and how perplexity filtering and adversarial training defend against it.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>GCG: Gradient-Based Adversarial Prompts</h1>
+<p>Greedy Coordinate Gradient (GCG), introduced by Zou et al. (2023) in 'Universal and Transferable Adversarial Attacks on Aligned Language Models', is the first systematic method for producing adversarial suffixes that cause aligned LLMs to comply with harmful requests. GCG operates by appending a learned token sequence to a harmful prompt and optimizing that suffix via gradient descent over the model's token embedding space, minimizing the cross-entropy loss of a target harmful completion. The resulting suffixes look like grammatical gibberish to humans but reliably bypass safety alignment fine-tuning on GPT-3.5, GPT-4, Claude, and Llama-2. Understanding GCG in depth is essential for ML engineers building robust defenses, because every effective defense — perplexity filtering, adversarial training, certified smoothing — works by exploiting specific properties of how GCG constructs its suffixes.</p>
+<h2>Overview</h2>
+<p>GCG was the first attack to demonstrate that adversarial examples transfer across black-box LLMs — a suffix optimized on open-weight Llama-2 and Vicuna retains significant attack success against closed-source GPT-4 and Claude. The attack frames suffix optimization as a discrete combinatorial search over vocabulary tokens guided by continuous gradient information. At each step it evaluates the gradient of the attack loss with respect to one-hot token embeddings, uses the gradient magnitudes to shortlist candidate token substitutions at each suffix position, then picks the substitution that most reduces the loss via forward passes. The final suffix, typically 20–200 tokens, appears as a semantically incoherent string — 'describing. ! + similarlyNow write step: : [ i've HERE' — that triggers the target model to begin generating the harmful completion. The key insight for defenders is that this incoherence is a measurable signal: GCG suffixes have anomalously high perplexity under standard language models.</p>
+<h2>GCG Attack Mechanism</h2>
+<p>GCG minimizes a loss L(x_adv) = -log P(y_target | x_prompt + x_suffix), where x_prompt is the harmful user prompt, x_suffix is the learnable token sequence, and y_target is the desired harmful continuation (e.g., 'Sure, here is how to...'). Because token vocabularies are discrete, standard gradient descent cannot directly update token identities. GCG linearizes the loss around each suffix token position using the gradient with respect to one-hot token embeddings, selecting the top-k tokens per position by gradient magnitude as candidates. It then evaluates a random subset of these candidates via forward passes to find the actual best substitution. This combination of gradient-guided search with forward-pass verification makes GCG far more sample-efficient than pure random token search while remaining applicable to any differentiable language model. The loss computation requires white-box access to model weights and gradients, but the resulting suffix transfers to black-box models because the optimization discovers statistical regularities in how alignment fine-tuning responds to prefix context.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+from transformers import AutoTokenizer, AutoModelForCausalLM
+
+# EDUCATIONAL: Understanding GCG loss for defensive research purposes
+def gcg_loss(model, prompt_ids: torch.Tensor, suffix_ids: torch.Tensor,
+             target_ids: torch.Tensor) -&gt; torch.Tensor:
+    &quot;&quot;&quot;Compute CE loss of target harmful completion given prompt+suffix.
+    This is what GCG minimizes. Understanding it helps build better defenses.&quot;&quot;&quot;
+    full_input = torch.cat([prompt_ids, suffix_ids, target_ids], dim=-1)
+    logits = model(full_input).logits
+    # Shift: predict target tokens from suffix+prompt context
+    offset = prompt_ids.shape[-1] + suffix_ids.shape[-1] - 1
+    target_logits = logits[:, offset: offset + target_ids.shape[-1]]
+    return F.cross_entropy(target_logits.reshape(-1, logits.shape[-1]),
+                           target_ids.reshape(-1))
+
+def compute_token_gradients(model, suffix_ids: torch.Tensor,
+                            loss_fn) -&gt; torch.Tensor:
+    &quot;&quot;&quot;Gradient w.r.t. one-hot suffix embeddings: identifies candidate substitutions.
+    Top-k tokens per position by gradient magnitude are the GCG candidate set.&quot;&quot;&quot;
+    vocab_size = model.config.vocab_size
+    one_hot = F.one_hot(suffix_ids, num_classes=vocab_size).float().requires_grad_(True)
+    emb = one_hot @ model.get_input_embeddings().weight
+    loss = loss_fn(emb)
+    loss.backward()
+    topk_candidates = (-one_hot.grad).topk(k=256, dim=-1).indices
+    print(f&quot;Gradient computed over {suffix_ids.shape[-1]} suffix positions, &quot;
+          f&quot;top-256 candidates per position returned&quot;)
+    return topk_candidates  # shape: (suffix_len, 256)
+
+</code></pre>
+<h2>Greedy Token Search Algorithm</h2>
+<p>The core GCG loop alternates between a gradient step (to compute candidate tokens) and a greedy forward-pass selection step. At each iteration: (1) compute the gradient of the loss with respect to all suffix token positions simultaneously; (2) for each suffix position, extract the top-k tokens by gradient magnitude — typically k=256; (3) sample a random batch of B candidate suffixes (e.g., B=512), each formed by substituting one randomly chosen position with one of its top-k gradient candidates; (4) evaluate the loss on all B candidates via batched forward passes; (5) keep the candidate with the lowest loss. This process repeats for 500–1000 iterations. The greedy selection in step 4 is what makes GCG more reliable than pure gradient descent on continuous embeddings — continuous embeddings quickly drift away from valid token sequences, while the discrete candidate-and-verify approach stays in the vocabulary manifold. The result is a token sequence where each token was chosen to minimally increase (or maximally decrease) the log-probability of the target harmful completion.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+from dataclasses import dataclass
+from typing import List, Tuple
+
+@dataclass
+class SuffixExperiment:
+    suffix_length: int
+    attack_success_rate: float   # fraction of AdvBench prompts bypassed
+    avg_optimization_steps: int
+    avg_ppl: float               # perplexity under GPT-2 (higher = more detectable)
+    transferability_rate: float  # success rate on a held-out black-box model
+
+def analyze_suffix_length_tradeoff() -&gt; List[SuffixExperiment]:
+    &quot;&quot;&quot;Illustrative results based on GCG paper (Zou et al., 2023).
+    Longer suffixes achieve higher attack success but are more detectable.
+    Defense insight: perplexity threshold + length cap cuts ASR below 40%.&quot;&quot;&quot;
+    return [
+        SuffixExperiment(10,  0.31, 250, 180.0, 0.12),
+        SuffixExperiment(20,  0.52, 400, 420.0, 0.21),
+        SuffixExperiment(50,  0.74, 500, 890.0, 0.34),
+        SuffixExperiment(100, 0.87, 600, 1650.0, 0.41),
+        SuffixExperiment(200, 0.91, 800, 3200.0, 0.47),
+    ]
+
+def print_defense_analysis(experiments: List[SuffixExperiment],
+                           max_suffix_len: int = 20, ppl_threshold: float = 500.0):
+    print(f&quot;{'Len':&gt;5} {'ASR':&gt;8} {'PPL':&gt;8} {'Len-blocked':&gt;13} {'PPL-blocked':&gt;13}&quot;)
+    for exp in experiments:
+        len_blocked = exp.suffix_length &gt; max_suffix_len
+        ppl_blocked = exp.avg_ppl &gt; ppl_threshold
+        either = len_blocked or ppl_blocked
+        print(f&quot;{exp.suffix_length:&gt;5} {exp.attack_success_rate:&gt;8.0%} &quot;
+              f&quot;{exp.avg_ppl:&gt;8.0f} {str(len_blocked):&gt;13} {str(ppl_blocked):&gt;13}&quot;)
+    print(&quot;\nCombined defense blocks all suffixes with length&gt;20 OR PPL&gt;500&quot;)
+
+print_defense_analysis(analyze_suffix_length_tradeoff())
+
+</code></pre>
+<h2>Transferability Across Models</h2>
+<p>A key finding of the GCG paper is that adversarial suffixes optimized on an ensemble of open-weight models (Llama-2-7B, Llama-2-13B, Vicuna-7B, Vicuna-13B) transfer to black-box commercial models including GPT-3.5 Turbo, GPT-4, and Claude. Transfer attack success rates range from 16% (Claude) to 47% (GPT-3.5 Turbo) — well above the baseline of 0% for unoptimized harmful prompts. Transferability arises because alignment fine-tuning responds to similar statistical patterns across models: all RLHF-trained models learn to detect and refuse harmful intent expressed in natural language, and GCG discovers that appending certain anomalous token sequences disrupts this detection regardless of the specific model. This has major implications for defense design — model-specific defenses that rely on the exact format of the safety training are insufficient. Effective defenses must operate at the semantic or distributional level, not at the token level. Perplexity filtering is effective precisely because it detects the statistical anomaly of GCG suffixes regardless of which model generated them.</p>
+<ul>
+<li>White-box optimization on Llama-2 + Vicuna ensemble gives 40-50% transfer rate to GPT-4</li>
+<li>Transfer rate is higher to instruction-tuned models than to base models</li>
+<li>Suffixes optimized on larger model ensembles transfer more reliably</li>
+<li>Commercial models with system prompts show lower transfer rates than models without</li>
+<li>Semantic similarity between open-weight and target model training data increases transfer</li>
+</ul>
+<h2>Perplexity-Based Detection</h2>
+<p>The most practical first-line defense against GCG is perplexity filtering: compute the perplexity of the incoming prompt under a standard reference language model (GPT-2 is sufficient), and flag or reject prompts whose perplexity exceeds a threshold derived from the distribution of normal user prompts. GCG-generated suffixes contain grammatically anomalous token sequences — they are not natural language — and score perplexity values of 500–5000 under GPT-2, versus 50–200 for typical user prompts. A threshold set at mean + 3σ of the normal distribution catches nearly all GCG suffixes with a false positive rate below 0.3% on legitimate prompts. The key limitation is that future attacks may optimize for both attack success and low perplexity simultaneously — this is an open research problem. However, as of 2024, no published attack achieves high ASR while also maintaining natural-language perplexity, making perplexity filtering a high-value, low-cost defense to deploy immediately.</p>
+<pre><code class="language-python">import torch
+import math
+from transformers import GPT2LMHeadModel, GPT2TokenizerFast
+from typing import Callable, List
+
+def load_ppl_model(device: str = &quot;cpu&quot;):
+    &quot;&quot;&quot;Load GPT-2 as a reference perplexity model (lightweight, fast).&quot;&quot;&quot;
+    tokenizer = GPT2TokenizerFast.from_pretrained(&quot;gpt2&quot;)
+    model = GPT2LMHeadModel.from_pretrained(&quot;gpt2&quot;).to(device).eval()
+    return model, tokenizer
+
+def compute_perplexity(text: str, model, tokenizer, device: str = &quot;cpu&quot;) -&gt; float:
+    &quot;&quot;&quot;Compute perplexity of input text. GCG suffixes score very high (&gt;500).&quot;&quot;&quot;
+    inputs = tokenizer(text, return_tensors=&quot;pt&quot;,
+                       truncation=True, max_length=512).to(device)
+    with torch.no_grad():
+        loss = model(**inputs, labels=inputs[&quot;input_ids&quot;]).loss
+    return math.exp(loss.item())
+
+def build_perplexity_detector(model, tokenizer, normal_texts: List[str],
+                              sigma_threshold: float = 3.0) -&gt; Callable:
+    &quot;&quot;&quot;Fit PPL distribution on normal prompts; flag anomalies at 3-sigma.&quot;&quot;&quot;
+    ppls = [compute_perplexity(t, model, tokenizer) for t in normal_texts]
+    mean_ppl = sum(ppls) / len(ppls)
+    std_ppl = (sum((p - mean_ppl) ** 2 for p in ppls) / len(ppls)) ** 0.5
+    threshold = mean_ppl + sigma_threshold * std_ppl
+    def detector(text: str) -&gt; dict:
+        ppl = compute_perplexity(text, model, tokenizer)
+        z = (ppl - mean_ppl) / std_ppl
+        return {&quot;perplexity&quot;: round(ppl, 1), &quot;threshold&quot;: round(threshold, 1),
+                &quot;flagged&quot;: ppl &gt; threshold, &quot;z_score&quot;: round(z, 2)}
+    print(f&quot;Detector calibrated: mean={mean_ppl:.1f}, std={std_ppl:.1f}, threshold={threshold:.1f}&quot;)
+    return detector
+
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Defense</th>
+<th>GCG attack success rate</th>
+<th>Clean accuracy</th>
+<th>Compute overhead</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>No defense</td>
+<td>87% (100-token suffix)</td>
+<td>100%</td>
+<td>None</td>
+<td>Baseline — unacceptable in production</td>
+</tr>
+<tr>
+<td>Perplexity filter (3σ)</td>
+<td>8%</td>
+<td>99.7%</td>
+<td>~10ms GPT-2 call</td>
+<td>Best cost/benefit; misses low-PPL variants</td>
+</tr>
+<tr>
+<td>Input paraphrasing</td>
+<td>22%</td>
+<td>97%</td>
+<td>1 extra LLM call</td>
+<td>Disrupts suffix tokens; reduces clean coherence</td>
+</tr>
+<tr>
+<td>Adversarial training</td>
+<td>31%</td>
+<td>98%</td>
+<td>2x fine-tuning cost</td>
+<td>Generalizes; must be refreshed vs new attacks</td>
+</tr>
+<tr>
+<td>Random smoothing</td>
+<td>40%</td>
+<td>95%</td>
+<td>N forward passes per input</td>
+<td>Certified radius but high inference cost</td>
+</tr>
+<tr>
+<td>Certified defense (IBP)</td>
+<td>0% (certified)</td>
+<td>91%</td>
+<td>10-50x training cost</td>
+<td>Formal guarantee; large accuracy drop</td>
+</tr>
+</tbody>
+</table>
+<h2>Adversarial Training Defense</h2>
+<p>Adversarial training augments the safety fine-tuning dataset with adversarial examples — prompts with GCG-optimized suffixes paired with correct refusal completions. The model learns to refuse harmful requests even when anomalous suffix tokens are present. The key challenge is coverage: GCG is computationally expensive (hours per suffix), so generating adversarial examples for every possible harmful prompt category is impractical. Instead, practitioners generate adversarial examples for a representative sample of 500–2000 harmful prompt categories and rely on the model's generalization to cover unseen variations. Studies show that adversarial training reduces GCG attack success by 50–70% on held-out prompts without significantly degrading refusal rates on clean harmful prompts or helpfulness on benign prompts. However, adversarial training is an arms race — new attack variants can circumvent defenses that were trained on older attack signatures, requiring periodic defense refresh as new attacks are discovered.</p>
+<pre><code class="language-python">import torch
+import random
+from datasets import Dataset
+from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments
+from typing import List, Dict
+
+def create_adversarial_augmented_dataset(safety_examples: List[Dict],
+                                         adversarial_suffixes: List[str],
+                                         augment_ratio: float = 0.3) -&gt; Dataset:
+    &quot;&quot;&quot;Build safety fine-tuning dataset augmented with adversarial suffix examples.
+    Model sees harmful prompt + GCG suffix paired with correct refusal.&quot;&quot;&quot;
+    augmented = []
+    for ex in safety_examples:
+        augmented.append({&quot;prompt&quot;: ex[&quot;prompt&quot;], &quot;response&quot;: ex[&quot;refusal&quot;]})
+        if random.random() &lt; augment_ratio:
+            suffix = random.choice(adversarial_suffixes)
+            augmented.append({&quot;prompt&quot;: ex[&quot;prompt&quot;] + &quot; &quot; + suffix,
+                               &quot;response&quot;: ex[&quot;refusal&quot;]})
+    random.shuffle(augmented)
+    print(f&quot;Dataset: {len(safety_examples)} original + adversarial augmentation -&gt; {len(augmented)} total&quot;)
+    return Dataset.from_list(augmented)
+
+def evaluate_robustness(model, tokenizer, advbench_sample: List[str],
+                        suffix: str) -&gt; Dict:
+    &quot;&quot;&quot;Measure attack success rate on AdvBench subset after adversarial training.&quot;&quot;&quot;
+    refused, total = 0, len(advbench_sample)
+    for prompt in advbench_sample:
+        adversarial_input = prompt + &quot; &quot; + suffix
+        inputs = tokenizer(adversarial_input, return_tensors=&quot;pt&quot;,
+                           truncation=True, max_length=512)
+        with torch.no_grad():
+            out = model.generate(**inputs, max_new_tokens=32, do_sample=False)
+        response = tokenizer.decode(out[0], skip_special_tokens=True).lower()
+        if any(kw in response for kw in [&quot;cannot&quot;, &quot;sorry&quot;, &quot;unable&quot;, &quot;refuse&quot;, &quot;inappropriate&quot;]):
+            refused += 1
+    return {&quot;refusal_rate&quot;: refused / total, &quot;attack_success_rate&quot;: 1 - refused / total,
+            &quot;total_prompts&quot;: total}
+
+</code></pre>
+<blockquote>
+<p><strong>Perplexity Filtering Limitation</strong>: GCG-generated adversarial suffixes are detectable by perplexity filtering because they contain grammatically anomalous token sequences — but future attacks may optimize for low-perplexity suffixes simultaneously. AutoDAN (Liu et al., 2023) already produces more fluent adversarial prompts by incorporating a fluency reward into the search. Defense teams should treat perplexity filtering as one layer in a defense-in-depth stack, not as a standalone guarantee, and monitor for new attacks that explicitly optimize against this defense.</p>
+</blockquote>
+<h2>Evaluation via AdvBench</h2>
+<p>AdvBench, introduced alongside GCG, is the standard benchmark for evaluating adversarial attacks and defenses on aligned LLMs. It contains 520 harmful behaviors spanning categories including weapons, malware, hate speech, illegal activities, and privacy violations. Each behavior is represented as an instruction plus a target string that the attack should elicit. Attack success is measured by two metrics: a string-matching heuristic that checks whether the model's response begins with the target string (fast, automatable), and human evaluation of whether the response actually fulfills the harmful request (slower, more accurate). The GCG paper reports 88% attack success rate on Llama-2-7B-chat and 57% on GPT-3.5 Turbo on AdvBench. These numbers should be interpreted carefully: string matching overestimates ASR because models sometimes begin with the target string but then add safety caveats that render the response harmless. Human-evaluated ASR is typically 20–30% lower than string-matched ASR.</p>
+<ul>
+<li>AdvBench contains 520 harmful instructions across 10 harm categories</li>
+<li>String-match ASR is fast but overestimates real attack success by 20-30%</li>
+<li>Llama-2-7B-chat: 88% string-match ASR under GCG (Zou et al., 2023)</li>
+<li>GPT-3.5 Turbo: 57% ASR using suffix transferred from open-weight model ensemble</li>
+<li>GPT-4: 47% ASR — highest-capability models show better natural resistance</li>
+<li>Claude (Anthropic): 16% ASR — constitutional AI training shows added robustness</li>
+<li>Evaluation should always include clean prompt refusal rate to measure defense cost</li>
+</ul>
+<h2>Key Takeaways</h2>
+<p>GCG revealed that current safety alignment via RLHF is not robust to gradient-guided adversarial optimization. The attack is computationally feasible for anyone with open-weight model access and a consumer GPU, and the resulting suffixes transfer to commercial models. The most practical defensive response is a layered strategy: deploy perplexity filtering as the first layer (low cost, catches most GCG variants), add adversarial training to the safety fine-tuning pipeline (higher cost, generalizes to unseen suffixes), and monitor for new attack variants using AdvBench as a continuous evaluation harness. Certified defenses exist but impose large accuracy penalties that make them impractical for production deployment today. The GCG paper is a landmark in LLM security research because it demonstrated that aligned models have a fundamental vulnerability that cannot be patched by simply adding more safety training — it requires rethinking alignment at the algorithmic level, combining training-time and inference-time defenses.</p>
+<ul>
+<li>GCG optimizes a token suffix to minimize CE loss of a harmful target completion via greedy coordinate gradient search</li>
+<li>Suffixes transfer across models: white-box optimization on Llama-2 achieves 47% ASR on GPT-3.5</li>
+<li>Perplexity filtering (GPT-2, 3σ threshold) reduces ASR from 87% to 8% with &lt;0.3% false positives</li>
+<li>Adversarial training reduces ASR by 50-70% but requires periodic refresh as new attacks emerge</li>
+<li>AdvBench (520 behaviors) is the standard evaluation benchmark — always report both string-match and human ASR</li>
+<li>Longer suffixes have higher ASR but higher PPL — defense can exploit both axes simultaneously</li>
+<li>Defense-in-depth: perplexity filter + input paraphrasing + adversarial training is the recommended production stack</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AWQ: Activation-Aware Weight Quantization | Notes Backup</title>
+  <meta name="description" content="Quantization method that protects salient weights identified by activation magnitude, achieving low perplexity at INT4 without expensive Hessian computation." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>AWQ: Activation-Aware Weight Quantization</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Quantization method that protects salient weights identified by activation magnitude, achieving low perplexity at INT4 without expensive Hessian computation.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>AWQ: Activation-Aware Weight Quantization</h1>
+<p>AWQ (Activation-aware Weight Quantization) is a post-training quantization algorithm introduced by Lin et al. in 2023 that achieves state-of-the-art accuracy at INT4 without the expensive second-order Hessian computation required by GPTQ. The central observation of AWQ is that weights are not equally important: roughly 1% of weight channels are 'salient'—they correspond to input channels with large activation magnitudes and disproportionately influence model outputs. Uniformly rounding all weights to the nearest 4-bit value treats salient and non-salient channels identically, degrading the critical 1% as much as the rest. AWQ avoids this by computing per-channel scaling factors before quantization: salient channels are scaled up (making their quantization grid finer) while the complementary scaling is applied to the preceding layer's output, keeping the overall computation equivalent. The net effect is that salient weights suffer far less rounding error, preserving model quality without requiring per-weight optimization or Hessian inversion.</p>
+<h2>Overview</h2>
+<p>AWQ's design philosophy is elegantly simple: find a diagonal scaling matrix S such that quantizing (W × S^{-1}) in INT4 preserves accuracy better than quantizing W directly, then absorb S^{-1} into the preceding layer's output (or equivalently, multiply the input by S before it reaches this layer). Because the scaling and its inverse cancel algebraically, the model's outputs are unchanged in full precision—the scaling is 'mathematically transparent.' In the quantized model, however, the scaled weight W' = W × S^{-1} has smaller variance in the salient channels (because S^{-1} shrinks their range), giving the INT4 grid more resolution where it matters most. The optimal S is found by grid search on the calibration data: AWQ evaluates a set of candidate scale magnitudes and selects the one that minimizes the reconstruction error of the quantized layer output. This grid search is far cheaper than GPTQ's Cholesky factorization, making AWQ quantization 2–5× faster on large models.</p>
+<ul>
+<li>Identify salient channels: those with the highest mean activation magnitude across calibration data</li>
+<li>Compute per-channel scale s: proportional to the activation magnitude, with a tunable exponent alpha</li>
+<li>Apply weight scaling: W' = W × diag(s)^{-1}, equivalently scale the input by diag(s)</li>
+<li>Quantize W' to INT4 using standard symmetric or asymmetric quantization</li>
+<li>Absorb the input scaling into the previous layer (e.g., multiply LayerNorm weights by s)</li>
+<li>No Hessian computation or error propagation: fast and memory-efficient quantization</li>
+</ul>
+<h2>Identifying Salient Weights</h2>
+<p>The salience of a weight channel in AWQ is defined by the activation magnitude of the corresponding input feature, not by the weight value itself. This is a subtle but important distinction: a weight with a large absolute value might still be unimportant if the corresponding input activation is small (the product w × x remains small). Conversely, a weight with a small absolute value but a consistently large activation magnitude is highly salient—its quantization error gets amplified by the large activation. AWQ measures salience by computing the mean absolute value of each input channel across the calibration dataset: s_i = mean_over_tokens(|x_i|). Channels with the top 1% of these magnitudes are identified as salient. This salience measurement requires only a single forward pass over the calibration data with lightweight forward hooks—no backward pass, no Hessian, no matrix inversion.</p>
+<pre><code class="language-python">import torch, torch.nn as nn
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from datasets import load_dataset
+
+def get_channel_magnitudes(model, tokenizer, n=32):
+    &quot;&quot;&quot;Collect per-input-channel activation magnitudes via forward hooks.&quot;&quot;&quot;
+    mags, hooks = {}, []
+    def hook_fn(name):
+        def fn(mod, inp, out):
+            x = inp[0].detach().float().abs().mean(dim=(0, 1))
+            mags[name] = x if name not in mags else mags[name]*0.9 + x*0.1
+        return fn
+    for nm, mod in model.named_modules():
+        if isinstance(mod, nn.Linear):
+            hooks.append(mod.register_forward_hook(hook_fn(nm)))
+    ds = load_dataset(&quot;wikitext&quot;, &quot;wikitext-2-raw-v1&quot;, split=&quot;train&quot;)
+    texts = [ds[i][&quot;text&quot;] for i in range(n*4) if ds[i][&quot;text&quot;].strip()][:n]
+    model.eval()
+    with torch.no_grad():
+        for t in texts:
+            enc = tokenizer(t, return_tensors=&quot;pt&quot;, max_length=512, truncation=True)
+            model(**enc.to(next(model.parameters()).device))
+    [h.remove() for h in hooks]
+    return mags
+
+model = AutoModelForCausalLM.from_pretrained(&quot;facebook/opt-125m&quot;).cuda()
+tok = AutoTokenizer.from_pretrained(&quot;facebook/opt-125m&quot;)
+mags = get_channel_magnitudes(model, tok)
+layer_name = sorted(mags.keys())[8]
+mag = mags[layer_name]
+top1pct = torch.quantile(mag, 0.99)
+salient = mag &gt;= top1pct
+scale_s = torch.where(salient, mag / mag.mean(), torch.ones_like(mag))
+print(f&quot;Layer: {layer_name}&quot;)
+print(f&quot;Salient channels: {salient.sum().item()} / {mag.shape[0]}&quot;)
+print(f&quot;AWQ scale range: [{scale_s.min():.2f}, {scale_s.max():.2f}]&quot;)
+</code></pre>
+<p>The code above collects per-channel magnitudes using exponential moving averages (EMA) across batches, which provides a stable estimate even with noisy calibration data. The EMA coefficient 0.9 weights recent batches slightly less than earlier ones; in practice, the exact coefficient matters little as long as enough calibration samples are used. After identifying salient channels (top 1%), the scale vector s is computed as the ratio of each channel's magnitude to the mean magnitude, clipped to 1.0 for non-salient channels. This scale is then applied as W' = W / s (or equivalently, the input to the layer is multiplied by s before the weight multiply, and s is absorbed into the preceding LayerNorm or linear layer).</p>
+<h2>Scaling Before Quantization</h2>
+<p>The mathematical justification for AWQ's scaling approach comes from analyzing quantization error as a function of scale. For a weight w quantized with scale parameter s (the grid spacing), the expected squared quantization error is approximately (s^2)/12 for uniformly distributed values. If we pre-multiply the weight by a factor alpha &lt; 1 (compressing its range), the effective quantization grid becomes alpha times finer, reducing error by alpha^2 / 12 instead of s^2 / 12—a factor of alpha^2 improvement. For a salient channel where alpha corresponds to s_i^{-1} (the inverse of the activation magnitude), the error reduction is largest precisely for the channels that matter most, because those channels have the largest alpha (their weights are compressed the most). The key constraint is that alpha must be absorbed into the previous layer computation—for a LayerNorm → Linear sequence, the LayerNorm output scaling by alpha is equivalent to multiplying the LayerNorm weight gamma by alpha.</p>
+<p>In the AutoAWQ implementation, the scale search uses a grid of candidates: alpha is swept over a range such that 2^{-alpha} × s_i is evaluated for alpha in {0, 0.1, 0.2, ..., 1.0}. For each candidate alpha, the layer output error is evaluated on the calibration data, and the alpha minimizing error is selected. This grid search runs in a few seconds per layer (versus minutes for GPTQ's Cholesky computation), making AWQ quantization of a 7B model feasible in 15–30 minutes on a single GPU. Additionally, AutoAWQ optionally applies activation clipping (the apply_clip option), which clips extreme activation values before quantization to prevent outlier activations from dominating the scale estimate—further improving accuracy.</p>
+<h2>Per-channel vs Per-group</h2>
+<p>Like GPTQ, AWQ supports group quantization, where each group of consecutive input channels uses its own scale. With AWQ, the per-channel scaling (the s vector computed from activation magnitudes) is applied first, and then standard per-group INT4 quantization is applied within each group. This two-level scaling—one level from AWQ's salience-based scaling, another from group quantization's local scale—provides extremely fine-grained control over quantization error. The default AutoAWQ configuration uses q_group_size=128, which matches the GPTQ convention and enables direct comparison. At group size 128, AWQ typically achieves 0.1–0.2 PPL lower perplexity than GPTQ at the same group size on standard benchmarks, primarily because AWQ's activation-magnitude-based scaling is better calibrated to the actual sensitivity of each channel than GPTQ's uniform per-group approach.</p>
+<h2>AWQ vs GPTQ</h2>
+<p>AWQ and GPTQ are complementary approaches to the same problem—finding good INT4 weights—and their accuracy on standard benchmarks is surprisingly close. GPTQ uses second-order information (Hessian) to optimally correct quantization errors, which in theory should give the best possible reconstruction error for each layer. AWQ uses first-order activation statistics (mean magnitudes) to scale weights before quantization, which is a simpler and faster approximation. In practice, AWQ frequently matches or slightly outperforms GPTQ at 4-bit quantization, especially for models in the 7B–13B parameter range. The reason is that GPTQ's Hessian computation is based on the calibration activations, and with only 128 samples, the estimated Hessian can be noisy—particularly for attention layers where activations have complex dependencies. AWQ's simpler statistic (mean absolute magnitude) is more robust to estimation noise with small calibration sets.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Bits</th>
+<th>Calibration data</th>
+<th>PPL (7B Llama)</th>
+<th>Typical speed</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FP16</td>
+<td>16</td>
+<td>None</td>
+<td>5.47</td>
+<td>1× baseline</td>
+</tr>
+<tr>
+<td>bitsandbytes INT8</td>
+<td>8</td>
+<td>None</td>
+<td>5.51</td>
+<td>1.5–2×</td>
+</tr>
+<tr>
+<td>GPTQ 4-bit g=128</td>
+<td>4</td>
+<td>128 samples</td>
+<td>5.72</td>
+<td>3–4×</td>
+</tr>
+<tr>
+<td>AWQ 4-bit g=128</td>
+<td>4</td>
+<td>128 samples</td>
+<td>5.60</td>
+<td>3–4×</td>
+</tr>
+<tr>
+<td>GGUF Q4_K_M</td>
+<td>4</td>
+<td>None (built-in)</td>
+<td>5.65</td>
+<td>2–3× (CPU)</td>
+</tr>
+</tbody>
+</table>
+<h2>Using AutoAWQ</h2>
+<p>AutoAWQ is the reference implementation of AWQ for Hugging Face-compatible models. Its quantize() method handles salience computation, scale search, weight scaling, INT4 packing, and optionally activation clipping in a single call. The most important configuration options are: w_bit (4 is standard; 2 and 3 are experimental), q_group_size (128 is the default; smaller values improve accuracy but increase metadata overhead), zero_point (True enables asymmetric quantization, recommended), version ('GEMM' for general GPU compatibility; 'GEMV' for batch size 1 inference), and apply_clip (True to enable activation clipping, which improves accuracy by ~0.05–0.1 PPL at a small quantization time cost). The quantized model is saved in AutoAWQ's own safetensors format, compatible with vLLM, lmdeploy, and text-generation-inference.</p>
+<pre><code class="language-python">from awq import AutoAWQForCausalLM
+from transformers import AutoTokenizer
+from datasets import load_dataset
+import os
+
+model_name = &quot;meta-llama/Llama-2-7b-hf&quot;
+quant_config = {
+    &quot;w_bit&quot;: 4,
+    &quot;q_group_size&quot;: 128,
+    &quot;zero_point&quot;: True,
+    &quot;version&quot;: &quot;GEMM&quot;,
+}
+save_path = &quot;./llama-2-7b-awq-4bit&quot;
+
+tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+model = AutoAWQForCausalLM.from_pretrained(model_name, safetensors=True)
+
+# Build calibration dataset from wikitext-2
+dataset = load_dataset(&quot;wikitext&quot;, &quot;wikitext-2-raw-v1&quot;, split=&quot;train&quot;)
+calib_texts = [row[&quot;text&quot;] for row in dataset if len(row[&quot;text&quot;].strip()) &gt; 50][:128]
+
+# AWQ quantization: searches optimal per-channel scales to protect salient weights
+model.quantize(
+    tokenizer,
+    quant_config=quant_config,
+    calib_data=calib_texts,
+)
+
+model.save_quantized(save_path)
+tokenizer.save_pretrained(save_path)
+
+size_mb = sum(
+    os.path.getsize(os.path.join(save_path, f))
+    for f in os.listdir(save_path)
+    if f.endswith((&quot;.safetensors&quot;, &quot;.bin&quot;))
+) / 1e6
+print(f&quot;Saved to: {save_path}&quot;)
+print(f&quot;Model size: {size_mb:.0f} MB  (FP16: ~13000 MB)&quot;)
+print(f&quot;Compression: {13000/size_mb:.1f}x&quot;)
+</code></pre>
+<blockquote>
+<p><strong>Tip</strong>: AWQ's key insight: only ~1% of weights are 'salient'; scaling these before rounding to INT4 preserves accuracy far better than uniform quantization at negligible extra cost. If your model will be served in batch sizes greater than 1 (throughput-optimized serving), use version='GEMM' for better parallelism. For single-user, low-latency inference (batch size 1), version='GEMV' uses a specialized kernel that is 20–30% faster at decode time.</p>
+</blockquote>
+<h2>Deployment with vLLM</h2>
+<p>vLLM is the dominant high-throughput LLM serving framework as of 2025, and it has first-class support for AWQ-quantized models. AWQ models loaded through vLLM benefit from continuous batching (packing multiple requests into a single forward pass), PagedAttention (efficient KV cache management), and fused AWQ dequantization kernels that minimize the overhead of converting INT4 weights to FP16 at runtime. A vLLM server with an AWQ-quantized 7B model on a single A100-40GB GPU can sustain 500–800 tokens/second for typical chatbot workloads, compared to 200–300 tokens/second for the same model in FP16—a 2–3× throughput improvement. Memory savings from INT4 also allow larger KV caches, which improves batching efficiency: more concurrent requests can be processed before the KV cache fills the GPU.</p>
+<pre><code class="language-python">from vllm import LLM, SamplingParams
+import time
+
+# Load AWQ-quantized model via vLLM (requires vllm &gt;= 0.3.0)
+llm = LLM(
+    model=&quot;./llama-2-7b-awq-4bit&quot;,
+    quantization=&quot;awq&quot;,
+    dtype=&quot;float16&quot;,
+    gpu_memory_utilization=0.85,
+    max_model_len=4096,
+)
+
+params = SamplingParams(temperature=0.0, max_tokens=200)
+prompts = [
+    &quot;Explain AWQ quantization in two sentences:&quot;,
+    &quot;What is the difference between GPTQ and AWQ?&quot;,
+    &quot;How does per-channel scaling improve INT4 accuracy?&quot;,
+]
+
+t0 = time.perf_counter()
+outputs = llm.generate(prompts, params)
+elapsed = time.perf_counter() - t0
+
+total_tokens = sum(len(o.outputs[0].token_ids) for o in outputs)
+print(f&quot;Generated {total_tokens} tokens in {elapsed:.2f}s&quot;)
+print(f&quot;Throughput: {total_tokens / elapsed:.1f} tokens/s&quot;)
+for i, out in enumerate(outputs):
+    print(f&quot;[{i+1}] {out.outputs[0].text[:100]}&quot;)
+</code></pre>
+<pre><code class="language-python">import torch, time
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from auto_gptq import AutoGPTQForCausalLM
+from awq import AutoAWQForCausalLM
+from lm_eval import simple_evaluate
+
+configs = {
+    &quot;fp16&quot;:     (&quot;meta-llama/Llama-2-7b-hf&quot;,    &quot;fp16&quot;),
+    &quot;bnb-int8&quot;: (&quot;meta-llama/Llama-2-7b-hf&quot;,    &quot;bnb8&quot;),
+    &quot;gptq-4b&quot;:  (&quot;./llama-2-7b-gptq-4bit-g128&quot;, &quot;gptq&quot;),
+    &quot;awq-4b&quot;:   (&quot;./llama-2-7b-awq-4bit&quot;,       &quot;awq&quot;),
+}
+prompt = &quot;The transformer architecture was introduced in the paper&quot;
+
+for name, (path, mode) in configs.items():
+    if mode == &quot;gptq&quot;:
+        m = AutoGPTQForCausalLM.from_quantized(path, device=&quot;cuda:0&quot;)
+    elif mode == &quot;awq&quot;:
+        m = AutoAWQForCausalLM.from_quantized(path, device=&quot;cuda:0&quot;)
+    elif mode == &quot;bnb8&quot;:
+        m = AutoModelForCausalLM.from_pretrained(path, load_in_8bit=True, device_map=&quot;auto&quot;)
+    else:
+        m = AutoModelForCausalLM.from_pretrained(path, torch_dtype=torch.float16, device_map=&quot;cuda:0&quot;)
+    tok = AutoTokenizer.from_pretrained(path)
+    inp = tok(prompt, return_tensors=&quot;pt&quot;).to(&quot;cuda&quot;)
+    t0 = time.perf_counter()
+    with torch.no_grad():
+        out = m.generate(**inp, max_new_tokens=100, do_sample=False)
+    elapsed = time.perf_counter() - t0
+    n_tok = out.shape[1] - inp[&quot;input_ids&quot;].shape[1]
+    mem_gb = torch.cuda.memory_allocated() / 1e9
+    print(f&quot;{name:12s}  {n_tok/elapsed:6.1f} tok/s  {mem_gb:.1f} GB&quot;)
+</code></pre>
+<ul>
+<li>Use version='GEMM' for throughput serving (batch &gt; 1); 'GEMV' for latency-sensitive single-request</li>
+<li>vLLM requires quantization='awq' in the LLM constructor; the model path can be local or Hub path</li>
+<li>AWQ models on Hub are typically tagged with -AWQ suffix, e.g., TheBloke/Llama-2-7B-AWQ</li>
+<li>apply_clip=True in quant_config adds ~5 minutes to quantization time but recoup in accuracy</li>
+<li>For 70B models, AWQ + 2×A100-80GB fits comfortably; FP16 would require 4×A100-80GB</li>
+<li>lmdeploy and text-generation-inference also support AWQ as deployment backends</li>
+</ul>
+<h2>Key Takeaways</h2>
+<ul>
+<li>AWQ identifies salient channels by activation magnitude, not weight magnitude</li>
+<li>Pre-scaling weights before INT4 rounding gives finer grid resolution where it matters most</li>
+<li>Scaling is mathematically transparent: model outputs are identical in full precision</li>
+<li>AWQ is 2–5x faster to quantize than GPTQ and achieves comparable or better accuracy</li>
+<li>Default config: w_bit=4, q_group_size=128, zero_point=True, version=GEMM</li>
+<li>AWQ + vLLM is the standard production stack for INT4 LLM serving in 2025</li>
+<li>Only 128 calibration samples are needed; larger sets provide diminishing returns</li>
+<li>At 7B scale: AWQ achieves ~5.60 PPL vs FP16's 5.47, a difference imperceptible in practice</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

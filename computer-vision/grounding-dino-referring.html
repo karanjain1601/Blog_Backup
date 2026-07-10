@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Grounding DINO: Open-Set Object Detection with Language | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Grounding DINO: Open-Set Object Detection with Language</h1>
+      
+      <h1>Grounding DINO: Open-Set Object Detection with Language</h1>
+<p>Grounding DINO extends the DINO object detection transformer to support open-set detection conditioned on natural-language prompts. Unlike closed-vocabulary detectors trained on fixed category lists, it can locate any object described by a noun phrase or category name without task-specific fine-tuning, enabling rapid adaptation to new detection taxonomies at inference time.</p>
+<p>The model was trained on a mixture of detection, grounding, and referring expression datasets, enabling both precise object localization and semantic phrase-to-box alignment. Grounding DINO achieves state-of-the-art zero-shot transfer on benchmarks such as ODINW-13 and COCO without any target-domain training data, outperforming specialist detectors on several categories.</p>
+<p>Grounding DINO builds on the DINO transformer detector, replacing the fixed class head with a language-aware scoring module. A BERT-based text encoder processes the input prompt into contextual token embeddings, while a Swin Transformer backbone extracts hierarchical multi-scale image feature maps that serve as input to the detection decoder and feature enhancer layers.</p>
+<p>The decoder uses bipartite matching to assign predicted boxes to ground-truth objects, as in standard DETR-style detectors. Each decoder query attends to both image spatial regions and text token embeddings via alternating cross-attention layers, enabling the model to simultaneously localize objects and align them semantically to the relevant spans within the input language prompt.</p>
+<pre><code>text_feat = bert(caption)\nimg_feat = swin(image)\nfused = feature_enhancer(img_feat, text_feat)\nboxes, phrases = decoder(fused, text_feat)
+</code></pre>
+<p>Phrase grounding requires localizing specific noun phrases from a caption within an image. The task is harder than standard detection because phrases may be relational — 'the person on the left' — or attribute-qualified — 'the red car'. Grounding DINO handles this through bidirectional cross-attention between box prediction queries and phrase token embeddings in the text encoder.</p>
+<p>Training uses a contrastive alignment loss that pulls predicted box query embeddings toward the embeddings of their matched phrase tokens in the text encoder. At inference, the model scores each predicted box by computing similarity against all phrase spans in the encoded prompt, selecting the box-phrase pairing with the highest alignment score above a tunable confidence threshold.</p>
+<pre><code># contrastive alignment between box query embeddings and phrase token embeddings\n# box matches phrase if IoU &gt; 0.5 with GT and text overlap
+</code></pre>
+<p>The feature enhancer module interleaves image and text features through alternating self-attention and cross-attention layers in each block. Image tokens first attend to each other via spatial self-attention, then cross-attend to all text tokens to incorporate language context. Text tokens similarly cross-attend to image features, creating deeply coupled bidirectional multimodal representations.</p>
+<p>This tight early-fusion design contrasts with late-fusion approaches that concatenate image and text features only at the prediction head. Early and iterative fusion enables the model to route visual attention toward semantically relevant image regions conditioned on the specific language prompt, substantially improving localization precision for attribute-qualified and relational phrases.</p>
+<pre><code>model = GroundingDINO()\nboxes, logits = model(image, text_prompt=&quot;cat . dog . person&quot;)\nkeep = logits &gt; 0.35\nfinal_boxes = boxes[keep]
+</code></pre>
+<p>In zero-shot detection mode, Grounding DINO accepts a period-separated list of category names as the text prompt and returns bounding boxes for detected instances of each listed category. This enables rapid adaptation to new detection taxonomies — including specialized domain-specific categories — at inference time without any gradient updates or dataset-specific fine-tuning.</p>
+<p>Referring expression comprehension (REC) tasks require localizing the single image region that matches a complex natural-language phrase. Grounding DINO handles REC by providing the full phrase as the text prompt and selecting the top-scored predicted box. It achieves competitive results on standard referring expression benchmarks including RefCOCO, RefCOCO+, and RefCOCOg evaluation splits.</p>
+<pre><code>prompt = &quot;the red car on the left&quot;\nboxes = model(image, prompt)\n# select top-1 box\n# compare to Refcocog evaluation split (mIoU metric)
+</code></pre>
+<blockquote>
+<p>****: Grounding DINO uses a comma-separated list of categories as the text prompt — e.g. 'cat . dog . car .' — for detection. Use natural language phrases for referring expression. The period separator is essential: it marks token boundaries for the cross-attention.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Backbone</th>
+<th>COCO AP</th>
+<th>LVIS AP</th>
+<th>Zero-shot AP (ODINW)</th>
+<th>Open-vocab</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DINO</td>
+<td>Swin-L</td>
+<td>63.3</td>
+<td>—</td>
+<td>—</td>
+<td>No</td>
+</tr>
+<tr>
+<td>GLIP</td>
+<td>Swin-T</td>
+<td>49.8</td>
+<td>17.1</td>
+<td>20.8</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>GLIP-L</td>
+<td>Swin-L</td>
+<td>61.5</td>
+<td>29.3</td>
+<td>29.9</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Grounding DINO-T</td>
+<td>Swin-T</td>
+<td>58.1</td>
+<td>25.6</td>
+<td>26.1</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Grounding DINO-L</td>
+<td>Swin-L</td>
+<td>63.0</td>
+<td>34.4</td>
+<td>35.7</td>
+<td>Yes</td>
+</tr>
+</tbody>
+</table>
+<p>Grounding DINO demonstrates that language-conditioned detection can rival specialized closed-vocabulary detectors on standard benchmarks while adding flexible open-vocabulary capability. The tight cross-modal feature fusion in the enhancer module is a key architectural differentiator that enables reliable phrase grounding for attribute-qualified and spatially relational noun phrases.</p>
+<p>Zero-shot performance on ODINW-13 and LVIS shows that training on diverse grounding data transfers strongly across detection domains. For production deployments, combining Grounding DINO with a segmentation head such as SAM creates a powerful open-vocabulary detection-and-segmentation pipeline that requires no dataset-specific annotation for new object categories or domains.</p>
+<p>When deploying Grounding DINO for referring expressions, use concise attribute-rich noun phrases and keep prompts under 512 tokens for reliable tokenization. For multi-category detection, use period-separated category names and tune the box confidence threshold separately per category to balance recall and precision across the specific distribution of your deployment domain.</p>
+    </article>
+  </main>
+</body>
+</html>

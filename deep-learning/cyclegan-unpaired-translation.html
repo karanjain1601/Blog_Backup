@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CycleGAN — Unpaired Image Translation via Cycle Consistency | Notes Backup</title>
+  <meta name="description" content="CycleGAN (Zhu et al. 2017) learns image-to-image translation without paired training data using two generators G:X-&gt;Y and F:Y-&gt;X with cycle consistency F(G(x))~x enforced by an L1 loss, enabling horse-to-zebra, photo-to-painting, and other domain transfers." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>CycleGAN — Unpaired Image Translation via Cycle Consistency</h1>
+      <ul class='note-meta'><li><strong>description:</strong> CycleGAN (Zhu et al. 2017) learns image-to-image translation without paired training data using two generators G:X-&gt;Y and F:Y-&gt;X with cycle consistency F(G(x))~x enforced by an L1 loss, enabling horse-to-zebra, photo-to-painting, and other domain transfers.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>CycleGAN — Unpaired Image Translation via Cycle Consistency</h1>
+<p>CycleGAN (Zhu et al. 2017) solves the fundamental limitation of Pix2Pix: the need for aligned paired images. Instead, CycleGAN learns from two unrelated collections of images — domain X (e.g., photos of horses) and domain Y (e.g., photos of zebras) — with no correspondence between them. The key insight is the cycle consistency constraint: a round-trip translation X→Y→X should recover the original image. This constraint is powerful enough to prevent G from mapping everything to a single mode and ensures semantically meaningful translations emerge from unpaired data.</p>
+<h2>Two Generators and Two Discriminators</h2>
+<p>CycleGAN uses two generators: G: X→Y translates X-domain images to look like Y-domain, and F: Y→X translates Y-domain images to look like X-domain. Two corresponding discriminators D_X and D_Y classify whether an image belongs to domain X or Y respectively. G and F are ResNet-based with instance normalisation; D_X and D_Y use PatchGAN. The model has roughly 11M parameters per generator and 2.7M per discriminator. Instance normalisation (per-image, not per-batch) was found critical for stable unpaired translation training.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class ResBlock(nn.Module):
+    def __init__(self, ch):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.ReflectionPad2d(1), nn.Conv2d(ch, ch, 3, bias=False),
+            nn.InstanceNorm2d(ch), nn.ReLU(True),
+            nn.ReflectionPad2d(1), nn.Conv2d(ch, ch, 3, bias=False),
+            nn.InstanceNorm2d(ch))
+    def forward(self, x): return x + self.net(x)
+
+class CycleGenerator(nn.Module):
+    def __init__(self, in_ch=3, ngf=32, n_res=4):
+        super().__init__()
+        model = [nn.ReflectionPad2d(3), nn.Conv2d(in_ch, ngf, 7, bias=False),
+                 nn.InstanceNorm2d(ngf), nn.ReLU(True),
+                 nn.Conv2d(ngf, ngf*2, 3, 2, 1, bias=False),
+                 nn.InstanceNorm2d(ngf*2), nn.ReLU(True)]
+        model += [ResBlock(ngf*2) for _ in range(n_res)]
+        model += [nn.ConvTranspose2d(ngf*2, ngf, 3, 2, 1, output_padding=1, bias=False),
+                  nn.InstanceNorm2d(ngf), nn.ReLU(True),
+                  nn.ReflectionPad2d(3), nn.Conv2d(ngf, in_ch, 7), nn.Tanh()]
+        self.net = nn.Sequential(*model)
+    def forward(self, x): return self.net(x)
+
+G_XY = CycleGenerator()
+x = torch.randn(1, 3, 64, 64)
+print('CycleGAN G output:', G_XY(x).shape)
+</code></pre>
+<h2>Cycle Consistency Loss</h2>
+<p>The cycle consistency loss enforces that round-trip translations reconstruct the original: F(G(x)) ≈ x (forward cycle) and G(F(y)) ≈ y (backward cycle). The loss uses L1 norm: L_cyc = λ·(E[‖F(G(x))−x‖₁] + E[‖G(F(y))−y‖₁]). Without this constraint, the networks learn a mapping that satisfies the GAN objective but is otherwise unconstrained — typically degenerating to mode collapse where G maps all x to the same y. The cycle loss is what gives CycleGAN its remarkable ability to learn meaningful semantic correspondences (horse body → zebra body, not just average zebra texture).</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def cycle_consistency_loss(G_XY, G_YX, real_X, real_Y, lam=10.0):
+    '''L_cyc = lam * (||F(G(x))-x||_1 + ||G(F(y))-y||_1).'''
+    l1 = nn.L1Loss()
+    fake_Y = G_XY(real_X)            # X -&gt; Y
+    rec_X  = G_YX(fake_Y)            # Y -&gt; X  (reconstruct)
+    fake_X = G_YX(real_Y)            # Y -&gt; X
+    rec_Y  = G_XY(fake_X)            # X -&gt; Y  (reconstruct)
+    loss_fwd = l1(rec_X, real_X)     # forward cycle
+    loss_bwd = l1(rec_Y, real_Y)     # backward cycle
+    loss = lam * (loss_fwd + loss_bwd)
+    return loss, loss_fwd.item(), loss_bwd.item()
+
+G_XY = CycleGenerator(); G_YX = CycleGenerator()
+rx = torch.randn(1, 3, 64, 64)
+ry = torch.randn(1, 3, 64, 64)
+loss, fwd, bwd = cycle_consistency_loss(G_XY, G_YX, rx, ry)
+print('Cycle loss: {:.4f}  fwd: {:.4f}  bwd: {:.4f}'.format(
+      loss.item(), fwd, bwd))
+</code></pre>
+<h2>Identity Loss for Color Preservation</h2>
+<p>The identity loss adds the constraint that G should act as the identity when given an image already in its target domain: G(y) ≈ y and F(x) ≈ x. L_id = λ_id·(E[‖G(y)−y‖₁] + E[‖F(x)−x‖₁]). Typically λ_id = 0.5·λ_cyc. Without the identity loss, G may freely shift the colour palette of images that don't need translation — for example, G trained for photo→Monet might add a warm orange tone to photos that already look painterly. The identity loss prevents this unwanted colour shift.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def identity_loss(G_XY, G_YX, real_X, real_Y, lam_id=5.0):
+    '''Penalise G_XY(y) != y and G_YX(x) != x.'''
+    l1   = nn.L1Loss()
+    id_Y = G_XY(real_Y)   # G should be identity on Y-domain input
+    id_X = G_YX(real_X)   # F should be identity on X-domain input
+    loss = lam_id * (l1(id_Y, real_Y) + l1(id_X, real_X))
+    return loss
+
+G_XY = CycleGenerator(); G_YX = CycleGenerator()
+rx = torch.randn(1, 3, 64, 64); ry = torch.randn(1, 3, 64, 64)
+loss_id = identity_loss(G_XY, G_YX, rx, ry)
+print('Identity loss:', round(loss_id.item(), 4))
+print('Without identity loss, G may shift overall color hue of input images.')
+</code></pre>
+<h2>Full Objective and Training</h2>
+<p>The full CycleGAN objective is L = L_GAN(G,D_Y,X,Y) + L_GAN(F,D_X,Y,X) + λ·L_cyc(G,F) + λ_id·L_id(G,F). Training alternates: update D_X and D_Y using the LSGAN (least-squares) objective (more stable than BCE), then update G and F jointly using the full loss with cycle and identity terms. A replay buffer of 50 previously generated images is used when updating D to prevent oscillations. Learning rate 0.0002 with Adam; linear decay after 100 epochs.</p>
+<blockquote>
+<p><strong>What CycleGAN Cannot Do</strong>: Cycle consistency enforces that the overall image structure is preserved but does not constrain local geometry. CycleGAN cannot reliably change object count, size, or shape — it can change texture and colour (horse stripes) but not remodel the body shape or add/remove objects. Tasks requiring structural change (cat→dog, landscape→portrait) require additional constraints or a different formulation such as GeoGAN or geometry-aware translation methods.</p>
+</blockquote>
+<h2>Contrastive Unpaired Translation (CUT)</h2>
+<p>CUT (Park et al. 2020) achieves unpaired translation without a reverse generator F or cycle consistency. Instead, it uses patch-wise contrastive loss (PatchNCE): for each patch location, the corresponding patch in the generated image should be closer to the real source patch than to patches at other locations. This preserves content without requiring F(G(x))≈x. CUT uses only one generator and one discriminator — half the parameters of CycleGAN — and is roughly 2× faster to train. It achieves comparable or better FID on horse↔zebra and other benchmarks.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+def patch_nce_loss(feat_q, feat_k, tau=0.07):
+    '''PatchNCE: query (generated) vs key (source) patch features.
+    Positive pair: same spatial location. Negatives: other locations.'''
+    feat_q = F.normalize(feat_q, dim=1)  # (N, C)
+    feat_k = F.normalize(feat_k, dim=1)  # (N, C)
+    logits = torch.mm(feat_q, feat_k.t()) / tau  # (N, N)
+    labels = torch.arange(logits.size(0), device=logits.device)
+    return F.cross_entropy(logits, labels)
+
+# Comparison: memory and parameter count
+def model_stats(name, n_params):
+    print('{}: {:,} params  ({:.1f}M)'.format(name, n_params, n_params/1e6))
+
+N, C = 256, 256
+feat_q = torch.randn(N, C)
+feat_k = torch.randn(N, C)
+nce = patch_nce_loss(feat_q, feat_k)
+print('PatchNCE loss:', round(nce.item(), 4))
+print('CUT: 1 generator + PatchNCE -- no F, no cycle, ~2x faster than CycleGAN')
+</code></pre>
+<h2>Applications and Known Limitations</h2>
+<p>CycleGAN has been applied to horse↔zebra (texture change), apple↔orange (texture + colour), photo↔Monet painting, photo↔Van Gogh, aerial→map, summer→winter, and medical image synthesis (CT→MRI). Limitations: cannot change geometry or count; requires domain gap to be mainly texture/colour; can hallucinate spurious patterns when source and target domains have very different semantics; training can be unstable and sensitive to λ values. CUT and recent diffusion-based methods address several of these limitations.</p>
+<ul>
+<li>Horse→zebra: texture change works well (stripes added naturally)</li>
+<li>Apple→orange: colour + texture change, shape preserved</li>
+<li>Photo→Monet: artistic style transferred, structure preserved</li>
+<li>Photo→Van Gogh: more aggressive style, occasional geometry distortion</li>
+<li>Cat→dog: often fails due to geometric differences — beyond CycleGAN's scope</li>
+<li>Medical CT→MRI: cross-modality synthesis for data augmentation</li>
+</ul>
+<h2>Method Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Paired Data</th>
+<th>Generators</th>
+<th>Discriminators</th>
+<th>Cycle Loss</th>
+<th>Training Speed</th>
+<th>FID Quality</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Pix2Pix</td>
+<td>Required</td>
+<td>1</td>
+<td>1 PatchGAN</td>
+<td>No</td>
+<td>Fast</td>
+<td>Best (with pairs)</td>
+</tr>
+<tr>
+<td>CycleGAN</td>
+<td>Not required</td>
+<td>2 (G and F)</td>
+<td>2 PatchGAN</td>
+<td>Yes (λ=10)</td>
+<td>Moderate</td>
+<td>Good</td>
+</tr>
+<tr>
+<td>UNIT</td>
+<td>Not required</td>
+<td>2 VAE-GAN</td>
+<td>2</td>
+<td>No (shared latent)</td>
+<td>Slow</td>
+<td>Comparable</td>
+</tr>
+<tr>
+<td>CUT</td>
+<td>Not required</td>
+<td>1 only</td>
+<td>1 PatchGAN</td>
+<td>No (PatchNCE)</td>
+<td>~2x faster</td>
+<td>Comparable/better</td>
+</tr>
+</tbody>
+</table>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

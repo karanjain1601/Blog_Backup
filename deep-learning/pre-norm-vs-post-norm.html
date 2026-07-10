@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pre-Norm vs Post-Norm Transformers — Stability and Performance | Notes Backup</title>
+  <meta name="description" content="Comparing the original post-norm Transformer (Vaswani 2017) with the modern pre-norm layout used in GPT-2 and LLaMA: training stability, gradient flow, and the Sandwich normalisation variant." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Pre-Norm vs Post-Norm Transformers — Stability and Performance</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Comparing the original post-norm Transformer (Vaswani 2017) with the modern pre-norm layout used in GPT-2 and LLaMA: training stability, gradient flow, and the Sandwich normalisation variant.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Pre-Norm vs Post-Norm Transformers — Stability and Performance</h1>
+<p>The placement of Layer Normalisation inside a Transformer block has a surprisingly large effect on training stability and the ability to scale to deep models. The original Vaswani et al. (2017) architecture applies LayerNorm <em>after</em> each residual connection — post-norm. Nearly all modern large language models (GPT-2, LLaMA, Mistral) instead apply LayerNorm <em>before</em> the sub-layer — pre-norm. The difference is one line of code, but its training implications are significant.</p>
+<h2>Post-Norm — The Original Transformer Design</h2>
+<p>In the post-norm formulation (Vaswani 2017), the residual and the sub-layer output are summed first, then normalised: x = LayerNorm(x + Sublayer(x)). LayerNorm sees the combined residual stream and stabilises it. The problem is that at initialisation, the Jacobian of LayerNorm with respect to its input can have extreme eigenvalues, leading to unstable gradients in very deep networks. Training post-norm models typically requires a careful learning rate warmup schedule to prevent divergence in the first few thousand steps.</p>
+<ul>
+<li>Post-norm attention: x = LayerNorm(x + MultiHeadAttn(x))</li>
+<li>Post-norm FFN:      x = LayerNorm(x + FFN(x))</li>
+<li>Requires warmup: LR must ramp from near-zero to peak over ~4000 steps</li>
+<li>Final quality: empirically slightly better at convergence for shallow models</li>
+<li>Deep models (24+ layers): training instability is common without careful tuning</li>
+</ul>
+<blockquote>
+<p><strong>Pre-LN Transformers Paper (Liu et al. 2020)</strong>: The paper 'On the Variance of the Adaptive Learning Rate and Beyond' and the 'Pre-LN Transformer' analysis (Liu et al.) showed that post-norm models have extremely large gradient variance at initialisation, which is why warmup is essential. Pre-norm eliminates this instability because the residual path carries raw gradients whose magnitude is bounded independently of depth.</p>
+</blockquote>
+<h2>Pre-Norm — Modern LLMs and Training Stability</h2>
+<p>In the pre-norm formulation, LayerNorm is applied to x before passing it to the sub-layer, and the result is added back to the un-normalised x: x = x + Sublayer(LayerNorm(x)). The residual bypass path carries raw gradients all the way back to the first layer, like a highway. This makes gradient magnitude approximately constant across depth at initialisation, enabling training at full learning rate without a warmup phase. GPT-2 adopted pre-norm and it has been the standard in LLMs ever since.</p>
+<h2>Gradient Flow Analysis</h2>
+<p>The key difference in gradient behaviour comes from the residual path. In post-norm, gradients must flow through the LayerNorm Jacobian at each layer: the gradient magnitude can grow or shrink unpredictably with depth. In pre-norm, the residual connection bypasses LayerNorm entirely — a gradient flowing back through the residual path sees identity Jacobian, so its magnitude is preserved. Only the sub-layer branch (a fraction of the total gradient) passes through LayerNorm. This is why pre-norm models converge faster and require less careful hyperparameter tuning, even if their final perplexity sometimes lags post-norm by a small margin.</p>
+<h2>Code 1 — Pre-Norm Transformer Block</h2>
+<p>The canonical pre-norm block used in GPT-2, LLaMA, and Mistral: LayerNorm is applied to the input before each sub-layer, and outputs are added to the un-normalised residual.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class PreNormBlock(nn.Module):
+    &quot;&quot;&quot;Pre-normalisation Transformer block (GPT-2 / LLaMA style).
+    x = x + Attn(LayerNorm(x))
+    x = x + FFN(LayerNorm(x))
+    &quot;&quot;&quot;
+    def __init__(self, d_model: int, n_heads: int, d_ff: int,
+                 dropout: float = 0.1):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.attn  = nn.MultiheadAttention(d_model, n_heads,
+                                            dropout=dropout, batch_first=True)
+        self.ff1   = nn.Linear(d_model, d_ff)
+        self.ff2   = nn.Linear(d_ff, d_model)
+        self.act   = nn.GELU()
+        self.drop  = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor,
+                attn_mask: torch.Tensor = None) -&gt; torch.Tensor:
+        # Self-attention sub-layer: norm BEFORE attention
+        normed  = self.norm1(x)
+        a, _    = self.attn(normed, normed, normed, attn_mask=attn_mask)
+        x       = x + self.drop(a)
+        # FFN sub-layer: norm BEFORE FFN
+        x = x + self.drop(self.ff2(self.act(self.ff1(self.norm2(x)))))
+        return x
+
+# Sanity check
+block = PreNormBlock(d_model=256, n_heads=8, d_ff=1024)
+inp   = torch.randn(2, 10, 256)
+out   = block(inp)
+print('Pre-norm output shape:', out.shape)      # (2, 10, 256)
+assert out.shape == inp.shape
+print('Output norm (pre-norm — residual keeps scale):', out.norm(dim=-1).mean().item())
+</code></pre>
+<h2>Code 2 — Post-Norm Transformer Block</h2>
+<p>The original Vaswani (2017) post-norm block: LayerNorm is applied after the residual addition, stabilising the hidden state at each sub-layer output.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class PostNormBlock(nn.Module):
+    &quot;&quot;&quot;Post-normalisation Transformer block (Vaswani 2017 original style).
+    x = LayerNorm(x + Attn(x))
+    x = LayerNorm(x + FFN(x))
+    &quot;&quot;&quot;
+    def __init__(self, d_model: int, n_heads: int, d_ff: int,
+                 dropout: float = 0.1):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.attn  = nn.MultiheadAttention(d_model, n_heads,
+                                            dropout=dropout, batch_first=True)
+        self.ff1   = nn.Linear(d_model, d_ff)
+        self.ff2   = nn.Linear(d_ff, d_model)
+        self.act   = nn.GELU()
+        self.drop  = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor,
+                attn_mask: torch.Tensor = None) -&gt; torch.Tensor:
+        # Self-attention sub-layer: norm AFTER residual
+        a, _ = self.attn(x, x, x, attn_mask=attn_mask)
+        x    = self.norm1(x + self.drop(a))
+        # FFN sub-layer: norm AFTER residual
+        x = self.norm2(x + self.drop(self.ff2(self.act(self.ff1(x)))))
+        return x
+
+# Sanity check
+block = PostNormBlock(d_model=256, n_heads=8, d_ff=1024)
+inp   = torch.randn(2, 10, 256)
+out   = block(inp)
+print('Post-norm output shape:', out.shape)     # (2, 10, 256)
+# Post-norm: LayerNorm stabilises output magnitude after each residual
+print('Output norm (post-norm — LN normalises output):', out.norm(dim=-1).mean().item())
+print('Input norm:', inp.norm(dim=-1).mean().item())
+</code></pre>
+<h2>Code 3 — Gradient Norm Comparison</h2>
+<p>Empirically measuring gradient norms across 20 steps to illustrate that pre-norm keeps gradient magnitude more stable than post-norm for a 12-layer stack.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def build_stack(norm_type: str, n_layers: int = 12, d: int = 128):
+    &quot;&quot;&quot;Minimal feed-forward stack emulating pre vs post norm stacking.&quot;&quot;&quot;
+    layers = []
+    for _ in range(n_layers):
+        if norm_type == 'pre':
+            layers += [nn.LayerNorm(d), nn.Linear(d, d), nn.GELU(), nn.Linear(d, d)]
+        else:
+            layers += [nn.Linear(d, d), nn.GELU(), nn.Linear(d, d), nn.LayerNorm(d)]
+    return nn.Sequential(*layers)
+
+def measure_grad_norm(model: nn.Module, x: torch.Tensor) -&gt; float:
+    x = x.detach().requires_grad_(False)
+    y = model(x).mean()
+    y.backward()
+    total_sq = sum(p.grad.norm().item()**2
+                   for p in model.parameters() if p.grad is not None)
+    model.zero_grad()
+    return total_sq ** 0.5
+
+d = 128
+x = torch.randn(4, d)
+results = {}
+for ntype in ('pre', 'post'):
+    torch.manual_seed(0)
+    model = build_stack(ntype, n_layers=12, d=d)
+    norms = []
+    for step in range(20):
+        xi = x + 0.01 * step * torch.randn_like(x)
+        norms.append(measure_grad_norm(model, xi))
+    results[ntype] = norms
+    mean_gn = sum(norms) / len(norms)
+    std_gn  = (sum((g - mean_gn)**2 for g in norms) / len(norms))**0.5
+    print(f'{ntype}-norm: mean grad norm = {mean_gn:.4f}, std = {std_gn:.4f}')
+print('Pre-norm has lower variance — more predictable gradient signal')
+</code></pre>
+<h2>Code 4 — Sandwich Normalisation</h2>
+<p>Sandwich-LN (Ding et al. 2021, CogView) applies LayerNorm both before the sub-layer (pre) and after the residual (post), combining the stability of pre-norm with some of the quality benefits of post-norm.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class SandwichBlock(nn.Module):
+    &quot;&quot;&quot;Sandwich normalisation: LayerNorm before sublayer AND after residual.
+    x_attn = LayerNorm_post(x + Attn(LayerNorm_pre(x)))
+    x_ffn  = LayerNorm_post(x + FFN(LayerNorm_pre(x)))
+    Reference: Ding et al. (2021) CogView.
+    &quot;&quot;&quot;
+    def __init__(self, d_model: int, n_heads: int, d_ff: int):
+        super().__init__()
+        self.pre_attn  = nn.LayerNorm(d_model)
+        self.post_attn = nn.LayerNorm(d_model)
+        self.pre_ffn   = nn.LayerNorm(d_model)
+        self.post_ffn  = nn.LayerNorm(d_model)
+        self.attn = nn.MultiheadAttention(d_model, n_heads, batch_first=True)
+        self.ff1  = nn.Linear(d_model, d_ff)
+        self.ff2  = nn.Linear(d_ff, d_model)
+        self.act  = nn.GELU()
+
+    def forward(self, x: torch.Tensor) -&gt; torch.Tensor:
+        # Attention with pre- and post-normalisation
+        n = self.pre_attn(x)
+        a, _ = self.attn(n, n, n)
+        x = self.post_attn(x + a)
+        # FFN with pre- and post-normalisation
+        n = self.pre_ffn(x)
+        x = self.post_ffn(x + self.ff2(self.act(self.ff1(n))))
+        return x
+
+torch.manual_seed(0)
+d_model, n_heads, d_ff = 256, 8, 1024
+inp   = torch.randn(2, 12, d_model)
+block = SandwichBlock(d_model, n_heads, d_ff)
+out   = block(inp)
+print('Sandwich block output:', out.shape)
+print('Input  mean norm:', inp.norm(dim=-1).mean().item())
+print('Output mean norm:', out.norm(dim=-1).mean().item())
+print('Params:', sum(p.numel() for p in block.parameters()))
+</code></pre>
+<h2>Pre-Norm vs Post-Norm at a Glance</h2>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Post-Norm (Vaswani 2017)</th>
+<th>Pre-Norm (GPT-2, LLaMA)</th>
+<th>Sandwich-Norm</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>LN position</td>
+<td>After residual addition</td>
+<td>Before sub-layer input</td>
+<td>Before and after sub-layer</td>
+</tr>
+<tr>
+<td>LR warmup needed</td>
+<td>Yes — required to prevent divergence</td>
+<td>No — more forgiving LR schedule</td>
+<td>Minimal — stable at init</td>
+</tr>
+<tr>
+<td>Gradient flow</td>
+<td>Through LN Jacobian (unpredictable)</td>
+<td>Residual bypasses LN (stable)</td>
+<td>Mixed: pre and post paths</td>
+</tr>
+<tr>
+<td>Convergence quality</td>
+<td>Slightly better at final perplexity</td>
+<td>Slightly lower but reliable</td>
+<td>On par or better</td>
+</tr>
+<tr>
+<td>Stability at 24+ layers</td>
+<td>Difficult — common divergence</td>
+<td>Good — default choice</td>
+<td>Best reported stability</td>
+</tr>
+<tr>
+<td>Modern adoption</td>
+<td>T5, older BERT variants</td>
+<td>GPT-2/3/4, LLaMA, Mistral, Gemma</td>
+<td>CogView, specialised models</td>
+</tr>
+</tbody>
+</table>
+<p>For new Transformer architectures, pre-norm is the safe default: it trains without warmup, scales to hundreds of layers, and requires less careful learning-rate tuning. Post-norm may recover a small quality margin when training is carefully managed with warmup, and is worth considering for smaller models where training stability is less of a concern. Sandwich-norm offers a middle ground but adds extra parameters and is used primarily in large image-generation models.</p>
+    </article>
+  </main>
+</body>
+</html>

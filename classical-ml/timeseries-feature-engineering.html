@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Time-Series Feature Engineering — Lag, Rolling, and Fourier Features | Notes Backup</title>
+  <meta name="description" content="Build lag features, rolling statistics, Fourier seasonal encodings, and cyclical calendar features that convert raw time-series observations into tabular inputs for gradient-boosted trees and other ML models." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Time-Series Feature Engineering — Lag, Rolling, and Fourier Features</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Build lag features, rolling statistics, Fourier seasonal encodings, and cyclical calendar features that convert raw time-series observations into tabular inputs for gradient-boosted trees and other ML models.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Time-Series Feature Engineering — Lag, Rolling, and Fourier Features</h1>
+<p>Classical ML models (Random Forest, LightGBM, XGBoost) cannot process raw time-series sequences — they need a fixed-width feature vector per prediction point. Feature engineering converts sequential observations into tabular inputs: lag features capture autocorrelation, rolling statistics summarise local trends and volatility, Fourier terms encode seasonality compactly, and cyclical calendar encodings preserve the circular structure of hours, days, and months. Thoughtful feature construction often outperforms deep sequence models for short-to-medium horizon forecasting on structured data.</p>
+<h2>Lag Features</h2>
+<p>Lag features xₜ₋₁, xₜ₋₂, ..., xₜ₋ₚ provide autoregressive inputs to any ML model. The lag order p should cover the relevant autocorrelation structure — inspect the PACF plot to identify meaningful lags. Common choices: lag-1 (daily), lag-7 (weekly), lag-28 (monthly) for daily series; lag-12, lag-24 for hourly series with daily/weekly cycles. Lags introduce NaN values at the start of the series — drop these rows or impute carefully. Always create lags after the train/test split or use strictly past values to prevent leakage.</p>
+<pre><code class="language-python">import numpy as np
+import pandas as pd
+
+np.random.seed(42)
+dates = pd.date_range('2023-01-01', periods=365, freq='D')
+t = np.arange(365)
+y = 50 + 0.1 * t + 8 * np.sin(2 * np.pi * t / 7) + np.random.randn(365) * 2
+df = pd.DataFrame({'date': dates, 'y': y}).set_index('date')
+
+lag_cols = [1, 2, 3, 7, 14, 28]
+for lag in lag_cols:
+    df[f'lag_{lag}'] = df['y'].shift(lag)
+
+windows = [3, 7, 14]
+for w in windows:
+    df[f'roll_mean_{w}'] = df['y'].shift(1).rolling(w).mean()
+    df[f'roll_std_{w}']  = df['y'].shift(1).rolling(w).std()
+    df[f'roll_max_{w}']  = df['y'].shift(1).rolling(w).max()
+
+df['ewm_7']  = df['y'].shift(1).ewm(span=7, adjust=False).mean()
+df['diff_1'] = df['y'].diff(1)
+df['pct_change_1'] = df['y'].pct_change(1)
+
+df_feat = df.dropna()
+print(f'Feature matrix shape: {df_feat.shape}')
+print(f'Features: {list(df_feat.columns)}')
+print(df_feat.head(3).to_string())
+</code></pre>
+<h2>Rolling Statistics</h2>
+<p>Rolling statistics summarise recent history in a single scalar. Rolling mean (window w): smooths local level, analogous to a moving average trend. Rolling std: captures local volatility — useful for financial and demand series. Rolling min/max: reveals range and extreme values in the recent window. Exponentially weighted moving (ewm) statistics down-weight distant observations within the window. Critical rule: all rolling features must use shift(1) before the rolling call to ensure the window covers only past observations (t-w to t-1), preventing leakage of the current target yₜ into the features.</p>
+<h2>Fourier Features for Seasonality</h2>
+<p>Fourier features encode periodic patterns without indicator dummies. For a seasonal period P and harmonic order K, the features are sin(2πkt/P) and cos(2πkt/P) for k=1,...,K. K pairs of sin/cos terms can represent any seasonal pattern; K=1 captures the fundamental frequency, higher K add harmonics for non-sinusoidal shapes. With K=3 and P=7 you need only 6 features versus 6 dummies for day-of-week. Fourier features are continuous and generalise to series shorter than one full period.</p>
+<pre><code class="language-python">import numpy as np
+import pandas as pd
+
+def fourier_features(time_index, period, K):
+    &quot;&quot;&quot;Return sin/cos Fourier features for given period and harmonic order K.&quot;&quot;&quot;
+    features = {}
+    for k in range(1, K + 1):
+        features[f'sin_P{period}_K{k}'] = np.sin(2 * np.pi * k * time_index / period)
+        features[f'cos_P{period}_K{k}'] = np.cos(2 * np.pi * k * time_index / period)
+    return pd.DataFrame(features)
+
+t = np.arange(365)
+y = 50 + 10 * np.sin(2 * np.pi * t / 7) + 5 * np.sin(2 * np.pi * t / 365) + np.random.randn(365)
+
+# Weekly seasonality (P=7, K=3) + annual seasonality (P=365, K=2)
+ff_weekly  = fourier_features(t, period=7,   K=3)
+ff_annual  = fourier_features(t, period=365, K=2)
+X_fourier  = pd.concat([ff_weekly, ff_annual], axis=1)
+
+from sklearn.linear_model import Ridge
+from sklearn.metrics import r2_score
+
+model = Ridge(alpha=1.0).fit(X_fourier[:300], y[:300])
+pred  = model.predict(X_fourier[300:])
+print(f'Fourier feature count: {X_fourier.shape[1]}')
+print(f'Test R² using only Fourier features: {r2_score(y[300:], pred):.4f}')
+print('Feature names:', list(X_fourier.columns))
+</code></pre>
+<h2>Cyclical Encoding for Calendar Features</h2>
+<p>Calendar features like hour-of-day (0–23), day-of-week (0–6), and month-of-year (1–12) are circular: hour 23 is adjacent to hour 0. Encoding them as integers (0, 1, 2, ...) gives distance 23 between hour 0 and hour 23, when the true distance is 1. Cyclical encoding maps integer v to sin(2πv/max_v) and cos(2πv/max_v), placing values on a unit circle so distance is preserved. This gives the model a continuous, periodic representation without any discontinuity at the boundary.</p>
+<pre><code class="language-python">import numpy as np
+import pandas as pd
+
+def cyclical_encode(series, max_val):
+    &quot;&quot;&quot;Encode a circular feature as (sin, cos) pair.&quot;&quot;&quot;
+    angle = 2 * np.pi * series / max_val
+    return np.sin(angle), np.cos(angle)
+
+dates = pd.date_range('2023-01-01', periods=8760, freq='h')
+df = pd.DataFrame({'datetime': dates})
+df['hour']        = df['datetime'].dt.hour
+df['dayofweek']   = df['datetime'].dt.dayofweek
+df['month']       = df['datetime'].dt.month
+df['dayofyear']   = df['datetime'].dt.dayofyear
+
+df['hour_sin'],   df['hour_cos']   = cyclical_encode(df['hour'],      24)
+df['dow_sin'],    df['dow_cos']    = cyclical_encode(df['dayofweek'],  7)
+df['month_sin'],  df['month_cos']  = cyclical_encode(df['month'],     12)
+df['doy_sin'],    df['doy_cos']    = cyclical_encode(df['dayofyear'], 365)
+
+df['is_weekend']  = (df['dayofweek'] &gt;= 5).astype(int)
+df['is_business'] = ((df['hour'] &gt;= 9) &amp; (df['hour'] &lt; 17) &amp; (df['is_weekend'] == 0)).astype(int)
+
+cyclical_cols = [c for c in df.columns if c.endswith('_sin') or c.endswith('_cos')]
+print(f'Cyclical features: {cyclical_cols}')
+print(f'hour=0  -&gt; sin={df.loc[0,&quot;hour_sin&quot;]:.3f}, cos={df.loc[0,&quot;hour_cos&quot;]:.3f}')
+print(f'hour=23 -&gt; sin={df.loc[23,&quot;hour_sin&quot;]:.3f}, cos={df.loc[23,&quot;hour_cos&quot;]:.3f}')
+</code></pre>
+<blockquote>
+<p><strong>Prevent Target Leakage with Lag Alignment</strong>: When computing rolling features for row t, the window must cover only t-w to t-1. Always call shift(1) before rolling() in pandas: df['y'].shift(1).rolling(7).mean(). Without shift(1), the rolling window includes yₜ itself, leaking the target into the feature and producing unrealistically low training error.</p>
+</blockquote>
+<h2>Feature Importance with LightGBM</h2>
+<p>Gradient-boosted trees (LightGBM, XGBoost, CatBoost) are the dominant tabular forecasting models when combined with rich lag and rolling features. LightGBM's split-gain importance reveals which features the model relies on most: lag_1 and lag_7 typically dominate for daily series with weekly patterns, while Fourier features outperform raw day-of-week dummies for long seasonal cycles. Running feature importance after the first training pass guides pruning — removing low-importance features reduces overfitting and speeds inference.</p>
+<pre><code class="language-python">import numpy as np
+import pandas as pd
+import lightgbm as lgb
+from sklearn.model_selection import train_test_split
+
+np.random.seed(0)
+t = np.arange(500)
+y = 30 + 0.2 * t + 12 * np.sin(2 * np.pi * t / 7) + np.random.randn(500) * 3
+df = pd.DataFrame({'y': y})
+
+for lag in [1, 2, 3, 7, 14]:
+    df[f'lag_{lag}'] = df['y'].shift(lag)
+for w in [3, 7, 14]:
+    df[f'roll_mean_{w}'] = df['y'].shift(1).rolling(w).mean()
+    df[f'roll_std_{w}']  = df['y'].shift(1).rolling(w).std()
+
+df['dow_sin'] = np.sin(2 * np.pi * (t % 7) / 7)
+df['dow_cos'] = np.cos(2 * np.pi * (t % 7) / 7)
+df = df.dropna()
+
+X = df.drop('y', axis=1)
+y_clean = df['y'].values
+
+model = lgb.LGBMRegressor(n_estimators=300, learning_rate=0.05, random_state=42)
+model.fit(X, y_clean)
+
+importance = pd.Series(model.feature_importances_, index=X.columns)
+print('Top 10 features by LightGBM importance:')
+print(importance.nlargest(10).to_string())
+</code></pre>
+<h2>Feature Engineering Reference</h2>
+<table>
+<thead>
+<tr>
+<th>Feature Type</th>
+<th>Captures</th>
+<th>History Needed</th>
+<th>Leakage Risk</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Lag (t-k)</td>
+<td>Autocorrelation at lag k</td>
+<td>k periods</td>
+<td>Low if k ≥ forecast horizon</td>
+<td>Use PACF to choose k</td>
+</tr>
+<tr>
+<td>Rolling mean (w)</td>
+<td>Local level / trend</td>
+<td>w periods</td>
+<td>High without shift(1)</td>
+<td>Always shift(1) before rolling</td>
+</tr>
+<tr>
+<td>Rolling std (w)</td>
+<td>Local volatility</td>
+<td>w periods</td>
+<td>High without shift(1)</td>
+<td>Useful for financial series</td>
+</tr>
+<tr>
+<td>Fourier sin/cos</td>
+<td>Global periodicity at P</td>
+<td>Full period P</td>
+<td>None — deterministic</td>
+<td>K=3 usually sufficient</td>
+</tr>
+<tr>
+<td>Cyclical sin/cos</td>
+<td>Circular calendar features</td>
+<td>None — derived</td>
+<td>None — deterministic</td>
+<td>Replace raw integer encodings</td>
+</tr>
+<tr>
+<td>Delta / diff(k)</td>
+<td>Rate of change</td>
+<td>k+1 periods</td>
+<td>Low if k ≥ horizon</td>
+<td>Stabilises non-stationary series</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>Always inspect the PACF plot before selecting lag orders — only include lags with significant partial autocorrelations.</li>
+<li>Include lag-7 and lag-14 for weekly daily data; lag-12 and lag-24 for hourly data with daily/weekly cycles.</li>
+<li>Fourier features outperform one-hot day/month dummies when the seasonal pattern is smooth.</li>
+<li>Cyclical sin/cos encoding is essential for hour-of-day and day-of-week when using distance-based models (KNN, SVM).</li>
+<li>Delta features (yₜ - yₜ₋₁) reduce non-stationarity and can improve tree model performance.</li>
+</ul>
+<p>Feature selection for time-series ML follows a different logic than static tabular data. Because lag features are correlated (lag_1 and lag_2 carry overlapping information), standard SHAP values or permutation importance can be misleading — removing any single correlated lag may not reduce error because others compensate. Instead, use recursive feature elimination with a temporal CV loop to identify the minimum feature set that preserves out-of-sample accuracy, then re-train the final model on the full reduced feature set.</p>
+<p>For multivariate forecasting where covariates (weather, promotions, prices) supplement the target series, feature engineering extends naturally. Create lag and rolling features for each covariate in addition to the target. For known future covariates (e.g., promotions calendar, holiday flags) no lag alignment is needed — their future values are available at prediction time. For unknown future covariates (e.g., competitor prices), use their lagged values only and be explicit about the information cutoff horizon they impose.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RetNet — Retention Mechanism and Parallel/Recurrent Modes | Notes Backup</title>
+  <meta name="description" content="RetNet&#x27;s retention mechanism with three computation modes — parallel O(L²) training, recurrent O(1) inference, and chunkwise — plus multi-scale decay for different temporal scales." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>RetNet — Retention Mechanism and Parallel/Recurrent Modes</h1>
+      <ul class='note-meta'><li><strong>description:</strong> RetNet&#x27;s retention mechanism with three computation modes — parallel O(L²) training, recurrent O(1) inference, and chunkwise — plus multi-scale decay for different temporal scales.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>RetNet — Retention Mechanism and Parallel/Recurrent Modes</h1>
+<p>RetNet (Sun et al., 2023) targets the impossible triangle of sequence modeling: training parallelism, low-cost inference, and strong performance. Transformers offer training parallelism and strong performance but O(L) KV-cache at inference. RNNs offer O(1) inference but are sequential during training. RetNet introduces the retention mechanism — a linear recurrence with exponential decay — that achieves all three simultaneously: parallel mode for fast GPU training, recurrent mode for O(1) per-step inference, and a chunkwise mode that interpolates between the two.</p>
+<h2>The Three Computation Modes</h2>
+<p>RetNet's retention mechanism can be computed in three mathematically equivalent ways. Parallel mode: Ret(Q,K,V) = (QKᵀ ⊙ D) V where D[m,n] = γ^{m-n} if m ≥ n else 0 is the causal decay mask — identical structure to attention but with no softmax and an exponential decay instead of uniform weighting. Recurrent mode: Sₙ = γSₙ₋₁ + kₙᵀvₙ, retₙ = qₙSₙ — constant O(d²) state updated O(1) per step. Chunkwise mode: process chunks of C tokens in parallel (using local decay masks) while maintaining a recurrent state across chunks.</p>
+<ul>
+<li>Parallel: O(L²·d) — same GPU utilization as attention, ideal for training</li>
+<li>Recurrent: O(d²) state, O(d²) per step — constant memory, ideal for inference</li>
+<li>Chunkwise: O(C²·d + L/C·d²) — balanced training and prefill speed</li>
+<li>γ ∈ (0,1): decay factor per head — controls how quickly old information is forgotten</li>
+<li>No softmax: retention is linear — removes numerical instability and enables recurrent form</li>
+</ul>
+<h2>Parallel Mode — O(L²) Training</h2>
+<p>The parallel retention formula Ret = (QKᵀ ⊙ D)V closely mirrors scaled dot-product attention: Q, K, V are linear projections of the input, and the output is a weighted sum of values. The difference is in the weighting: attention uses softmax(QKᵀ / √d) for position-aware soft selection, while retention uses the fixed causal decay mask D[m,n] = γ^{m-n} which exponentially down-weights contributions from distant positions. This means retention is content-agnostic in its positional weighting — it cannot attend selectively like Mamba — but it admits the recurrent form that attention does not.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+def build_decay_mask(L, gamma, device='cpu'):
+    &quot;&quot;&quot;D[m,n] = gamma^(m-n) if m&gt;=n else 0 — causal exponential decay mask.&quot;&quot;&quot;
+    idx = torch.arange(L, device=device).float()
+    D   = gamma ** (idx.unsqueeze(0) - idx.unsqueeze(1))   # (L, L)
+    return torch.tril(D)    # causal: zero out future positions
+
+class ParallelRetention(nn.Module):
+    def __init__(self, d_model, heads=4):
+        super().__init__()
+        self.heads  = heads
+        self.d_head = d_model // heads
+        self.Q = nn.Linear(d_model, d_model, bias=False)
+        self.K = nn.Linear(d_model, d_model, bias=False)
+        self.V = nn.Linear(d_model, d_model, bias=False)
+        self.out = nn.Linear(d_model, d_model, bias=False)
+        # Multi-scale: different gamma per head
+        gammas = 1 - 2 ** (-5 - torch.arange(heads).float())
+        self.register_buffer('gammas', gammas)
+
+    def forward(self, x):
+        B, L, d = x.shape
+        Q = self.Q(x).view(B, L, self.heads, self.d_head).transpose(1, 2)  # (B,H,L,dh)
+        K = self.K(x).view(B, L, self.heads, self.d_head).transpose(1, 2)
+        V = self.V(x).view(B, L, self.heads, self.d_head).transpose(1, 2)
+        out = torch.zeros_like(Q)
+        for h in range(self.heads):
+            D   = build_decay_mask(L, self.gammas[h].item(), x.device)     # (L, L)
+            ret = (Q[:, h] @ K[:, h].transpose(-1, -2)) * D.unsqueeze(0)  # (B,L,L)
+            out[:, h] = ret @ V[:, h]
+        return self.out(out.transpose(1, 2).reshape(B, L, d))
+
+model = ParallelRetention(d_model=128, heads=4)
+x = torch.randn(2, 16, 128)
+print(f&quot;Parallel retention output: {model(x).shape}&quot;)
+</code></pre>
+<h2>Recurrent Mode — O(1) Inference</h2>
+<p>The recurrent form of retention processes one token at a time: at step n, the state Sₙ = γSₙ₋₁ + kₙᵀvₙ is a d × d matrix accumulating weighted outer products of keys and values. The output is retₙ = qₙSₙ — a simple matrix-vector product. No KV cache is needed: the entire sequence history is compressed into the fixed-size state S. This gives O(1) memory overhead and O(d²) compute per step, independent of sequence length — a significant advantage over Transformer's O(L·d) KV cache that grows with every new token.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class RecurrentRetention(nn.Module):
+    &quot;&quot;&quot;RetNet recurrent mode: O(1) per step, O(d^2) fixed state.&quot;&quot;&quot;
+    def __init__(self, d_model, heads=4):
+        super().__init__()
+        self.heads  = heads
+        self.d_head = d_model // heads
+        self.Q  = nn.Linear(d_model, d_model, bias=False)
+        self.K  = nn.Linear(d_model, d_model, bias=False)
+        self.V  = nn.Linear(d_model, d_model, bias=False)
+        self.out = nn.Linear(d_model, d_model, bias=False)
+        gammas = 1 - 2 ** (-5 - torch.arange(heads).float())
+        self.register_buffer('gammas', gammas)
+
+    def step(self, x_t, S):
+        &quot;&quot;&quot;Process one token, update state S: (B, heads, d_head, d_head).&quot;&quot;&quot;
+        B  = x_t.shape[0]
+        q  = self.Q(x_t).view(B, self.heads, self.d_head)
+        k  = self.K(x_t).view(B, self.heads, self.d_head)
+        v  = self.V(x_t).view(B, self.heads, self.d_head)
+        # S_n = gamma * S_{n-1} + k_n^T v_n  (outer product accumulation)
+        S  = self.gammas.view(1,-1,1,1) * S + torch.einsum('bhd,bhe-&gt;bhde', k, v)
+        # ret_n = q_n S_n
+        ret = torch.einsum('bhd,bhde-&gt;bhe', q, S).reshape(B, -1)
+        return self.out(ret), S
+
+d, H, B = 64, 4, 2
+model = RecurrentRetention(d, H)
+S = torch.zeros(B, H, d//H, d//H)    # initial state
+print(&quot;Autoregressive recurrent generation:&quot;)
+for t in range(6):
+    x_t = torch.randn(B, d)
+    out, S = model.step(x_t, S)
+print(f&quot;Output: {out.shape}, State: {S.shape}, State norm: {S.norm():.3f}&quot;)
+</code></pre>
+<h2>Chunkwise Mode</h2>
+<p>The chunkwise mode processes the sequence in chunks of size C. Within each chunk, parallel retention is applied using a local decay mask — identical to parallel mode but only C×C instead of L×L. Across chunks, the recurrent state is updated to carry information from past chunks. The within-chunk parallel computation achieves high GPU utilization, while the across-chunk recurrence keeps memory bounded. Chunkwise is the recommended mode for training on long documents: choose C such that C² fits comfortably in GPU memory while L/C recurrent updates are cheap.</p>
+<pre><code class="language-python">import torch
+
+def chunkwise_retention(Q, K, V, gamma, chunk_size=32):
+    &quot;&quot;&quot;
+    Chunkwise retention: parallel within chunk, recurrent across chunks.
+    Q, K, V: (B, L, d) — all same dimension for simplicity.
+    &quot;&quot;&quot;
+    B, L, d = Q.shape
+    n_chunks = (L + chunk_size - 1) // chunk_size
+    outputs  = []
+    S = torch.zeros(B, d, d, device=Q.device)     # cross-chunk state (B, d, d)
+
+    for c in range(n_chunks):
+        s, e    = c * chunk_size, min((c+1) * chunk_size, L)
+        q_c, k_c, v_c = Q[:, s:e], K[:, s:e], V[:, s:e]
+        cs = e - s
+
+        # Intra-chunk parallel retention
+        idx = torch.arange(cs, device=Q.device).float()
+        D   = torch.tril(gamma ** (idx.unsqueeze(0) - idx.unsqueeze(1))).unsqueeze(0)
+        intra = ((q_c @ k_c.transpose(-1,-2)) * D) @ v_c       # (B, cs, d)
+
+        # Cross-chunk: contribution from accumulated past state
+        decay  = gamma ** torch.arange(cs, 0, -1, dtype=torch.float32, device=Q.device)
+        cross  = (q_c * decay.view(1,-1,1)) @ S                 # (B, cs, d)
+
+        outputs.append(intra + cross)
+        # Update state: S_new = gamma^cs * S + K_c^T V_c
+        S = gamma**cs * S + k_c.transpose(-1,-2) @ v_c
+
+    return torch.cat(outputs, dim=1)
+
+B, L, d = 2, 64, 32
+Q = K = V = torch.randn(B, L, d)
+out = chunkwise_retention(Q, K, V, gamma=0.9, chunk_size=16)
+print(f&quot;Chunkwise output: {out.shape}&quot;)   # (2, 64, 32)
+</code></pre>
+<blockquote>
+<p><strong>Choosing Chunk Size</strong>: For training on sequences of length L=8192, a chunk size of C=512 gives 16 recurrent steps across chunks. Within each chunk the C×C=262K element matrix is small enough for fast matrix multiplication on modern GPUs. For inference, switch to recurrent mode (C=1) — no code changes needed, just call the recurrent step function instead of the parallel forward.</p>
+</blockquote>
+<h2>Code 4 — RetNet vs Transformer Perplexity Comparison</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+import matplotlib.pyplot as plt
+
+class TinyRetNet(nn.Module):
+    &quot;&quot;&quot;Minimal RetNet-like LM using GRU as retention proxy for benchmarking.&quot;&quot;&quot;
+    def __init__(self, vocab, d):
+        super().__init__()
+        self.embed = nn.Embedding(vocab, d)
+        self.gru   = nn.GRU(d, d, batch_first=True)
+        self.head  = nn.Linear(d, vocab)
+    def forward(self, x):
+        h, _ = self.gru(self.embed(x))
+        return self.head(h)
+
+def sim_curve(start, rate, floor, n=200, noise=1.2, seed=0):
+    &quot;&quot;&quot;Simulate perplexity training curve.&quot;&quot;&quot;
+    np.random.seed(seed)
+    return start * np.exp(-rate * np.arange(1, n+1)) + floor + np.random.randn(n) * noise
+
+steps  = np.arange(1, 201)
+curves = {
+    'Transformer':   sim_curve(200, 0.018, 15.0, seed=0),
+    'RetNet':        sim_curve(200, 0.019, 14.5, seed=1),
+    'Mamba':         sim_curve(200, 0.020, 14.2, seed=2),
+    'RWKV':          sim_curve(200, 0.017, 15.8, seed=3),
+}
+colors = ['steelblue', 'forestgreen', 'tomato', 'orange']
+
+fig, ax = plt.subplots(figsize=(9, 5))
+for (name, ppl), color in zip(curves.items(), colors):
+    ax.plot(steps, ppl, alpha=0.8, label=name, color=color, linewidth=1.5)
+ax.set_yscale('log')
+ax.set_xlabel('Training Steps'); ax.set_ylabel('Perplexity (log scale)')
+ax.set_title('LM Training Curves: RetNet vs Alternatives')
+ax.legend(); ax.grid(True, alpha=0.3)
+plt.tight_layout(); plt.savefig('retnet_ppl.png', dpi=120); plt.show()
+for name, ppl in curves.items():
+    print(f&quot;{name:14s}: final PPL = {ppl[-1]:.1f}&quot;)
+</code></pre>
+<h2>Multi-Scale Retention (MSR)</h2>
+<p>RetNet uses multi-scale retention (MSR) as its multi-head mechanism: each head has a different decay factor γₕ = 1 - 2^(-5-h) for h = 0,...,H-1. For H=8 heads, the gammas range from 1-2^{-5} ≈ 0.97 (slow decay, long memory) to 1-2^{-12} ≈ 0.9998 (very slow decay). This gives different heads different temporal receptive fields — heads with small γ focus on recent context while heads with large γ maintain longer history. MSR provides the temporal diversity that multi-head attention achieves through content-based selection, but here it is achieved purely through structural decay parameters.</p>
+<ul>
+<li>γ close to 1 (e.g. 0.9997): very slow decay — head retains signal over thousands of steps</li>
+<li>γ close to 0.9 (e.g. 0.97): faster decay — head focuses on the last ~30 positions</li>
+<li>Effective receptive field of head h: approximately 1/(1-γₕ) tokens</li>
+<li>No learned position encoding needed: decay mask D encodes relative position implicitly</li>
+<li>MSR concatenated and projected: same shape as multi-head attention output</li>
+</ul>
+<h2>Model Comparison Table</h2>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Parallelizable</th>
+<th>Inference O()</th>
+<th>Recurrent State</th>
+<th>Softmax</th>
+<th>Attention Complexity</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Transformer</td>
+<td>Yes (O(L^2))</td>
+<td>O(L·d) KV cache</td>
+<td>No (KV grows)</td>
+<td>Yes</td>
+<td>O(L^2)</td>
+</tr>
+<tr>
+<td>RetNet</td>
+<td>Yes (parallel mode)</td>
+<td>O(d^2) fixed</td>
+<td>Yes (d×d matrix)</td>
+<td>No</td>
+<td>O(L^2) train / O(1) infer</td>
+</tr>
+<tr>
+<td>Mamba</td>
+<td>Yes (parallel scan)</td>
+<td>O(N·d) fixed</td>
+<td>Yes (N×d)</td>
+<td>No</td>
+<td>O(L) scan</td>
+</tr>
+<tr>
+<td>RWKV</td>
+<td>Yes (parallel)</td>
+<td>O(d^2) fixed</td>
+<td>Yes (d×d matrix)</td>
+<td>No</td>
+<td>O(L)</td>
+</tr>
+<tr>
+<td>Linear Attn</td>
+<td>Yes (O(L·d^2))</td>
+<td>O(d^2) fixed</td>
+<td>Yes (d×d matrix)</td>
+<td>No</td>
+<td>O(L·d)</td>
+</tr>
+</tbody>
+</table>
+<p>RetNet occupies an interesting position: it achieves Transformer-level perplexity (within 0.5 PPL at equivalent parameter counts), offers 8× faster inference than Transformer at L=8192 due to the fixed-size state, and trains efficiently in parallel mode. Its main limitation relative to Mamba is the lack of content-selectivity — the exponential decay is fixed per head, so the model cannot dynamically choose to attend or ignore specific tokens. Hybrid architectures combining RetNet-style linear recurrence layers with occasional full attention layers show promise for combining the best of both approaches.</p>
+<ul>
+<li>RetNet paper reports 8.4× throughput improvement over Transformer at inference (L=8192)</li>
+<li>Memory: O(d²) state vs O(L·d) KV cache — fixed regardless of sequence length</li>
+<li>Matches GPT-3 perplexity at 6.7B parameters with faster inference</li>
+<li>torchscale library (Microsoft) implements RetNet: pip install torchscale</li>
+<li>Hybrid RetNet + full attention every k layers improves quality with minimal inference cost</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

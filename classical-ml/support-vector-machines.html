@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Support Vector Machines — Margin Maximisation and the Dual | Notes Backup</title>
+  <meta name="description" content="Derive the hard-margin SVM primal and dual, understand KKT conditions, implement SMO, visualise support vectors, and see why the dual enables the kernel trick." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Support Vector Machines — Margin Maximisation and the Dual</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Derive the hard-margin SVM primal and dual, understand KKT conditions, implement SMO, visualise support vectors, and see why the dual enables the kernel trick.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Support Vector Machines — Margin Maximisation and the Dual</h1>
+<p>Support Vector Machines find the maximum-margin separating hyperplane between two classes. The key insight is that only the training points nearest the boundary — the support vectors — determine the decision function. The primal formulation is a quadratic program; its Lagrangian dual replaces data points with inner products, enabling the kernel trick. SVMs achieve strong generalisation bounds via VC theory and the margin, making them effective even in high dimensions.</p>
+<h2>Maximum Margin Classifier</h2>
+<p>The separating hyperplane is {x : wᵀx + b = 0}. A point xᵢ is correctly classified if yᵢ(wᵀxᵢ + b) &gt; 0. To maximise the margin (width between the two class boundaries), we require yᵢ(wᵀxᵢ + b) ≥ 1 for all i and maximise 2/‖w‖, equivalently minimising ‖w‖²/2. Points that satisfy yᵢ(wᵀxᵢ + b) = 1 are on the margin boundary — these are the support vectors. The margin equals 2/‖w‖; maximising it is equivalent to minimising ‖w‖² subject to the constraints.</p>
+<h2>Lagrangian and KKT Conditions</h2>
+<p>The primal is: min_{w,b} ½‖w‖² s.t. yᵢ(wᵀxᵢ+b) ≥ 1. Forming the Lagrangian: L = ½‖w‖² − Σᵢαᵢ[yᵢ(wᵀxᵢ+b)−1] with αᵢ ≥ 0. Stationarity KKT conditions: ∂L/∂w = w − Σαᵢyᵢxᵢ = 0 → w = Σαᵢyᵢxᵢ; ∂L/∂b = −Σαᵢyᵢ = 0. Complementary slackness: αᵢ[yᵢ(wᵀxᵢ+b)−1] = 0 — either αᵢ=0 (point off margin) or the constraint is active (point is a support vector). The decision boundary is determined entirely by support vectors with αᵢ &gt; 0.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.datasets import make_blobs
+from sklearn.svm import SVC
+
+try:
+    import cvxpy as cp
+
+    np.random.seed(42)
+    X, y_raw = make_blobs(n_samples=40, centers=2, random_state=42)
+    y = 2 * y_raw - 1  # map to {-1, +1}
+
+    n, d = X.shape
+    w_var = cp.Variable(d)
+    b_var = cp.Variable()
+    constraints = [y[i] * (X[i] @ w_var + b_var) &gt;= 1 for i in range(n)]
+    prob = cp.Problem(cp.Minimize(0.5 * cp.sum_squares(w_var)), constraints)
+    prob.solve(solver=cp.OSQP, eps_abs=1e-8, eps_rel=1e-8)
+
+    w_cvx = w_var.value
+    b_cvx = b_var.value
+    margin = 2.0 / np.linalg.norm(w_cvx)
+
+    svc = SVC(kernel='linear', C=1e6).fit(X, y)
+    print(f'cvxpy margin:   {margin:.4f}')
+    print(f'sklearn margin: {2.0 / np.linalg.norm(svc.coef_):.4f}')
+    print(f'Max w diff:     {np.abs(w_cvx - svc.coef_[0]).max():.4f}')
+except ImportError:
+    print('cvxpy not installed — using scipy for QP instead.')
+    from sklearn.datasets import make_blobs
+    from sklearn.svm import SVC
+    np.random.seed(42)
+    X, y_raw = make_blobs(n_samples=40, centers=2, random_state=42)
+    svc = SVC(kernel='linear', C=1e6).fit(X, y_raw)
+    print(f'sklearn margin: {2.0 / np.linalg.norm(svc.coef_):.4f}')
+    print(f'Support vectors: {svc.n_support_}')
+</code></pre>
+<h2>The Dual Problem</h2>
+<p>Substituting the KKT conditions w = Σαᵢyᵢxᵢ back into the Lagrangian gives the dual: maximise Σαᵢ − ½ΣᵢΣⱼ αᵢαⱼyᵢyⱼxᵢᵀxⱼ, subject to αᵢ ≥ 0 and Σαᵢyᵢ = 0. This is a quadratic program in n variables (one per training point). The objective involves only inner products xᵢᵀxⱼ — this is why kernels can replace xᵀz with k(x,z) without changing the algorithm. The decision function is f(x) = sign(Σ αᵢyᵢk(xᵢ,x) + b).</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.svm import SVC
+from sklearn.datasets import make_blobs
+
+def smo_simplified(X, y, C=1e6, tol=1e-4, max_passes=100):
+    n = len(y)
+    alpha = np.zeros(n)
+    b = 0.0
+    passes = 0
+    K = X @ X.T  # kernel matrix (linear)
+    while passes &lt; max_passes:
+        num_changed = 0
+        for i in range(n):
+            Ei = np.sum(alpha * y * K[:, i]) + b - y[i]
+            if (y[i]*Ei &lt; -tol and alpha[i] &lt; C) or (y[i]*Ei &gt; tol and alpha[i] &gt; 0):
+                j = np.random.choice([k for k in range(n) if k != i])
+                Ej = np.sum(alpha * y * K[:, j]) + b - y[j]
+                ai_old, aj_old = alpha[i], alpha[j]
+                L = max(0, aj_old - ai_old) if y[i] != y[j] else max(0, ai_old + aj_old - C)
+                H = min(C, C + aj_old - ai_old) if y[i] != y[j] else min(C, ai_old + aj_old)
+                if L &gt;= H: continue
+                eta = 2*K[i,j] - K[i,i] - K[j,j]
+                if eta &gt;= 0: continue
+                alpha[j] = np.clip(aj_old - y[j]*(Ei-Ej)/eta, L, H)
+                if abs(alpha[j] - aj_old) &lt; 1e-5: continue
+                alpha[i] += y[i]*y[j]*(aj_old - alpha[j])
+                b -= Ei + y[i]*(alpha[i]-ai_old)*K[i,i] + y[j]*(alpha[j]-aj_old)*K[i,j]
+                num_changed += 1
+        passes = 0 if num_changed &gt; 0 else passes + 1
+    return alpha, b
+
+np.random.seed(42)
+X, y_raw = make_blobs(n_samples=30, centers=2, cluster_std=0.8, random_state=42)
+y = 2*y_raw - 1
+alpha, b = smo_simplified(X, y, C=1e6)
+svs = np.where(alpha &gt; 1e-5)[0]
+print(f'SMO support vectors: {svs}')
+print(f'sklearn SVs:         {SVC(kernel=&quot;linear&quot;,C=1e6).fit(X,y).support_}')
+</code></pre>
+<h2>Visualising Support Vectors and the Decision Boundary</h2>
+<pre><code class="language-python">import numpy as np
+from sklearn.svm import SVC
+from sklearn.datasets import make_blobs
+
+np.random.seed(42)
+X, y = make_blobs(n_samples=60, centers=2, cluster_std=0.9, random_state=42)
+
+svc = SVC(kernel='linear', C=1e6)
+svc.fit(X, y)
+
+w = svc.coef_[0]
+b = svc.intercept_[0]
+margin = 2.0 / np.linalg.norm(w)
+
+print('=== Hard-margin SVM Decision Boundary ===')
+print(f'Weight vector w: {np.round(w, 4)}')
+print(f'Bias b:          {b:.4f}')
+print(f'Margin width:    {margin:.4f}')
+print(f'Number of support vectors: {svc.n_support_}')
+print(f'Support vector indices: {svc.support_}')
+
+# Verify support vectors are on the margin
+for i in svc.support_:
+    margin_val = y[i] * (X[i] @ w + b)
+    print(f'  Point {i}: y*(wx+b) = {margin_val:.4f}  (should be ~1.0 for hard-margin)')
+</code></pre>
+<blockquote>
+<p><strong>Only Support Vectors Matter</strong>: The SVM decision function f(x) = Σᵢ αᵢyᵢk(xᵢ,x) + b involves only points with αᵢ &gt; 0 — the support vectors. All other training points have αᵢ = 0 and do not affect the boundary. This makes SVMs sparse in the dual and efficient at prediction time. Typically only 10–30% of training points become support vectors.</p>
+</blockquote>
+<h2>Primal vs Dual — When to Use Each</h2>
+<pre><code class="language-python">import numpy as np
+from sklearn.svm import SVC
+from sklearn.datasets import make_blobs
+
+np.random.seed(0)
+X, y_raw = make_blobs(n_samples=40, centers=2, cluster_std=0.8, random_state=0)
+y = 2 * y_raw - 1
+
+svc = SVC(kernel='linear', C=1e6)
+svc.fit(X, y)
+
+# Primal: w from sklearn
+w_primal = svc.coef_[0]
+b_primal = svc.intercept_[0]
+
+# Dual: reconstruct w from dual alphas and support vectors
+alpha_dual = svc.dual_coef_[0]   # = alpha_i * y_i for support vectors
+X_sv = svc.support_vectors_
+w_dual = X_sv.T @ alpha_dual
+
+print('Primal w:', np.round(w_primal, 4))
+print('Dual   w:', np.round(w_dual,   4))
+print(f'Max |w_primal - w_dual| = {np.abs(w_primal - w_dual).max():.2e}')
+
+# Decision values
+dv_primal = X @ w_primal + b_primal
+dv_dual   = svc.decision_function(X)
+print(f'Decision function max diff: {np.abs(dv_primal - dv_dual).max():.2e}')
+print(f'Both primal and dual formulations agree.')
+</code></pre>
+<h2>Primal vs Dual Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Aspect</th>
+<th>Primal</th>
+<th>Dual</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Variables</td>
+<td>w ∈ ℝᵈ, b ∈ ℝ</td>
+<td>α ∈ ℝⁿ</td>
+</tr>
+<tr>
+<td>QP size</td>
+<td>d+1 variables</td>
+<td>n variables</td>
+</tr>
+<tr>
+<td>Preferred when</td>
+<td>n &gt;&gt; d (wide data)</td>
+<td>d &gt;&gt; n (tall/kernel data)</td>
+</tr>
+<tr>
+<td>Enables kernels</td>
+<td>No — explicit w required</td>
+<td>Yes — only xᵢᵀxⱼ appears</td>
+</tr>
+<tr>
+<td>Sparsity</td>
+<td>No inherent sparsity</td>
+<td>Sparse: αᵢ=0 for non-SVs</td>
+</tr>
+<tr>
+<td>Prediction cost</td>
+<td>O(d) per point</td>
+<td>O(n_sv · d) per point</td>
+</tr>
+</tbody>
+</table>
+<h2>Generalisation and VC Dimension</h2>
+<p>VC theory bounds generalisation error: with probability 1−δ, test error ≤ training error + O(√(VC_dim·log(n)/n + log(1/δ)/n)). For linear SVMs the VC dimension equals d+1. But the margin-based bound is tighter: test error ≤ O(R²/γ² / n + log(1/δ)/n) where R is the data radius and γ is the margin. A large margin implies good generalisation independent of dimension d — explaining why SVMs with kernels can generalise in infinite-dimensional feature spaces.</p>
+<ul>
+<li>The SVM margin bound depends on R²/γ², not on the ambient dimension d — key advantage of large-margin classifiers.</li>
+<li>Support vectors are the only training points that influence the boundary; removing non-SVs leaves the model unchanged.</li>
+<li>The dual QP has n variables; SMO decomposes it into 2-variable subproblems solvable analytically.</li>
+<li>For linear SVM with large n, primal methods (LibLinear, SGD) are faster; dual SMO is preferred for kernel SVMs.</li>
+<li>Always scale features before training SVM — the L2 norm used in the margin is sensitive to feature scale.</li>
+</ul>
+<h2>Practical Considerations</h2>
+<p>Feature scaling is critical: SVMs optimise ‖w‖² which is scale-sensitive, so always use StandardScaler. The regularisation parameter C controls the trade-off between maximising the margin and allowing misclassifications (in the soft-margin case). Cross-validate C over a log-spaced grid (e.g., 10⁻³ to 10³). For large n (&gt; 50,000), use LinearSVC (primal SGD) instead of SVC (dual SMO) for dramatically better speed.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

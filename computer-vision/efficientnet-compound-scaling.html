@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>EfficientNet: Compound Scaling of CNNs | Notes Backup</title>
+  <meta name="description" content="Neural architecture search baseline (EfficientNet-B0) and compound scaling — simultaneously scaling width, depth, and resolution with coefficient φ for efficient accuracy gains." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>EfficientNet: Compound Scaling of CNNs</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Neural architecture search baseline (EfficientNet-B0) and compound scaling — simultaneously scaling width, depth, and resolution with coefficient φ for efficient accuracy gains.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>EfficientNet: Compound Scaling of CNNs</h1>
+<h2>Overview</h2>
+<p>EfficientNet (Tan &amp; Le, 2019) introduced a principled approach to CNN scaling. Instead of arbitrarily increasing width, depth, or resolution, it uses Neural Architecture Search to find a baseline (B0) and then a compound scaling method to derive B1–B7, achieving state-of-the-art accuracy with far fewer parameters than prior models like ResNet or DenseNet.</p>
+<p>The core insight is that width, depth, and resolution are not independent — scaling all three together in a fixed ratio, controlled by a single coefficient φ, produces better results than scaling any one dimension alone. EfficientNet-B7 achieves 84.3% top-1 on ImageNet using 8.4× fewer parameters than the best contemporary models.</p>
+<h2>EfficientNet-B0 Baseline</h2>
+<p>The B0 baseline is found via Neural Architecture Search optimizing a multi-objective reward: ACC(m) × [FLOPS(m)/T]^w where w=−0.07. The search space includes MBConv blocks with squeeze-and-excitation, varying expansion ratios (1 or 6), kernel sizes (3×3 or 5×5), and number of layers per stage across 9 stages.</p>
+<p>EfficientNet-B0 has 5.3M parameters and achieves 77.1% top-1 accuracy at 224×224 resolution. It uses 7 MBConv stages with varying channel widths (16→320) and expansion ratios, plus an initial stem conv and a final head with 1280 channels. This compact baseline is the foundation for all EfficientNet-B1 through B7 variants.</p>
+<h2>Compound Scaling Equations</h2>
+<p>Compound scaling uses a single user-defined coefficient φ to uniformly scale network width, depth, and input resolution. This contrasts with ad-hoc scaling where practitioners independently tune each dimension. The method is grounded in the observation that larger inputs need deeper networks (more receptive field) and wider networks (more fine-grained features) to capture richer patterns.</p>
+<pre><code class="language-python"># Compound scaling coefficients (Tan &amp; Le 2019)
+# Constraint: alpha * beta^2 * gamma^2 ≈ 2
+# Found via grid search on B0: alpha=1.2, beta=1.1, gamma=1.15
+# phi is the user-chosen scaling coefficient
+
+alpha, beta, gamma = 1.2, 1.1, 1.15
+
+def compound_scale(phi):
+    depth_mult  = alpha ** phi        # scales number of layers
+    width_mult  = beta  ** phi        # scales channel widths
+    resolution  = gamma ** phi        # scales input resolution
+    # FLOP cost ≈ alpha * beta^2 * gamma^2 ≈ 2^phi
+    return depth_mult, width_mult, resolution
+</code></pre>
+<p>The constraint α·β²·γ² ≈ 2 ensures that total FLOPs grow by approximately 2^φ with each unit increase in φ. Since FLOPs scale quadratically with resolution and width but linearly with depth, the squaring of β and γ accounts for this asymmetry and keeps compute budgets predictable across the entire EfficientNet scaling family.</p>
+<h2>MBConv Block</h2>
+<p>The MBConv (Mobile Inverted Bottleneck Convolution) block is the core building block of EfficientNet, inherited from MobileNetV2 with an added Squeeze-and-Excitation (SE) module. Each block expands channels by a factor (1× or 6×), applies a depthwise separable convolution, applies channel attention via SE, then projects back to the output channel count.</p>
+<pre><code class="language-python">import torch.nn as nn
+
+class MBConv(nn.Module):
+    def __init__(self, inp, oup, stride, expand_ratio, se_ratio=0.25):
+        super().__init__()
+        mid = inp * expand_ratio
+        self.skip = (stride == 1 and inp == oup)
+        self.conv = nn.Sequential(
+            nn.Conv2d(inp, mid, 1, bias=False), nn.BatchNorm2d(mid), nn.SiLU(),
+            nn.Conv2d(mid, mid, 3, stride, 1, groups=mid, bias=False), nn.BatchNorm2d(mid), nn.SiLU(),
+            SEBlock(mid, int(inp * se_ratio)),
+            nn.Conv2d(mid, oup, 1, bias=False), nn.BatchNorm2d(oup),
+        )
+    def forward(self, x):
+        return x + self.conv(x) if self.skip else self.conv(x)
+</code></pre>
+<p>The SiLU (Swish) activation — f(x)=x·σ(x) — replaces ReLU throughout EfficientNet and contributes measurably to accuracy. The SE block performs global average pooling then two FC layers to produce per-channel attention weights in [0,1], letting the network recalibrate feature maps. Skip connections are applied when stride=1 and input/output channel counts match exactly.</p>
+<h2>Scaling from B0 to B7</h2>
+<p>EfficientNet-B1 through B7 are obtained by applying compound scaling with φ=1 through 7 to the B0 baseline. Resolution increases from 224px (B0) to 600px (B7), while depth and width scale proportionally. Each increment of φ roughly doubles FLOPs but improves accuracy by 0.5–1.5% top-1, making the tradeoff curve far more favorable than scaling any single dimension alone.</p>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Input Res</th>
+<th>Width × Depth Mult</th>
+<th>Top-1 %</th>
+<th>Params (M)</th>
+<th>FLOPs (G)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>B0</td>
+<td>224</td>
+<td>1.0 × 1.0</td>
+<td>77.1</td>
+<td>5.3</td>
+<td>0.39</td>
+</tr>
+<tr>
+<td>B1</td>
+<td>240</td>
+<td>1.0 × 1.1</td>
+<td>79.1</td>
+<td>7.8</td>
+<td>0.70</td>
+</tr>
+<tr>
+<td>B2</td>
+<td>260</td>
+<td>1.1 × 1.2</td>
+<td>80.1</td>
+<td>9.2</td>
+<td>1.0</td>
+</tr>
+<tr>
+<td>B3</td>
+<td>300</td>
+<td>1.2 × 1.4</td>
+<td>81.6</td>
+<td>12</td>
+<td>1.8</td>
+</tr>
+<tr>
+<td>B4</td>
+<td>380</td>
+<td>1.4 × 1.8</td>
+<td>82.9</td>
+<td>19</td>
+<td>4.2</td>
+</tr>
+<tr>
+<td>B5</td>
+<td>456</td>
+<td>1.6 × 2.2</td>
+<td>83.6</td>
+<td>30</td>
+<td>9.9</td>
+</tr>
+<tr>
+<td>B6</td>
+<td>528</td>
+<td>1.8 × 2.6</td>
+<td>84.0</td>
+<td>43</td>
+<td>19</td>
+</tr>
+<tr>
+<td>B7</td>
+<td>600</td>
+<td>2.0 × 3.1</td>
+<td>84.3</td>
+<td>66</td>
+<td>37</td>
+</tr>
+</tbody>
+</table>
+<p>The Width × Depth multipliers are applied to B0 channel counts and layer counts per stage. Note that FLOPs grow super-linearly with model index — B7 uses ~95× more FLOPs than B0 for only 7.2% higher accuracy. This illustrates why B4 is often the practical ceiling, and why EfficientNetV2 redesigned large model stages to reduce this overhead.</p>
+<pre><code class="language-python">import torchvision.models as models
+import torch.nn as nn
+
+# Load pretrained EfficientNet-B0; swap classifier for custom task
+model = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1)
+
+num_classes = 10
+in_features = model.classifier[1].in_features
+model.classifier[1] = nn.Linear(in_features, num_classes)
+
+total = sum(p.numel() for p in model.parameters())
+trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+print(f&quot;Total params: {total/1e6:.2f}M | Trainable: {trainable/1e6:.2f}M&quot;)
+</code></pre>
+<p>When fine-tuning EfficientNet, freeze the stem and early stages and train only later stages plus the classifier head. This typically yields 90%+ of full fine-tune accuracy with 3–5× faster convergence. Use input sizes matching the variant (224 for B0, 380 for B4) and apply ImageNet normalization (mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225]) consistently.</p>
+<pre><code class="language-python">from thop import profile
+import torch, torchvision.models as M
+
+results = {}
+for name, cls, res in [
+    (&quot;B0&quot;, M.efficientnet_b0, 224), (&quot;B1&quot;, M.efficientnet_b1, 240),
+    (&quot;B2&quot;, M.efficientnet_b2, 260), (&quot;B3&quot;, M.efficientnet_b3, 300),
+    (&quot;B4&quot;, M.efficientnet_b4, 380),
+]:
+    m = cls(weights=None)
+    x = torch.randn(1, 3, res, res)
+    flops, params = profile(m, inputs=(x,), verbose=False)
+    results[name] = {&quot;gflops&quot;: flops/1e9, &quot;params_m&quot;: params/1e6}
+    print(f&quot;{name} ({res}px): {flops/1e9:.2f} GFLOPs, {params/1e6:.1f}M params&quot;)
+</code></pre>
+<p>FLOPs roughly double with each step from B0 to B3, then increase more steeply as resolution grows. Plotting accuracy vs. FLOPs on a log scale shows EfficientNet on a Pareto frontier above ResNet and VGG at all compute points. For batch inference on V100, B0 achieves ~2500 images/sec while B4 achieves ~350 images/sec — a 7× throughput gap for 5.8% accuracy gain.</p>
+<h2>Key Takeaways</h2>
+<blockquote>
+<p><strong>tip</strong>: EfficientNet-B4 (380px, 19M params) is usually the best tradeoff — B5+ give diminishing returns at much higher cost. Use B0 for edge/mobile and B4 for server inference.</p>
+</blockquote>
+<p>EfficientNet showed that compound scaling beats ad-hoc single-axis scaling. The pattern generalizes: EfficientDet applies it to detection backbones, EfficientNetV2 swaps early MBConv6 for Fused-MBConv and adds progressive training. Core lesson: jointly optimizing width, depth, and resolution under a fixed compute budget yields models that transfer exceptionally well with minimal fine-tuning effort.</p>
+    </article>
+  </main>
+</body>
+</html>

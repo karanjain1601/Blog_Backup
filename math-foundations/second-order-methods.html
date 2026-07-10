@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Second-Order Methods — Newton&#x27;s Method and L-BFGS | Notes Backup</title>
+  <meta name="description" content="Newton&#x27;s method quadratic convergence, practical infeasibility for deep learning, quasi-Newton and L-BFGS algorithm, Gauss-Newton approximation, K-FAC, and when second-order methods beat Adam." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Second-Order Methods — Newton&#x27;s Method and L-BFGS</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Newton&#x27;s method quadratic convergence, practical infeasibility for deep learning, quasi-Newton and L-BFGS algorithm, Gauss-Newton approximation, K-FAC, and when second-order methods beat Adam.</li><li><strong>topic:</strong> math-foundations</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Second-Order Methods — Newton's Method and L-BFGS</h1>
+<p>Second-order optimization methods use curvature information (the Hessian matrix) in addition to gradient information to compute better update directions. Theoretically, they are dramatically superior: while gradient descent converges at a linear rate O(1/t) for strongly convex functions, Newton's method converges quadratically (number of correct digits doubles per iteration) and reaches high precision in very few steps. In practice, however, second-order methods are rarely used for deep learning because the Hessian of an n-parameter model requires O(n²) storage and O(n³) inversion — prohibitive for n = 10⁷ or more. This note covers Newton's method and its convergence guarantees, the BFGS and L-BFGS quasi-Newton approximations, the Gauss-Newton approximation for least squares, and K-FAC as the state-of-the-art practical second-order method for neural networks.</p>
+<h2>Newton's Method</h2>
+<p>Newton's update is x ← x − H⁻¹∇f, where H = ∇²f is the Hessian. The intuition: the second-order Taylor expansion f(x+δ) ≈ f(x) + ∇fᵀδ + ½δᵀHδ is a quadratic in δ; minimizing over δ gives δ<em> = −H⁻¹∇f, which is the Newton direction. For a quadratic objective, this step hits the minimum exactly in one iteration (the quadratic model is exact). Near a minimum, Newton's method exhibits quadratic convergence: if ε_t = ‖x_t − x</em>‖, then ε_{t+1} ≤ C·ε_t². This means if you are within 0.1 of the solution, after one step you are within 0.01; after two steps, 0.0001. Requirements: H must be positive definite (PD) to guarantee a descent direction. Near a saddle point (H is indefinite), H⁻¹∇f may point uphill. Fix: damped Newton uses (H + λI)⁻¹∇f with λ &gt; 0 large enough to make H + λI PD (trust-region regularization). Cost: O(n²) to store the Hessian, O(n³) to compute its inverse — completely infeasible for n = 10⁶+ parameter models.</p>
+<pre><code class="language-python">import numpy as np
+
+# Newton's method on 2D quadratic f = x^2 + 5y^2 (converges in 1 step)
+# and Rosenbrock f = (1-x)^2 + 100(y-x^2)^2 (shows quadratic convergence)
+def rosenbrock(xy):
+    x, y = xy
+    return (1 - x)**2 + 100 * (y - x**2)**2
+
+def rosenbrock_grad(xy):
+    x, y = xy
+    return np.array([-2*(1-x) - 400*x*(y-x**2),
+                      200*(y-x**2)])
+
+def rosenbrock_hess(xy):
+    x, y = xy
+    return np.array([[2 - 400*(y-x**2) + 800*x**2, -400*x],
+                     [-400*x, 200.0]])
+
+def newton_method(f, grad_f, hess_f, x0, max_iter=20, tol=1e-10):
+    x = x0.copy()
+    history = []
+    for i in range(max_iter):
+        g = grad_f(x)
+        H = hess_f(x)
+        H_reg = H + 1e-6 * np.eye(len(x))  # damping for numerical stability
+        delta = np.linalg.solve(H_reg, g)
+        x = x - delta
+        err = np.linalg.norm(g)
+        history.append(err)
+        if err &lt; tol: break
+        print(f&quot;  iter {i+1}: ‖∇f‖ = {err:.2e}&quot;)
+    return x, history
+
+print(&quot;Newton on Rosenbrock:&quot;)
+x_opt, hist = newton_method(rosenbrock, rosenbrock_grad, rosenbrock_hess,
+                             x0=np.array([-1.0, 1.0]))
+print(f&quot;Solution: {x_opt.round(6)} (expected [1, 1])&quot;)
+</code></pre>
+<h2>BFGS: Quasi-Newton Approximation</h2>
+<p>BFGS (Broyden-Fletcher-Goldfarb-Shanno, 1970) approximates the inverse Hessian from gradient differences, avoiding the O(n²) cost of computing the true Hessian. After step t, define sₜ = θₜ − θₜ₋₁ (parameter change) and yₜ = ∇f(θₜ) − ∇f(θₜ₋₁) (gradient change). BFGS performs a rank-2 update: Bₜ₊₁⁻¹ = (I − ρₜsₜyₜᵀ)Bₜ⁻¹(I − ρₜyₜsₜᵀ) + ρₜsₜsₜᵀ where ρₜ = 1/(yₜᵀsₜ). The update satisfies the secant condition: Bₜ₊₁sₜ = yₜ (the approximate Hessian times the step equals the gradient change — like a discrete second derivative). BFGS achieves superlinear convergence: ‖x_{t+1} − x<em>‖ / ‖xₜ − x</em>‖ → 0, faster than linear but slower than quadratic. Memory: O(n²) for the full inverse Hessian approximation — still impractical for large n, motivating the limited-memory variant L-BFGS.</p>
+<pre><code class="language-python">import numpy as np
+from scipy.optimize import minimize
+import time
+
+def convex_objective(w, X, y):
+    &quot;&quot;&quot;Logistic regression loss (convex, smooth — good for L-BFGS).&quot;&quot;&quot;
+    logits = X @ w
+    return np.mean(np.log(1 + np.exp(-y * logits))) + 0.01 * np.dot(w, w)
+
+def convex_grad(w, X, y):
+    logits = X @ w
+    sig = 1 / (1 + np.exp(y * logits))
+    return -np.mean(y[:, None] * X * sig[:, None], axis=0) + 0.02 * w
+
+np.random.seed(42)
+n, d = 500, 50
+X = np.random.randn(n, d)
+w_true = np.random.randn(d) * 0.5
+y = np.sign(X @ w_true + 0.1 * np.random.randn(n))
+w0 = np.zeros(d)
+
+# GD baseline
+def run_gd(steps=500, lr=0.1):
+    w = w0.copy()
+    losses = []
+    for _ in range(steps):
+        g = convex_grad(w, X, y)
+        w -= lr * g
+        losses.append(convex_objective(w, X, y))
+    return losses[-1], len(losses)
+
+# L-BFGS via scipy
+t0 = time.time()
+res_lbfgs = minimize(convex_objective, w0, jac=convex_grad, args=(X, y), method='L-BFGS-B')
+t_lbfgs = time.time() - t0
+gd_final, gd_iters = run_gd()
+print(f&quot;GD (500 iters): final loss = {gd_final:.6f}&quot;)
+print(f&quot;L-BFGS ({res_lbfgs.nit} iters): final loss = {res_lbfgs.fun:.6f}, time = {t_lbfgs:.3f}s&quot;)
+print(f&quot;L-BFGS is {gd_iters // res_lbfgs.nit}x more iteration-efficient&quot;)
+</code></pre>
+<h2>L-BFGS: Limited Memory Variant</h2>
+<p>L-BFGS (Liu and Nocedal, 1989) stores only the last m = 10 to 20 (sₜ, yₜ) pairs instead of the full inverse Hessian approximation. The Hessian-vector product Bₜ⁻¹·g is computed via the two-loop recursion — a sequential algorithm over the stored pairs — in O(mn) time per iteration instead of O(n²). Total memory: O(mn) instead of O(n²). For m = 20 and n = 10⁶, this is 20 × 10⁶ floats (160 MB) versus 10¹² floats for the full Hessian — a million-fold reduction. L-BFGS is the standard optimizer for large-scale convex optimization outside deep learning: LibLinear uses L-BFGS for logistic regression, scikit-learn's LogisticRegression with solver='lbfgs' uses it, and most scientific computing libraries provide L-BFGS-B (with box constraints). In PyTorch: torch.optim.LBFGS requires a closure that re-evaluates and returns the loss (needed for line search); it does NOT work well with mini-batches because the secant condition yₜᵀsₜ &gt; 0 requires consistent gradient estimates, which random mini-batches violate.</p>
+<h2>Gauss-Newton and K-FAC</h2>
+<p>For least squares f = ½‖r(θ)‖² where r(θ) is a residual vector, the Hessian is H = JᵀJ + Σᵢ rᵢ∇²rᵢ ≈ JᵀJ (Gauss-Newton approximation, dropping the second-derivative terms). The Gauss-Newton update θ ← θ − (JᵀJ)⁻¹Jᵀr is equivalent to solving a local linearized least squares problem. JᵀJ is PSD by construction (no indefinite H issues), and for small residuals the approximation is tight. K-FAC (Kronecker-Factored Approximate Curvature, Martens and Grosse 2015) approximates the Fisher information matrix F (which equals the Hessian for cross-entropy loss under the model's own distribution) using the Kronecker structure of linear layers. For a linear layer y = Wx with input x and output gradient δ, K-FAC approximates F_W ≈ A ⊗ G where A = E[xxᵀ] (input covariance, size d_in × d_in) and G = E[δδᵀ] (output gradient covariance, size d_out × d_out). The inverse F_W⁻¹ ≈ A⁻¹ ⊗ G⁻¹ via the Kronecker product rule (A⊗B)⁻¹ = A⁻¹⊗B⁻¹. This gives O(d_in² + d_out²) per layer instead of O((d_in·d_out)²), making K-FAC practical for networks with moderate-width layers. K-FAC achieves Adam-comparable convergence with fewer steps, at the cost of more compute per step.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+import time
+
+torch.manual_seed(0)
+n, d_in, d_out = 200, 20, 1
+X = torch.randn(n, d_in)
+true_w = torch.randn(d_in, d_out)
+y = X @ true_w + 0.1 * torch.randn(n, d_out)
+
+def make_model():
+    return nn.Sequential(nn.Linear(d_in, 10), nn.Tanh(), nn.Linear(10, d_out))
+
+def train_lbfgs(model, X, y, max_iter=100):
+    optimizer = optim.LBFGS(model.parameters(), lr=0.5, max_iter=max_iter,
+                             line_search_fn='strong_wolfe')
+    loss_fn = nn.MSELoss()
+    def closure():
+        optimizer.zero_grad()
+        loss = loss_fn(model(X), y)
+        loss.backward()
+        return loss
+    t0 = time.time()
+    optimizer.step(closure)
+    return loss_fn(model(X), y).item(), time.time() - t0
+
+def train_adam(model, X, y, steps=500):
+    optimizer = optim.Adam(model.parameters(), lr=0.01)
+    loss_fn = nn.MSELoss()
+    t0 = time.time()
+    for _ in range(steps):
+        optimizer.zero_grad()
+        loss_fn(model(X), y).backward()
+        optimizer.step()
+    return loss_fn(model(X), y).item(), time.time() - t0
+
+lbfgs_loss, lbfgs_time = train_lbfgs(make_model(), X, y)
+adam_loss, adam_time = train_adam(make_model(), X, y)
+print(f&quot;L-BFGS: loss={lbfgs_loss:.6f}, time={lbfgs_time:.3f}s&quot;)
+print(f&quot;Adam (500 steps): loss={adam_loss:.6f}, time={adam_time:.3f}s&quot;)
+</code></pre>
+<h2>ML Connections: When Second-Order Beats Adam</h2>
+<p>Second-order methods beat Adam in specific scenarios where their assumptions hold. Full-batch training: when the full dataset fits in memory and consistent gradients are available, L-BFGS's secant condition is satisfied and superlinear convergence applies. This covers small dataset fine-tuning, scientific ML (physics-informed neural networks), and neural network verification. Convex or nearly convex objectives: logistic regression, linear SVM, last-layer fine-tuning with frozen representations — the quadratic convergence regime is accessible. Small models (under 10M parameters): the Hessian or its factored approximation is computable; K-FAC is practical for models with layers up to width 1000-2000. Natural policy gradient in RL: K-FAC approximates the Fisher information matrix, giving a principled natural gradient step that is invariant to parameter reparameterization — critical for stable policy optimization. In contrast, Adam approximates second-order information using only the diagonal of the Fisher (per-parameter adaptive learning rates), missing off-diagonal curvature structure that K-FAC captures. For LLM pre-training with n = 7×10⁹ parameters and stochastic gradients, second-order methods remain impractical: even K-FAC's per-layer cost exceeds GPU memory, and mini-batch gradients violate the secant condition.</p>
+<pre><code class="language-python">import numpy as np
+from scipy.optimize import minimize
+import time
+
+np.random.seed(1)
+n_samples, n_features = 1000, 30
+X_np = np.random.randn(n_samples, n_features)
+w_true = np.random.randn(n_features)
+y_np = X_np @ w_true + 0.1 * np.random.randn(n_samples)
+
+def mse_loss(w): return 0.5 * np.mean((X_np @ w - y_np)**2) + 0.01 * np.dot(w, w)
+def mse_grad(w): return X_np.T @ (X_np @ w - y_np) / n_samples + 0.02 * w
+
+# Gradient descent
+def run_gd_np(lr=0.1, steps=1000):
+    w = np.zeros(n_features)
+    losses = [mse_loss(w)]
+    for _ in range(steps):
+        w -= lr * mse_grad(w)
+        losses.append(mse_loss(w))
+    return w, losses
+
+t0 = time.time(); w_gd, losses_gd = run_gd_np(); t_gd = time.time() - t0
+
+# L-BFGS
+t0 = time.time()
+res = minimize(mse_loss, np.zeros(n_features), jac=mse_grad, method='L-BFGS-B')
+t_lbfgs = time.time() - t0
+
+print(f&quot;GD (1000 steps): final loss = {losses_gd[-1]:.6f}, time = {t_gd:.3f}s&quot;)
+print(f&quot;L-BFGS ({res.nit} iters): final loss = {res.fun:.6f}, time = {t_lbfgs:.3f}s&quot;)
+print(f&quot;Solution quality — GD: {np.linalg.norm(w_gd - w_true):.4f}, &quot;
+      f&quot;L-BFGS: {np.linalg.norm(res.x - w_true):.4f}&quot;)
+</code></pre>
+<h2>Implementation Pitfalls</h2>
+<p>Four critical pitfalls with second-order methods in practice. First, using L-BFGS with mini-batches: the secant condition requires yₜᵀsₜ &gt; 0 (positive curvature along the step). When gradients are computed on different random mini-batches at successive steps, yₜ and sₜ are computed from different data distributions, causing yₜᵀsₜ &lt; 0 frequently — the inverse Hessian approximation becomes indefinite, and L-BFGS diverges or makes very poor updates. Always use L-BFGS with full-batch or very large batches only. Second, forgetting the closure in PyTorch: torch.optim.LBFGS requires a closure function that zeroes gradients, performs the forward pass, and returns the loss — without this, the line search has no way to evaluate the objective and will use a fixed step size (degrading to GD). Third, memory overflow with m too large: setting max_history (m) to 100 or 200 uses 100-200 times more memory than a single gradient vector — keep m between 10 and 30. Fourth, ignoring H's indefiniteness near saddles: if λ_min(H) &lt; 0, H⁻¹∇f may point to a higher function value. Add damping: use (H + λI)⁻¹∇f with λ = max(0, −λ_min(H)) + ε.</p>
+<h2>Practical Guidance</h2>
+<p>Decision guide for second-order methods in practice. Use L-BFGS when: (1) the dataset fits entirely in memory (n ≤ 10⁶ samples); (2) the objective is smooth and convex or nearly convex; (3) you need high precision (scientific computing, neural network verification); (4) you are doing full-batch fine-tuning of the last layer only. Use K-FAC when: training a moderately-sized model (10M-100M parameters) where K-FAC's per-layer factored Fisher is computable, and you want faster convergence than Adam with fewer total steps (accepting more compute per step). Use Adam everywhere else: stochastic training, large models, non-smooth objectives. When using torch.optim.LBFGS in PyTorch, set line_search_fn='strong_wolfe' for automatic step size selection, and set history_size=20 (the m parameter). Monitor the closure being called multiple times per step (this is normal — L-BFGS's line search makes multiple function evaluations to find the optimal step size along the Newton direction).</p>
+<blockquote>
+<p><strong>Warning</strong>: L-BFGS requires a closure that re-evaluates the loss, and the loss must be computed on the SAME data every time (no random sampling within the closure). Using random mini-batches in the closure causes the secant condition yₜᵀsₜ &gt; 0 to fail, producing negative curvature estimates and divergence or wildly incorrect updates. For mini-batch training, always use Adam or SGD with momentum. Only switch to L-BFGS for full-batch fine-tuning, small dataset problems, or after training with Adam when you want to squeeze out the last precision improvement.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Convergence Rate</th>
+<th>Memory</th>
+<th>Typical Iterations</th>
+<th>Best For</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GD</td>
+<td>Linear O(κ log 1/ε)</td>
+<td>O(n)</td>
+<td>1000-10000</td>
+<td>Prototype, baseline</td>
+</tr>
+<tr>
+<td>SGD + Momentum</td>
+<td>O(1/t) stochastic</td>
+<td>O(n)</td>
+<td>10-100 epochs</td>
+<td>DL, stochastic settings</td>
+</tr>
+<tr>
+<td>Adam / AdamW</td>
+<td>O(1/√t) adaptive</td>
+<td>O(3n) (params + 2 moments)</td>
+<td>10-50 epochs</td>
+<td>Default DL choice</td>
+</tr>
+<tr>
+<td>BFGS</td>
+<td>Superlinear</td>
+<td>O(n²)</td>
+<td>20-100</td>
+<td>Medium n, full batch</td>
+</tr>
+<tr>
+<td>L-BFGS</td>
+<td>Superlinear</td>
+<td>O(mn), m≈20</td>
+<td>50-500</td>
+<td>Large n, full batch, convex</td>
+</tr>
+<tr>
+<td>Newton</td>
+<td>Quadratic</td>
+<td>O(n²) + O(n³) invert</td>
+<td>5-20</td>
+<td>n &lt; 1000, high precision</td>
+</tr>
+<tr>
+<td>K-FAC</td>
+<td>Near-quadratic per layer</td>
+<td>O(Σ(d_in² + d_out²))</td>
+<td>2-5× fewer than Adam</td>
+<td>Moderate DL models, RL</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>Key Takeaways</h2>
+<ul>
+<li>Newton's method update x ← x − H⁻¹∇f converges quadratically near a minimum: the error ε satisfies ε_{t+1} ≤ C·ε_t², doubling the number of correct digits per step.</li>
+<li>Newton requires O(n²) memory and O(n³) inversion — infeasible for n &gt; 10⁵; damped Newton adds λI to H for stability near saddles.</li>
+<li>BFGS approximates the inverse Hessian using rank-2 updates from gradient differences (sₜ, yₜ), achieving superlinear convergence with O(n²) memory.</li>
+<li>L-BFGS stores only the last m=10-20 (sₜ, yₜ) pairs, computing Hessian-vector products via the two-loop recursion in O(mn) — practical for large-scale convex problems.</li>
+<li>L-BFGS FAILS with mini-batches because random gradients violate the secant condition yₜᵀsₜ &gt; 0; use only with full-batch or consistent gradients.</li>
+<li>K-FAC approximates the Fisher information using Kronecker structure: F_W ≈ A⊗G, inverted as A⁻¹⊗G⁻¹, reducing per-layer cost from O((d_in·d_out)²) to O(d_in² + d_out²).</li>
+<li>Second-order methods beat Adam for small-to-medium scale full-batch problems; Adam wins for stochastic large-scale deep learning.</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

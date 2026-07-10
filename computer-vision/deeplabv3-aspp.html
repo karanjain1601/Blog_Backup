@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DeepLabV3+: Atrous Spatial Pyramid Pooling | Notes Backup</title>
+  <meta name="description" content="DeepLab&#x27;s ASPP captures multi-scale context using dilated convolutions at rates [6,12,18] — encoder-decoder design, Xception backbone, and performance on Pascal VOC and Cityscapes." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>DeepLabV3+: Atrous Spatial Pyramid Pooling</h1>
+      <ul class='note-meta'><li><strong>description:</strong> DeepLab&#x27;s ASPP captures multi-scale context using dilated convolutions at rates [6,12,18] — encoder-decoder design, Xception backbone, and performance on Pascal VOC and Cityscapes.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>DeepLabV3+: Atrous Spatial Pyramid Pooling</h1>
+<h2>Overview</h2>
+<p>DeepLabV3+ (Chen et al., 2018) combines atrous spatial pyramid pooling for multi-scale context with an encoder-decoder structure for sharp boundaries. It achieves 89.0% mIoU on Pascal VOC 2012 and 82.1% on Cityscapes — among the strongest CNN-based results before Vision Transformers. The key insight is that objects appear at vastly different scales, and a single receptive field cannot capture all of them simultaneously.</p>
+<p>The DeepLab lineage progressed from CRF post-processing (v1) to ASPP (v2), multi-scale ASPP without CRF (v3), and finally the encoder-decoder fusion of v3+. Each version improved mIoU by addressing a specific limitation: scale variation (ASPP), spatial precision (decoder), and backbone choice (Xception with depthwise separable convolutions for efficiency).</p>
+<h2>Atrous Spatial Pyramid Pooling</h2>
+<p>ASPP applies parallel dilated convolutions at multiple rates to the same feature map, then concatenates their outputs. Rate 6 captures medium-range context; rate 12 captures broader patterns; rate 18 captures very large objects. A global average pooling branch adds image-level context. All branches are projected to 256 channels and concatenated, giving the classifier a rich, multi-scale feature representation.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class ASPP(nn.Module):
+    def __init__(self, in_ch=2048, out_ch=256, rates=(6, 12, 18)):
+        super().__init__()
+        self.branches = nn.ModuleList([
+            nn.Conv2d(in_ch, out_ch, 1),  # rate=1 (1x1)
+            *[nn.Conv2d(in_ch, out_ch, 3, padding=r, dilation=r) for r in rates]
+        ])
+        self.gap = nn.AdaptiveAvgPool2d(1)  # global avg pool branch
+        self.gap_proj = nn.Conv2d(in_ch, out_ch, 1)
+        self.proj = nn.Conv2d(out_ch * (len(rates) + 2), out_ch, 1)
+
+    def forward(self, x):
+        h, w = x.shape[2:]
+        feats = [b(x) for b in self.branches]
+        gap = F.interpolate(self.gap_proj(self.gap(x)), size=(h,w), mode='bilinear', align_corners=False)
+        return self.proj(torch.cat(feats + [gap], dim=1))
+</code></pre>
+<p>The ASPP module is the core differentiator of the DeepLab family. By aggregating context at rates [6,12,18], it effectively looks at the feature map through windows of different sizes simultaneously. This is especially important for Cityscapes urban scenes, where small traffic signs and large buildings must both be segmented accurately in the same forward pass.</p>
+<h2>DeepLabV3+ Encoder-Decoder</h2>
+<p>V3+ adds a lightweight decoder on top of the ASPP encoder. Low-level features from an early backbone layer (1/4 resolution) are projected to 48 channels, concatenated with the 4× upsampled ASPP output, then refined with two 3×3 convolutions before a final 4× upsample to input resolution. This simple decoder recovers sharp object boundaries at low additional compute cost.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class DeepLabV3PlusDecoder(nn.Module):
+    def __init__(self, low_level_ch=256, aspp_out_ch=256, num_classes=21):
+        super().__init__()
+        self.low_level_proj = nn.Sequential(
+            nn.Conv2d(low_level_ch, 48, 1), nn.BatchNorm2d(48), nn.ReLU(inplace=True)
+        )
+        self.fuse = nn.Sequential(
+            nn.Conv2d(aspp_out_ch + 48, 256, 3, padding=1), nn.ReLU(inplace=True),
+            nn.Conv2d(256, 256, 3, padding=1), nn.ReLU(inplace=True),
+            nn.Conv2d(256, num_classes, 1)
+        )
+
+    def forward(self, aspp_out, low_level_feat, input_size):
+        low = self.low_level_proj(low_level_feat)
+        x = F.interpolate(aspp_out, size=low.shape[2:], mode='bilinear', align_corners=False)
+        x = self.fuse(torch.cat([x, low], dim=1))
+        return F.interpolate(x, size=input_size, mode='bilinear', align_corners=False)
+</code></pre>
+<p>The choice of low-level feature layer matters. In ResNet-based DeepLabV3+, features after the first residual block (stride 4, 256 channels) are used. For Xception, features after the entry flow block are preferred. Projecting these to just 48 channels prevents them from dominating the ASPP output during concatenation, balancing semantic depth with spatial detail.</p>
+<h2>Xception Backbone</h2>
+<p>DeepLabV3+ adopts a modified Xception as its default backbone, replacing VGG and ResNet. Xception uses depthwise separable convolutions throughout — splitting a standard conv into a per-channel depthwise conv and a pointwise 1×1 conv — which reduces parameters and FLOPs while maintaining accuracy. The modified backbone adds middle flow repetitions (16 instead of 8) and uses dilated depthwise separable convolutions in the exit flow.</p>
+<pre><code class="language-python">import torch.nn as nn
+
+class DepthwiseSeparableConv(nn.Module):
+    def __init__(self, in_ch, out_ch, stride=1, dilation=1):
+        super().__init__()
+        self.depthwise = nn.Conv2d(
+            in_ch, in_ch, 3, stride=stride,
+            padding=dilation, dilation=dilation, groups=in_ch
+        )
+        self.pointwise = nn.Conv2d(in_ch, out_ch, 1)
+        self.bn = nn.BatchNorm2d(out_ch)
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        return self.relu(self.bn(self.pointwise(self.depthwise(x))))
+</code></pre>
+<p>The Xception backbone in DeepLabV3+ is pretrained on ImageNet and fine-tuned end-to-end. For resource-constrained deployments, MobileNetV2 or EfficientNet-Lite are common substitutes. MobileNetV2-backed DeepLabV3+ runs at real-time speeds on mobile devices, making it the basis of Google's on-device segmentation APIs used in video conferencing background blur features.</p>
+<h2>Training on Cityscapes</h2>
+<p>Cityscapes contains 5000 finely annotated urban driving images across 19 classes. Training DeepLabV3+ requires large crop sizes (769×769), output_stride=16, and a poly learning rate schedule. The model is typically first pretrained on COCO or Pascal VOC, then fine-tuned on Cityscapes. Multi-scale inference (crops at 0.5×, 1.0×, 1.75×) and horizontal flipping at test time boost mIoU by 1–2%.</p>
+<pre><code class="language-python">import numpy as np
+
+def compute_miou(pred, target, num_classes=19, ignore_index=255):
+    ious = []
+    for cls in range(num_classes):
+        mask = target != ignore_index
+        p = (pred == cls) &amp; mask
+        t = (target == cls) &amp; mask
+        inter = (p &amp; t).sum()
+        union = (p | t).sum()
+        if union == 0:
+            continue  # class not present in this image
+        ious.append(inter / union)
+    return np.mean(ious)
+
+# Usage: average compute_miou over all val images for final mIoU
+</code></pre>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+# output_stride=16: standard strides, saves memory
+# output_stride=8: remove stride in layer3 and layer4, compensate with dilation
+def set_output_stride(resnet, output_stride=16):
+    if output_stride == 16:
+        # layer4: stride=1, dilation=2
+        resnet.layer4[0].conv2.stride = (1, 1)
+        resnet.layer4[0].conv2.dilation = (2, 2)
+        resnet.layer4[0].conv2.padding = (2, 2)
+    elif output_stride == 8:
+        # layer3: stride=1, dilation=2; layer4: stride=1, dilation=4
+        pass  # apply analogously to layer3 and layer4
+    return resnet
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>DeepLab version</th>
+<th>ASPP rates</th>
+<th>Backbone</th>
+<th>VOC mIoU</th>
+<th>Cityscapes mIoU</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>v1</td>
+<td>None (single scale)</td>
+<td>VGG-16</td>
+<td>67.6</td>
+<td>—</td>
+</tr>
+<tr>
+<td>v2</td>
+<td>[6, 12, 18, 24]</td>
+<td>ResNet-101</td>
+<td>79.7</td>
+<td>70.4</td>
+</tr>
+<tr>
+<td>v3</td>
+<td>[6, 12, 18]</td>
+<td>ResNet-101</td>
+<td>85.7</td>
+<td>81.3</td>
+</tr>
+<tr>
+<td>v3+ (Xception)</td>
+<td>[6, 12, 18]</td>
+<td>Xception-65</td>
+<td>89.0</td>
+<td>82.1</td>
+</tr>
+<tr>
+<td>v3+ (ResNet-101)</td>
+<td>[6, 12, 18]</td>
+<td>ResNet-101</td>
+<td>87.8</td>
+<td>80.9</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>****: DeepLabV3+ at output_stride=8 gives ~1% better mIoU than output_stride=16 but uses 4x more GPU memory for the same input — use output_stride=16 unless you have abundant VRAM.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<p>DeepLabV3+ achieves its strong performance through three complementary ideas: dilated convolutions to maintain spatial resolution, ASPP to aggregate multi-scale context, and a lightweight decoder to recover sharp boundaries. These ideas are individually useful and are widely adopted in other architectures. The Xception backbone with depthwise separable convolutions makes the model efficient without sacrificing accuracy.</p>
+<p>For new projects, torchvision provides deeplabv3_resnet101 and deeplabv3_mobilenet_v3_large with pretrained weights. The mobile variant runs at interactive speeds on CPU. For maximum accuracy on Cityscapes or VOC, use the Xception backbone with output_stride=16, ASPP rates [6,12,18], and test-time augmentation. Fine-tune from COCO-pretrained weights rather than training from scratch to save compute.</p>
+    </article>
+  </main>
+</body>
+</html>

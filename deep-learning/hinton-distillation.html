@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hinton Knowledge Distillation — Soft Targets and Temperature | Notes Backup</title>
+  <meta name="description" content="Compress a large teacher into a small student by training on soft probability targets. Covers temperature scaling, the T-squared gradient compensation, the combined distillation loss, dark knowledge, born-again networks, and when distillation helps vs hurts." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Hinton Knowledge Distillation — Soft Targets and Temperature</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Compress a large teacher into a small student by training on soft probability targets. Covers temperature scaling, the T-squared gradient compensation, the combined distillation loss, dark knowledge, born-again networks, and when distillation helps vs hurts.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Hinton Knowledge Distillation — Soft Targets and Temperature</h1>
+<p>Knowledge distillation (Hinton et al. 2015) transfers knowledge from a large, accurate teacher network into a small, fast student. The key insight is that a teacher's full output distribution over all classes encodes rich structural information learned from data — information that one-hot hard labels discard entirely. Training the student to match this soft distribution transfers inter-class relationships, not just the identity of the correct class.</p>
+<h2>Hard Labels vs Soft Targets</h2>
+<p>A hard label for class 'cat' is the one-hot vector [0, 0, 1, 0, …], providing exactly one bit of information: which class is correct. A teacher's output at standard temperature might be [0.02, 0.05, 0.88, 0.01, 0.04, …], revealing that it considers 'dog' and 'lynx' related to 'cat'. At temperature T=4 this softens further to [0.08, 0.12, 0.45, 0.05, 0.11, …], making inter-class similarities even more visible. The soft targets carry structural knowledge that hard labels throw away.</p>
+<h2>Temperature Scaling and Soft Targets</h2>
+<p>The softmax at temperature T is σ(z_i / T) = exp(z_i / T) / Σ_j exp(z_j / T). At T=1 this is the standard softmax. As T increases, the distribution becomes more uniform and inter-class logit differences become more visible. Both teacher and student use the same temperature T during distillation, so the student learns to reproduce the teacher's relative confidence structure. At inference, T is reset to 1. Typical setting: T=4, α=0.1.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+def soft_distillation_loss(student_logits, teacher_logits, labels,
+                            temperature=4.0, alpha=0.1):
+    &quot;&quot;&quot;
+    Hinton distillation: L = alpha*CE(hard) + (1-alpha)*T^2*KL(soft_teacher||soft_student)
+    Both teacher and student softmax use temperature T. T=1 at inference.
+    &quot;&quot;&quot;
+    hard_loss = F.cross_entropy(student_logits, labels)
+
+    # Soft distributions at temperature T
+    soft_teacher = F.softmax(teacher_logits / temperature, dim=-1)
+    soft_student = F.log_softmax(student_logits / temperature, dim=-1)
+    # KL(teacher || student): teacher is target, student is prediction
+    kl_loss = F.kl_div(soft_student, soft_teacher, reduction='batchmean')
+
+    # Scale by T^2: compensates for the 1/T^2 gradient shrinkage at high T
+    distill_loss = (temperature ** 2) * kl_loss
+    total = alpha * hard_loss + (1.0 - alpha) * distill_loss
+    return total, hard_loss.item(), distill_loss.item()
+
+
+torch.manual_seed(0)
+teacher_logits = torch.randn(8, 10) * 3.0
+student_logits = torch.randn(8, 10)
+labels = torch.randint(0, 10, (8,))
+
+for T in [1.0, 4.0, 10.0]:
+    loss, hard, kd = soft_distillation_loss(
+        student_logits, teacher_logits, labels, temperature=T)
+    print(f'T={T:.0f}: total={loss.item():.4f}  hard={hard:.4f}  kd={kd:.4f}')
+</code></pre>
+<h2>The T² Scale Factor and Gradient Compensation</h2>
+<p>When temperature T is applied, the gradients of the KL term with respect to the student logits shrink by a factor of 1/T². Without compensation, higher temperatures produce negligibly small KL gradients, making the distillation signal disappear. Multiplying the KL loss by T² restores the gradient magnitude to the same scale as T=1, ensuring the distillation signal is not overwhelmed by the hard-label cross-entropy regardless of temperature choice. This is why the combined loss uses (1-α)T²·KL(σ(z_t/T), σ(z_s/T)).</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def show_temperature_effect(logits, temperatures=(1, 4, 10, 20)):
+    &quot;&quot;&quot;Show how temperature T softens the output distribution.&quot;&quot;&quot;
+    print(f'{&quot;T&quot;:&gt;4}  {&quot;Max P&quot;:&gt;8}  {&quot;Entropy&quot;:&gt;9}  {&quot;2nd P&quot;:&gt;8}  {&quot;Shape&quot;}')
+    print('-' * 52)
+    for T in temperatures:
+        p = F.softmax(logits / T, dim=0)
+        sorted_p = p.sort(descending=True).values
+        entropy = -(p * (p + 1e-9).log()).sum().item()
+        shape = 'sharp' if T &lt;= 1 else 'moderate' if T &lt;= 4 else 'soft'
+        print(f'{T:&gt;4}  {sorted_p[0].item():&gt;8.4f}  {entropy:&gt;9.4f}  '
+              f'{sorted_p[1].item():&gt;8.4f}  {shape}')
+
+# Simulated teacher logits: class 2 is correct, class 0 is structurally similar
+logits = torch.tensor([1.5, 0.4, 4.2, -0.8, 0.1, -0.5, 0.3, -1.0, 0.6, -0.2])
+show_temperature_effect(logits)
+
+p_t1  = F.softmax(logits / 1,  dim=0)
+p_t10 = F.softmax(logits / 10, dim=0)
+print(f'Class-0 prob: T=1 -&gt; {p_t1[0].item():.4f},  T=10 -&gt; {p_t10[0].item():.4f}')
+print('High T reveals structural similarity — dog is more like cat than car.')
+</code></pre>
+<h2>Full Distillation Training Loop</h2>
+<p>During distillation the teacher is frozen — its weights do not change. Only student weights are updated. The combined loss blends hard cross-entropy (α = 0.1 typically, so 10% of the loss) with the scaled KL distillation term (90%). Using a small α gives most weight to the teacher's soft targets. After training, the adapter layer (used only to match logit dimensions if teacher and student have different output sizes) is discarded; the student head is the only output.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+import torch.optim as optim
+
+def train_with_distillation(teacher, student, train_loader, device,
+                             temperature=4.0, alpha=0.1, epochs=3, lr=1e-3):
+    &quot;&quot;&quot;Teacher frozen; student trained on CE + scaled KD loss.&quot;&quot;&quot;
+    teacher.eval()
+    for p in teacher.parameters():
+        p.requires_grad_(False)
+    optimizer = optim.Adam(student.parameters(), lr=lr)
+    T = temperature
+    for epoch in range(epochs):
+        student.train()
+        total, correct, n = 0.0, 0, 0
+        for X, y in train_loader:
+            X, y = X.to(device), y.to(device)
+            with torch.no_grad():
+                t_logits = teacher(X)
+            s_logits = student(X)
+            hard = F.cross_entropy(s_logits, y)
+            soft_t = F.softmax(t_logits / T, dim=-1)
+            soft_s = F.log_softmax(s_logits / T, dim=-1)
+            kd = F.kl_div(soft_s, soft_t, reduction='batchmean') * T ** 2
+            loss = alpha * hard + (1 - alpha) * kd
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            total += loss.item()
+            correct += (s_logits.argmax(1) == y).sum().item()
+            n += y.size(0)
+        print(f'Epoch {epoch+1}: loss={total/len(train_loader):.4f}  acc={correct/n:.3f}')
+
+print('Typical: temperature=4, alpha=0.1 (10% hard CE, 90% soft KD).')
+print('Teacher is frozen throughout; only student weights are updated.')
+</code></pre>
+<h2>Dark Knowledge and Inter-Class Similarities</h2>
+<p>Hinton coined the term 'dark knowledge' for the information encoded in the teacher's non-maximum probabilities. A teacher trained on ImageNet that gives cat:0.70, dog:0.20, lion:0.05 is encoding the geometric fact that cats and dogs are more similar to each other than either is to a car. This similarity structure was learned from data: the teacher saw many ambiguous cat-dog images during training and internalized those relationships in its logits. Hard labels erase this; soft targets preserve it.</p>
+<blockquote>
+<p><strong>Dark Knowledge Hypothesis</strong>: The soft targets carry more information per sample than hard labels because each output vector encodes a full ranking over all classes. Empirically, distilling with even a small amount of real data and a large amount of unlabeled data can outperform training on the full labeled dataset — the teacher's soft outputs substitute for labels on the unlabeled portion.</p>
+</blockquote>
+<h2>When Distillation Helps and When It Does Not</h2>
+<p>Knowledge distillation is not universally beneficial. It works best when the teacher is well-calibrated and significantly more capable than the student, the dataset is small or medium-sized (so soft targets add meaningful signal beyond what the data provides), and the teacher and student operate on the same domain and task. It degrades when the teacher is poorly calibrated (its soft targets are misleading), there is a domain mismatch between teacher pretraining and student fine-tuning, or the student is already near the teacher's capacity.</p>
+<ul>
+<li>Helps: large teacher-student capacity gap — student cannot independently learn the decision boundary.</li>
+<li>Helps: limited labeled data — soft targets effectively augment supervision with class structure.</li>
+<li>Helps: born-again networks — same capacity student benefits from soft targets (Furlanello 2018).</li>
+<li>Does NOT help: teacher is badly calibrated (overconfident or underconfident on soft classes).</li>
+<li>Does NOT help: domain mismatch between teacher training distribution and student target task.</li>
+<li>Does NOT help: very large datasets where the student can learn class structure from data alone.</li>
+<li>Marginal: student much smaller than teacher (capacity gap too large; intermediate distillation helps more).</li>
+</ul>
+<pre><code class="language-python">import numpy as np
+
+# Illustrative CIFAR-10 accuracy: same student architecture, same training budget
+# Teacher: ResNet-56 (93.0% top-1). All students: same CNN, different supervision.
+configs = [
+    ('ResNet-8  (hard labels)',   85.2),
+    ('ResNet-8  (soft T=4)',      87.8),
+    ('ResNet-14 (hard labels)',  89.1),
+    ('ResNet-14 (soft T=4)',     91.3),
+    ('ResNet-20 (hard labels)',  91.4),
+    ('ResNet-20 (soft T=4)',     93.0),
+    ('ResNet-20 born-again',     92.7),  # same-capacity teacher -&gt; student
+]
+
+print(f'{&quot;Configuration&quot;:&lt;28} {&quot;Acc (%)&quot;:&gt;8}')
+print('-' * 38)
+for name, acc in configs:
+    print(f'{name:&lt;28} {acc:&gt;8.1f}')
+
+pairs = [(configs[0][1], configs[1][1]),
+         (configs[2][1], configs[3][1]),
+         (configs[4][1], configs[5][1])]
+gains = [s - h for h, s in pairs]
+print(f'Average gain from soft targets: +{np.mean(gains):.2f}%')
+print(f'Born-again gain: +{configs[6][1] - configs[4][1]:.1f}% (same capacity, soft targets only)')
+</code></pre>
+<h2>Born-Again Networks</h2>
+<p>Born-again networks (Furlanello et al. 2018) show that distilling a model into a student of identical architecture still improves accuracy. The student trained with soft targets from a same-capacity teacher outperforms the teacher trained with hard labels alone. This demonstrates that the benefit of distillation is not purely about compressing a larger model — the soft targets themselves are a better training signal, independent of capacity transfer. Ensembling multiple born-again generations further improves performance.</p>
+<table>
+<thead>
+<tr>
+<th>Temperature</th>
+<th>Max Probability</th>
+<th>Entropy</th>
+<th>Inter-class Info</th>
+<th>Gradient Scale</th>
+<th>Typical Acc Gain</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>T=1 (hard)</td>
+<td>~0.95 (sharp)</td>
+<td>Low</td>
+<td>Minimal — near one-hot</td>
+<td>1× (baseline)</td>
+<td>Baseline</td>
+</tr>
+<tr>
+<td>T=4 (typical)</td>
+<td>~0.45 (moderate)</td>
+<td>Medium</td>
+<td>Rich — similarities visible</td>
+<td>T²=16×</td>
+<td>+1.5–2.5%</td>
+</tr>
+<tr>
+<td>T=10 (soft)</td>
+<td>~0.25 (soft)</td>
+<td>High</td>
+<td>Very rich — structure well exposed</td>
+<td>T²=100×</td>
+<td>+2.0–3.0%</td>
+</tr>
+<tr>
+<td>T=20 (very soft)</td>
+<td>~0.15 (near uniform)</td>
+<td>Very high</td>
+<td>Maximum — nearly uniform</td>
+<td>T²=400× (may destabilize)</td>
+<td>Often degrades</td>
+</tr>
+</tbody>
+</table>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

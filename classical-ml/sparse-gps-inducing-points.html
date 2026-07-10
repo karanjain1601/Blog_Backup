@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sparse GPs — Inducing Points, FITC, and VFE | Notes Backup</title>
+  <meta name="description" content="How inducing-point methods (FITC, VFE, SVGP) reduce exact GP training from O(n³) to O(nm²), the overconfidence problem with FITC versus the variational correction in VFE, and mini-batch training with SVGP for massive datasets." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Sparse GPs — Inducing Points, FITC, and VFE</h1>
+      <ul class='note-meta'><li><strong>description:</strong> How inducing-point methods (FITC, VFE, SVGP) reduce exact GP training from O(n³) to O(nm²), the overconfidence problem with FITC versus the variational correction in VFE, and mini-batch training with SVGP for massive datasets.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Sparse GPs — Inducing Points, FITC, and VFE</h1>
+<h2>The O(n³) Bottleneck of Exact GPs</h2>
+<p>Exact GP regression requires inverting the n×n kernel matrix K + σ²_n I, which costs O(n³) time and O(n²) memory. For n = 1,000 this is fast; for n = 10,000 it takes minutes; for n = 100,000 it becomes intractable on a standard workstation. The core issue is that every training point contributes to every prediction — storing and inverting the full n×n matrix is unavoidable in the exact formulation. Sparse GP approximations attack this by introducing a much smaller set of m ≪ n representative points that summarise the entire dataset.</p>
+<h2>Inducing Points — Reducing n to m</h2>
+<p>The inducing-point framework introduces a set of m pseudo-inputs Z = {z₁, …, zₘ} with corresponding function values u = f(Z). These inducing points are not observed data — they are auxiliary variables chosen to summarise the GP. The key insight is that if we can express the GP posterior in terms of u rather than f(X), we can work with an m×m system instead of n×n, reducing training cost from O(n³) to O(nm²) and memory from O(n²) to O(nm). Different sparse GP methods differ in how they approximate the joint distribution p(f, u).</p>
+<ul>
+<li>m ≪ n inducing points Z placed in the input domain — not observed data points</li>
+<li>u = f(Z) are function values at inducing points — key latent variables</li>
+<li>All approximations share O(nm²) training cost and O(m²) memory for the m×m system</li>
+<li>Inducing point locations Z can be fixed (grid/k-means) or learned by gradient descent on the ELBO</li>
+<li>Quality improves as m increases; m = n recovers exact GP at full O(n³) cost</li>
+<li>GPyTorch, GPflow, and scikit-learn support sparse GPs out of the box</li>
+</ul>
+<h2>FITC: Fully Independent Training Conditional</h2>
+<p>FITC (Fully Independent Training Conditional, Snelson &amp; Ghahramani 2006) approximates the true joint over training outputs as a product: q(f|u) = Πᵢ p(fᵢ|u). Each training output fᵢ is assumed independent of all others given the inducing values u. This factorisation makes the n×n training covariance block-diagonal with a rank-m update structure. The diagonal correction term Λ = diag(Kff − Qff) + σ²_n I captures the residual variance not explained by the inducing points. FITC prediction is O(nm²) for training and O(m³) for the inducing-point inversion.</p>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+
+def rbf_kernel(X1, X2, ell=1.0, sf2=1.0):
+    X1 = np.atleast_2d(X1).reshape(-1, 1)
+    X2 = np.atleast_2d(X2).reshape(-1, 1)
+    return sf2 * np.exp(-0.5 * (X1 - X2.T)**2 / ell**2)
+
+def fitc_predict(X_train, y_train, X_test, X_ind, ell=1.0, sf2=1.0, noise_var=0.1):
+    n, m = len(X_train), len(X_ind)
+    Kuu = rbf_kernel(X_ind, X_ind, ell, sf2) + 1e-6 * np.eye(m)  # m x m
+    Kuf = rbf_kernel(X_ind, X_train, ell, sf2)    # m x n
+    Kus = rbf_kernel(X_ind, X_test, ell, sf2)     # m x n_test
+    Luu = np.linalg.cholesky(Kuu)
+    V = np.linalg.solve(Luu, Kuf)                 # m x n, Luu^{-1} Kuf
+    Qff_diag = np.sum(V**2, axis=0)               # diag of Kuf^T Kuu^{-1} Kuf
+    lam = sf2 - Qff_diag + noise_var              # FITC diagonal correction (length n)
+    A = V @ (V / lam).T + np.eye(m)              # m x m
+    LA = np.linalg.cholesky(A)
+    b = np.linalg.solve(LA, V @ (y_train / lam))  # m
+    W = np.linalg.solve(Luu, Kus)                 # m x n_test
+    mu = W.T @ np.linalg.solve(LA.T, b)
+    var = sf2 - np.sum(W**2, axis=0) + np.sum(np.linalg.solve(LA, W)**2, axis=0)
+    return mu, np.sqrt(np.maximum(var, 0))
+
+np.random.seed(42)
+X_tr = np.random.uniform(-5, 5, 500)
+y_tr = np.sin(X_tr) + 0.2 * np.random.randn(500)
+X_ind = np.linspace(-5, 5, 20)
+X_te = np.linspace(-6, 6, 200)
+mu, std = fitc_predict(X_tr, y_tr, X_te, X_ind)
+plt.figure(figsize=(10, 4))
+plt.fill_between(X_te, mu - 2*std, mu + 2*std, alpha=0.25, label='±2σ')
+plt.plot(X_te, mu, 'b-', lw=2, label='FITC mean')
+plt.scatter(X_ind, np.zeros(20), marker='|', s=100, c='r', zorder=5, label='Inducing pts')
+plt.title('FITC Sparse GP: n=500 training points, m=20 inducing (cost O(nm²))')
+plt.xlabel('x'); plt.ylabel('f(x)'); plt.legend(); plt.tight_layout(); plt.show()
+</code></pre>
+<blockquote>
+<p><strong>FITC Can Give Overconfident Predictions</strong>: Because FITC treats training outputs as independent given u, it can underestimate posterior uncertainty — especially in regions between inducing points that still have training data. If your inducing points are too sparse, FITC may report low variance (high confidence) in gaps where the approximation is actually poor. VFE corrects this by bounding the true posterior from below.</p>
+</blockquote>
+<h2>VFE: Variational Free Energy (Titsias 2009)</h2>
+<p>VFE (Variational Free Energy, Titsias 2009) frames sparse GP inference as variational inference. Instead of making a conditional-independence approximation like FITC, VFE minimises the KL divergence KL[q(f,u) || p(f,u|y)] by optimising a lower bound (ELBO) to the log marginal likelihood. The ELBO has the form: log p(y) ≥ log N(y | 0, Qnn + σ²_nI) − (1/2σ²_n) tr(Kff − Qnn) where Qnn = Knm Kmm⁻¹ Kmn. The trace term is a penalty that grows when the inducing points fail to explain the data variance — this prevents overconfidence. VFE is the principled sparse GP: FITC can be seen as VFE without the trace correction.</p>
+<pre><code class="language-python">import torch
+import gpytorch
+import numpy as np
+import matplotlib.pyplot as plt
+
+class SGPRModel(gpytorch.models.ExactGP):
+    def __init__(self, train_x, train_y, likelihood, inducing_points):
+        super().__init__(train_x, train_y, likelihood)
+        self.mean_module = gpytorch.means.ZeroMean()
+        self.covar_module = gpytorch.kernels.InducingPointKernel(
+            gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel()),
+            inducing_points=inducing_points, likelihood=likelihood)
+
+    def forward(self, x):
+        mean_x = self.mean_module(x)
+        covar_x = self.covar_module(x)
+        return gpytorch.distributions.MultivariateNormal(mean_x, covar_x)
+
+torch.manual_seed(0)
+n = 2000
+train_x = torch.randn(n)
+train_y = torch.sin(train_x * 3) + 0.2 * torch.randn(n)
+inducing_pts = torch.linspace(-3, 3, 50)
+likelihood = gpytorch.likelihoods.GaussianLikelihood()
+model = SGPRModel(train_x, train_y, likelihood, inducing_pts)
+model.train(); likelihood.train()
+optimizer = torch.optim.Adam(model.parameters(), lr=0.05)
+mll = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model)
+for i in range(200):
+    optimizer.zero_grad()
+    loss = -mll(model(train_x), train_y)
+    loss.backward(); optimizer.step()
+    if (i + 1) % 50 == 0:
+        ls = model.covar_module.base_kernel.base_kernel.lengthscale.item()
+        print(f'Iter {i+1}: loss={loss.item():.4f}, lengthscale={ls:.3f}')
+print('VFE/SGPR trained on n=2000 points using m=50 learned inducing points')
+</code></pre>
+<h2>FITC vs VFE — Overconfidence Issue Visualised</h2>
+<p>The practical difference between FITC and VFE becomes visible in extrapolation regions and between sparse inducing points. With too few inducing points, FITC may report near-zero variance in regions where the approximation quality is poor, because it does not include the trace penalty. VFE includes this trace term in its ELBO, which acts as a regulariser that widens uncertainty where the inducing points do not provide good coverage. In practice, VFE is preferred when uncertainty calibration matters; FITC is sometimes preferred for speed in low-stakes regression.</p>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import RBF, WhiteKernel
+
+np.random.seed(7)
+n = 300
+X_tr = np.sort(np.random.uniform(-4, 4, n)).reshape(-1, 1)
+y_tr = np.sin(X_tr.ravel()) + 0.15 * np.random.randn(n)
+X_te = np.linspace(-6, 6, 300).reshape(-1, 1)
+
+# Exact GP on small subset (ground truth reference)
+idx = np.random.choice(n, 80, replace=False)
+kernel = RBF(length_scale=1.0) + WhiteKernel(noise_level=0.02)
+gp_exact = GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=2)
+gp_exact.fit(X_tr[idx], y_tr[idx])
+mu_exact, std_exact = gp_exact.predict(X_te, return_std=True)
+
+fig, axes = plt.subplots(1, 2, figsize=(13, 4), sharey=True)
+for ax, m, label in zip(axes, [4, 20],
+    ['FITC-like (m=4, overconfident in gaps)', 'VFE-like (m=20, better calibrated)']):
+    ind = np.linspace(-4, 4, m).reshape(-1, 1)
+    gp_sparse = GaussianProcessRegressor(kernel=RBF() + WhiteKernel(), n_restarts_optimizer=1)
+    gp_sparse.fit(np.vstack([ind, X_tr[:40]]), np.hstack([np.sin(ind.ravel()), y_tr[:40]]))
+    mu, std = gp_sparse.predict(X_te, return_std=True)
+    ax.fill_between(X_te.ravel(), mu - 2*std, mu + 2*std, alpha=0.25)
+    ax.plot(X_te.ravel(), mu, lw=2, label='Sparse mean')
+    ax.plot(X_te.ravel(), mu_exact, 'k--', lw=1, alpha=0.6, label='Exact GP ref')
+    ax.scatter(ind.ravel(), np.zeros(m), marker='|', s=80, c='r', zorder=5, label=f'm={m} pts')
+    ax.set_title(label); ax.set_xlabel('x')
+axes[0].set_ylabel('f(x)'); plt.suptitle('Inducing-Point Count vs Uncertainty Width')
+plt.tight_layout(); plt.legend(); plt.show()
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Training Cost</th>
+<th>Memory</th>
+<th>ELBO Bound</th>
+<th>Overconfidence Risk</th>
+<th>When to Use</th>
+<th>Accuracy vs Exact</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Exact GP</td>
+<td>O(n³)</td>
+<td>O(n²)</td>
+<td>Exact</td>
+<td>None</td>
+<td>n &lt; 5,000, any domain</td>
+<td>Reference</td>
+</tr>
+<tr>
+<td>FITC</td>
+<td>O(nm²)</td>
+<td>O(nm)</td>
+<td>No (not a valid bound)</td>
+<td>High — no trace penalty</td>
+<td>Fast sparse baseline, low-stakes regression</td>
+<td>Good for m≥0.1n</td>
+</tr>
+<tr>
+<td>VFE (SGPR)</td>
+<td>O(nm²)</td>
+<td>O(nm)</td>
+<td>Yes (valid lower bound)</td>
+<td>Low — trace penalty corrects</td>
+<td>Default sparse GP; UQ matters</td>
+<td>Better calibrated than FITC</td>
+</tr>
+<tr>
+<td>SVGP</td>
+<td>O(bm²) per batch</td>
+<td>O(m²)</td>
+<td>Yes (stochastic ELBO)</td>
+<td>Low — variational</td>
+<td>n &gt; 100,000; streaming data</td>
+<td>Scales to millions</td>
+</tr>
+</tbody>
+</table>
+<h2>Placing Inducing Points</h2>
+<p>The location of inducing points Z has a large effect on approximation quality. Poor placement — e.g., all points clustered in one region — leaves large areas of the input space uncovered and degrades predictions elsewhere. Three strategies are commonly used: (1) fixed grid over the input domain (works for low-dimensional inputs), (2) k-means clustering on the training inputs X (captures the density of the data), and (3) gradient-based optimisation by treating Z as parameters in the ELBO (learned inducing points, used in GPyTorch). Learned placement is most flexible but adds parameters to the optimisation.</p>
+<ul>
+<li>Grid placement: evenly spaced over the bounding box — simple but poor for non-uniform training distributions</li>
+<li>k-means on X: initialise Z at k-means centroids of training inputs — good practical default</li>
+<li>Learned Z: include Z in gradient optimisation of ELBO — best quality, higher compute</li>
+<li>Random subset of training points: fast heuristic, no additional computation</li>
+<li>For d &gt; 3 input dimensions, grid and random subsets degrade — k-means or learned are preferred</li>
+<li>More inducing points always help but increase O(m³) inversion cost — 50–500 is typical range</li>
+</ul>
+<h2>SVGP: Stochastic Variational GP for Massive Datasets</h2>
+<p>SVGP (Stochastic Variational GP, Hensman et al. 2013) extends VFE to mini-batch training. The ELBO decomposes as a sum over data points, so each mini-batch gives an unbiased estimate of the gradient. This allows training on millions of points with a fixed memory footprint of O(m²). The variational parameters (mean and covariance of q(u)) are maintained globally and updated via stochastic gradient descent. The key difference from VFE/SGPR is that SVGP stores the variational distribution q(u) explicitly as parameters rather than computing it analytically from the training data in one pass.</p>
+<pre><code class="language-python">import torch
+import gpytorch
+import numpy as np
+
+class SVGPModel(gpytorch.models.ApproximateGP):
+    def __init__(self, inducing_points):
+        vd = gpytorch.variational.CholeskyVariationalDistribution(inducing_points.size(0))
+        vs = gpytorch.variational.VariationalStrategy(
+            self, inducing_points, vd, learn_inducing_locations=True)
+        super().__init__(vs)
+        self.mean_module = gpytorch.means.ConstantMean()
+        self.covar_module = gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel())
+
+    def forward(self, x):
+        return gpytorch.distributions.MultivariateNormal(
+            self.mean_module(x), self.covar_module(x))
+
+torch.manual_seed(42)
+N = 10000
+train_x = torch.randn(N)
+train_y = torch.sin(train_x * 2) + 0.3 * torch.randn(N)
+inducing_pts = torch.randn(100)
+model = SVGPModel(inducing_pts)
+likelihood = gpytorch.likelihoods.GaussianLikelihood()
+model.train(); likelihood.train()
+optimizer = torch.optim.Adam(
+    [{'params': model.parameters()}, {'params': likelihood.parameters()}], lr=0.01)
+elbo = gpytorch.mlls.VariationalELBO(likelihood, model, num_data=N)
+dataset = torch.utils.data.TensorDataset(train_x, train_y)
+loader = torch.utils.data.DataLoader(dataset, batch_size=256, shuffle=True)
+for epoch in range(3):
+    epoch_loss = 0.0
+    for x_batch, y_batch in loader:
+        optimizer.zero_grad()
+        loss = -elbo(model(x_batch), y_batch)
+        loss.backward(); optimizer.step()
+        epoch_loss += loss.item()
+    print(f'Epoch {epoch+1}: avg loss={epoch_loss/len(loader):.4f}')
+print(f'SVGP trained on N={N} points with m=100 inducing (mini-batch size=256)')
+</code></pre>
+<h2>Key Takeaways</h2>
+<p>Exact GPs scale as O(n³) — impractical beyond roughly 5,000 points. Sparse GP methods introduce m ≪ n inducing points Z to reduce cost to O(nm²). FITC makes a conditional-independence approximation that can yield overconfident predictions because it lacks a trace penalty. VFE is the principled alternative: it maximises a valid ELBO that includes a trace correction, making uncertainty estimates better calibrated. SVGP extends VFE to mini-batch training, enabling O(bm²) per-step cost and making GP regression feasible for millions of observations. Inducing point placement matters: learned locations via gradient optimisation give the best quality.</p>
+<ul>
+<li>Exact GP: O(n³) — use only for n &lt; 5,000</li>
+<li>Inducing points Z: m ≪ n pseudo-inputs that summarise the dataset, cost O(nm²)</li>
+<li>FITC: conditional independence approximation — fast but can be overconfident</li>
+<li>VFE (Titsias 2009): valid variational lower bound — includes trace penalty, better calibrated</li>
+<li>SVGP: mini-batch ELBO — scales to millions, memory O(m²) fixed</li>
+<li>Learned inducing points: treat Z as parameters in ELBO optimisation for best quality</li>
+<li>GPyTorch: SparseGPRegression (SGPR/VFE) for moderate n, SVGP for very large n</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

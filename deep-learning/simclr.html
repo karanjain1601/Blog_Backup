@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SimCLR — Simple Contrastive Learning of Representations | Notes Backup</title>
+  <meta name="description" content="SimCLR (Chen et al. 2020) learns visual representations by maximizing agreement between two augmented views of the same image via the NT-Xent contrastive loss, a 2-layer MLP projection head, and large batch sizes that supply enough in-batch negatives." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>SimCLR — Simple Contrastive Learning of Representations</h1>
+      <ul class='note-meta'><li><strong>description:</strong> SimCLR (Chen et al. 2020) learns visual representations by maximizing agreement between two augmented views of the same image via the NT-Xent contrastive loss, a 2-layer MLP projection head, and large batch sizes that supply enough in-batch negatives.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>SimCLR — Simple Contrastive Learning of Representations</h1>
+<p>SimCLR (Simple Framework for Contrastive Learning of Visual Representations, Chen et al. 2020) showed that self-supervised contrastive learning could rival supervised ImageNet pre-training. The key insight is elegant: augment each image twice, encode both views with a shared ResNet, project the representations with a small MLP, and then train the encoder to maximise agreement between the two views while treating all other images in the batch as negatives. No labels required.</p>
+<h2>Contrastive Learning Framework</h2>
+<p>For a mini-batch of N images, SimCLR generates 2N augmented views by applying two independent stochastic augmentation sequences to each image. The encoder f (a ResNet) maps each view xᵢ to a representation hᵢ = f(xᵢ). A two-layer MLP projection head g maps hᵢ to zᵢ = g(hᵢ), which is L2-normalised before the loss is computed. The contrastive loss is computed in the z-space; importantly, downstream tasks use hᵢ (the encoder output before projection), not zᵢ.</p>
+<h2>NT-Xent Loss</h2>
+<p>The NT-Xent (Normalised Temperature-scaled Cross Entropy) loss for a positive pair (i, j) from the same image is: L_{i,j} = -log[ exp(sim(zᵢ,zⱼ)/τ) / Σ_{k≠i} exp(sim(zᵢ,zₖ)/τ) ] where sim(u,v) = uᵀv/(‖u‖‖v‖) is cosine similarity and τ is a temperature hyperparameter (default 0.07). The denominator sums over all 2(N-1) other views in the batch — both augmentations of other images — making them the negatives. The final loss is the mean over all 2N ordered pairs.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def nt_xent_loss(z1, z2, temperature=0.07):
+    &quot;&quot;&quot;NT-Xent loss for SimCLR.
+    z1, z2: (N, D) L2-normalised embeddings from two augmented views.
+    Returns scalar loss.
+    &quot;&quot;&quot;
+    N = z1.size(0)
+    # Concatenate representations: [z1_0, z1_1, ..., z2_0, z2_1, ...]
+    z = torch.cat([z1, z2], dim=0)          # (2N, D)
+    # Cosine similarity matrix for all pairs
+    sim = F.cosine_similarity(z.unsqueeze(1), z.unsqueeze(0), dim=2)  # (2N, 2N)
+    sim = sim / temperature
+    # Mask out self-similarity on the diagonal
+    mask_self = torch.eye(2 * N, dtype=torch.bool, device=z.device)
+    sim.masked_fill_(mask_self, float('-inf'))
+    # Positive pairs: (i, i+N) and (i+N, i)
+    labels = torch.cat([torch.arange(N, 2*N), torch.arange(N)]).to(z.device)
+    loss = F.cross_entropy(sim, labels)
+    return loss
+
+# Quick sanity check
+torch.manual_seed(42)
+z1 = F.normalize(torch.randn(32, 128), dim=1)
+z2 = F.normalize(torch.randn(32, 128), dim=1)
+print('NT-Xent loss (random, should be ~log(63)):', nt_xent_loss(z1, z2).item())
+# Perfect agreement should give loss near zero
+z2_perfect = z1.clone()
+print('NT-Xent loss (perfect agreement):', nt_xent_loss(z1, z2_perfect).item())
+</code></pre>
+<h2>Data Augmentation Pipeline</h2>
+<p>The augmentation strategy is one of the most critical components of SimCLR. An ablation study in the paper showed that random cropping (resized crop) alone provides the most benefit, followed by color jitter. The intuition is that a crop forces the network to learn content rather than position or spatial layout. Color jitter prevents the network from using color statistics as a shortcut. Gaussian blur (applied with 50% probability) encourages robustness to frequency content.</p>
+<pre><code class="language-python">import torch
+from torchvision import transforms
+
+class SimCLRAugmentation:
+    &quot;&quot;&quot;Two-view augmentation for SimCLR. Returns a pair (view1, view2) per image.&quot;&quot;&quot;
+    def __init__(self, image_size=224, s=1.0):
+        color_jitter = transforms.ColorJitter(
+            brightness=0.8 * s,
+            contrast=0.8 * s,
+            saturation=0.8 * s,
+            hue=0.2 * s
+        )
+        self.transform = transforms.Compose([
+            transforms.RandomResizedCrop(image_size, scale=(0.2, 1.0)),  # most important
+            transforms.RandomHorizontalFlip(p=0.5),
+            transforms.RandomApply([color_jitter], p=0.8),
+            transforms.RandomGrayscale(p=0.2),
+            transforms.RandomApply([transforms.GaussianBlur(kernel_size=23)], p=0.5),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                 std=[0.229, 0.224, 0.225]),
+        ])
+
+    def __call__(self, x):
+        return self.transform(x), self.transform(x)
+
+# Usage with DataLoader
+# dataset = ImageFolder(root, transform=SimCLRAugmentation(224))
+# Each batch gives: (view1_batch, view2_batch), labels
+print('SimCLR augmentation pipeline defined.')
+print('Key: RandomResizedCrop(scale=0.2-1.0) is the most important augmentation.')
+</code></pre>
+<h2>SimCLR Training Loop</h2>
+<p>SimCLR requires no special architecture beyond a standard ResNet encoder and a small MLP projection head. The projection head (two linear layers with BatchNorm and ReLU) is only used during pre-training; it is discarded for downstream tasks. A large batch size (4096–8192) is critical because the number of in-batch negatives determines how informative the loss signal is. LARS optimiser is recommended at these batch sizes due to its layer-wise adaptive learning rate scaling.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torchvision.models as models
+
+class SimCLR(nn.Module):
+    def __init__(self, backbone='resnet50', proj_dim=128):
+        super().__init__()
+        base = models.resnet50(weights=None)
+        self.encoder = nn.Sequential(*list(base.children())[:-1])  # remove fc
+        feat_dim = base.fc.in_features  # 2048 for ResNet-50
+        self.projector = nn.Sequential(
+            nn.Linear(feat_dim, feat_dim),
+            nn.BatchNorm1d(feat_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(feat_dim, proj_dim),
+        )
+
+    def forward(self, x1, x2):
+        h1 = self.encoder(x1).flatten(1)  # (N, 2048)
+        h2 = self.encoder(x2).flatten(1)
+        z1 = F.normalize(self.projector(h1), dim=1)  # (N, 128)
+        z2 = F.normalize(self.projector(h2), dim=1)
+        return z1, z2, h1, h2  # return h for downstream use
+
+# Training step (inside epoch loop)
+def train_step(model, batch, optimizer, temperature=0.07):
+    (view1, view2), _ = batch
+    view1, view2 = view1.cuda(), view2.cuda()
+    z1, z2, _, _ = model(view1, view2)
+    loss = nt_xent_loss(z1, z2, temperature)
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    return loss.item()
+
+model = SimCLR().cuda()
+print('Encoder output dim:', 2048)
+print('Projector output dim:', 128)
+print('Parameters:', sum(p.numel() for p in model.parameters()) // 1_000_000, 'M')
+</code></pre>
+<h2>Linear Evaluation Protocol</h2>
+<p>To evaluate representation quality, SimCLR uses linear evaluation: freeze the pre-trained encoder and train a single linear classifier on top of the frozen representations. This isolates the representation quality from the linear head's capacity. A high linear evaluation accuracy indicates the encoder has learned semantically meaningful features. The encoder's output (before projection) is used; this is why the projection head must be discarded.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
+
+def linear_evaluation(encoder, train_loader, val_loader, num_classes=1000,
+                       epochs=100, lr=0.1, device='cuda'):
+    &quot;&quot;&quot;Freeze encoder, train and evaluate a linear classifier.&quot;&quot;&quot;
+    encoder.eval()
+    for p in encoder.parameters():
+        p.requires_grad_(False)
+
+    # Determine feature dimension from a dummy forward pass
+    with torch.no_grad():
+        dummy = torch.randn(2, 3, 224, 224).to(device)
+        feat_dim = encoder(dummy).flatten(1).size(1)
+
+    classifier = nn.Linear(feat_dim, num_classes).to(device)
+    optimizer = torch.optim.SGD(classifier.parameters(), lr=lr,
+                                momentum=0.9, weight_decay=0.0)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, epochs)
+    criterion = nn.CrossEntropyLoss()
+
+    for epoch in range(epochs):
+        classifier.train()
+        for imgs, labels in train_loader:
+            imgs, labels = imgs.to(device), labels.to(device)
+            with torch.no_grad():
+                feats = encoder(imgs).flatten(1)
+            logits = classifier(feats)
+            loss = criterion(logits, labels)
+            optimizer.zero_grad(); loss.backward(); optimizer.step()
+        scheduler.step()
+
+    # Validation accuracy
+    classifier.eval()
+    correct = total = 0
+    with torch.no_grad():
+        for imgs, labels in val_loader:
+            imgs, labels = imgs.to(device), labels.to(device)
+            feats = encoder(imgs).flatten(1)
+            preds = classifier(feats).argmax(1)
+            correct += (preds == labels).sum().item()
+            total += labels.size(0)
+    return correct / total
+
+print('Linear evaluation protocol: freeze encoder, train linear head only.')
+</code></pre>
+<blockquote>
+<p><strong>Projection Head Matters — Use Encoder Output Downstream</strong>: A critical finding of SimCLR is that the projection head (g) improves contrastive learning but the representation before the projection head (h) is better for downstream tasks. The projection head collapses information that is useful for classification but not for contrastive loss. Always freeze the encoder and discard the projection head when performing linear evaluation or fine-tuning.</p>
+</blockquote>
+<h2>Temperature and Batch Size Sensitivity</h2>
+<p>Temperature τ controls the concentration of the distribution. Low τ (e.g., 0.07) creates a sharper distribution, penalising hard negatives more. High τ treats negatives more uniformly. Batch size is a proxy for the number of negatives: at batch size N, there are 2(N-1) negatives per anchor. SimCLR needs 4096–8192 images per batch to accumulate enough negatives. This requires either many GPUs or gradient accumulation, making it expensive compared to queue-based methods.</p>
+<ul>
+<li>τ = 0.07 optimal across experiments — too low causes instability, too high degrades quality.</li>
+<li>Batch size 4096 with LARS optimizer and cosine decay over 100–1000 epochs.</li>
+<li>Random resized crop is the single most important augmentation (&gt;10% top-1 difference).</li>
+<li>Color jitter + random grayscale prevents reliance on color statistics as a cheat code.</li>
+<li>Removing Gaussian blur from the pipeline causes ~1–2% top-1 regression.</li>
+</ul>
+<h2>SimCLR v2 and Extensions</h2>
+<p>SimCLR v2 (Chen et al. 2020b) introduced three improvements: (1) a larger backbone (ResNet-152 with selective kernels), (2) a deeper projection head (3-layer MLP instead of 2-layer), and (3) semi-supervised learning with distillation — use the self-supervised model to generate pseudo-labels on unlabelled data and distil into a smaller student. These improvements pushed top-1 accuracy beyond 79% on ImageNet with only 1% of labels.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Batch Size</th>
+<th>Negatives Needed</th>
+<th>Projection Layers</th>
+<th>Linear Eval Top-1</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SimCLR v1</td>
+<td>4096</td>
+<td>Yes (in-batch)</td>
+<td>2-layer MLP</td>
+<td>69.3%</td>
+</tr>
+<tr>
+<td>SimCLR v2</td>
+<td>4096</td>
+<td>Yes (in-batch)</td>
+<td>3-layer MLP</td>
+<td>74.2%</td>
+</tr>
+<tr>
+<td>BYOL</td>
+<td>4096</td>
+<td>No</td>
+<td>2-layer MLP</td>
+<td>74.3%</td>
+</tr>
+<tr>
+<td>MoCo v3</td>
+<td>4096</td>
+<td>No (large batch ViT)</td>
+<td>2-layer MLP</td>
+<td>83.2% (ViT-B/16)</td>
+</tr>
+</tbody>
+</table>
+    </article>
+  </main>
+</body>
+</html>

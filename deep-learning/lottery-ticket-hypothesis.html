@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lottery Ticket Hypothesis — Winning Tickets and IMP | Notes Backup</title>
+  <meta name="description" content="Implement Iterative Magnitude Pruning from scratch, validate the lottery ticket hypothesis by comparing winning tickets vs random sparse masks, detect early-bird tickets, and transfer tickets across datasets." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Lottery Ticket Hypothesis — Winning Tickets and IMP</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Implement Iterative Magnitude Pruning from scratch, validate the lottery ticket hypothesis by comparing winning tickets vs random sparse masks, detect early-bird tickets, and transfer tickets across datasets.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Lottery Ticket Hypothesis — Winning Tickets and IMP</h1>
+<p>The Lottery Ticket Hypothesis (Frankle &amp; Carlin 2019) states: a randomly initialized dense neural network contains a sparse subnetwork — a winning ticket — that, when trained in isolation from its original initialization, can match the full network's test accuracy within the same training budget. Finding winning tickets requires Iterative Magnitude Pruning (IMP) with the critical step of rewinding to the original initialization.</p>
+<p>This is remarkable: the full network's expressivity is not necessary for good generalization. The hypothesis reframes pruning from post-training compression to pre-training architecture search. The winning ticket is not the pruned network after training — it is the sparse subnetwork that, when initialized to its original values and trained from scratch (but with the mask), achieves the same accuracy.</p>
+<h2>Iterative Magnitude Pruning (IMP)</h2>
+<p>IMP consists of four steps repeated k times: (1) Train the full network to convergence from initialization θ₀. (2) Prune p% of remaining weights globally by magnitude. (3) Reset remaining weights to θ₀ — the rewind step. (4) Repeat with the pruned, rewound network. Each round prunes p% of remaining weights, so after k rounds the sparsity is 1−(1−p)^k. Pruning 20% per round for 10 rounds achieves ~89% sparsity. The mask defines the winning ticket structure.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import copy
+
+class IMP:
+    def __init__(self, model):
+        self.model = model
+        self.theta0 = copy.deepcopy(model.state_dict())
+        self.masks = {n: torch.ones_like(p)
+                      for n, p in model.named_parameters() if 'weight' in n}
+
+    def train_step(self, x, y, optimizer, criterion):
+        optimizer.zero_grad()
+        loss = criterion(self.model(x), y)
+        loss.backward()
+        for n, p in self.model.named_parameters():
+            if n in self.masks and p.grad is not None:
+                p.grad.data.mul_(self.masks[n])
+        optimizer.step()
+        return loss.item()
+
+    def prune(self, prune_rate=0.2):
+        all_w = torch.cat([p.abs().flatten() for n, p in self.model.named_parameters()
+                           if n in self.masks])
+        thresh = torch.quantile(all_w, prune_rate)
+        for n, p in self.model.named_parameters():
+            if n in self.masks:
+                self.masks[n] = (p.data.abs() &gt; thresh).float()
+
+    def rewind(self):
+        self.model.load_state_dict(copy.deepcopy(self.theta0))
+        with torch.no_grad():
+            for n, p in self.model.named_parameters():
+                if n in self.masks: p.data.mul_(self.masks[n])
+
+    def sparsity(self):
+        total = sum(m.numel() for m in self.masks.values())
+        active = sum(m.sum().item() for m in self.masks.values())
+        return 1.0 - active / total
+
+print('IMP: train_step, prune, rewind, sparsity ready.')
+</code></pre>
+<h2>Winning Ticket vs Random Sparse Mask</h2>
+<p>The winning ticket property depends on both the mask structure AND the specific initialization θ₀. To verify: compare (A) winning ticket — IMP mask + rewind to θ₀, (B) random sparse mask — same sparsity but randomly chosen connections, also initialized from θ₀. If the hypothesis holds, (A) significantly outperforms (B) at the same sparsity level.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import copy
+from sklearn.datasets import make_classification
+
+def simple_net(seed=0):
+    torch.manual_seed(seed)
+    return nn.Sequential(nn.Linear(20,64), nn.ReLU(), nn.Linear(64,64), nn.ReLU(), nn.Linear(64,2))
+
+def train_eval(model, X_tr, y_tr, X_te, y_te, mask=None, n_epochs=80):
+    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+    for _ in range(n_epochs):
+        opt.zero_grad()
+        loss = nn.CrossEntropyLoss()(model(X_tr), y_tr)
+        loss.backward()
+        if mask:
+            for n, p in model.named_parameters():
+                if n in mask and p.grad is not None: p.grad.data.mul_(mask[n])
+        opt.step()
+    with torch.no_grad():
+        return (model(X_te).argmax(1) == y_te).float().mean().item()
+
+X_np, y_np = make_classification(800, 20, n_classes=2, random_state=0)
+X = torch.tensor(X_np, dtype=torch.float32)
+y = torch.tensor(y_np, dtype=torch.long)
+X_tr, y_tr, X_te, y_te = X[:600], y[:600], X[600:], y[600:]
+
+full = simple_net(0)
+acc_full = train_eval(full, X_tr, y_tr, X_te, y_te)
+print(f'Full network: {acc_full:.4f}')
+
+wt_mask = {n: (p.abs() &gt; p.abs().quantile(0.5)).float() for n, p in full.named_parameters() if 'weight' in n}
+wt = simple_net(0)
+for n, p in wt.named_parameters():
+    if n in wt_mask: p.data.mul_(wt_mask[n])
+print(f'Winning ticket (50% sparse): {train_eval(wt, X_tr, y_tr, X_te, y_te, wt_mask):.4f}')
+
+rand_mask = {n: (torch.rand_like(p) &gt; 0.5).float() for n, p in full.named_parameters() if 'weight' in n}
+rand = simple_net(0)
+for n, p in rand.named_parameters():
+    if n in rand_mask: p.data.mul_(rand_mask[n])
+print(f'Random sparse  (50% sparse): {train_eval(rand, X_tr, y_tr, X_te, y_te, rand_mask):.4f}')
+</code></pre>
+<h2>Early Bird Tickets</h2>
+<p>You et al. (2020) showed winning ticket masks stabilize very early in training — within the first 5–10% of total epochs. The early bird ticket is detected via the Hamming distance between consecutive epoch masks: when the mask change rate drops below ε ≈ 0.02, the ticket has crystallized. This reduces the cost of IMP by 4–7× since you can identify the mask structure without training to full convergence.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def detect_early_bird(model, X, y, n_epochs=60, prune_rate=0.5):
+    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+    prev_mask = None
+    early_epoch = None
+    for epoch in range(n_epochs):
+        nn.CrossEntropyLoss()(model(X), y).backward()
+        opt.step(); opt.zero_grad()
+        all_w = torch.cat([p.abs().flatten() for n, p in model.named_parameters() if 'weight' in n])
+        thresh = torch.quantile(all_w, prune_rate)
+        cur_mask = torch.cat([(p.abs() &gt; thresh).float().flatten()
+                              for n, p in model.named_parameters() if 'weight' in n])
+        if prev_mask is not None:
+            change = (cur_mask != prev_mask).float().mean().item()
+            if change &lt; 0.02 and early_epoch is None:
+                early_epoch = epoch
+            if epoch % 10 == 0:
+                print(f'Epoch {epoch:3d}: mask change = {change:.4f}')
+        prev_mask = cur_mask
+    print(f'Early bird at epoch: {early_epoch}')
+    return early_epoch
+
+torch.manual_seed(0)
+from sklearn.datasets import make_classification
+X_np, y_np = make_classification(600, 20, random_state=0)
+X = torch.tensor(X_np, dtype=torch.float32)
+y = torch.tensor(y_np, dtype=torch.long)
+model = nn.Sequential(nn.Linear(20,64), nn.ReLU(), nn.Linear(64,32), nn.ReLU(), nn.Linear(32,2))
+detect_early_bird(model, X, y)
+</code></pre>
+<h2>Lottery Ticket Transfer Across Tasks</h2>
+<p>Morcos et al. (2019) showed tickets found on a source task often transfer to related target tasks. Tickets from larger datasets are more transferable — connecting to the pre-training paradigm. A ticket found during pre-training may already be a good ticket for downstream tasks, enabling efficient sparse fine-tuning.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from sklearn.datasets import make_classification
+
+def get_data(n_classes, seed):
+    X, y = make_classification(800, 30, n_classes=n_classes, n_informative=15, random_state=seed)
+    X = torch.tensor(X, dtype=torch.float32)
+    y = torch.tensor(y, dtype=torch.long)
+    return X[:600], y[:600], X[600:], y[600:]
+
+def get_mask(X_tr, y_tr, n_cls, prune_rate=0.7, epochs=80, seed=0):
+    torch.manual_seed(seed)
+    model = nn.Sequential(nn.Linear(30,128), nn.ReLU(), nn.Linear(128,64), nn.ReLU(), nn.Linear(64,n_cls))
+    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+    for _ in range(epochs):
+        nn.CrossEntropyLoss()(model(X_tr), y_tr).backward(); opt.step(); opt.zero_grad()
+    all_w = torch.cat([p.abs().flatten() for n,p in model.named_parameters() if 'weight' in n])
+    thresh = torch.quantile(all_w, prune_rate)
+    return {n: (p.abs() &gt; thresh).float() for n,p in model.named_parameters() if 'weight' in n}
+
+X_tr1, y_tr1, _, _ = get_data(3, 0)
+X_tr2, y_tr2, X_te2, y_te2 = get_data(4, 99)
+mask = get_mask(X_tr1, y_tr1, n_cls=3)
+sparsity = 1 - sum((m&gt;0).sum().item() for m in mask.values()) / sum(m.numel() for m in mask.values())
+print(f'Task-1 ticket sparsity: {sparsity:.1%}')
+
+torch.manual_seed(42)
+model2 = nn.Sequential(nn.Linear(30,128), nn.ReLU(), nn.Linear(128,64), nn.ReLU(), nn.Linear(64,4))
+for n, p in model2.named_parameters():
+    if n in mask: p.data.mul_(mask[n])
+opt2 = torch.optim.Adam(model2.parameters(), lr=1e-3)
+for _ in range(80):
+    nn.CrossEntropyLoss()(model2(X_tr2), y_tr2).backward(); opt2.step(); opt2.zero_grad()
+with torch.no_grad():
+    acc = (model2(X_te2).argmax(1) == y_te2).float().mean().item()
+print(f'Task-2 accuracy with task-1 ticket: {acc:.4f}')
+</code></pre>
+<h2>Connection to NAS and Strong Lottery Ticket</h2>
+<p>The strong lottery ticket hypothesis (Zhou et al. 2019) shows that random weights with the right binary mask already perform well — even without optimizing from θ₀. This means the mask structure is the primary source of inductive bias. This connects to Neural Architecture Search (NAS): finding the winning ticket structure is equivalent to a binary NAS problem. One-shot NAS methods (DARTS, SMASH) train a supernetwork and extract the best subnetwork — conceptually identical to IMP.</p>
+<p>Later work showed that rewinding to an early (but not initial) checkpoint — after a few hundred steps of warmup — works even for large-scale models where step-zero rewind fails. This warm rewind variant is necessary for ResNets and Transformers at ImageNet scale. The effective rewind point is a hyperparameter tuned based on model size and dataset complexity.</p>
+<h2>Pruning Methods Comparison</h2>
+<blockquote>
+<p><strong>Rewind is Essential</strong>: The critical finding of Frankle &amp; Carlin is that training the sparse subnetwork from a new random initialization fails to match the full network. The winning ticket property requires both the mask structure AND the original initialization θ₀. Resetting to θ₀ is non-negotiable — it distinguishes IMP from ordinary pruning.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Winning ticket</th>
+<th>Rewind to θ₀</th>
+<th>Accuracy recovery</th>
+<th>GPU speedup</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>IMP / Lottery ticket</td>
+<td>Yes</td>
+<td>Yes — essential</td>
+<td>Full match at 60–90% sparsity</td>
+<td>Needs sparse kernels; limited on current GPUs</td>
+</tr>
+<tr>
+<td>One-shot magnitude</td>
+<td>Partial</td>
+<td>No — prune after training once</td>
+<td>Good at 50%, degrades past 80%</td>
+<td>Direct if sparse ops available</td>
+</tr>
+<tr>
+<td>Movement pruning</td>
+<td>Partial</td>
+<td>No</td>
+<td>Better than magnitude for fine-tuning</td>
+<td>Limited — unstructured sparsity</td>
+</tr>
+<tr>
+<td>Structured (channel) pruning</td>
+<td>No</td>
+<td>No</td>
+<td>Recoverable with retraining at 50%</td>
+<td>Direct 2–4× on standard hardware</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>Winning tickets at 90% sparsity on MNIST, 60–70% on CIFAR-10 match the full network.</li>
+<li>The rewind step (resetting to θ₀) is what distinguishes IMP from ordinary pruning.</li>
+<li>Early bird tickets reduce IMP cost by 4–7× by detecting mask stability within 5–10% of training.</li>
+<li>Strong lottery ticket: even random weights with the right binary mask perform well (structure &gt; values).</li>
+<li>Transfer tickets: masks from large datasets transfer to smaller tasks, enabling efficient sparse fine-tuning.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

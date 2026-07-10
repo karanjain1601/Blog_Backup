@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>K-Means Clustering — Lloyd&#x27;s Algorithm and Initialization | Notes Backup</title>
+  <meta name="description" content="Master Lloyd&#x27;s algorithm for k-means clustering: the assign-update loop that minimizes WCSS, k-means++ initialization for O(log k) approximation, elbow and silhouette methods for choosing k, mini-batch k-means for large data, and color quantization as a practical application." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>K-Means Clustering — Lloyd&#x27;s Algorithm and Initialization</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Master Lloyd&#x27;s algorithm for k-means clustering: the assign-update loop that minimizes WCSS, k-means++ initialization for O(log k) approximation, elbow and silhouette methods for choosing k, mini-batch k-means for large data, and color quantization as a practical application.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>K-Means Clustering — Lloyd's Algorithm and Initialization</h1>
+<p>K-Means is the most widely deployed clustering algorithm. Given n points and a target number of clusters k, it partitions the data to minimize the Within-Cluster Sum of Squares (WCSS). The algorithm alternates between two simple steps — assigning points to clusters and updating cluster centers — until convergence. Understanding its geometric objective, the k-means++ initialization strategy, and how to select k are essential for practical unsupervised learning.</p>
+<h2>The K-Means Objective</h2>
+<p>K-Means minimizes WCSS = Σᵢ Σ_{x∈Cᵢ} ‖x − μᵢ‖² where Cᵢ is the i-th cluster and μᵢ is its centroid. This objective favors compact, spherical clusters of roughly equal size. Because WCSS is non-convex in both the assignments and centroids jointly, the algorithm converges to a local minimum rather than the global optimum. Finding the globally optimal k-means partition is NP-hard; in practice we run the algorithm with multiple restarts and keep the best result.</p>
+<h2>Lloyd's Algorithm</h2>
+<p>Lloyd's algorithm alternates: (1) E-step — assign each point to its nearest centroid, which cannot increase WCSS for fixed centroids; (2) M-step — set each centroid to the mean of its assigned points, which minimizes WCSS for fixed assignments since the mean uniquely minimizes the sum of squared deviations. Because each step is non-increasing and WCSS is bounded below by zero, and there are finitely many distinct partitions of n points into k non-empty clusters, convergence in finite steps is guaranteed. The quality of the local minimum found depends heavily on initialization.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.datasets import make_blobs
+
+def kmeans_plus_plus(X, k, rng):
+    &quot;&quot;&quot;K-Means++ seeding — O(log k) approximation guarantee.&quot;&quot;&quot;
+    n = X.shape[0]
+    centers = [X[rng.integers(n)].copy()]
+    for _ in range(k - 1):
+        dists = np.array([min(np.sum((x - c) ** 2) for c in centers) for x in X])
+        probs = dists / dists.sum()
+        centers.append(X[rng.choice(n, p=probs)].copy())
+    return np.array(centers)
+
+def lloyd_kmeans(X, k, max_iter=300, tol=1e-4, seed=42):
+    &quot;&quot;&quot;Lloyd's algorithm with K-Means++ initialization.&quot;&quot;&quot;
+    rng = np.random.default_rng(seed)
+    centers = kmeans_plus_plus(X, k, rng)
+    for it in range(max_iter):
+        diffs = X[:, None, :] - centers[None, :, :]
+        labels = np.argmin((diffs ** 2).sum(axis=2), axis=1)
+        new_centers = np.array([X[labels == i].mean(axis=0) for i in range(k)])
+        shift = np.max(np.linalg.norm(new_centers - centers, axis=1))
+        centers = new_centers
+        if shift &lt; tol:
+            print(f&quot;Converged at iteration {it + 1}&quot;)
+            break
+    wcss = sum(np.sum((X[labels == i] - centers[i]) ** 2) for i in range(k))
+    return labels, centers, wcss
+
+X, y_true = make_blobs(n_samples=400, centers=4, cluster_std=0.8, random_state=42)
+labels, centers, wcss = lloyd_kmeans(X, k=4)
+print(f&quot;Final WCSS: {wcss:.2f}&quot;)
+print(f&quot;Cluster sizes: {[int((labels == i).sum()) for i in range(4)]}&quot;)
+</code></pre>
+<h2>K-Means++ Initialization</h2>
+<p>Random initialization frequently lands in poor local optima. K-Means++ seeds centroids spread across the data by choosing each new centroid with probability proportional to its squared distance from the nearest already-chosen centroid. This gives a theoretical guarantee: E[WCSS_init] ≤ O(log k) × OPT. In practice k-means++ reduces variance across restarts dramatically and usually reaches a good solution in 3–5 restarts rather than the 20–50 needed with pure random initialization.</p>
+<ul>
+<li>Choose first centroid uniformly at random from the data.</li>
+<li>For each remaining point x, compute d²(x) = min squared distance to the nearest chosen centroid.</li>
+<li>Sample the next centroid with probability proportional to d²(x) — farther points are more likely to be chosen.</li>
+<li>Repeat steps 2–3 until k centroids are selected, then run Lloyd's algorithm.</li>
+<li>Guarantee: E[WCSS] ≤ 8(ln k + 2) × OPT — a logarithmic approximation factor.</li>
+</ul>
+<h2>Choosing K — Elbow, Silhouette, and Gap Statistic</h2>
+<p>Selecting k is unsupervised — there is no ground truth label. Three complementary diagnostics help: (1) Elbow method — plot WCSS vs k; the 'elbow' (largest second derivative) indicates diminishing returns from adding clusters. (2) Silhouette score — s(i) = (b(i)−a(i)) / max(a(i),b(i)) where a(i) is the mean intra-cluster distance and b(i) is the mean distance to the nearest other cluster; range [−1,1], higher is better. (3) Gap statistic — compares log(WCSS_k) to its expected value under a null uniform reference distribution; choose the smallest k where Gap(k) ≥ Gap(k+1) − se(k+1).</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
+from sklearn.datasets import make_blobs
+
+X, _ = make_blobs(n_samples=500, centers=5, cluster_std=0.9, random_state=0)
+
+k_range = range(2, 11)
+wcss_vals, sil_vals = [], []
+
+for k in k_range:
+    km = KMeans(n_clusters=k, init='k-means++', n_init=10, random_state=42)
+    labels = km.fit_predict(X)
+    wcss_vals.append(km.inertia_)
+    sil_vals.append(silhouette_score(X, labels))
+
+wcss_arr = np.array(wcss_vals)
+diffs2 = np.diff(np.diff(wcss_arr))
+elbow_k = list(k_range)[np.argmax(diffs2) + 1]
+best_sil_k = list(k_range)[np.argmax(sil_vals)]
+
+print(f&quot;Elbow method suggests k={elbow_k}&quot;)
+print(f&quot;Best silhouette at k={best_sil_k} (score={max(sil_vals):.4f})&quot;)
+print(&quot;\nk  | WCSS        | Silhouette&quot;)
+for k, w, s in zip(k_range, wcss_vals, sil_vals):
+    mark = &quot; &lt;&lt;&quot; if k == best_sil_k else &quot;&quot;
+    print(f&quot;{k:2d} | {w:11.2f} | {s:.4f}{mark}&quot;)
+</code></pre>
+<h2>Mini-Batch K-Means for Large Datasets</h2>
+<p>Standard k-means scales as O(n·k·d) per iteration, which becomes expensive for millions of points. Mini-batch k-means processes a random mini-batch at each step and updates centroids with a running average, reducing per-iteration cost to O(b·k·d) where b is the batch size. The centroid update rule is: μ ← μ + (1/count)(x − μ) for each point in the batch. This trades a small increase in final WCSS (typically 1–5%) for a dramatic reduction in wall-clock time, making it the go-to algorithm for streaming or very large datasets.</p>
+<pre><code class="language-python">import numpy as np
+import time
+from sklearn.cluster import KMeans, MiniBatchKMeans
+
+rng = np.random.default_rng(42)
+X_large = rng.standard_normal((300_000, 15))
+
+k = 20
+results = {}
+
+t0 = time.perf_counter()
+km = KMeans(n_clusters=k, init='k-means++', n_init=3, max_iter=100, random_state=42)
+km.fit(X_large[:30_000])
+results['KMeans (30K pts)'] = (km.inertia_, time.perf_counter() - t0)
+
+t0 = time.perf_counter()
+mbkm = MiniBatchKMeans(n_clusters=k, batch_size=2048, n_init=5,
+                        max_iter=200, random_state=42)
+mbkm.fit(X_large)
+results['MiniBatch (300K pts)'] = (mbkm.inertia_, time.perf_counter() - t0)
+
+print(f&quot;{'Algorithm':&lt;25} {'Inertia':&gt;14} {'Time (s)':&gt;10}&quot;)
+for name, (inertia, elapsed) in results.items():
+    print(f&quot;{name:&lt;25} {inertia:&gt;14.2f} {elapsed:&gt;10.3f}&quot;)
+print(&quot;\nMini-batch handles 10x more data in comparable time.&quot;)
+</code></pre>
+<h2>Image Compression via Color Quantization</h2>
+<p>Color quantization represents an image using only k colors by treating each pixel's RGB triplet as a point in 3D color space and running k-means. Each pixel is replaced by its nearest cluster center (representative color), reducing storage from 24 bits/pixel to ⌈log₂ k⌉ bits/pixel plus the k×24-bit palette. The compression ratio and MSE reconstruction error both depend on k — more colors means better quality but less compression.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.cluster import MiniBatchKMeans
+
+rng = np.random.default_rng(42)
+H, W = 128, 128
+palette = np.array([[200,50,50],[50,180,50],[50,50,200],[200,180,50],[160,50,180]], dtype=np.float32)
+regions = rng.integers(0, 5, size=(H, W))
+img = palette[regions] + rng.normal(0, 12, (H, W, 3))
+img = np.clip(img, 0, 255).astype(np.uint8)
+
+pixels = img.reshape(-1, 3).astype(np.float32)
+original_bits = H * W * 24
+
+print(f&quot;Image: {H}x{W} px | {H*W} pixels | Original: {original_bits // 8 // 1024:.1f} KB uncompressed&quot;)
+print(f&quot;{'Colors':&gt;8} {'MSE':&gt;10} {'Bits/px':&gt;8} {'Ratio':&gt;8}&quot;)
+for n_colors in [2, 4, 8, 16, 32, 64, 128]:
+    km = MiniBatchKMeans(n_clusters=n_colors, random_state=42, n_init=5)
+    km.fit(pixels)
+    quantized = km.cluster_centers_[km.labels_]
+    mse = np.mean((pixels - quantized) ** 2)
+    bpp = int(np.ceil(np.log2(n_colors)))
+    ratio = original_bits / (H * W * bpp + n_colors * 24)
+    print(f&quot;{n_colors:&gt;8} {mse:&gt;10.2f} {bpp:&gt;8} {ratio:&gt;8.1f}x&quot;)
+</code></pre>
+<h2>K-Means Limitations and Alternatives</h2>
+<ul>
+<li>Spherical cluster assumption: WCSS minimization is biased toward round, equal-sized clusters; non-convex shapes like crescents or rings are split arbitrarily.</li>
+<li>Equal-size bias: the Voronoi partition naturally creates similarly-sized cells, so true imbalanced clusters are often misidentified.</li>
+<li>Outlier sensitivity: the mean is not robust; a single extreme point drags its centroid away from the true cluster center.</li>
+<li>Requires k upfront: unlike density-based methods, k must be specified before running — a significant practical limitation.</li>
+<li>Local optima: Lloyd's algorithm converges to a local minimum; the global optimum is NP-hard to find.</li>
+<li>High-dimensional failure: in high dimensions Euclidean distances concentrate (all pairwise distances become similar), degrading cluster quality.</li>
+</ul>
+<blockquote>
+<p><strong>When Not to Use K-Means</strong>: Avoid k-means for non-convex cluster shapes (use DBSCAN or spectral clustering), for data with significant outliers (use k-medoids/PAM), or when the number of clusters is unknown and hard to estimate. K-medoids replaces the mean centroid with an actual data point (the medoid), making it robust to outliers while retaining the same assign-update structure.</p>
+</blockquote>
+<h2>Clustering Algorithm Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Algorithm</th>
+<th>Cluster Assumption</th>
+<th>Outlier Robust</th>
+<th>Cluster Shape</th>
+<th>k Required</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>K-Means</td>
+<td>Spherical, equal-size clusters</td>
+<td>No — mean shifts with outliers</td>
+<td>Convex only</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>K-Medoids (PAM)</td>
+<td>Spherical, medoid as center</td>
+<td>Yes — medoid is robust to extremes</td>
+<td>Convex only</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>DBSCAN</td>
+<td>Density-connected regions</td>
+<td>Yes — noise labeled explicitly</td>
+<td>Arbitrary</td>
+<td>No (ε, minPts)</td>
+</tr>
+<tr>
+<td>GMM</td>
+<td>Gaussian-distributed clusters</td>
+<td>Partial — soft assignments diluted</td>
+<td>Elliptical</td>
+<td>Yes</td>
+</tr>
+</tbody>
+</table>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

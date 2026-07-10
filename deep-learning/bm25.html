@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BM25 for Sparse Retrieval | Notes Backup</title>
+  <meta name="description" content="The BM25 ranking function that extends TF-IDF with document length normalization and saturation terms, remaining a competitive baseline and essential component of hybrid retrieval systems." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>BM25 for Sparse Retrieval</h1>
+      <ul class='note-meta'><li><strong>description:</strong> The BM25 ranking function that extends TF-IDF with document length normalization and saturation terms, remaining a competitive baseline and essential component of hybrid retrieval systems.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>BM25 for Sparse Retrieval</h1>
+<p>BM25 (Best Match 25) is the probabilistic ranking function that has dominated information retrieval for over three decades. Published by Robertson and Walker in 1994 and refined through the TREC competitions, BM25 extends TF-IDF with two critical corrections: a term frequency saturation term that prevents a single term from dominating the score no matter how many times it appears, and a document length normalisation factor that prevents long documents from systematically outranking short ones simply by containing more words. Despite being a lexical method with no semantic understanding, BM25 remains a competitive baseline on many IR benchmarks and is an essential component of every production-grade hybrid retrieval system. Elasticsearch, Solr, Lucene, OpenSearch, and virtually every search engine uses BM25 as its default ranking function.</p>
+<h2>Overview</h2>
+<p>BM25 computes a relevance score between a query q = {t1, ..., tm} and a document d by summing per-term contributions. Each term's contribution is the product of its IDF (inverse document frequency — how rare the term is across the corpus) and a saturating TF weight (which grows with term frequency but plateaus to prevent any single term from dominating). The document length normalises TF: a term appearing 5 times in a 20-word document is far more significant than the same term appearing 5 times in a 2000-word document. Two hyperparameters control the formula: k1 governs TF saturation (typical range 1.2-2.0, default 1.5) and b governs length normalisation (range 0-1, default 0.75). BM25 is available in every major programming language and search infrastructure; the Python rank_bm25 library, Elasticsearch, and OpenSearch all support it out of the box. On MS MARCO dev, a well-tuned BM25 achieves MRR@10 of 18.6 without any neural components — a strong baseline that dense models only began surpassing consistently from 2020 onward.</p>
+<h2>TF-IDF Limitations</h2>
+<p>TF-IDF, BM25's predecessor, has two systematic failure modes that BM25 corrects. First, TF in the raw TF-IDF formula grows without bound: a document that mentions 'cancer' 100 times receives a TF score 100x higher than one mentioning it once, even though the marginal information value of the 100th occurrence is minimal. Second, TF-IDF does not normalise for document length: a 10,000-word document containing a query term once is scored identically to a 50-word document containing it once, even though the latter is clearly more topically focused. BM25 addresses both: the saturation term makes TF approach a ceiling of (k1+1) as frequency grows, and the length normalisation factor b * (|d| / avgdl) reduces the effective TF weight for long documents. A third limitation of TF-IDF is that it provides no principled treatment of very common terms: a term appearing in 95% of documents receives a near-zero IDF but still contributes to scores. BM25's smoothed IDF (adding 0.5 in numerator and denominator) handles this gracefully without hard cutoffs, and terms with n_t &gt; N/2 receive IDF less than log(2) ≈ 0.69, automatically suppressing them.</p>
+<h2>BM25 Formula</h2>
+<p>The BM25 relevance score of document d for query q is the sum over all query terms t of their weighted contributions. For each term t, the IDF component is log((N - n_t + 0.5) / (n_t + 0.5) + 1), where N is the total number of documents and n_t is the number of documents containing term t. The smoothing constants (0.5) prevent IDF from becoming negative for very common terms and avoid division by zero. The TF component is (f_t * (k1 + 1)) / (f_t + k1 * (1 - b + b * |d| / avgdl)), where f_t is the raw term frequency in document d, |d| is the document length in tokens, and avgdl is the average document length across the corpus. As f_t approaches infinity, the TF component approaches (k1 + 1), providing the saturation ceiling. Setting b=0 disables length normalisation entirely; b=1 applies full normalisation. The formula degenerates to unsmoothed TF-IDF when k1 approaches infinity and b=0, demonstrating that BM25 strictly generalises TF-IDF.</p>
+<pre><code class="language-python">import math
+from collections import Counter
+from typing import List
+
+def bm25_score(query: List[str], doc: List[str], corpus: List[List[str]],
+               k1: float = 1.5, b: float = 0.75) -&gt; float:
+    # BM25 Okapi: smoothed IDF * saturating TF with document length normalisation
+    avg  = sum(len(d) for d in corpus) / len(corpus)
+    tf   = Counter(doc)
+    score = 0.0
+    for t in query:
+        n_t   = sum(1 for d in corpus if t in set(d))
+        idf   = math.log((len(corpus) - n_t + 0.5) / (n_t + 0.5) + 1)
+        f     = tf.get(t, 0)
+        sat   = f * (k1 + 1) / (f + k1 * (1 - b + b * len(doc) / avg))
+        score += idf * sat
+    return score
+
+corpus_raw = ['BM25 uses term frequency weighted by inverse document frequency.',
+              'Dense retrieval encodes text into vectors using neural bi-encoders.',
+              'TF-IDF assigns higher weight to rare terms in a short document.',
+              'Hybrid search blends BM25 sparse scores with dense cosine similarity.']
+corpus  = [d.lower().split() for d in corpus_raw]
+query   = 'BM25 sparse retrieval ranking'.lower().split()
+results = sorted([(bm25_score(query, d, corpus), raw)
+                  for d, raw in zip(corpus, corpus_raw)], reverse=True)
+for score, text in results:
+    print(f'{score:.4f}  {text[:70]}')
+</code></pre>
+<h2>Parameters k1 and b</h2>
+<p>The k1 parameter (typical range 1.2-2.0) controls how quickly the TF score saturates. With k1=0, TF plays no role and only IDF matters — BM25 degenerates to binary weighting where presence or absence of a term is all that counts. With k1=1.5 (default), the TF score reaches 80% of its ceiling at f_t=3 occurrences, meaning terms appearing 3 or more times are treated similarly regardless of exact count. With k1=2.0, saturation is slower and repeated terms get more credit — useful for verbose documents where repetition carries meaning. The b parameter (range 0-1, default 0.75) controls the strength of length normalisation. At b=0, no length normalisation is applied; at b=1, full normalisation divides TF by the document-to-average-length ratio. The optimal values of k1 and b are corpus-dependent: short-document corpora (tweets, product titles) benefit from lower b because short documents do not need much length penalisation, while long-document corpora (legal filings, research papers) benefit from higher b. On MS MARCO (500-word average passage length), the default k1=1.5, b=0.75 performs well but a grid search often yields a 2-4% MRR improvement.</p>
+<pre><code class="language-python">import numpy as np
+from rank_bm25 import BM25Okapi
+from typing import List
+
+def mrr_at_k(corpus: List[str], queries: List[str], relevant_ids: List[int],
+             k1: float, b: float, k: int = 10) -&gt; float:
+    # Compute MRR@k for a given (k1, b) combination on the provided query set
+    bm25 = BM25Okapi([d.lower().split() for d in corpus], k1=k1, b=b)
+    rrs  = []
+    for query, rel_id in zip(queries, relevant_ids):
+        scores = bm25.get_scores(query.lower().split())
+        ranked = list(np.argsort(scores)[::-1][:k])
+        rr     = next((1.0 / (r + 1) for r, idx in enumerate(ranked) if idx == rel_id), 0.0)
+        rrs.append(rr)
+    return float(np.mean(rrs))
+
+corpus   = [f'Article {i} on {&quot;NLP&quot; if i%3==0 else &quot;ML&quot;} topic {i%20}' for i in range(500)]
+queries  = [f'{&quot;NLP&quot; if i%3==0 else &quot;ML&quot;} article {i%20}' for i in range(30)]
+rel_ids  = [i * (500 // 30) for i in range(30)]
+print(f'{&quot;k1&quot;:&gt;6} {&quot;b&quot;:&gt;6} {&quot;MRR@10&quot;:&gt;9}')
+best, best_p = 0.0, (1.5, 0.75)
+for k1 in [0.5, 1.0, 1.5, 2.0]:
+    for b in [0.0, 0.25, 0.5, 0.75, 1.0]:
+        mrr = mrr_at_k(corpus, queries, rel_ids, k1=k1, b=b)
+        mark = ' &lt;-- best' if mrr &gt; best else ''
+        if mrr &gt; best: best, best_p = mrr, (k1, b)
+        print(f'{k1:&gt;6.2f} {b:&gt;6.2f} {mrr:&gt;9.4f}{mark}')
+print(f'Optimal: k1={best_p[0]}, b={best_p[1]}, MRR@10={best:.4f}')
+</code></pre>
+<h2>Inverted Index</h2>
+<p>BM25 is always deployed with an inverted index — a data structure that maps each vocabulary term to the list of documents containing it, along with term frequency information. For a corpus of 1M documents with vocabulary size 500K, the inverted index stores roughly 500K posting lists, where each entry records the document ID and the term frequency in that document. At query time, BM25 retrieves only the posting lists for query terms (typically 3-10 terms), computes term scores using precomputed IDF values, and accumulates document scores in a top-k priority queue. This operation is O(sum of posting list lengths for query terms), which is vastly more efficient than scanning all documents. For a query with 5 terms each appearing in 10K documents (1% of a 1M corpus), BM25 examines only 50K documents instead of 1M. Elasticsearch implements this with compressed posting lists (variable-byte encoding, delta coding) and skipping structures that allow bypassing low-TF postings when a document has already been assigned a high score by previous terms, further accelerating retrieval.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>MRR@10 (MS MARCO dev)</th>
+<th>Speed (1M docs, ms)</th>
+<th>Memory (1M docs)</th>
+<th>Handles synonyms?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>TF-IDF</td>
+<td>16.8</td>
+<td>8-15</td>
+<td>~400 MB (dense matrix)</td>
+<td>No — exact vocabulary match only</td>
+</tr>
+<tr>
+<td>BM25 (Okapi)</td>
+<td>18.6</td>
+<td>3-8</td>
+<td>~180 MB (inverted index)</td>
+<td>No — exact vocabulary match only</td>
+</tr>
+<tr>
+<td>BM25+</td>
+<td>18.9</td>
+<td>3-8</td>
+<td>~185 MB</td>
+<td>No — minor IDF improvement for long docs</td>
+</tr>
+<tr>
+<td>BM25L</td>
+<td>18.7</td>
+<td>3-8</td>
+<td>~182 MB</td>
+<td>No — reduced over-normalisation for long docs</td>
+</tr>
+<tr>
+<td>BM25 Adpt</td>
+<td>19.3</td>
+<td>4-9</td>
+<td>~200 MB</td>
+<td>No — learned per-term k1; requires training data</td>
+</tr>
+<tr>
+<td>SPLADE sparse</td>
+<td>34.0</td>
+<td>15-30</td>
+<td>~600 MB (expanded sparse vecs)</td>
+<td>Partially — learned vocabulary expansion</td>
+</tr>
+</tbody>
+</table>
+<h2>BM25 Variants</h2>
+<p>Several BM25 variants address specific limitations of the original formula. BM25+ (Lv and Zhai, 2011) adds a small constant delta (typically 1.0) to the TF component, ensuring that any document containing a query term receives a non-zero score even for very long documents where length normalisation would otherwise drive the score to near zero. BM25L applies a different length normalisation formula that is less aggressive for long documents with high term frequency, addressing the over-normalisation problem in lengthy documents. BM25 Adpt (Trotman et al., 2014) learns term-specific k1 values from training data, allowing high-frequency content words to saturate faster than rare technical terms. SPLADE (Formal et al., 2021) extends BM25's sparse framework with learned neural term expansion: a BERT encoder produces a sparse distribution over the full vocabulary for each token, effectively expanding queries and documents with semantically related terms while preserving inverted index compatibility. SPLADE achieves MRR@10 of 34+ on MS MARCO while remaining deployable on standard search infrastructure.</p>
+<pre><code class="language-python">import time
+import numpy as np
+from rank_bm25 import BM25Okapi
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+from typing import List
+
+def compare_bm25_tfidf(corpus: List[str], query: str, top_k: int = 10) -&gt; dict:
+    # Compare rank_bm25 speed and overlap vs brute-force TF-IDF cosine similarity
+    tokenized = [doc.lower().split() for doc in corpus]
+    t0 = time.perf_counter()
+    bm25        = BM25Okapi(tokenized)
+    bm25_scores = bm25.get_scores(query.lower().split())
+    bm25_top    = np.argsort(bm25_scores)[::-1][:top_k]
+    t_bm25      = time.perf_counter() - t0
+    t0 = time.perf_counter()
+    vec      = TfidfVectorizer().fit(corpus)
+    sim      = cosine_similarity(vec.transform([query]), vec.transform(corpus)).flatten()
+    tfidf_top = np.argsort(sim)[::-1][:top_k]
+    t_tfidf  = time.perf_counter() - t0
+    overlap  = len(set(bm25_top) &amp; set(tfidf_top))
+    print(f'BM25: {t_bm25*1000:.1f}ms | TF-IDF: {t_tfidf*1000:.1f}ms | Overlap@{top_k}: {overlap}')
+    return {'bm25_top': bm25_top.tolist(), 'tfidf_top': tfidf_top.tolist(), 'overlap': overlap}
+
+corpus = [f'Document {i} on information retrieval and machine learning area {i%10}.'
+          for i in range(10_000)]
+compare_bm25_tfidf(corpus, 'information retrieval ranking models', top_k=10)
+</code></pre>
+<blockquote>
+<p><strong>BM25 in Hybrid Systems</strong>: BM25 still outperforms dense retrieval for exact keyword matches, rare terms, and entity-centric queries — always include BM25 in a hybrid system rather than using dense-only retrieval. On TREC-COVID (medical expert queries) BM25 outperforms E5-large-v2 by 5-8 NDCG points. Reciprocal Rank Fusion of BM25 + dense is the default architecture for production RAG at Microsoft, Elasticsearch, and Qdrant.</p>
+</blockquote>
+<h2>When BM25 Wins</h2>
+<p>BM25 outperforms dense retrieval in several well-understood scenarios. First, rare terms: a query for a specific chemical compound name, a product model number, or a legal citation is trivially handled by BM25 (look up the posting list) but may confuse a dense model trained on general text. Second, exact-match requirements: when a user copies an error message verbatim and searches for it, BM25 matches on the exact character sequence while dense retrieval may return semantically related but useless results. Third, low-resource domains: when no training data exists for fine-tuning a dense model, BM25 provides a strong zero-shot baseline that often matches or exceeds an off-the-shelf dense model for domain-specific jargon. Fourth, interpretability: BM25 scores are directly interpretable — you can see exactly which terms contributed and why a document ranked where it did — while dense retrieval scores are opaque. Fifth, incremental indexing: new documents can be added to a BM25 index in real-time by updating posting lists; adding documents to a dense FAISS index requires re-encoding and potentially rebuilding the ANN index.</p>
+<pre><code class="language-python">import json
+from elasticsearch import Elasticsearch
+from typing import List, Dict
+
+def create_bm25_index(es: Elasticsearch, idx: str, k1: float = 1.5, b: float = 0.75) -&gt; None:
+    # Create an Elasticsearch index with custom BM25 similarity settings
+    settings = {
+        'settings': {
+            'similarity': {'custom_bm25': {'type': 'BM25', 'k1': k1, 'b': b}},
+            'number_of_shards': 1, 'number_of_replicas': 0
+        },
+        'mappings': {'properties': {'text': {'type': 'text', 'similarity': 'custom_bm25'}}}
+    }
+    if es.indices.exists(index=idx): es.indices.delete(index=idx)
+    es.indices.create(index=idx, body=settings)
+
+def index_docs(es: Elasticsearch, idx: str, docs: List[str]) -&gt; None:
+    # Bulk-index a list of text documents into the given ES index
+    body = '\n'.join(f'{json.dumps({&quot;index&quot;:{&quot;_index&quot;:idx,&quot;_id&quot;:i}})}\n{json.dumps({&quot;text&quot;:d})}'
+                     for i, d in enumerate(docs))
+    es.bulk(body=body + '\n'); es.indices.refresh(index=idx)
+    print(f'Indexed {len(docs):,} documents into &quot;{idx}&quot;')
+
+def es_bm25_search(es: Elasticsearch, idx: str, query: str, k: int = 10) -&gt; List[Dict]:
+    resp = es.search(index=idx, body={'query': {'match': {'text': query}}, 'size': k})
+    return [{'id': h['_id'], 'score': h['_score'], 'text': h['_source']['text']}
+            for h in resp['hits']['hits']]
+
+es     = Elasticsearch('http://localhost:9200')
+corpus = [f'Document {i}: information retrieval research area {i % 15}' for i in range(10_000)]
+create_bm25_index(es, 'rag-bm25-demo')
+index_docs(es, 'rag-bm25-demo', corpus)
+hits = es_bm25_search(es, 'rag-bm25-demo', 'information retrieval ranking', k=10)
+for h in hits[:3]:
+    print(f'[{h[&quot;score&quot;]:.3f}] id={h[&quot;id&quot;]}  {h[&quot;text&quot;][:60]}')
+</code></pre>
+<ul>
+<li>Exact keyword match: product codes, error messages, chemical names, legal citations</li>
+<li>Rare entity retrieval: proper nouns, domain-specific jargon with no dense training signal</li>
+<li>Low-resource scenarios where no domain-specific dense model is available</li>
+<li>Interpretability requirements: BM25 scores show exactly which terms drove the ranking</li>
+<li>Incremental indexing: BM25 posting lists update in real-time; dense ANN indices need rebuilding</li>
+<li>Systems where embedding all documents upfront is computationally or economically infeasible</li>
+</ul>
+<h2>Key Takeaways</h2>
+<p>BM25 is a 30-year-old ranking function that remains an essential component of modern retrieval systems. Its two core innovations over TF-IDF — TF saturation and document length normalisation — are simple yet highly effective in practice. The rank_bm25 Python library provides a drop-in implementation with configurable k1 and b; Elasticsearch and OpenSearch expose BM25 through their similarity settings API. Optimising k1 and b on a held-out evaluation set typically yields 2-5% MRR improvement over defaults. For hybrid RAG systems, BM25 serves as the sparse retrieval component alongside a dense bi-encoder; their outputs are combined using Reciprocal Rank Fusion or learned score combination. Never deploy a dense-only RAG system in production without at least evaluating a BM25 baseline — on many real-world corpora, BM25 alone matches poorly-tuned dense models, and hybrid always outperforms either alone.</p>
+<ul>
+<li>BM25 formula: sum over query terms of smoothed IDF * saturating TF with document length normalisation</li>
+<li>Default k1=1.5, b=0.75 works well across most corpora; tune on held-out dev set for 2-5% MRR gain</li>
+<li>rank_bm25 Python library: 3 lines to index and query; Elasticsearch/OpenSearch for production scale</li>
+<li>BM25 wins on exact keyword queries, rare terms, entity names, and low-resource domains</li>
+<li>SPLADE extends BM25 with learned term expansion, achieving MRR@10 of 34+ on MS MARCO</li>
+<li>Always include BM25 in hybrid RAG — pure dense search misses critical exact-match queries in production</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

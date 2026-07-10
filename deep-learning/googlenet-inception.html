@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GoogLeNet / Inception — Parallel Branches and Auxiliary Classifiers | Notes Backup</title>
+  <meta name="description" content="GoogLeNet introduces the Inception module — parallel 1×1, 3×3, 5×5, and max-pool branches concatenated to capture multi-scale features — achieving 5M parameters (vs AlexNet&#x27;s 60M) through 1×1 bottlenecks. Inception-v3 adds factorization; Xception pushes to depthwise separable convolutions." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>GoogLeNet / Inception — Parallel Branches and Auxiliary Classifiers</h1>
+      <ul class='note-meta'><li><strong>description:</strong> GoogLeNet introduces the Inception module — parallel 1×1, 3×3, 5×5, and max-pool branches concatenated to capture multi-scale features — achieving 5M parameters (vs AlexNet&#x27;s 60M) through 1×1 bottlenecks. Inception-v3 adds factorization; Xception pushes to depthwise separable convolutions.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>GoogLeNet / Inception — Parallel Branches and Auxiliary Classifiers</h1>
+<p>GoogLeNet (Szegedy et al., 2014, also Inception-v1) asks a different question from VGG: instead of going deeper uniformly, what if a single layer captures features at multiple scales simultaneously? The Inception module applies parallel convolutions of different kernel sizes and concatenates their outputs. This multi-scale processing — 1×1 for cross-channel projection, 3×3 for local features, 5×5 for broader context, plus max pooling for spatial invariance — captures a richer feature representation than any single kernel size, while 1×1 bottlenecks keep computation tractable.</p>
+<h2>Motivation: Efficiency Through Architectural Width</h2>
+<p>Larger networks mean more parameters and more computation — two resources that scale poorly with depth alone. GoogLeNet's solution is architectural width: within a single layer, apply multiple filter sizes in parallel and let the network learn which scales are most informative. The 1×1 convolution is key: applied before expensive 3×3 and 5×5 convolutions, it acts as a channel-reduction bottleneck. Without 1×1 reduction, a single Inception module on 256-channel input with 64 filters of 5×5 costs 256×64×25×H×W = 409,600×H×W multiply-adds. With a 1×1 reduction to 32 channels first: 256×32 + 32×64×25 = 59,392 — a 7× reduction.</p>
+<h2>The Inception Module</h2>
+<p>The Inception-v1 module has four parallel branches: (1) 1×1 conv for direct channel projection; (2) 1×1 conv reducing channels, followed by 3×3 conv; (3) 1×1 conv reducing channels, followed by 5×5 conv; (4) 3×3 max pooling followed by 1×1 conv. All branches preserve spatial dimensions (via appropriate padding) and their outputs are concatenated along the channel dimension. The network learns to weight these pathways through backpropagation — effectively performing sparse, multi-scale feature extraction at each layer.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class InceptionModule(nn.Module):
+    '''Inception-v1 module: parallel branches at 1x1, 3x3, 5x5, max-pool.'''
+    def __init__(self, in_ch, ch1x1, ch3x3_r, ch3x3, ch5x5_r, ch5x5, ch_pool):
+        super().__init__()
+        self.branch1 = nn.Sequential(
+            nn.Conv2d(in_ch, ch1x1, 1), nn.ReLU(inplace=True))
+        self.branch2 = nn.Sequential(
+            nn.Conv2d(in_ch, ch3x3_r, 1), nn.ReLU(inplace=True),
+            nn.Conv2d(ch3x3_r, ch3x3, 3, padding=1), nn.ReLU(inplace=True))
+        self.branch3 = nn.Sequential(
+            nn.Conv2d(in_ch, ch5x5_r, 1), nn.ReLU(inplace=True),
+            nn.Conv2d(ch5x5_r, ch5x5, 5, padding=2), nn.ReLU(inplace=True))
+        self.branch4 = nn.Sequential(
+            nn.MaxPool2d(3, stride=1, padding=1),
+            nn.Conv2d(in_ch, ch_pool, 1), nn.ReLU(inplace=True))
+
+    def forward(self, x):
+        return torch.cat([self.branch1(x), self.branch2(x),
+                          self.branch3(x), self.branch4(x)], dim=1)
+
+# Inception-3a from GoogLeNet paper: in=192, out=64+128+32+32=256
+module = InceptionModule(192, 64, 96, 128, 16, 32, 32)
+x = torch.randn(2, 192, 28, 28)
+out = module(x)
+params = sum(p.numel() for p in module.parameters())
+print('Inception-3a: {} -&gt; {}'.format(x.shape, out.shape))
+print('Output channels: 64+128+32+32 = {}'.format(64+128+32+32))
+print('Parameters: {:,}'.format(params))
+</code></pre>
+<h2>1x1 Convolutions as Channel Bottlenecks</h2>
+<p>The 1×1 convolution (also called a pointwise convolution or network-in-network projection) operates identically to a linear combination across channels at each spatial location. It reduces channels before expensive convolutions — for example, reducing 256 channels to 32 before a 5×5 conv cuts the 5×5 computation by 8× — and expands channels after depthwise convolutions in modern architectures. Beyond channel reduction, 1×1 convs add nonlinearity (paired with ReLU) and mix information across channels without any spatial mixing. Lin et al. (2014) showed that 1×1 conv layers act as 'micro-networks' within each spatial location, greatly increasing representational capacity.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def count_params(m): return sum(p.numel() for p in m.parameters())
+def count_flops_conv(in_ch, out_ch, k, h, w):
+    return 2 * in_ch * out_ch * k * k * h * w
+
+in_ch, out_ch, H, W = 256, 128, 14, 14
+
+# Direct 5x5 conv
+direct = nn.Conv2d(in_ch, out_ch, 5, padding=2)
+
+# 1x1 bottleneck + 5x5 conv
+bottleneck = nn.Sequential(
+    nn.Conv2d(in_ch, 32, 1), nn.ReLU(inplace=True),
+    nn.Conv2d(32, out_ch, 5, padding=2))
+
+direct_params = count_params(direct)
+bottle_params = count_params(bottleneck)
+direct_flops  = count_flops_conv(in_ch, out_ch, 5, H, W)
+bottle_flops  = (count_flops_conv(in_ch, 32, 1, H, W) +
+                 count_flops_conv(32, out_ch, 5, H, W))
+
+print('{:&lt;20} {:&gt;12} {:&gt;14}'.format('Config', 'Params', 'FLOPs'))
+print('{:&lt;20} {:&gt;12,} {:&gt;14,}'.format('Direct 5x5', direct_params, direct_flops))
+print('{:&lt;20} {:&gt;12,} {:&gt;14,}'.format('1x1+5x5 bottleneck', bottle_params, bottle_flops))
+print('Param reduction: {:.1f}x'.format(direct_params / bottle_params))
+print('FLOP reduction:  {:.1f}x'.format(direct_flops / bottle_flops))
+</code></pre>
+<h2>Auxiliary Classifiers</h2>
+<p>GoogLeNet inserts two auxiliary classification heads at intermediate depths (after Inception-4a and Inception-4d). During training, these auxiliary outputs compute softmax losses (weighted by 0.3) that are added to the main loss. Gradients from these intermediate losses flow backward into the lower layers, providing an additional training signal and combating vanishing gradients in the 22-layer network. At inference time, auxiliary classifiers are removed. The Inception authors later acknowledged that the regularisation effect (dropout before auxiliary classifiers) contributed more than the gradient signal — Inception-v3 retained only one auxiliary classifier.</p>
+<blockquote>
+<p><strong>Auxiliary Classifiers vs Residuals</strong>: Auxiliary classifiers solve the vanishing gradient problem by injecting loss signal at intermediate layers — an engineering workaround. ResNet (2015) solved the same problem more elegantly with skip connections that provide a direct gradient path. With skip connections, auxiliary classifiers become unnecessary. Inception-v4 and Inception-ResNet combine both approaches, but the residual path dominates. Modern architectures universally prefer residuals over auxiliary classifiers.</p>
+</blockquote>
+<h2>Inception-v3: Factorization and Asymmetric Convolutions</h2>
+<p>Inception-v3 (Szegedy et al., 2016) introduces three key improvements: (1) factorize 5×5 convolutions into two stacked 3×3 convolutions (same RF, fewer parameters); (2) factorize n×n convolutions into asymmetric 1×n + n×1 convolutions — for n=7, this reduces parameters from 49C² to 14C² (3.5× saving); (3) label smoothing as a regulariser (target distribution: 0.9 for true class, 0.1/(K-1) for others); (4) BatchNorm applied throughout the auxiliary classifier. These changes reduced computation by a factor of 4 while improving accuracy to 78.8% top-1 on ImageNet.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def count_params(m): return sum(p.numel() for p in m.parameters())
+
+in_ch, out_ch, n = 256, 256, 7
+
+# Standard nxn conv
+standard = nn.Sequential(
+    nn.Conv2d(in_ch, out_ch, n, padding=n//2, bias=False),
+    nn.BatchNorm2d(out_ch), nn.ReLU(inplace=True))
+
+# Factored into two 3x3 convs (for n=5 case)
+factored_5x5 = nn.Sequential(
+    nn.Conv2d(in_ch, out_ch, 3, padding=1, bias=False),
+    nn.BatchNorm2d(out_ch), nn.ReLU(inplace=True),
+    nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False),
+    nn.BatchNorm2d(out_ch), nn.ReLU(inplace=True))
+
+# Asymmetric factorization: 1xn + nx1
+asymmetric = nn.Sequential(
+    nn.Conv2d(in_ch, out_ch, (1, n), padding=(0, n//2), bias=False),
+    nn.BatchNorm2d(out_ch), nn.ReLU(inplace=True),
+    nn.Conv2d(out_ch, out_ch, (n, 1), padding=(n//2, 0), bias=False),
+    nn.BatchNorm2d(out_ch), nn.ReLU(inplace=True))
+
+x = torch.randn(2, in_ch, 17, 17)
+for name, m in [('{}x{} standard'.format(n,n), standard),
+                ('two 3x3', factored_5x5),
+                ('1x{}+{}x1'.format(n,n), asymmetric)]:
+    print('{:&lt;18} params={:&gt;8,}  out={}'.format(name, count_params(m), m(x).shape))
+</code></pre>
+<h2>Xception: Extreme Inception</h2>
+<p>Xception (Chollet, 2017) takes Inception to its logical extreme: if Inception modules are essentially depthwise separable convolutions (spatial filtering per channel, followed by cross-channel mixing), why not replace all convolutions with depthwise separable operations? Xception uses 36 depthwise separable conv layers in a linear stack with residual connections. A depthwise separable conv applies a spatial 3×3 filter to each input channel independently (depthwise), then mixes channels with a 1×1 conv (pointwise). For C input and output channels, this costs C×9 + C² parameters vs C²×9 for a standard conv — roughly a 1/9 + 1/C saving, typically 8–9× fewer parameters.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def count_params(m): return sum(p.numel() for p in m.parameters())
+
+class DepthwiseSeparable(nn.Module):
+    '''Xception-style depthwise separable convolution block.'''
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.dw = nn.Conv2d(in_ch, in_ch, 3, padding=1, groups=in_ch, bias=False)
+        self.pw = nn.Conv2d(in_ch, out_ch, 1, bias=False)
+        self.bn = nn.BatchNorm2d(out_ch)
+        self.relu = nn.ReLU(inplace=True)
+    def forward(self, x): return self.relu(self.bn(self.pw(self.dw(x))))
+
+class StandardConvBlock(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.conv = nn.Conv2d(in_ch, out_ch, 3, padding=1, bias=False)
+        self.bn   = nn.BatchNorm2d(out_ch)
+        self.relu = nn.ReLU(inplace=True)
+    def forward(self, x): return self.relu(self.bn(self.conv(x)))
+
+in_ch, out_ch = 256, 256
+std = StandardConvBlock(in_ch, out_ch)
+dws = DepthwiseSeparable(in_ch, out_ch)
+x = torch.randn(2, in_ch, 28, 28)
+
+ratio = count_params(std) / count_params(dws)
+theory = 1/9 + 1/out_ch
+print('Standard conv:   {:&gt;8,} params  output {}'.format(count_params(std), std(x).shape))
+print('DW Separable:    {:&gt;8,} params  output {}'.format(count_params(dws), dws(x).shape))
+print('Reduction: {:.2f}x  (theory: 1/9+1/C = {:.4f})'.format(ratio, theory))
+</code></pre>
+<h2>Inception Versions Comparison</h2>
+<p>Each Inception version addresses a specific limitation of its predecessor: v1 introduced multi-scale parallel branches; v3 factorised operations for efficiency; v4 added residual connections for easier training; Xception replaced inception blocks with depthwise separable convolutions entirely.</p>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Year</th>
+<th>Params</th>
+<th>GFLOPs</th>
+<th>Top-1 Acc</th>
+<th>Key Innovation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GoogLeNet (v1)</td>
+<td>2014</td>
+<td>5M</td>
+<td>1.5</td>
+<td>69.8%</td>
+<td>Inception module + auxiliary classifiers</td>
+</tr>
+<tr>
+<td>Inception-v3</td>
+<td>2016</td>
+<td>23M</td>
+<td>5.7</td>
+<td>78.8%</td>
+<td>Factorized 5×5 + asymmetric 1×n, label smoothing</td>
+</tr>
+<tr>
+<td>Inception-v4</td>
+<td>2016</td>
+<td>42M</td>
+<td>12.3</td>
+<td>80.0%</td>
+<td>Deeper inception with uniform stem block</td>
+</tr>
+<tr>
+<td>Inception-ResNet-v2</td>
+<td>2016</td>
+<td>55M</td>
+<td>13.2</td>
+<td>80.4%</td>
+<td>Inception modules + residual shortcuts</td>
+</tr>
+<tr>
+<td>Xception</td>
+<td>2017</td>
+<td>22M</td>
+<td>8.4</td>
+<td>79.0%</td>
+<td>All convolutions replaced by depthwise separable</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>GoogLeNet achieved AlexNet-level accuracy with 12x fewer parameters — demonstrating that architectural design matters more than raw scale.</li>
+<li>1x1 convolutions are now universal: they appear in ResNet bottlenecks, MobileNet, EfficientNet, and transformer projection layers.</li>
+<li>Asymmetric factorisation (1xn + nx1) inspired the use of depthwise separable convolutions in MobileNet and ShuffleNet.</li>
+<li>Auxiliary classifiers were largely abandoned after residual connections provided a cleaner solution to the vanishing gradient problem.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

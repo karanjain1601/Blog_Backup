@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tree of Thoughts | Notes Backup</title>
+  <meta name="description" content="Generalizing chain-of-thought to a tree search where the LLM explores multiple reasoning branches, evaluates intermediate states, and uses BFS/DFS to find the best solution path." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Tree of Thoughts</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Generalizing chain-of-thought to a tree search where the LLM explores multiple reasoning branches, evaluates intermediate states, and uses BFS/DFS to find the best solution path.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Tree of Thoughts</h1>
+<p>Tree of Thoughts (Yao et al., 2023) generalises chain-of-thought and self-consistency into a unified framework for deliberate problem solving. Where chain-of-thought generates a single linear reasoning path and self-consistency samples multiple independent paths before voting, Tree of Thoughts (ToT) treats reasoning as a search problem over a tree of partial solutions. The LLM is used in two roles: as a generator that proposes candidate next-steps (thoughts) from any given partial solution, and as an evaluator that scores the promise of each intermediate state. A search algorithm — BFS, DFS, or beam search — traverses the tree, expanding promising nodes and pruning hopeless branches. This structure allows the model to explore multiple reasoning directions, backtrack from dead ends, and look ahead across multiple steps before committing to a path. On the Game of 24 (construct a formula using four numbers that evaluates to 24), standard CoT solves only 4% of problems and self-consistency at N=100 reaches only 9%, while ToT-BFS solves 74%. The improvement comes from deliberate search: ToT can try '4+5=9, 9+6=15, 15*?=24... this branch fails, backtrack' in a way that linear reasoning cannot.</p>
+<h2>Overview</h2>
+<p>The Tree of Thoughts framework decomposes reasoning into three components. First, a thought decomposition that defines what constitutes one reasoning step — this could be a single sentence, an equation, a paragraph, or a code fragment, depending on the task. Second, a thought generator function that, given the current partial solution state, proposes k candidate next thoughts. Third, a state evaluator function that, given any partial solution, returns a score estimating how promising that branch is. These three components are combined with a search strategy (BFS or DFS) to explore the reasoning tree. BFS maintains a fixed-width frontier of the most promising partial solutions at each depth level, expanding each one and keeping the top-k children for the next level. DFS explores a single branch to completion and backtracks when the evaluator score falls below a threshold. Both strategies use significantly more LLM calls than chain-of-thought — a depth-3 tree with branching factor k=5 uses 1+5+25+125=156 evaluator calls plus 3+15+75=93 generator calls — but they can solve problems that no linear reasoning strategy can approach.</p>
+<h2>From Chain to Tree</h2>
+<p>Standard chain-of-thought generates one token at a time, committing irrevocably to each token before generating the next. Self-consistency samples multiple independent chains but evaluates only at the end — it cannot redirect a chain mid-generation based on early signs of failure. Tree of Thoughts introduces two capabilities that neither approach has: intermediate evaluation and backtracking. Intermediate evaluation allows the framework to score a reasoning state after each step (or each few steps) rather than waiting until the end. If a partial solution scores poorly early, it is pruned from the frontier before more computation is wasted on it. Backtracking allows DFS to return to a previously explored state and try a different branch. These capabilities mirror classical AI planning: CoT is like forward-chaining with no lookahead, self-consistency is like running N independent forward chains and picking the best final state, and ToT is like A* search or alpha-beta pruning in the reasoning space. The difference is that every operator (next-step generator) and every heuristic (state evaluator) is implemented by an LLM call, making the search both flexible and expensive.</p>
+<h2>Thought Generation</h2>
+<p>The thought generator takes a partial solution state and produces k candidate next steps. The generation can be done in two modes: independent sampling (generate k thoughts in k separate API calls, each sampling independently from temperature T &gt; 0) or sequential proposal (generate k thoughts in a single call by asking the LLM to produce a numbered list of k distinct continuations). Independent sampling produces more diverse thoughts but uses k API calls per expansion; sequential proposal uses one call but may produce less diverse thoughts since the model generates all k in a single sequence and may repeat variations. In practice, sequential proposal with explicit diversity instructions ('Generate 5 distinct next steps, each taking a different approach') provides a good balance of diversity and efficiency. The granularity of a thought — how much reasoning it contains — is a critical design decision: too fine-grained (single words or short phrases) makes the tree too deep to search effectively; too coarse-grained (full paragraphs) reduces the branching opportunities and makes the search similar to self-consistency.</p>
+<pre><code class="language-python">import re
+from dataclasses import dataclass, field
+from typing import Optional
+import anthropic
+
+@dataclass
+class Thought:
+    content: str
+    value: float = 0.0
+    depth: int = 0
+    parent: Optional['Thought'] = field(default=None, repr=False)
+
+def generate_thoughts(state: str, k: int = 3) -&gt; list:
+    client = anthropic.Anthropic()
+    resp = client.messages.create(
+        model='claude-opus-4-5', max_tokens=500,
+        messages=[{'role': 'user', 'content': 'State:\n' + state + '\nGenerate ' + str(k) + ' distinct next reasoning steps (numbered):'}]
+    )
+    lines = resp.content[0].text.strip().split('\n')
+    return [l.lstrip('0123456789.-) ').strip() for l in lines if l.strip()][:k]
+
+def evaluate_state(content: str, problem: str) -&gt; float:
+    client = anthropic.Anthropic()
+    prompt = 'Problem: ' + problem + '\nReasoning: ' + content[:500] + '\nRate 1-10 (just a number):'
+    resp = client.messages.create(
+        model='claude-opus-4-5', max_tokens=5,
+        messages=[{'role': 'user', 'content': prompt}]
+    )
+    try:
+        return float(resp.content[0].text.strip()) / 10.0
+    except ValueError:
+        return 0.5
+
+def bfs_tot(problem: str, depth: int = 3, k: int = 3) -&gt; Thought:
+    frontier = [Thought(content='Problem: ' + problem, depth=0)]
+    for d in range(depth):
+        candidates = []
+        for node in frontier:
+            for text in generate_thoughts(node.content, k=k):
+                child = Thought(content=node.content + '\n' + text, depth=d + 1, parent=node)
+                child.value = evaluate_state(child.content, problem)
+                candidates.append(child)
+        frontier = sorted(candidates, key=lambda t: t.value, reverse=True)[:k]
+    return max(frontier, key=lambda t: t.value)
+</code></pre>
+<p>The BFS implementation above maintains a fixed-width frontier of k nodes at each depth level. After expansion, the top-k children by evaluator score become the next frontier. This beam-search-style exploration guarantees that the most promising paths are always in the frontier, at the cost of potentially missing solutions that require passing through a low-scoring intermediate state. The Thought dataclass stores the full accumulated reasoning text, its value score, and a reference to its parent, enabling path reconstruction for debugging and explainability. In production implementations, the client object should be shared across calls rather than instantiated per call to avoid connection overhead, and all evaluations in a single BFS level can be batched asynchronously for efficiency.</p>
+<h2>State Evaluation</h2>
+<p>The state evaluator is the most important component of Tree of Thoughts — it determines which branches get expanded and which are pruned. A good evaluator must reliably distinguish between promising intermediate reasoning states and dead-end branches, even when the solution is not yet complete. There are three evaluation strategies. The first is value prompt: ask the LLM to score the current partial solution on a scale from 1 to 10, using few-shot examples that calibrate what a score of 3, 6, or 9 looks like for the specific task. The second is vote aggregation: generate multiple completions of the partial solution and vote on whether they reach a valid answer — states from which many completions succeed are scored high. The third is task-specific heuristics: for math problems, check intermediate numeric values against known constraints; for Game of 24, check whether the remaining numbers can possibly combine to the target. The value prompt approach is the most general, the vote aggregation is the most accurate but expensive, and task-specific heuristics are the most efficient when available.</p>
+<pre><code class="language-python">import anthropic
+
+VALUE_PROMPT_TEMPLATE = '''Evaluate this reasoning step for the problem below.
+
+Scale:
+1-3 = clearly wrong or stuck (arithmetic error, wrong direction, no progress)
+4-6 = uncertain (plausible but unverified; might work, might not)
+7-9 = promising (correct so far; on a clear path to the answer)
+10  = solved (the final answer is present and correct)
+
+Example (Problem: use 4 5 6 10 to make 24):
+Step: &quot;4 * 6 = 24&quot; -&gt; Rating: 10
+Step: &quot;10 - 4 = 6, now have 6 6 5&quot; -&gt; Rating: 7
+Step: &quot;5 + 6 = 11, now have 4 10 11&quot; -&gt; Rating: 5
+Step: &quot;4 * 10 = 40, too large&quot; -&gt; Rating: 2
+
+Now evaluate:
+Problem: {problem}
+Reasoning step: {step}
+Rating (single integer 1-10):'''
+
+def score_step(problem: str, step: str) -&gt; float:
+    client = anthropic.Anthropic()
+    prompt = VALUE_PROMPT_TEMPLATE.format(problem=problem, step=step[:400])
+    resp = client.messages.create(
+        model='claude-opus-4-5', max_tokens=5,
+        messages=[{'role': 'user', 'content': prompt}]
+    )
+    raw = resp.content[0].text.strip().split()[0]
+    try:
+        return max(1, min(10, int(raw))) / 10.0
+    except ValueError:
+        return 0.5
+
+test_steps = [
+    ('Use 4 5 6 10 to make 24', '5 - 4 = 1, now use 1, 6, 10'),
+    ('Use 4 5 6 10 to make 24', '6 * 4 = 24, done!'),
+    ('Use 4 5 6 10 to make 24', '10 + 5 = 15, 15 * 6 = 90, too large'),
+]
+for prob, step in test_steps:
+    score = score_step(prob, step)
+    print('Score {:.1f}: {}'.format(score, step[:55]))
+</code></pre>
+<p>The few-shot calibration in the value prompt is essential for reliable scoring. Without examples, the LLM tends to assign scores in a narrow band (5–7) regardless of the actual quality of the intermediate state, which provides insufficient signal for the search algorithm to distinguish promising from hopeless branches. With 3–4 well-chosen examples that span the full 1–10 range, the evaluator becomes significantly more discriminative. For best results, include one example that is clearly solved (score 10), one that is on track (score 7–8), one that is ambiguous (score 4–5), and one that is clearly wrong (score 1–2). The examples should be from the same task domain as the target problem.</p>
+<h2>BFS and DFS Search</h2>
+<p>BFS (breadth-first search) and DFS (depth-first search) have complementary strengths in the Tree of Thoughts setting. BFS maintains the top-k frontier nodes at each depth level and expands all of them before moving to the next level. This provides broad coverage of the solution space and guarantees that the best-scoring path at any depth is always in the frontier. However, BFS uses k times more evaluator calls per level than DFS and cannot go deep without incurring exponential cost. DFS explores a single branch to completion or until the evaluator score drops below a threshold, then backtracks and tries the next branch. DFS can go much deeper than BFS for the same call budget, but it may get stuck in high-scoring but ultimately fruitless branches. In practice, BFS with k=3–5 is recommended for problems with shallow reasoning trees (3–4 levels), while DFS with aggressive pruning (threshold=0.4) is better for problems that may require longer chains of reasoning. MCTS-guided ToT, which assigns visit counts to nodes and balances exploration with exploitation using the UCB formula, is the most capable but also the most complex to implement.</p>
+<pre><code class="language-python">import re
+from typing import Optional
+import anthropic
+
+PRUNE_THRESHOLD = 0.35
+
+def dfs_tot(problem: str, state: str = '', depth: int = 0,
+            max_depth: int = 4, k: int = 3) -&gt; Optional[tuple]:
+    client = anthropic.Anthropic()
+    if depth == max_depth:
+        resp = client.messages.create(
+            model='claude-opus-4-5', max_tokens=80,
+            messages=[{'role': 'user', 'content': 'Problem: ' + problem + '\n' + state + '\nFinal answer:'}]
+        )
+        return (state + '\n' + resp.content[0].text.strip(), 1.0)
+    steps_resp = client.messages.create(
+        model='claude-opus-4-5', max_tokens=300,
+        messages=[{'role': 'user', 'content': 'Problem: ' + problem + '\n' + state + '\nNext ' + str(k) + ' distinct steps (numbered):'}]
+    )
+    steps = [l.lstrip('0123456789.) ').strip() for l in steps_resp.content[0].text.split('\n') if l.strip()][:k]
+    best = None
+    for step in steps:
+        score_resp = client.messages.create(
+            model='claude-opus-4-5', max_tokens=5,
+            messages=[{'role': 'user', 'content': state + '\n' + step + '\nScore 1-10 toward: ' + problem}]
+        )
+        try:
+            score = float(score_resp.content[0].text.strip()) / 10.0
+        except ValueError:
+            score = 0.5
+        if score &lt; PRUNE_THRESHOLD:
+            continue
+        result = dfs_tot(problem, state + '\n' + step, depth + 1, max_depth, k)
+        if result and (best is None or result[1] &gt; best[1]):
+            best = result
+    return best
+
+solution = dfs_tot('Use the numbers 4, 6, 8, 3 with +, -, *, / to make 24')
+print('Solution found:', solution is not None)
+</code></pre>
+<h2>Implementation</h2>
+<p>Implementing Tree of Thoughts for production use requires careful management of LLM call volume. The number of calls grows rapidly: for BFS at depth d with branching factor k, the generator calls are k+k^2+...+k^d = k(k^d-1)/(k-1) and the evaluator calls are the same. For k=5, d=3: generator calls = 5+25+125 = 155, evaluator calls = 155, total = 310 calls per problem. This cost is only justified when the problem genuinely requires search — when greedy decoding and self-consistency fail consistently. Before deploying ToT, always verify that simpler methods fail: if CoT achieves 70%+ on a task, self-consistency at N=20 will likely push it to 85%+ at far lower cost than ToT. ToT should be reserved for tasks where CoT achieves below 30% and the problem has a well-defined evaluation criterion (so the state evaluator can be calibrated). Prompt caching for the system prompt and few-shot examples can reduce the per-call cost significantly — the base prompt that includes the problem statement and evaluation instructions can be cached, and only the varying partial solution text is billed at full rate.</p>
+<pre><code class="language-python">import math
+from dataclasses import dataclass
+import anthropic
+
+@dataclass
+class SearchCost:
+    method: str
+    generator_calls: int
+    evaluator_calls: int
+    total_calls: int
+    cost_usd: float
+
+def compute_tot_costs(k: int = 5, d: int = 3,
+                      price_per_mtok_in: float = 3.0,
+                      price_per_mtok_out: float = 15.0) -&gt; list:
+    avg_tokens = 300 * price_per_mtok_in / 1e6 + 200 * price_per_mtok_out / 1e6
+    bfs_gen  = sum(k ** i for i in range(1, d + 1))
+    bfs_eval = bfs_gen
+    bfs_cost = round((bfs_gen + bfs_eval) * avg_tokens, 4)
+    dfs_gen  = k * d
+    dfs_cost = round(dfs_gen * 2 * avg_tokens, 4)
+    sc_cost  = round(20 * avg_tokens, 4)
+    cot_cost = round(1 * avg_tokens, 4)
+    results = [
+        SearchCost('Standard CoT',   1,   0,   1,  cot_cost),
+        SearchCost('SC (N=20)',       0,  20,  20,  sc_cost),
+        SearchCost('ToT-BFS d=' + str(d) + ' k=' + str(k), bfs_gen, bfs_eval, bfs_gen + bfs_eval, bfs_cost),
+        SearchCost('ToT-DFS d=' + str(d) + ' k=' + str(k), dfs_gen, dfs_gen,  dfs_gen * 2,        dfs_cost),
+    ]
+    print(f'{&quot;Method&quot;:&lt;22} {&quot;Gen&quot;:&gt;6} {&quot;Eval&quot;:&gt;6} {&quot;Total&quot;:&gt;8} {&quot;Cost($)&quot;:&gt;10} {&quot;vs CoT&quot;:&gt;8}')
+    for r in results:
+        print(f'{r.method:&lt;22} {r.generator_calls:&gt;6} {r.evaluator_calls:&gt;6} {r.total_calls:&gt;8} {r.cost_usd:&gt;9.4f}  {r.cost_usd/cot_cost:&gt;6.1f}x')
+    return results
+
+compute_tot_costs(k=5, d=3)
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Game-24 Accuracy</th>
+<th>API Calls</th>
+<th>Exploration</th>
+<th>Best For</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Standard CoT</td>
+<td>4%</td>
+<td>1</td>
+<td>Single path</td>
+<td>Tasks where greedy reasoning already works</td>
+</tr>
+<tr>
+<td>CoT + SC N=20</td>
+<td>9%</td>
+<td>20</td>
+<td>20 independent paths</td>
+<td>Tasks where diverse sampling helps; single-step inference</td>
+</tr>
+<tr>
+<td>ToT-BFS d=3 k=5</td>
+<td>74%</td>
+<td>310</td>
+<td>Full BFS tree</td>
+<td>Problems requiring systematic search with backtrack</td>
+</tr>
+<tr>
+<td>ToT-DFS d=4 k=3</td>
+<td>62%</td>
+<td>~80</td>
+<td>Depth-first with pruning</td>
+<td>Deeper problems where BFS is too expensive</td>
+</tr>
+<tr>
+<td>MCTS-guided</td>
+<td>78%</td>
+<td>200–500</td>
+<td>UCB exploration balance</td>
+<td>Hard combinatorial tasks with long reasoning chains</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Exponential Call Cost</strong>: Tree of Thoughts uses O(k^d) LLM calls where k is the branching factor and d is the depth — a depth-3 tree with k=5 uses over 310 calls versus 1 for CoT and 20 for self-consistency. Only use ToT when greedy decoding and self-consistency demonstrably fail on the task. Always verify with benchmarking: if CoT achieves above 30% accuracy, try self-consistency first before committing to ToT's cost.</p>
+</blockquote>
+<h2>Comparison with CoT and SC</h2>
+<p>Tree of Thoughts, chain-of-thought, and self-consistency occupy different points on the cost-accuracy-problem-complexity frontier. CoT is O(1) calls and works well on tasks where the model's latent knowledge is sufficient to follow a single correct reasoning path. Self-consistency is O(N) calls and works well on tasks where multiple independent paths can converge on the correct answer through voting — it cannot correct errors within a single path, only vote away paths that error. ToT is O(k^d) calls and works on tasks that require systematic exploration of a search space where early choices determine whether later steps can succeed — it can backtrack and try a different branch, which neither CoT nor SC can do. The practical decision rule is: start with CoT; if CoT fails consistently, try self-consistency at N=20; if self-consistency still fails (implying that no single linear path reaches the answer reliably), move to ToT. The canonical tasks that motivate each method are: CoT for grade-school math and factual QA, SC for competitive math and commonsense reasoning, ToT for combinatorial puzzle solving and complex planning.</p>
+<ul>
+<li>CoT: O(1) calls, single path, good when model knowledge is sufficient for linear reasoning</li>
+<li>Self-consistency: O(N) calls, no branching, good when diverse paths vote to the correct answer</li>
+<li>ToT: O(k^d) calls, full search with backtracking, necessary when no linear path reliably succeeds</li>
+<li>Decision rule: try CoT first, then SC N=20, then ToT — only escalate if the simpler method fails</li>
+<li>ToT is only justified when the task has a well-defined state evaluator that can guide the search</li>
+<li>Game of 24 is the canonical ToT task: CoT 4%, SC 9%, ToT-BFS 74% — 74% justifies the cost</li>
+</ul>
+<h2>Key Takeaways</h2>
+<p>Tree of Thoughts is the most capable prompting framework for problems that require systematic search over a reasoning space, enabling LLMs to solve problems that no linear reasoning strategy can approach. By combining LLM-generated thoughts (candidate next steps), LLM-scored state evaluations, and classical search algorithms (BFS/DFS), ToT transforms the single-path reasoning of CoT into a full planning and backtracking procedure. The cost is significant — hundreds of LLM calls per problem — but justified for tasks where CoT and self-consistency consistently fail. Implementation requires three components: a thought generator, a state evaluator calibrated with few-shot examples, and a search algorithm. Use BFS for shallow trees (d=3) and DFS with pruning for deeper trees. Always benchmark the simpler methods first: ToT's cost is only worthwhile when greedy and ensemble methods have demonstrably failed.</p>
+<ul>
+<li>Define the thought granularity carefully — one equation, one sentence, or one code line per step</li>
+<li>Calibrate the state evaluator with 4 few-shot examples spanning scores 1, 4, 7, and 10</li>
+<li>Use BFS with k=3–5 for shallow problems (d=3); use DFS with PRUNE_THRESHOLD=0.4 for deeper trees</li>
+<li>Total BFS calls = k*(k^d - 1)/(k-1) generators + same evaluators; budget before deployment</li>
+<li>Use prompt caching on the static system prompt to reduce per-call cost by 30–60%</li>
+<li>Benchmark ladder: CoT first, then SC N=20, then ToT — only escalate when the cheaper method fails</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

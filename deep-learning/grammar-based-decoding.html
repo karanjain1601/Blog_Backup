@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Grammar-Based Constrained Decoding | Notes Backup</title>
+  <meta name="description" content="Masking invalid tokens at each decoding step using a grammar (regex, JSON schema, CFG) to guarantee syntactically valid structured output without relying on the model&#x27;s formatting ability." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Grammar-Based Constrained Decoding</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Masking invalid tokens at each decoding step using a grammar (regex, JSON schema, CFG) to guarantee syntactically valid structured output without relying on the model&#x27;s formatting ability.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Grammar-Based Constrained Decoding</h1>
+<p>Grammar-based constrained decoding intercepts the token sampling process at each generation step and masks out all tokens that would make the partial output syntactically invalid under a declared grammar. The model never sees the masked tokens as candidates — they are set to negative infinity logit before the softmax — so the generated sequence is guaranteed to match the grammar regardless of the model's formatting ability. This provides a hard syntactic guarantee that prompt engineering cannot: no amount of instruction following produces 100% validity, but grammar constraints do, because validity is enforced mechanically at each token, not requested behaviorally through natural language.</p>
+<h2>Overview</h2>
+<p>The technique originated in the structured prediction literature but was adapted for LLM decoding in 2023–2024 with the releases of the Outlines library (dottxt-ai), Guidance (Microsoft), LMQL (ETH Zürich), and native grammar support in llama.cpp (GBNF format). Each implementation shares the same core idea: compile the grammar into a finite state machine (FSM) or pushdown automaton (PDA) that tracks the current parse state, and at each decoding step, consult the automaton to determine which tokens can legally extend the current partial output. The valid token set is typically a small fraction of the vocabulary, creating a sparse logit mask that is applied before sampling.</p>
+<p>Grammar-based decoding addresses a fundamental asymmetry in LLM training: models are trained on vast amounts of natural language and only a small fraction of structured data examples. Even after instruction tuning, the model's formatting instincts are statistical approximations of format rules rather than guaranteed rule-following behavior. A grammar constraint replaces this approximate behavior with an exact enforcement mechanism, making the output quality independent of the model's formatting knowledge for the syntactic dimension while still depending entirely on the model for semantic content.</p>
+<h2>Token Masking Mechanism</h2>
+<p>At each decoding step, the LLM's forward pass produces a logit vector of shape (vocabulary_size,). Before sampling, the constrained decoding engine applies a binary mask: valid_logits = logits + mask, where mask[i] = 0 for valid tokens and mask[i] = -inf for invalid tokens. After applying the mask, the softmax distribution assigns zero probability to invalid tokens, making their selection impossible. The constraint engine maintains a current FSM state and, given that state, precomputes which tokens in the vocabulary are valid continuations. This precomputation is the main performance bottleneck: for a 50K-token vocabulary, checking each token against the FSM state requires 50K state-transition queries per decoding step.</p>
+<pre><code class="language-python">import re
+import torch
+from typing import Dict, List, Optional, Set
+
+class RegexFSM:
+    &quot;&quot;&quot;Minimal FSM for single-character regex matching used as a token masking demo.&quot;&quot;&quot;
+    def __init__(self, pattern: str):
+        self.pattern = re.compile(pattern)
+        self.partial  = ''
+
+    def accepts_extension(self, token: str) -&gt; bool:
+        candidate = self.partial + token
+        return bool(re.match(self.pattern, candidate))
+
+    def advance(self, token: str) -&gt; None:
+        self.partial += token
+
+    def is_complete(self) -&gt; bool:
+        return bool(self.pattern.fullmatch(self.partial))
+
+def apply_token_mask(
+    logits:     torch.Tensor,
+    fsm:        RegexFSM,
+    vocab:      List[str],
+    fill_value: float = float('-inf'),
+) -&gt; torch.Tensor:
+    &quot;&quot;&quot;Zero out logits for tokens that cannot extend the FSM's current partial string.&quot;&quot;&quot;
+    masked = logits.clone()
+    for idx, token in enumerate(vocab):
+        if not fsm.accepts_extension(token):
+            masked[idx] = fill_value
+    return masked
+
+vocab  = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '-', '+', 'A', 'B', ' ', '\n']
+fsm    = RegexFSM(r'[+-]?\d{1,4}')
+logits = torch.randn(len(vocab))
+masked = apply_token_mask(logits, fsm, vocab)
+valid  = [vocab[i] for i in range(len(vocab)) if masked[i] != float('-inf')]
+print(f'Valid tokens at start: {valid}')  # Only digit chars and sign chars
+fsm.advance('+'); fsm.advance('4')
+masked2 = apply_token_mask(logits, fsm, vocab)
+valid2  = [vocab[i] for i in range(len(vocab)) if masked2[i] != float('-inf')]
+print(f'Valid tokens after &quot;+4&quot;: {valid2}')  # Digits only now
+</code></pre>
+<p>Real implementations precompute the valid token set for each FSM state rather than re-evaluating all vocabulary tokens at every step. Since the FSM has a finite number of states (typically thousands for JSON schemas, millions for context-free grammars), and the vocabulary is fixed, the mapping from (FSM state) to (valid token set) can be cached after the first decoding pass. Outlines precomputes this index at grammar compilation time; subsequent decoding steps perform a single dictionary lookup to retrieve the valid token mask for the current state.</p>
+<h2>Finite Automata for Regex</h2>
+<p>Regular expression grammars are the simplest case: any regex can be compiled to a deterministic finite automaton (DFA) in O(2^n) states in the worst case (due to exponential subset construction), but most practical regexes produce DFAs with tens to hundreds of states. Each DFA state corresponds to a point in the matching process — for example, a phone number regex \d{3}-\d{3}-\d{4} has states for 'start', 'first digit', 'second digit', 'third digit', 'hyphen', and so on. The token masking logic queries: given the current DFA state, which vocabulary tokens, when appended to the current partial string, lead to a valid DFA state rather than a reject state?</p>
+<pre><code class="language-python">import outlines
+import outlines.models as models
+from outlines import generate
+from typing import List
+
+def demo_regex_constrained_generation(
+    model_name: str = 'mistralai/Mistral-7B-v0.1',
+    n_samples:  int = 10,
+) -&gt; List[str]:
+    &quot;&quot;&quot;Generate phone numbers that are guaranteed to match the declared regex pattern.&quot;&quot;&quot;
+    model = models.transformers(model_name, device='cuda')
+    phone_pattern = r'\(\d{3}\) \d{3}-\d{4}'
+    generator = generate.regex(model, phone_pattern)
+    results = []
+    for i in range(n_samples):
+        prompt  = 'Phone number:'
+        sampled = generator(prompt, max_tokens=20, temperature=0.8)
+        results.append(sampled)
+        import re
+        is_valid = bool(re.fullmatch(phone_pattern, sampled))
+        print(f'  Sample {i+1:02d}: {sampled!r}  valid={is_valid}')
+    valid_count = sum(
+        bool(__import__('re').fullmatch(phone_pattern, s)) for s in results
+    )
+    print(f'\nValidity rate: {valid_count}/{n_samples} = {valid_count/n_samples:.0%}')
+    return results
+
+results = demo_regex_constrained_generation(n_samples=10)
+print('Constrained decoding guarantees 100% validity regardless of model size or temperature.')
+</code></pre>
+<p>The key advantage of regex-constrained decoding over prompt-based formatting is that it works at any sampling temperature. Prompt-based formatting requires low temperature (typically 0.0–0.3) to reliably follow format instructions, because high temperatures make the model more likely to deviate from patterns. Constrained decoding maintains 100% syntactic validity at any temperature — even temperature=2.0, which produces nearly random token selection, cannot violate the grammar because invalid tokens are masked before sampling.</p>
+<h2>Context-Free Grammar Constraints</h2>
+<p>Regular expressions cannot represent all structured formats: JSON with arbitrary nesting, Python code with matched brackets, and XML with matching open/close tags require context-free grammars (CFG). CFGs add a stack to the DFA, enabling recognition of nested structures. llama.cpp implements grammar-constrained decoding using GBNF (GGML BNF), a context-free grammar format adapted from BNF. LMQL compiles SQL-like queries into CFG constraints that guide generation. The pushdown automaton (PDA) for a JSON grammar typically has hundreds of states and stack symbols, making precomputation of valid token sets more expensive than for DFAs but still tractable.</p>
+<p>Context-free grammar constraints are particularly valuable for programming language generation. Code completion systems that guarantee syntactically valid Python, SQL, or JSON patches can use CFG constraints compiled from the language's formal grammar. The constraint ensures that generated code can be parsed without syntax errors, which is a minimum requirement for downstream compilation or execution. Semantic validity — whether the code does the right thing — remains the model's responsibility and cannot be enforced at the grammar level.</p>
+<h2>JSON Schema Decoding</h2>
+<p>JSON Schema decoding compiles a JSON Schema definition into a grammar that constrains the model to produce output matching both JSON syntax rules and the declared structural schema: required fields, value types, enum values, and array item types are all enforced at the token level. Outlines and Guidance both support this via <code>generate.json(model, schema)</code>, where <code>schema</code> is a Pydantic model class or a raw JSON Schema dict. The compiled grammar accepts exactly those token sequences that produce JSON objects satisfying the schema.</p>
+<pre><code class="language-python">import outlines
+import outlines.models as models
+from outlines import generate
+from pydantic import BaseModel, Field
+from typing import List, Literal
+import json
+
+class SentimentResult(BaseModel):
+    sentiment: Literal['positive', 'negative', 'neutral']
+    score:     float = Field(ge=0.0, le=1.0)
+    keywords:  List[str] = Field(max_length=5)
+    reasoning: str
+
+def batch_sentiment(
+    texts:      List[str],
+    model_name: str = 'mistralai/Mistral-7B-Instruct-v0.2',
+) -&gt; List[SentimentResult]:
+    model     = models.transformers(model_name, device='cuda')
+    generator = generate.json(model, SentimentResult)
+    results   = []
+    for text in texts:
+        prompt = f'Analyze sentiment of: &quot;{text}&quot;'
+        raw    = generator(prompt, max_tokens=150)
+        parsed = SentimentResult.model_validate_json(raw)
+        results.append(parsed)
+        print(f'  {parsed.sentiment:8s}  score={parsed.score:.2f}  kw={parsed.keywords}')
+    print(f'\nAll {len(results)} samples are valid SentimentResult objects: 100% guarantee')
+    return results
+
+texts = [
+    'The product quality is superb and delivery was lightning fast.',
+    'Terrible experience, support team was unhelpful and rude.',
+    'Average product, nothing special, works as described.',
+]
+results = batch_sentiment(texts)
+</code></pre>
+<p>The <code>Literal</code> type in Pydantic maps directly to a JSON Schema <code>enum</code> constraint, which is trivially expressible in a DFA — the model must produce exactly one of the declared string values for that field. The <code>ge=0.0, le=1.0</code> constraint on <code>score</code> maps to a numeric range, which requires the grammar to accept only floating-point literals in [0.0, 1.0]. Outlines handles this by compiling a regex for valid floats in the range and integrating it into the JSON grammar's numeric production rule.</p>
+<h2>Outlines and Guidance Libraries</h2>
+<p>The ecosystem of grammar-constrained decoding libraries has matured rapidly. Outlines (dottxt-ai) is the most popular Python library, offering regex, JSON Schema, Pydantic, and CFG constraints with support for HuggingFace Transformers, llama-cpp-python, and vLLM backends. Guidance (Microsoft) takes a different approach: it uses a template language where structured generation directives (like <code>gen(regex=...)</code>) are interleaved with prompt text, allowing complex mixed generation patterns. LMQL (ETH Zürich) compiles SQL-like queries into generation constraints, enabling conditional logic based on partial outputs. llama.cpp's native GBNF grammar mode provides the best performance for CPU and consumer GPU inference.</p>
+<table>
+<thead>
+<tr>
+<th>Library</th>
+<th>Grammar type</th>
+<th>Speed overhead</th>
+<th>Guarantee</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Outlines regex</td>
+<td>Regular expression (DFA)</td>
+<td>~5%</td>
+<td>100% syntactic match</td>
+<td>Precomputes state-to-token index; very fast after compile</td>
+</tr>
+<tr>
+<td>Outlines JSON</td>
+<td>JSON Schema (DFA + CFG)</td>
+<td>10–20%</td>
+<td>100% schema conformance</td>
+<td>Supports Pydantic; nested objects add FSM states</td>
+</tr>
+<tr>
+<td>Guidance</td>
+<td>Template + CFG directives</td>
+<td>15–30%</td>
+<td>100% per directive</td>
+<td>Mixed text/structured generation; token healing feature</td>
+</tr>
+<tr>
+<td>LMQL</td>
+<td>SQL-like constraint language</td>
+<td>20–40%</td>
+<td>100% per constraint</td>
+<td>Supports conditional logic on partial outputs</td>
+</tr>
+<tr>
+<td>llama.cpp GBNF</td>
+<td>BNF context-free grammar</td>
+<td>5–15%</td>
+<td>100% CFG membership</td>
+<td>Best for CPU/consumer GPU; GBNF format is verbose</td>
+</tr>
+<tr>
+<td>vLLM guided</td>
+<td>JSON Schema / regex</td>
+<td>5–10%</td>
+<td>100% syntactic</td>
+<td>Production-grade serving; integrates with Outlines FSM</td>
+</tr>
+</tbody>
+</table>
+<p>Choosing between libraries involves three dimensions: backend compatibility, grammar expressiveness, and operational overhead. Outlines is the best default for research and API servers using HuggingFace models. llama.cpp GBNF is optimal for local/edge deployment on consumer hardware. Guidance's token healing feature — which backtracks over greedily committed tokens that violate the grammar — makes it the most robust choice for complex interleaved generation patterns. vLLM's built-in guided decoding is the right choice when serving at scale, as it avoids per-request grammar compilation overhead.</p>
+<h2>Performance Impact</h2>
+<p>Grammar-based decoding adds latency in two phases: compile time (converting the grammar to an FSM and precomputing the state-to-token index) and per-step time (applying the token mask at each decoding step). Compile time ranges from milliseconds for simple regexes to several seconds for large JSON schemas with many fields. Outlines caches the compiled FSM per grammar, so compile time is a one-time cost amortized across all requests using the same schema. Per-step overhead is dominated by the sparse masking operation: for a 50K-vocabulary model with a grammar that allows 100 valid tokens per state, the masking is a single indexed update taking microseconds.</p>
+<pre><code class="language-python">import time
+import torch
+import outlines
+import outlines.models as models
+from outlines import generate
+from pydantic import BaseModel
+from typing import Literal
+
+class ReviewOutput(BaseModel):
+    sentiment: Literal['positive', 'negative', 'neutral']
+    score:     float
+    summary:   str
+
+def benchmark_decoding(
+    model_name: str = 'mistralai/Mistral-7B-Instruct-v0.2',
+    n_trials:   int = 20,
+) -&gt; None:
+    model     = models.transformers(model_name, device='cuda')
+    prompt    = 'Analyze: &quot;This product exceeded all my expectations.&quot;'
+    unconstrained = generate.text(model)
+    json_gen      = generate.json(model, ReviewOutput)
+    # Warmup
+    unconstrained(prompt, max_tokens=60)
+    json_gen(prompt, max_tokens=120)
+    t0 = time.perf_counter()
+    for _ in range(n_trials):
+        unconstrained(prompt, max_tokens=60)
+    unconstrained_ms = (time.perf_counter() - t0) / n_trials * 1000
+    t1 = time.perf_counter()
+    for _ in range(n_trials):
+        json_gen(prompt, max_tokens=120)
+    json_ms = (time.perf_counter() - t1) / n_trials * 1000
+    overhead_pct = (json_ms - unconstrained_ms) / unconstrained_ms * 100
+    print(f'Unconstrained :  {unconstrained_ms:6.1f} ms/request')
+    print(f'JSON-constrained: {json_ms:6.1f} ms/request')
+    print(f'Overhead:          {overhead_pct:+5.1f}%  (valid rate 100% vs ~85%)')
+
+benchmark_decoding(n_trials=20)
+</code></pre>
+<p>The performance tradeoff is favorable in most production scenarios. A 10–20% latency increase in exchange for 100% parse validity eliminates retry logic, error handling code, and the latency cost of retries (typically 1.5–3x full request latency per retry). For applications where downstream parsing errors require human intervention, the reliability improvement far outweighs the per-request overhead. The main case where constrained decoding is not worth the overhead is unconstrained creative generation, where no schema constraint applies and the token masking logic would never activate.</p>
+<h2>Key Takeaways</h2>
+<blockquote>
+<p><strong>Grammar Constraints Guarantee Syntax, Not Semantics</strong>: Grammar-based decoding guarantees syntactic validity but not semantic correctness — the output will always be valid JSON but might not satisfy business logic constraints; combine with Pydantic validators for full reliability.</p>
+</blockquote>
+<ul>
+<li>Grammar-based decoding masks invalid tokens at each step before sampling — invalid output is physically impossible, not behaviorally discouraged.</li>
+<li>Regular expression constraints compile to DFAs and add approximately 5% latency overhead with O(states × vocab) precomputed index lookup.</li>
+<li>JSON Schema constraints combine DFA (field sequencing) and CFG (nesting) and add 10–20% latency; Outlines caches the FSM per schema for amortized cost.</li>
+<li>Outlines is the best default for HuggingFace backends; llama.cpp GBNF is optimal for local/edge deployment; vLLM built-in guided decoding for production serving.</li>
+<li>Grammar constraints guarantee syntactic validity only — combine with Pydantic field validators for semantic correctness (value ranges, enum membership, cross-field dependencies).</li>
+<li>Compile the grammar once and cache the FSM; per-request overhead is only the mask application, not recompilation.</li>
+<li>The 10–20% latency overhead of constrained decoding is almost always justified by eliminating retry logic and parse error handling from the application layer.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

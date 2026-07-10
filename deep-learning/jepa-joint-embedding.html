@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>JEPA — Joint-Embedding Predictive Architecture | Notes Backup</title>
+  <meta name="description" content="JEPA (LeCun 2022; I-JEPA He et al. 2023) predicts representations of masked target regions in embedding space rather than pixel space, producing semantic features without augmentation-induced biases and outperforming MAE on linear probe benchmarks." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>JEPA — Joint-Embedding Predictive Architecture</h1>
+      <ul class='note-meta'><li><strong>description:</strong> JEPA (LeCun 2022; I-JEPA He et al. 2023) predicts representations of masked target regions in embedding space rather than pixel space, producing semantic features without augmentation-induced biases and outperforming MAE on linear probe benchmarks.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>JEPA — Joint-Embedding Predictive Architecture</h1>
+<p>JEPA (Joint-Embedding Predictive Architecture, LeCun 2022) argues that the right objective for self-supervised learning is to predict abstract representations of the world, not low-level sensory details. Instead of asking a model to reconstruct pixels (MAE) or match augmented views (SimCLR, DINO), a JEPA model learns to predict the representation of a masked or future region from the context. The crucial difference is where prediction happens: in embedding space, not pixel space. This frees the model from learning to reconstruct irrelevant texture and noise, focusing the capacity on semantic content.</p>
+<ul>
+<li>I-JEPA (He et al. 2023): predict patch-level representations of masked target blocks from context encoder output.</li>
+<li>Target encoder: EMA of context encoder — slowly evolving stable targets, prevents mode collapse.</li>
+<li>Predictor: narrow Transformer with positional conditioning — predicts abstract content, never raw pixels.</li>
+<li>No augmentation engineering: the masking strategy alone creates the self-supervised signal.</li>
+<li>V-JEPA (Bardes et al. 2024): temporal extension — predict future frame representations from past context.</li>
+</ul>
+<h2>Prediction in Embedding Space vs Pixel Space</h2>
+<p>MAE reconstructs pixel values of masked patches. This forces the encoder to capture both semantic content and low-level appearance (texture, color, noise) — since the decoder must recover pixel-accurate values. I-JEPA instead asks: given the representation of the visible context, predict the representation of the masked target as computed by a target encoder. The predictor never sees pixels of the target; it only sees the position of the target block and the context representation. This makes the problem strictly semantic — there is no gradient signal for pixel noise.</p>
+<h2>I-JEPA Masking Strategy</h2>
+<p>I-JEPA (Image Joint-Embedding Predictive Architecture, He et al. 2023) uses a carefully designed masking strategy to create a challenging but solvable predictive task. The image is divided into patches. A context region is selected (a random block covering roughly 85% of the image with some exclusions). Several target blocks (4 on average) are sampled from the remaining positions — these are the regions the predictor must reconstruct in embedding space. The predictor receives: (1) the context encoder output, and (2) the positional encoding of each target block. It must output a representation that matches the target encoder's representation at those positions.</p>
+<pre><code class="language-python">import torch
+import random
+
+
+def sample_block(grid_h: int, grid_w: int, min_scale: float, max_scale: float,
+                 aspect_min: float = 0.75, aspect_max: float = 1.5):
+    &quot;&quot;&quot;Sample a random rectangular block on the patch grid.&quot;&quot;&quot;
+    scale = random.uniform(min_scale, max_scale)
+    area = int(grid_h * grid_w * scale)
+    aspect = random.uniform(aspect_min, aspect_max)
+    h = int((area * aspect) ** 0.5)
+    w = int(area / max(h, 1))
+    h, w = min(h, grid_h), min(w, grid_w)
+    top  = random.randint(0, grid_h - h)
+    left = random.randint(0, grid_w - w)
+    indices = []
+    for r in range(top, top + h):
+        for c in range(left, left + w):
+            indices.append(r * grid_w + c)
+    return sorted(set(indices))
+
+
+def ijepa_masks(grid_h=14, grid_w=14, n_targets=4,
+                ctx_scale=(0.85, 1.0), tgt_scale=(0.15, 0.2)):
+    &quot;&quot;&quot;Return context_mask and list of target_masks (patch indices).&quot;&quot;&quot;
+    all_patches = list(range(grid_h * grid_w))
+    ctx_block   = sample_block(grid_h, grid_w, *ctx_scale)
+    # Context: all patches NOT excluded by any target block
+    target_masks = []
+    excluded = set()
+    for _ in range(n_targets):
+        tgt = sample_block(grid_h, grid_w, *tgt_scale)
+        target_masks.append(tgt)
+        excluded.update(tgt)
+    context_mask = [p for p in ctx_block if p not in excluded]
+    return context_mask, target_masks
+
+
+ctx, targets = ijepa_masks()
+print(f'Context patches: {len(ctx)}  |  Target blocks: {len(targets)}')
+for i, t in enumerate(targets):
+    print(f'  Target {i}: {len(t)} patches, first={t[0]}, last={t[-1]}')
+</code></pre>
+<h2>Predictor with Positional Conditioning</h2>
+<p>The predictor in I-JEPA is a narrow Transformer that takes two inputs: (1) the context encoder's output tokens (CLS + context patch tokens), and (2) a set of learnable mask tokens, one per target patch, with positional embeddings injected at the target positions. The predictor must attend from each mask token to the context tokens and produce a prediction that matches the target encoder representation at that position. The predictor is intentionally shallow (4 Transformer blocks) — it should not be so powerful that it can solve the task without learning good context representations.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+
+class IJEPAPredictor(nn.Module):
+    &quot;&quot;&quot;Narrow Transformer predictor: context tokens + target positions -&gt; target representations.&quot;&quot;&quot;
+
+    def __init__(self, embed_dim: int = 768, pred_dim: int = 384,
+                 depth: int = 4, num_heads: int = 6):
+        super().__init__()
+        self.proj_in  = nn.Linear(embed_dim, pred_dim)   # project context to pred_dim
+        self.mask_tok = nn.Parameter(torch.randn(1, 1, pred_dim) * 0.02)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=pred_dim, nhead=num_heads,
+            dim_feedforward=pred_dim * 4, dropout=0.0, batch_first=True,
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=depth)
+        self.proj_out = nn.Linear(pred_dim, embed_dim)   # back to target space
+
+    def forward(self, ctx_tokens: torch.Tensor,
+                target_pos_emb: torch.Tensor) -&gt; torch.Tensor:
+        &quot;&quot;&quot;ctx_tokens: (B, N_ctx, D)  target_pos_emb: (B, N_tgt, D)
+        Returns predictions: (B, N_tgt, D) in target encoder space.
+        &quot;&quot;&quot;
+        B, N_tgt, _ = target_pos_emb.shape
+        ctx = self.proj_in(ctx_tokens)                        # (B, N_ctx, pred_dim)
+        # Mask tokens initialised identically + positional offset
+        mask_toks = self.mask_tok.expand(B, N_tgt, -1)
+        mask_toks = mask_toks + self.proj_in(target_pos_emb)  # inject target position
+        tokens = torch.cat([ctx, mask_toks], dim=1)           # (B, N_ctx+N_tgt, pred_dim)
+        out    = self.transformer(tokens)                      # (B, N_ctx+N_tgt, pred_dim)
+        preds  = self.proj_out(out[:, -N_tgt:, :])            # (B, N_tgt, D)
+        return preds
+
+
+pred = IJEPAPredictor(embed_dim=768, pred_dim=384)
+ctx  = torch.randn(2, 120, 768)
+tgt_pos = torch.randn(2, 30, 768)
+out = pred(ctx, tgt_pos)
+print('Predictor output shape:', out.shape)   # (2, 30, 768)
+</code></pre>
+<h2>I-JEPA Training Loop</h2>
+<p>The training loop has three components: a context encoder (updated by gradient), a target encoder (EMA of context encoder, no gradient), and the predictor. The context encoder processes only the unmasked context patches. The target encoder processes the full image and provides the target representations. The predictor takes context encoder output + target position embeddings and produces predictions. The loss is MSE between the predictor output and the target encoder's patch tokens at the target positions. The EMA momentum increases from 0.996 to 1.0 over training (cosine schedule).</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import copy
+
+
+def build_ijepa(encoder_cls, embed_dim=768, pred_dim=384, momentum=0.996):
+    ctx_encoder = encoder_cls()
+    tgt_encoder = copy.deepcopy(ctx_encoder)
+    for p in tgt_encoder.parameters():
+        p.requires_grad_(False)
+    predictor = IJEPAPredictor(embed_dim=embed_dim, pred_dim=pred_dim)
+    return ctx_encoder, tgt_encoder, predictor
+
+
+@torch.no_grad()
+def ema_update(ctx_enc, tgt_enc, momentum=0.996):
+    for p_c, p_t in zip(ctx_enc.parameters(), tgt_enc.parameters()):
+        p_t.data = momentum * p_t.data + (1 - momentum) * p_c.data
+
+
+def ijepa_step(ctx_enc, tgt_enc, predictor, optimizer, imgs,
+               ctx_mask, target_masks, pos_embed):
+    &quot;&quot;&quot;Single I-JEPA training step.
+    imgs: (B, 3, H, W)  ctx_mask: list of patch indices (context)
+    target_masks: list of lists of patch indices (targets)
+    pos_embed: (1, N_patches, D) positional embeddings
+    &quot;&quot;&quot;
+    # Context encoder — only context patches
+    ctx_tokens = ctx_enc(imgs, mask=ctx_mask)           # (B, N_ctx, D)
+
+    # Target encoder — full image, no grad
+    with torch.no_grad():
+        all_target_tokens = tgt_enc(imgs)               # (B, N_all, D)
+
+    # Predictor
+    total_loss = 0.0
+    for tgt_idx in target_masks:
+        tgt_pos  = pos_embed[:, tgt_idx, :]             # (1, N_tgt, D)
+        tgt_pos  = tgt_pos.expand(imgs.size(0), -1, -1)
+        preds    = predictor(ctx_tokens, tgt_pos)        # (B, N_tgt, D)
+        targets  = all_target_tokens[:, tgt_idx, :].detach()
+        total_loss += F.mse_loss(preds, targets)
+
+    optimizer.zero_grad()
+    total_loss.backward()
+    optimizer.step()
+    ema_update(ctx_enc, tgt_enc)
+    return total_loss.item()
+
+
+print('I-JEPA: context encoder + EMA target encoder + narrow predictor.')
+print('Loss: MSE between predictor output and target encoder patch tokens.')
+</code></pre>
+<h2>Video-JEPA and Extensions</h2>
+<p>V-JEPA (Bardes et al. 2024) extends I-JEPA to video by predicting future frame representations in embedding space. A context clip (visible frames) is encoded; the predictor must produce representations of future frames given their temporal position. This approach learns temporal dynamics without requiring optical flow supervision, frame reconstruction, or contrastive negatives. V-JEPA features generalise well to action recognition benchmarks. World-JEPA (proposed direction) extends this principle to multi-modal joint embedding for robotics — predict future state representations from actions and observations.</p>
+<blockquote>
+<p><strong>JEPA vs MAE — Abstract vs Concrete Prediction</strong>: MAE's pixel reconstruction objective forces the model to learn both semantic content (which scene is this?) and low-level appearance (what color is each pixel?). JEPA's embedding-space prediction forces only semantic content — the predictor has no access to raw target pixels. On linear probe (which measures semantic quality of frozen features), I-JEPA exceeds MAE-ViT-L by ~3% on ImageNet. On fine-tuning, both methods reach similar accuracy, since fine-tuning corrects representation deficiencies.</p>
+</blockquote>
+<h2>Comparison — I-JEPA vs MAE vs DINO vs V-JEPA</h2>
+<pre><code class="language-python">import pandas as pd
+
+# Reported benchmark numbers from respective papers
+results = [
+    {'Method': 'MAE ViT-L',   'Prediction Target': 'Pixels',         'Augmentation': 'None',
+     'Masking': '75% random', 'Linear Probe': 75.8, 'Fine-tune': 85.9},
+    {'Method': 'I-JEPA ViT-L','Prediction Target': 'Embeddings',     'Augmentation': 'None',
+     'Masking': 'Block (15-20%)', 'Linear Probe': 79.3, 'Fine-tune': 86.7},
+    {'Method': 'DINO ViT-B',  'Prediction Target': 'CLS token',      'Augmentation': 'Strong',
+     'Masking': 'None',       'Linear Probe': 78.2, 'Fine-tune': 82.8},
+    {'Method': 'V-JEPA ViT-H','Prediction Target': 'Video embeddings','Augmentation': 'None',
+     'Masking': 'Spatio-temporal', 'Linear Probe': 81.9, 'Fine-tune': 88.1},
+]
+
+df = pd.DataFrame(results)
+print(df.to_string(index=False))
+print('\nKey: I-JEPA beats MAE on linear probe (+3.5%) without any augmentation.')
+print('Fine-tune numbers are closer — frozen quality is where the gap is largest.')
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Prediction Target</th>
+<th>Augmentation</th>
+<th>Masking</th>
+<th>Linear Probe</th>
+<th>Semantic Quality</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MAE ViT-L</td>
+<td>Pixels (pixel space)</td>
+<td>None</td>
+<td>75% random patches</td>
+<td>75.8%</td>
+<td>Low (fine-tune needed)</td>
+</tr>
+<tr>
+<td>I-JEPA ViT-L</td>
+<td>Patch embeddings</td>
+<td>None</td>
+<td>Block targets (15-20%)</td>
+<td>79.3%</td>
+<td>High (frozen usable)</td>
+</tr>
+<tr>
+<td>DINO ViT-B</td>
+<td>CLS token (global)</td>
+<td>Strong (crops, jitter)</td>
+<td>None</td>
+<td>78.2%</td>
+<td>High (semantic clusters)</td>
+</tr>
+<tr>
+<td>V-JEPA ViT-H</td>
+<td>Video frame embeddings</td>
+<td>None</td>
+<td>Spatio-temporal block</td>
+<td>81.9%</td>
+<td>High (temporal dynamics)</td>
+</tr>
+</tbody>
+</table>
+<p>I-JEPA achieves high-quality frozen representations without the augmentation engineering required by contrastive methods. It is particularly attractive when augmentation design is difficult — for example, medical images where color jitter and random cropping may change clinical meaning. The prediction-in-embedding-space principle is general and applies to any modality where a target encoder can provide meaningful abstract representations.</p>
+<h2>Practical Considerations and Limitations</h2>
+<p>I-JEPA's masking strategy is sensitive to block size and number of target blocks. Too few targets make the task easy; too many leave too little context for the predictor. The predictor depth is a critical hyperparameter: too deep a predictor can reconstruct targets from context without forcing the encoder to learn good representations. The EMA momentum schedule (0.996 → 1.0, cosine) ensures the target encoder remains stable. One practical limitation: I-JEPA requires the target encoder to process the full unmasked image at every step, doubling the forward pass cost compared to MAE, which encodes only visible patches. At ViT-H scale, this makes I-JEPA roughly 2× more compute-intensive per step than MAE at equal batch size.</p>
+    </article>
+  </main>
+</body>
+</html>

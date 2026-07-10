@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Reranking for RAG | Notes Backup</title>
+  <meta name="description" content="Using cross-encoder models to re-score an initial set of retrieved candidates for relevance, dramatically improving precision at the cost of additional latency — the most reliable RAG quality booster." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Reranking for RAG</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Using cross-encoder models to re-score an initial set of retrieved candidates for relevance, dramatically improving precision at the cost of additional latency — the most reliable RAG quality booster.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Reranking for RAG</h1>
+<p>Reranking is a second-stage relevance scoring step applied after an initial retrieval phase. The initial retrieval — typically a bi-encoder dense search or BM25 — returns a broad candidate set of 20–100 documents quickly but imprecisely, because bi-encoders compress query and document into fixed vectors independently before comparing them. A reranker then jointly encodes each query-document pair through a cross-encoder, producing a much more accurate relevance score. The top-k reranked documents (typically 3–10) are passed to the LLM. Reranking typically improves answer accuracy by 15–30% on domain-specific RAG benchmarks, making it the single highest-ROI improvement available to a basic retrieval pipeline.</p>
+<h2>Overview</h2>
+<p>A standard RAG pipeline without reranking suffers from a precision problem: the vector similarity between a query embedding and a document embedding is a coarse relevance proxy, because both are compressed into a fixed-size vector independently before comparison. The dot product measures geometric proximity in embedding space, not semantic entailment. A document that shares vocabulary with the query but does not actually answer it can rank higher than a document that answers the query using different words. Reranking addresses this by applying a cross-encoder that attends over the full query-document pair jointly, using its full BERT-style attention to detect whether the document actually contains the answer to the query. The cost is quadratic in the number of candidates (each query-document pair is scored independently), but since the candidate set is small (20–100 docs), the latency is acceptable.</p>
+<h2>Bi-Encoder vs Cross-Encoder</h2>
+<p>Bi-encoders (used in dense retrieval) encode query and document separately: encode(query) → q_vector, encode(doc) → d_vector, score = dot(q_vector, d_vector). This allows documents to be pre-encoded offline and indexed in FAISS, enabling sub-millisecond retrieval over millions of documents at query time. The price is the information bottleneck: the fixed-size vector cannot capture fine-grained interactions between query tokens and document tokens. Cross-encoders process the concatenated query and document as a single input sequence: encode([CLS] query [SEP] document [SEP]) → scalar score. The full self-attention over the combined sequence allows every query token to directly attend to every document token, producing a much more accurate relevance score. Cross-encoders cannot be pre-indexed and scale linearly with the number of candidates scored, so they are used only on the small candidate set returned by the bi-encoder.</p>
+<pre><code class="language-python">from sentence_transformers import CrossEncoder, SentenceTransformer
+import numpy as np
+import faiss
+
+def retrieve_candidates(query: str, docs: list, bi_model_name: str, top_n: int = 20) -&gt; list:
+    &quot;&quot;&quot;Fast bi-encoder retrieval: return indices of top_n candidate documents.&quot;&quot;&quot;
+    model  = SentenceTransformer(bi_model_name)
+    d_embs = model.encode(docs, normalize_embeddings=True).astype(np.float32)
+    q_emb  = model.encode([query], normalize_embeddings=True).astype(np.float32)
+    index  = faiss.IndexFlatIP(d_embs.shape[1])
+    index.add(d_embs)
+    _, idxs = index.search(q_emb, min(top_n, len(docs)))
+    return idxs[0].tolist()
+
+def cross_encoder_rerank(query: str, docs: list, candidate_idxs: list,
+                          ce_model: str = &quot;cross-encoder/ms-marco-MiniLM-L-6-v2&quot;) -&gt; list:
+    &quot;&quot;&quot;Score each query-candidate pair with a cross-encoder; return sorted results.&quot;&quot;&quot;
+    reranker  = CrossEncoder(ce_model, max_length=512)
+    pairs     = [(query, docs[i]) for i in candidate_idxs]
+    scores    = reranker.predict(pairs)
+    ranked    = sorted(zip(candidate_idxs, scores), key=lambda x: x[1], reverse=True)
+    return [{&quot;doc_idx&quot;: idx, &quot;ce_score&quot;: float(sc), &quot;text&quot;: docs[idx][:80]}
+            for idx, sc in ranked]
+
+docs  = [f&quot;Document {i}: topic about NLP technique {i % 8}.&quot; for i in range(30)]
+query = &quot;how does retrieval augmented generation improve LLM accuracy&quot;
+cands = retrieve_candidates(query, docs, &quot;all-MiniLM-L6-v2&quot;, top_n=20)
+print(f&quot;Bi-encoder top-3 (orig order): {cands[:3]}&quot;)
+results = cross_encoder_rerank(query, docs, cands)
+print(f&quot;Cross-encoder top-3: {[r['doc_idx'] for r in results[:3]]}&quot;)
+</code></pre>
+<h2>Cross-Encoder Architecture</h2>
+<p>A cross-encoder for reranking is a standard BERT-style transformer with a linear head on the [CLS] token that outputs a single scalar relevance score. The model is fine-tuned on MS-MARCO or similar passage-ranking datasets using a pointwise or listwise loss: given a query, a relevant passage, and several irrelevant passages, the model learns to assign a higher score to the relevant passage. The most commonly used cross-encoders are the ms-marco-MiniLM family from the sentence-transformers library. MiniLM-L-6-v2 has 6 layers and ~22M parameters, scoring 100 passages in about 50ms on CPU — a practical latency for retrieval pipelines. The full BERT-large cross-encoder (ms-marco-bert-base) is more accurate but takes ~200ms for 100 passages. For latency-sensitive pipelines, MiniLM-L-6 at top-50 candidates is the recommended default.</p>
+<pre><code class="language-python">import torch
+from transformers import AutoTokenizer, AutoModel
+import torch.nn.functional as F
+
+def colbert_encode(texts: list, model, tokenizer, device: str = &quot;cpu&quot;) -&gt; tuple:
+    &quot;&quot;&quot;Encode texts to per-token embeddings (batch, seq_len, dim) for ColBERT scoring.&quot;&quot;&quot;
+    enc = tokenizer(texts, padding=True, truncation=True,
+                    max_length=128, return_tensors=&quot;pt&quot;).to(device)
+    with torch.no_grad():
+        out = model(**enc)
+    # Normalise each token embedding to the unit sphere
+    token_embs = F.normalize(out.last_hidden_state, p=2, dim=-1)
+    return token_embs, enc[&quot;attention_mask&quot;]
+
+def colbert_maxsim(q_embs: torch.Tensor, d_embs: torch.Tensor,
+                    q_mask: torch.Tensor, d_mask: torch.Tensor) -&gt; float:
+    &quot;&quot;&quot;MaxSim score: sum over query tokens of max cosine similarity to any doc token.&quot;&quot;&quot;
+    sims = torch.matmul(q_embs[0], d_embs[0].T)   # (q_len, d_len)
+    sims[:, d_mask[0] == 0] = -1e9                 # mask padding in doc
+    max_sims = sims.max(dim=-1).values             # (q_len,)
+    max_sims[q_mask[0] == 0] = 0.0                # mask padding in query
+    return max_sims.sum().item()
+
+model_name = &quot;bert-base-uncased&quot;
+tok   = AutoTokenizer.from_pretrained(model_name)
+model = AutoModel.from_pretrained(model_name)
+query    = &quot;what is retrieval augmented generation&quot;
+passages = [&quot;RAG combines retrieval with generation to ground LLM answers in real documents.&quot;,
+            &quot;Convolutional networks process images through local filter operations.&quot;]
+q_embs, q_mask = colbert_encode([query], model, tok)
+for p in passages:
+    d_embs, d_mask = colbert_encode([p], model, tok)
+    score = colbert_maxsim(q_embs, d_embs, q_mask, d_mask)
+    print(f&quot;ColBERT score {score:.3f}: {p[:60]}&quot;)
+</code></pre>
+<h2>ColBERT Late Interaction</h2>
+<p>ColBERT (Contextualized Late Interaction over BERT) is a hybrid between bi-encoders and cross-encoders. It encodes query and document separately into per-token embeddings rather than pooled vectors, then computes a MaxSim interaction score: for each query token, find the maximum cosine similarity to any document token, then sum these per-token maximums. This late interaction allows document token embeddings to be pre-computed and stored offline (like a bi-encoder), while the MaxSim operation captures fine-grained token-level relevance signals (approaching cross-encoder accuracy). ColBERT v2 achieves near-cross-encoder accuracy on MS-MARCO while supporting offline indexing through its compressed token embedding index. It is the recommended choice when both retrieval latency and ranking accuracy are critical, and when infrastructure can support the larger per-document index (ColBERT stores ~100 vectors per document rather than 1).</p>
+<h2>Reranker Training</h2>
+<p>Off-the-shelf cross-encoders trained on MS-MARCO generalise well to many English-language domains but degrade on specialised corpora (legal, biomedical, financial, code). Fine-tuning a cross-encoder on domain-specific data typically improves MRR@10 by 5–15 percentage points. The training data format is triplets: (query, positive passage, negative passage). Hard negatives — passages that are retrieved by a bi-encoder but are not actually relevant — are far more valuable than random negatives for training strong rerankers. Hard negatives can be mined using a trained bi-encoder: retrieve top-100 for each training query, label the irrelevant ones as hard negatives, and include them in the triplet dataset. Training uses cross-entropy or margin ranking loss. Starting from a pre-trained MS-MARCO model and fine-tuning for 1–3 epochs on 10K–100K domain triplets is a practical recipe for most production deployments.</p>
+<pre><code class="language-python">import cohere
+import time
+
+def cohere_rerank(query: str, documents: list, api_key: str,
+                   model: str = &quot;rerank-english-v3.0&quot;, top_n: int = 5) -&gt; list:
+    &quot;&quot;&quot;Rerank documents with Cohere rerank API; measure latency and rank changes.&quot;&quot;&quot;
+    co = cohere.Client(api_key)
+    t0 = time.perf_counter()
+    response = co.rerank(
+        query=query,
+        documents=documents,
+        model=model,
+        top_n=top_n,
+        return_documents=True,
+    )
+    latency_ms = (time.perf_counter() - t0) * 1000
+    results = []
+    for r in response.results:
+        orig_rank = r.index + 1
+        new_rank  = len(results) + 1
+        delta     = orig_rank - new_rank
+        arrow     = f&quot;(+{delta})&quot; if delta &gt; 0 else f&quot;({delta})&quot; if delta &lt; 0 else &quot;(=)&quot;
+        snippet   = (r.document.text if r.document else documents[r.index])[:60]
+        results.append({&quot;orig_rank&quot;: orig_rank, &quot;new_rank&quot;: new_rank,
+                         &quot;score&quot;: r.relevance_score, &quot;snippet&quot;: snippet})
+        print(f&quot;Orig {orig_rank:&gt;2} -&gt; New {new_rank:&gt;2} {arrow:&gt;5}  score={r.relevance_score:.4f}  {snippet}&quot;)
+    print(f&quot;\nLatency: {latency_ms:.0f}ms  model={model}  docs={len(documents)}&quot;)
+    return results
+
+docs  = [f&quot;Passage {i}: content about natural language processing topic {i}.&quot; for i in range(10)]
+result = cohere_rerank(&quot;how does NLP process language semantics&quot;, docs, &quot;YOUR_API_KEY&quot;)
+</code></pre>
+<h2>Commercial Reranker APIs</h2>
+<p>Several providers offer hosted reranking APIs that require no model deployment. Cohere's rerank-english-v3.0 and rerank-multilingual-v3.0 are the most widely used, supporting up to 10,000 documents per call with latency of 100–500ms for 50 candidates. Voyage AI's rerank-1 and rerank-2 models offer competitive accuracy on technical and code-heavy corpora. Jina AI's jina-reranker-v2 is available both as an API and as an open-weight model. Commercial APIs are the fastest path to production reranking: no GPU infrastructure, pay-per-request pricing (~$0.002 per 1000 tokens), and managed model updates. The tradeoff is data privacy (all queries and documents leave your infrastructure) and per-query cost at high volume. For high-volume production workloads (&gt;1M daily queries), self-hosted open-weight rerankers such as BAAI/bge-reranker-v2-m3 offer better economics.</p>
+<pre><code class="language-python">import time
+import numpy as np
+from sentence_transformers import SentenceTransformer, CrossEncoder
+import faiss
+
+def full_rag_rerank_pipeline(query: str, docs: list,
+                              retrieve_top: int = 50, final_top: int = 5) -&gt; dict:
+    &quot;&quot;&quot;Retrieve top-50 with dense bi-encoder, rerank with cross-encoder, return top-5.&quot;&quot;&quot;
+    bi_model = SentenceTransformer(&quot;all-MiniLM-L6-v2&quot;)
+    ce_model = CrossEncoder(&quot;cross-encoder/ms-marco-MiniLM-L-6-v2&quot;, max_length=512)
+    # Stage 1: dense retrieval
+    d_embs = bi_model.encode(docs, normalize_embeddings=True).astype(np.float32)
+    index  = faiss.IndexFlatIP(d_embs.shape[1])
+    index.add(d_embs)
+    t0 = time.perf_counter()
+    q_emb = bi_model.encode([query], normalize_embeddings=True).astype(np.float32)
+    _, hits = index.search(q_emb, min(retrieve_top, len(docs)))
+    retrieval_ms = (time.perf_counter() - t0) * 1000
+    # Stage 2: cross-encoder reranking
+    candidates = [(i, docs[i]) for i in hits[0] if i &lt; len(docs)]
+    t1 = time.perf_counter()
+    scores = ce_model.predict([(query, doc) for _, doc in candidates])
+    ranked = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)
+    rerank_ms = (time.perf_counter() - t1) * 1000
+    top5 = [docs[idx] for (idx, _), _ in ranked[:final_top]]
+    print(f&quot;Stage 1 (bi-encoder): {len(candidates)} candidates in {retrieval_ms:.0f}ms&quot;)
+    print(f&quot;Stage 2 (cross-enc) : top-{final_top} from {len(candidates)} in {rerank_ms:.0f}ms&quot;)
+    return {&quot;top_docs&quot;: top5, &quot;retrieval_ms&quot;: retrieval_ms, &quot;rerank_ms&quot;: rerank_ms}
+
+docs   = [f&quot;Article {i}: information about deep learning concept {i % 12}.&quot; for i in range(100)]
+result = full_rag_rerank_pipeline(&quot;explain how neural networks learn representations&quot;, docs)
+for i, d in enumerate(result[&quot;top_docs&quot;]):
+    print(f&quot;  Final rank {i+1}: {d}&quot;)
+</code></pre>
+<h2>Latency vs Quality Tradeoff</h2>
+<p>Reranking adds latency proportional to the number of candidates scored and the size of the cross-encoder. MiniLM-L-6-v2 scoring 50 candidates takes 40–80ms on CPU, which is acceptable for interactive applications. Scoring 200 candidates with the same model takes 150–300ms. On GPU, these times drop to 5–20ms for 50 candidates. The quality vs latency Pareto frontier: score 20–30 candidates with MiniLM-L-6 for the best latency-quality tradeoff in CPU-only deployments; score 50–100 candidates with a larger model (bert-base-uncased fine-tuned on MS-MARCO) for maximum accuracy when GPU is available. Retrieving more initial candidates generally helps reranking up to ~100; beyond that, the marginal benefit diminishes because the additional candidates are increasingly irrelevant and a fixed-capacity reranker can only do so much. Always benchmark end-to-end pipeline latency (retrieval + reranking) under realistic load rather than measuring each stage in isolation.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>MRR@10 improvement</th>
+<th>Latency (50 docs, CPU)</th>
+<th>Cost</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>No reranker</td>
+<td>baseline (0%)</td>
+<td>0ms</td>
+<td>Free</td>
+<td>Bi-encoder order; fast but imprecise</td>
+</tr>
+<tr>
+<td>MiniLM cross-encoder</td>
+<td>+18–22%</td>
+<td>40–80ms</td>
+<td>Free (self-hosted)</td>
+<td>Best latency-quality for CPU; 22M params</td>
+</tr>
+<tr>
+<td>BERT-base cross-encoder</td>
+<td>+22–28%</td>
+<td>150–250ms</td>
+<td>Free (self-hosted)</td>
+<td>Higher accuracy; needs GPU for low latency</td>
+</tr>
+<tr>
+<td>ColBERT late interaction</td>
+<td>+20–25%</td>
+<td>10–30ms (GPU)</td>
+<td>Free (self-hosted)</td>
+<td>Pre-indexable token embs; needs ColBERT infra</td>
+</tr>
+<tr>
+<td>Cohere rerank-v3</td>
+<td>+22–28%</td>
+<td>100–300ms (API)</td>
+<td>~$0.002/1K tokens</td>
+<td>Managed; no GPU needed; data leaves infra</td>
+</tr>
+<tr>
+<td>Voyage rerank-2</td>
+<td>+23–29%</td>
+<td>100–400ms (API)</td>
+<td>~$0.002/1K tokens</td>
+<td>Strong on technical/code corpora</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Highest ROI Single Improvement</strong>: Reranking 50 candidates to 5 typically improves answer accuracy by 15–25% on domain-specific RAG — it's the highest ROI single improvement you can make to a basic RAG pipeline. Before investing in better embeddings, hybrid BM25+dense retrieval, or query rewriting, add a MiniLM cross-encoder reranker. The latency cost (40–80ms on CPU) is almost always worth the accuracy gain.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<p>Reranking is the most reliable, highest-ROI upgrade to any basic RAG pipeline. The two-stage architecture — fast bi-encoder retrieval of 20–100 candidates, followed by precise cross-encoder reranking to 3–10 results — combines the scalability of dense retrieval with the accuracy of full-sequence scoring. MiniLM-L-6-v2 is the practical default: 22M parameters, free, self-hosted, and scores 50 candidates in under 80ms on CPU. For maximum accuracy, fine-tune a cross-encoder on domain-specific hard negatives. For zero-infrastructure deployments, Cohere or Voyage reranker APIs are excellent drop-in options. ColBERT is the best choice when both pre-indexing and high accuracy are required. Always retrieve at least 20–50 candidates before reranking; reranking 5 candidates has minimal benefit over the original retrieval order.</p>
+<ul>
+<li>Two-stage pipeline: bi-encoder retrieves top-50, cross-encoder reranks to top-5</li>
+<li>Cross-encoders jointly attend over query+document; far more accurate than bi-encoder similarity</li>
+<li>MiniLM-L-6-v2 is the default: free, 22M params, 40–80ms for 50 candidates on CPU</li>
+<li>Fine-tune on hard negatives (bi-encoder top-100 minus ground truth) for domain adaptation</li>
+<li>Cohere rerank-v3 / Voyage rerank-2 for zero-infra deployments; ~$0.002 per 1K tokens</li>
+<li>ColBERT late interaction: offline-indexable token embeddings with near cross-encoder accuracy</li>
+<li>Always retrieve ≥20 candidates before reranking; benefit plateaus beyond ~100 candidates</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

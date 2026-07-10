@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Naive Bayes — Generative Classifier and Feature Independence | Notes Backup</title>
+  <meta name="description" content="Derive Naive Bayes as a generative classifier using Bayes&#x27; theorem, understand Gaussian/Multinomial/Bernoulli variants, implement Laplace smoothing, and compare against logistic regression on text and small datasets." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Naive Bayes — Generative Classifier and Feature Independence</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Derive Naive Bayes as a generative classifier using Bayes&#x27; theorem, understand Gaussian/Multinomial/Bernoulli variants, implement Laplace smoothing, and compare against logistic regression on text and small datasets.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Naive Bayes — Generative Classifier and Feature Independence</h1>
+<p>Naive Bayes is a generative classifier that models the joint distribution p(x, y) = p(y) · p(x|y), then applies Bayes' theorem to get the posterior p(y|x) ∝ p(y) · p(x|y). The 'naive' assumption is that features are conditionally independent given the class: p(x|y) = Πᵢ p(xᵢ|y). Despite being wrong in practice, this assumption produces surprisingly competitive classifiers, especially for text classification. Naive Bayes trains in O(nd) time, handles missing features naturally, and updates incrementally — making it ideal for streaming data and very small datasets.</p>
+<h2>Bayes' Theorem and the Generative Framework</h2>
+<p>Using Bayes' theorem: p(y=k|x) = p(y=k) · p(x|y=k) / p(x). Since p(x) is the same for all classes, classification reduces to argmax_k p(y=k) · p(x|y=k). With the naive independence assumption: log p(y=k|x) ∝ log p(y=k) + Σᵢ log p(xᵢ|y=k). Each term is a prior (class frequency) plus a sum of log-likelihoods — a linear function in log-probability space. This means Naive Bayes is a linear classifier in log-space, which is why it achieves competitive accuracy despite the naive assumption: many real-world classification tasks are approximately linearly separable in log-feature space.</p>
+<h2>Gaussian, Multinomial, and Bernoulli Variants</h2>
+<p>The variant of Naive Bayes is determined by the assumed distribution of p(xᵢ|y=k). Gaussian NB: xᵢ|y=k ~ N(μₖᵢ, σ²ₖᵢ). Parameters estimated by class-conditional means and variances. Used for continuous features. Multinomial NB: models word counts; p(xᵢ|y=k) is the probability of word i in class k. Most common for document classification with TF or count features. Bernoulli NB: models binary features (word present/absent); each dimension is Bernoulli(θₖᵢ). Complement NB: fits parameters for the complement of each class — more numerically stable for imbalanced text datasets.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.datasets import load_iris
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+from sklearn.naive_bayes import GaussianNB
+
+class GaussianNaiveBayes:
+    def fit(self, X, y):
+        self.classes_ = np.unique(y)
+        self.priors_ = {}
+        self.means_  = {}
+        self.vars_   = {}
+        for c in self.classes_:
+            Xc = X[y == c]
+            self.priors_[c] = len(Xc) / len(X)
+            self.means_[c]  = Xc.mean(axis=0)
+            self.vars_[c]   = Xc.var(axis=0) + 1e-9
+        return self
+
+    def _log_likelihood(self, x, c):
+        mu, var = self.means_[c], self.vars_[c]
+        return -0.5 * np.sum(np.log(2 * np.pi * var) + (x - mu)**2 / var)
+
+    def predict(self, X):
+        preds = []
+        for x in X:
+            scores = {c: np.log(self.priors_[c]) + self._log_likelihood(x, c)
+                      for c in self.classes_}
+            preds.append(max(scores, key=scores.get))
+        return np.array(preds)
+
+X, y = load_iris(return_X_y=True)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.3, random_state=42)
+gnb = GaussianNaiveBayes().fit(X_tr, y_tr)
+sk_gnb = GaussianNB().fit(X_tr, y_tr)
+print(f'Gaussian NB scratch: {accuracy_score(y_te, gnb.predict(X_te)):.4f}')
+print(f'Gaussian NB sklearn: {accuracy_score(y_te, sk_gnb.predict(X_te)):.4f}')
+</code></pre>
+<h2>Laplace Smoothing — Handling Zero Probabilities</h2>
+<p>With Multinomial or Bernoulli NB, a word that never appears in a class in the training data gets p(word|class) = 0. Since the joint probability is a product, a single zero probability makes the entire class probability zero regardless of all other features — a catastrophic failure called the zero-frequency problem. Laplace smoothing (add-k smoothing) adds a small count α (typically α=1) to every word-class count: p(xᵢ|y=k) = (count(xᵢ, k) + α) / (count(k) + α·V) where V is the vocabulary size. This guarantees no zero probabilities while barely affecting estimates for frequent words.</p>
+<pre><code class="language-python">import numpy as np
+
+# Demonstrate catastrophic zero probability without smoothing
+vocab = ['good', 'great', 'bad', 'terrible', 'novel_word']
+class_counts = {'pos': {'good': 10, 'great': 8, 'bad': 1},
+                'neg': {'bad': 12, 'terrible': 9, 'good': 2}}
+class_totals = {'pos': 30, 'neg': 40}
+priors = {'pos': 0.5, 'neg': 0.5}
+V = len(vocab)
+
+def predict_nb(text_words, alpha=0):
+    log_scores = {}
+    for c in ['pos', 'neg']:
+        log_p = np.log(priors[c])
+        for word in text_words:
+            count = class_counts[c].get(word, 0)
+            total = class_totals[c]
+            p_word = (count + alpha) / (total + alpha * V)
+            # Without smoothing, p_word=0 causes log(0) = -inf
+            log_p += np.log(p_word) if p_word &gt; 0 else float('-inf')
+        log_scores[c] = log_p
+    return log_scores
+
+test_doc = ['good', 'novel_word']  # novel_word absent from training
+print('Without smoothing (alpha=0):')
+for c, score in predict_nb(test_doc, alpha=0).items():
+    print(f'  {c}: log p = {score}')
+print('\nWith Laplace smoothing (alpha=1):')
+for c, score in predict_nb(test_doc, alpha=1).items():
+    print(f'  {c}: log p = {score:.4f}')
+</code></pre>
+<pre><code class="language-python">import numpy as np
+from sklearn.datasets import fetch_20newsgroups
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.naive_bayes import MultinomialNB, ComplementNB
+from sklearn.pipeline import Pipeline
+from sklearn.metrics import accuracy_score
+
+cats = ['sci.space', 'rec.sport.hockey', 'talk.politics.guns', 'comp.graphics']
+train = fetch_20newsgroups(subset='train', categories=cats,
+                            remove=('headers', 'footers', 'quotes'))
+test  = fetch_20newsgroups(subset='test',  categories=cats,
+                            remove=('headers', 'footers', 'quotes'))
+
+for name, clf in [('MultinomialNB', MultinomialNB(alpha=1.0)),
+                   ('ComplementNB',  ComplementNB(alpha=1.0))]:
+    pipe = Pipeline([('vec', CountVectorizer(max_features=10000)), ('clf', clf)])
+    pipe.fit(train.data, train.target)
+    preds = pipe.predict(test.data)
+    acc = accuracy_score(test.target, preds)
+    print(f'{name}: accuracy={acc:.4f}')
+</code></pre>
+<pre><code class="language-python">import numpy as np
+from sklearn.datasets import make_classification
+from sklearn.naive_bayes import GaussianNB
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import cross_val_score
+
+np.random.seed(42)
+X_full, y_full = make_classification(n_samples=5000, n_features=20,
+                                      n_informative=10, n_redundant=5, random_state=42)
+
+print(f'{'n_train':&gt;8} {'NB acc':&gt;10} {'LR acc':&gt;10} {'Winner':&gt;8}')
+for n_train in [30, 60, 100, 200, 500, 1000, 2000, 5000]:
+    X_sub, y_sub = X_full[:n_train], y_full[:n_train]
+    nb_score = cross_val_score(GaussianNB(), X_sub, y_sub,
+                                cv=5, scoring='accuracy').mean()
+    lr_score = cross_val_score(LogisticRegression(max_iter=500),
+                                X_sub, y_sub, cv=5, scoring='accuracy').mean()
+    winner = 'NB' if nb_score &gt; lr_score else 'LR'
+    print(f'{n_train:&gt;8} {nb_score:&gt;10.4f} {lr_score:&gt;10.4f} {winner:&gt;8}')
+</code></pre>
+<blockquote>
+<p><strong>When Naive Bayes Wins</strong>: Naive Bayes outperforms logistic regression when training data is very small (n &lt; 100), because as a generative model it makes stronger assumptions and therefore needs fewer examples to estimate parameters. As n grows, discriminative models like logistic regression that make fewer assumptions catch up and eventually win. This is the 'generative vs discriminative' asymptotic result of Ng and Jordan (2002): NB wins fast, LR wins big. For streaming or online learning, use partial_fit for incremental updates.</p>
+</blockquote>
+<h2>Log-Probability and Numerical Stability</h2>
+<p>Computing p(y=k|x) = p(y=k) · Πᵢ p(xᵢ|y=k) directly leads to floating-point underflow for even moderate-length documents — the product of many probabilities in [0,1] underflows to zero. The standard fix is to work in log-space: log p(y=k|x) ∝ log p(y=k) + Σᵢ log p(xᵢ|y=k). Then convert back using the log-sum-exp trick: log Σₖ exp(sₖ) = max(sₖ) + log Σₖ exp(sₖ - max(sₖ)). sklearn's Naive Bayes implementations use log-probabilities internally via predict_log_proba — always use this when implementing from scratch.</p>
+<h2>Online Learning with Naive Bayes</h2>
+<p>Naive Bayes supports true online learning via partial_fit, which updates the sufficient statistics (class counts, feature means/variances) incrementally without storing past data. Each update costs O(p) — linear in the number of features. This makes Naive Bayes ideal for streaming text classification, spam filtering with evolving vocabulary, and any setting where the data distribution shifts over time and the model needs continuous updating. In contrast, logistic regression requires storing the full gradient history or SGD updates, which are noisier and require careful learning rate tuning.</p>
+<table>
+<thead>
+<tr>
+<th>Variant</th>
+<th>Feature Type</th>
+<th>Likelihood</th>
+<th>Primary Use Case</th>
+<th>Key Assumption</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Gaussian NB</td>
+<td>Continuous</td>
+<td>N(μₖᵢ, σ²ₖᵢ)</td>
+<td>Numerical tabular data</td>
+<td>Features are Gaussian within each class</td>
+</tr>
+<tr>
+<td>Multinomial NB</td>
+<td>Integer counts</td>
+<td>Multinomial(θₖ)</td>
+<td>Text (word counts), document classification</td>
+<td>Word counts are conditionally independent</td>
+</tr>
+<tr>
+<td>Bernoulli NB</td>
+<td>Binary 0/1</td>
+<td>Bernoulli(θₖᵢ)</td>
+<td>Short texts, binary feature bags</td>
+<td>Absence of a feature is also informative</td>
+</tr>
+<tr>
+<td>Complement NB</td>
+<td>Integer counts</td>
+<td>Complement class multinomial</td>
+<td>Imbalanced text classification</td>
+<td>More stable than MNB for skewed classes</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>Always use log-probabilities to avoid underflow when multiplying many small probabilities.</li>
+<li>Apply Laplace smoothing (alpha=1) for Multinomial and Bernoulli NB to prevent zero probabilities.</li>
+<li>For text with TF-IDF features (floating point), use Gaussian NB or complement NB, not Multinomial NB.</li>
+<li>Use partial_fit for online/streaming learning — Naive Bayes is one of the few classifiers that updates truly incrementally.</li>
+<li>NB is well-calibrated when the independence assumption is approximately correct; check with calibration curves.</li>
+<li>For imbalanced classes, use ComplementNB which is more robust to class skew than MultinomialNB.</li>
+</ul>
+<blockquote>
+<p><strong>Why the Naive Assumption Often Works</strong>: Despite feature independence rarely holding in practice, Naive Bayes often performs well. The key insight (Domingos and Pazzani 1997): classification accuracy only requires that the ranking of class posteriors is correct, not that the probabilities are accurate. Even if p(x|y) is severely wrong due to dependence, the argmax class may still be correct. This is why NB is surprisingly robust to violated independence assumptions in classification, though not for probability calibration.</p>
+</blockquote>
+<p>Naive Bayes sits at one extreme of the generative-discriminative spectrum. Generative models (NB, LDA) model the full joint p(x,y), allowing generation of synthetic data and natural handling of missing features. Discriminative models (logistic regression, SVM) model only p(y|x), which is sufficient for classification. The tradeoff: generative models converge faster with small data (fewer parameters to estimate); discriminative models converge to lower asymptotic error with large data because they make fewer assumptions.</p>
+<p>Multinomial Naive Bayes with count features is a strong text classification baseline. Despite its simplicity, MNB achieves competitive accuracy on 20 Newsgroups, spam filtering, and sentiment benchmarks — often within 2-3% of fine-tuned deep learning models for short-text classification. Its production advantages: O(1) inference per document, trivially parallelisable, interpretable feature weights (log p(word|class) directly shows which words characterise each class), and true online learning via partial_fit.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

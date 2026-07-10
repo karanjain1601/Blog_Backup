@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Vocabulary Size Tradeoffs in LLMs | Notes Backup</title>
+  <meta name="description" content="How vocabulary size affects embedding table parameters, fertility (tokens per word), softmax compute, multilingual coverage, and model performance — and why modern LLMs use 64K–200K vocab." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Vocabulary Size Tradeoffs in LLMs</h1>
+      <ul class='note-meta'><li><strong>description:</strong> How vocabulary size affects embedding table parameters, fertility (tokens per word), softmax compute, multilingual coverage, and model performance — and why modern LLMs use 64K–200K vocab.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Vocabulary Size Tradeoffs in LLMs</h1>
+<p>Vocabulary size is one of the most consequential design decisions in a large language model. It controls how text is discretised into tokens — the atomic units the model sees, predicts, and attends over. Choose too small a vocabulary and you pay in fertility: every word splits into many tokens, inflating sequence lengths, wasting context window, and slowing autoregressive decoding. Choose too large and the embedding table swells, the softmax output layer becomes expensive, and rare tail tokens receive almost no training signal. Modern LLMs have converged on 64K–200K tokens, a sweet spot arrived at through years of empirical tuning across English quality, multilingual coverage, and compute budgets.</p>
+<h2>Overview</h2>
+<p>The vocabulary size V determines four coupled costs. First, the embedding table holds V × D parameters for the input embeddings (and another V × D for the untied output projection / LM head). Second, fertility — average tokens per word — falls as V grows, because more common n-grams fit directly in the vocabulary. Lower fertility means shorter token sequences, which reduces attention complexity and decoding latency. Third, the softmax over V logits at every decode step scales linearly with V; doubling the vocabulary roughly doubles the cost of the output projection and softmax. Fourth, multilingual coverage depends on how many vocabulary slots are allocated to non-English scripts: small vocabularies trained on English-heavy corpora produce high fertility for Chinese, Arabic, and Hindi text.</p>
+<p>Early models used small vocabularies: BERT uses WordPiece with 30K tokens; GPT-2 uses byte-level BPE with 50K. Scaling research revealed that larger vocabularies improve sample efficiency — the same perplexity can be achieved with less compute when the model does not waste capacity on tokenization artifacts. Llama-2 (32K) to Llama-3 (128K) is the most dramatic published jump; Meta reported that the 4× vocabulary expansion reduced token count for English by ~25% and for Chinese by ~50%, with context-window savings outweighing the ~2B extra embedding parameters added to an 8B model. Gemma-2 (2024) went further to 256K, prioritising broad multilingual coverage over embedding table compactness.</p>
+<h2>Embedding Table Cost</h2>
+<p>For a model with hidden dimension D and vocabulary size V, the input embedding matrix is V × D. If the LM head (output projection from hidden state to logits) is tied to the input embedding, the total is V × D parameters. Untied weights double this to 2 × V × D. For a 7B model with D = 4096, moving from 32K to 128K vocabulary adds (128K − 32K) × 4096 ≈ 393M parameters in tied mode, or ~786M in untied mode. For a 70B model with D = 8192, the same jump adds ~3.1B parameters. This fraction is large enough to affect training FLOP budgets but is usually justified by the fertility gains: fewer tokens per word means shorter sequences, and shorter sequences mean fewer attention operations and fewer decode steps during inference.</p>
+<pre><code class="language-python">import torch
+
+# Embedding table params = V * D (tied weights: shared input + LM head)
+# Untied: 2 * V * D (separate lm_head). Most large LLMs use untied weights.
+# At D=4096 (7B hidden dim) or D=8192 (70B), embedding tables are significant.
+
+def embedding_params(V, D, tied=True):
+    &quot;&quot;&quot;Return total embedding table parameters.&quot;&quot;&quot;
+    return V * D * (1 if tied else 2)
+
+model_total = {'7B': 7_000_000_000, '70B': 70_000_000_000}
+vocab_sizes = [32_000, 50_257, 100_000, 128_000, 200_000]
+labels      = ['Llama-2/Mistral', 'GPT-2', 'cl100k/GPT-4', 'Llama-3', 'Gemma-2']
+dim_sizes   = [4096, 8192]
+
+print(f&quot;{'Vocab':&gt;10} {'Label':&lt;16} {'D':&gt;5}  {'Emb Params':&gt;12}  {'% of 7B':&gt;8}  {'% of 70B':&gt;9}&quot;)
+print(&quot;-&quot; * 70)
+for V, lbl in zip(vocab_sizes, labels):
+    for D in dim_sizes:
+        p   = embedding_params(V, D)
+        f7  = p / model_total['7B']  * 100
+        f70 = p / model_total['70B'] * 100
+        print(f&quot;{V:&gt;10,} {lbl:&lt;16} {D:&gt;5}  {p:&gt;12,}  {f7:&gt;7.2f}%  {f70:&gt;8.2f}%&quot;)
+    print()
+print(&quot;Note: Llama-3 (128K, D=4096, untied) devotes ~1B params to embedding tables.&quot;)
+</code></pre>
+<p>One practical implication: embedding tables are memory-bound at inference. A 128K × 8192 float16 embedding table uses 128000 × 8192 × 2 bytes ≈ 2.1 GB of device memory. On an A100 (80 GB HBM), this is manageable, but on edge hardware with 8–16 GB VRAM it becomes a constraint. Quantising embedding weights to int8 halves this cost with negligible quality loss, since embedding lookups involve simple row fetches and are not sensitive to small quantisation errors in the same way that attention projections are. Vocabulary-parallel sharding across multiple GPUs is another common strategy for very large vocabularies (256K+), splitting the embedding matrix row-wise across devices.</p>
+<h2>Fertility and Sequence Length</h2>
+<p>Fertility measures how many tokens a tokenizer produces per word (or per character for logographic scripts). Formally, fertility(T, C) = |T(C)| / words(C) where T(C) is the token sequence produced by tokenizer T on corpus C and words(C) is the whitespace-delimited word count. Low fertility is desirable: each token carries more semantic content, context windows hold more information, and autoregressive decoding steps are fewer. The fertility gap between English and other languages is a key driver of the move to larger vocabularies. GPT-2 (50K, English-trained) produces ~1.3 tokens/word for English but ~3.0–4.5 for Chinese and ~2.5–3.5 for Arabic. Llama-3 (128K) achieves ~1.1 tokens/word for English and ~1.5–2.0 for Chinese because its vocabulary was trained on a more balanced multilingual corpus with dedicated CJK and Arabic subword merges. Code text fertility depends heavily on identifier length and whitespace handling; larger vocabularies tend to include common library names, keywords, and operators as single tokens.</p>
+<pre><code class="language-python">from transformers import AutoTokenizer
+import re
+
+def word_count(text):
+    return len(re.findall(r'\S+', text))
+
+def fertility(tok, text):
+    &quot;&quot;&quot;Avg subword tokens per whitespace-separated word.&quot;&quot;&quot;
+    ids = tok.encode(text, add_special_tokens=False)
+    return len(ids) / max(word_count(text), 1)
+
+samples = {
+    'English': 'The attention mechanism enables each token to attend to all others in the sequence, capturing long-range dependencies efficiently and accurately.',
+    'Chinese': '注意力机制使变换器模型能够有效捕获长距离依赖关系并显著提升性能表现。',
+    'Arabic':  'تتيح آلية الانتباه لكل رمز الانتباه إلى جميع الرموز الأخرى في التسلسل.',
+    'Code':    'def forward(q, k, v):\n    s = torch.matmul(q, k.T) / math.sqrt(q.size(-1))\n    return torch.matmul(F.softmax(s, -1), v)',
+}
+models = [
+    ('GPT-2  (50K)',   'gpt2'),
+    ('Llama-3 (128K)', 'unsloth/Meta-Llama-3-8B'),
+]
+print(f&quot;{'Model':&lt;18} {'English':&gt;9} {'Chinese':&gt;9} {'Arabic':&gt;9} {'Code':&gt;8}&quot;)
+print(&quot;-&quot; * 58)
+for name, mid in models:
+    try:
+        tok = AutoTokenizer.from_pretrained(mid)
+        v = [f'{fertility(tok, samples[l]):.2f}' for l in ['English', 'Chinese', 'Arabic', 'Code']]
+        print(f&quot;{name:&lt;18} {v[0]:&gt;9} {v[1]:&gt;9} {v[2]:&gt;9} {v[3]:&gt;8}&quot;)
+    except Exception:
+        print(f&quot;{name:&lt;18}  (tokenizer not locally cached)&quot;)
+print(&quot;\nLower fertility = fewer tokens per word = more content fits in context window.&quot;)
+print(&quot;Llama-3 128K vocab cuts Chinese token count ~50% vs Llama-2 32K.&quot;)
+</code></pre>
+<p>Fertility has a direct impact on API costs for commercial LLM providers that charge per token. A document that produces 1000 tokens under GPT-4's cl100k tokenizer might produce 1300–1500 tokens under GPT-2's tokenizer for the same text, increasing cost by 30–50%. For multilingual customer-support applications, this difference is even more dramatic: Arabic or Thai input that requires 3× the tokens of equivalent English content means 3× the API cost and 3× the context window consumption. For code-heavy workloads, tokenizer fertility on identifiers, operators, and whitespace varies significantly; Llama-3's 128K vocabulary contains many common code tokens as single entries, achieving near-word fertility on Python and JavaScript.</p>
+<h2>Softmax Bottleneck</h2>
+<p>At each autoregressive decode step, the model computes logits h × Wᵥᵀ where h ∈ ℝᴰ is the final hidden state and Wᵥ ∈ ℝᵛˣᴰ is the output embedding matrix. This is a matrix-vector product costing 2VD FLOPs, followed by a softmax over V values. At V = 128K and D = 4096, the output projection costs 2 × 128K × 4096 ≈ 1.07B FLOPs per decode step. For a 7B model whose full forward pass is ~14B FLOPs per token, the output projection is ~7.6% of total decode compute. Doubling V doubles this cost. At large batch sizes (256+), the softmax becomes memory-bandwidth-bound rather than compute-bound: the logit tensor (batch × V × float16) must be streamed from HBM, so effective throughput scales with memory bandwidth rather than FLOP rate.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+import time
+
+def benchmark_softmax(vocab_sizes, batch_size=32, seq_len=128, n_trials=20):
+    &quot;&quot;&quot;Benchmark softmax over vocabulary-sized logit tensors.&quot;&quot;&quot;
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print(f&quot;Device: {device}  batch={batch_size}  seq_len={seq_len}&quot;)
+    print(f&quot;{'Vocab':&gt;10}  {'Logits MB':&gt;10}  {'ms/step':&gt;10}  {'Toks/sec':&gt;12}&quot;)
+    print(&quot;-&quot; * 50)
+    for V in vocab_sizes:
+        logits = torch.randn(batch_size, seq_len, V, device=device)
+        # warm-up pass
+        _ = F.softmax(logits, dim=-1)
+        if device == 'cuda':
+            torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        for _ in range(n_trials):
+            out = F.softmax(logits, dim=-1)
+        if device == 'cuda':
+            torch.cuda.synchronize()
+        ms = (time.perf_counter() - t0) / n_trials * 1000
+        mb = logits.element_size() * logits.numel() / 1e6
+        tps = (batch_size * seq_len) / (ms / 1000)
+        print(f&quot;{V:&gt;10,}  {mb:&gt;10.1f}  {ms:&gt;10.2f}  {tps:&gt;12,.0f}&quot;)
+
+benchmark_softmax([32_000, 50_000, 100_000, 128_000, 200_000])
+</code></pre>
+<p>A practical mitigation for the softmax bottleneck is speculative decoding: a small draft model proposes K tokens in parallel, and the large model verifies them in a single forward pass. Because verification runs in parallel across K positions, the effective decode throughput increases even though the vocabulary is large. Another mitigation is fused softmax kernels (FlashDecoding, Triton-fused lm_head) that compute the output projection and softmax in a single memory pass, reducing HBM round-trips. For very large vocabularies (256K+), hierarchical softmax or mixture-of-softmaxes can reduce the output computation to O(V^0.5) per step, at the cost of some model capacity. In practice most production systems use flat softmax up to ~256K with aggressive kernel fusion.</p>
+<h2>Multilingual Coverage</h2>
+<p>A vocabulary trained primarily on English text allocates few slots to non-Latin scripts. Chinese characters, Arabic consonants, Devanagari syllables, and Hangul jamo each require dedicated vocabulary entries to achieve low fertility. GPT-2's 50K vocabulary, trained on English-dominated WebText, allocates almost no entries to CJK characters, forcing Chinese text into character-by-character or byte-level encoding with fertility 3–5×. XLM-R uses a 250K SentencePiece vocabulary trained with alpha-upsampling (alpha=0.7) across 100 languages, achieving fertility below 2 for most European languages and below 3 for CJK scripts. Vocabulary overlap between tokenizers designed for different languages is surprisingly low: GPT-2 and LLaMA-2 share only a small fraction of their vocabularies despite both using BPE or BPE-adjacent algorithms, because their training corpora have very different language distributions.</p>
+<pre><code class="language-python">from transformers import AutoTokenizer
+
+def vocab_overlap(tok_a, tok_b):
+    &quot;&quot;&quot;Compute Jaccard similarity between two tokenizer vocabularies.&quot;&quot;&quot;
+    set_a = set(tok_a.get_vocab().keys())
+    set_b = set(tok_b.get_vocab().keys())
+    inter = set_a &amp; set_b
+    union = set_a | set_b
+    jaccard = len(inter) / len(union)
+    only_a = sorted(set_a - set_b)
+    only_b = sorted(set_b - set_a)
+    return jaccard, only_a, only_b
+
+tok_a = AutoTokenizer.from_pretrained('gpt2')                 # 50K byte-level BPE
+tok_b = AutoTokenizer.from_pretrained('huggyllama/llama-7b')  # 32K SentencePiece BPE
+jaccard, only_a, only_b = vocab_overlap(tok_a, tok_b)
+print(f&quot;GPT-2 vocab size  : {tok_a.vocab_size:&gt;8,}&quot;)
+print(f&quot;LLaMA vocab size  : {tok_b.vocab_size:&gt;8,}&quot;)
+print(f&quot;Shared tokens     : {len(set(tok_a.get_vocab()) &amp; set(tok_b.get_vocab())):&gt;8,}&quot;)
+print(f&quot;Jaccard similarity: {jaccard:&gt;8.4f}&quot;)
+non_ascii_a = [t for t in only_a if any(ord(c) &gt; 127 for c in t)][:8]
+non_ascii_b = [t for t in only_b if any(ord(c) &gt; 127 for c in t)][:8]
+print(f&quot;\nGPT-2-only non-ASCII tokens (sample): {non_ascii_a}&quot;)
+print(f&quot;LLaMA-only non-ASCII tokens (sample): {non_ascii_b}&quot;)
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Vocab Size</th>
+<th>Emb Params (7B, D=4096)</th>
+<th>English Fertility</th>
+<th>Chinese Fertility</th>
+<th>Code Fertility</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GPT-2</td>
+<td>50,257</td>
+<td>~206M (tied)</td>
+<td>~1.30</td>
+<td>~3.20</td>
+<td>~1.50</td>
+</tr>
+<tr>
+<td>Llama-2 / Mistral-7B</td>
+<td>32,000</td>
+<td>~131M (tied)</td>
+<td>~1.40</td>
+<td>~3.60</td>
+<td>~1.60</td>
+</tr>
+<tr>
+<td>Falcon-7B</td>
+<td>65,024</td>
+<td>~267M (tied)</td>
+<td>~1.28</td>
+<td>~2.90</td>
+<td>~1.45</td>
+</tr>
+<tr>
+<td>GPT-4 (cl100k)</td>
+<td>100,277</td>
+<td>~411M (tied)</td>
+<td>~1.20</td>
+<td>~2.10</td>
+<td>~1.30</td>
+</tr>
+<tr>
+<td>Llama-3 (8B/70B)</td>
+<td>128,000</td>
+<td>~524M (tied)</td>
+<td>~1.10</td>
+<td>~1.70</td>
+<td>~1.20</td>
+</tr>
+<tr>
+<td>Gemma-2</td>
+<td>256,000</td>
+<td>~1,049M (tied)</td>
+<td>~1.08</td>
+<td>~1.40</td>
+<td>~1.15</td>
+</tr>
+</tbody>
+</table>
+<h2>Vocabulary Size in Notable LLMs</h2>
+<p>The historical progression reveals a consistent trend toward larger vocabularies. GPT-2 (2019) used 50,257-token byte-level BPE — 50K merges on top of 256 byte tokens, trained on WebText. GPT-3 (2020) retained the same tokenizer. BERT (2019) used WordPiece with 30,522 tokens, later shown to be too small for multilingual tasks. T5 (2020) used SentencePiece Unigram with 32,100 tokens. LLaMA-1 and LLaMA-2 (2023) used SentencePiece with 32K tokens; Mistral-7B adopted the same vocabulary. GPT-4's cl100k_base (2023) expanded to 100,277 tokens with improved multilingual and code coverage via a refined 5-pattern regex pre-tokenizer. LLaMA-3 (2024) made the most dramatic jump to 128K tiktoken BPE, with training data rebalanced to include more multilingual content. Gemma (2024) uses 256K SentencePiece. The trend is clear: each model generation roughly doubles the vocabulary size relative to its predecessor.</p>
+<blockquote>
+<p><strong>The Llama-3 Vocabulary Jump</strong>: The Llama-3 jump from 32K to 128K vocabulary (4× increase) adds ~2B parameters in embedding tables for a 7B model but reduces token count by ~25% for English and ~50% for Chinese — the longer context efficiency often outweighs the parameter cost. Meta's Llama-3 technical report noted that the larger vocabulary significantly improved performance on multilingual benchmarks and code tasks, and that the per-token compute savings from shorter sequences more than offset the increased embedding table size when measured over a fixed compute budget. This tradeoff becomes even more favourable at longer context lengths, since attention complexity scales quadratically with sequence length.</p>
+</blockquote>
+<p>Not all vocabulary expansions are equal. Simply adding more vocabulary slots without rebalancing the training data distribution produces tail tokens that appear too rarely for the model to learn useful embeddings. A commonly cited heuristic is that a token should appear at least 100 times per billion training tokens to have a well-trained embedding. GPT-4's cl100k tokenizer addressed tail token quality by using a more aggressive regex pre-tokenizer that prevents cross-word merges and by curating vocabulary entries to ensure every included token appears frequently in the training corpus. The result is a vocabulary where nearly every token develops meaningful representations, in contrast to vocabularies with many low-frequency tail tokens that the model effectively ignores.</p>
+<h2>Choosing Vocabulary Size</h2>
+<p>The optimal vocabulary size depends on the intended use case, training data distribution, model size, and serving constraints. A larger vocabulary is almost always better for multilingual models or code-heavy applications. For English-only classification models, a 30K–50K vocabulary is often sufficient and keeps embedding tables compact. For instruction-tuned models deployed via API where per-token billing matters, a larger vocabulary directly reduces costs for non-English users by reducing fertility. For edge deployment with strict memory budgets, a smaller vocabulary reduces the embedding table footprint — a 32K vocabulary at D=4096 uses only 262MB float16 vs 1.05GB for 128K. Vocabulary size should be chosen jointly with tokenizer training corpus composition: a 128K vocabulary trained on English-only data will have poor coverage of non-Latin scripts despite having many available slots. The vocabulary training corpus should reflect the target inference distribution.</p>
+<ul>
+<li>Target fertility below 1.5 tokens/word for English and below 2.5 for primary non-English languages to maintain context window efficiency.</li>
+<li>Use 64K–100K for bilingual or code-focused models; use 128K–256K for broad multilingual coverage across diverse scripts.</li>
+<li>Ensure tail token frequency exceeds ~100 occurrences per billion training tokens to avoid undertrained embedding vectors.</li>
+<li>For tied embeddings, the embedding matrix also serves as the output LM head — larger V linearly increases both memory and decode-step compute.</li>
+<li>Benchmark fertility on your actual deployment corpus, not just standard English benchmarks; fertility varies dramatically by domain and language mix.</li>
+<li>Alpha-upsampling (alpha=0.5–0.7) of low-resource languages during tokenizer training ensures non-English scripts receive adequate vocabulary coverage proportional to intended usage.</li>
+<li>When adapting a pretrained model to a new language domain, vocabulary expansion via embedding surgery (initialising new token embeddings from related existing tokens) is more efficient than full retraining.</li>
+</ul>
+<h2>Key Takeaways</h2>
+<ul>
+<li>Vocabulary size V sets the embedding table at V × D parameters (tied) or 2 × V × D (untied); for a 7B model with D=4096, moving from 32K to 128K adds ~393M parameters in tied mode.</li>
+<li>Fertility (tokens per word) falls as V grows: Llama-3's 128K achieves ~1.1 tokens/word for English and ~1.7 for Chinese, vs ~1.4 and ~3.6 for Llama-2's 32K.</li>
+<li>The softmax output layer scales linearly with V — doubling vocabulary doubles the cost of the output projection and softmax at every decode step.</li>
+<li>Multilingual coverage requires vocabulary slots explicitly allocated to non-Latin scripts via alpha-upsampling of non-English corpora during tokenizer training.</li>
+<li>The industry trend is toward larger vocabularies: 32K (2023) to 128K (2024) to 256K (2024), driven by multilingual demand and context-length efficiency improvements.</li>
+<li>Tail token quality matters — a token appearing fewer than ~100 times per billion training tokens will have a poorly trained embedding regardless of vocabulary size.</li>
+<li>For production systems, measure fertility on actual user traffic; API cost, latency, and context utilisation all depend directly on fertility rather than nominal vocabulary size.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

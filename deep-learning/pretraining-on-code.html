@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pretraining on Code — Code Understanding, Math Reasoning, and Transfer Benefits | Notes Backup</title>
+  <meta name="description" content="How including code in LLM pretraining improves reasoning, structured generation, and math benchmarks — covering quality filtering, language distribution, mixed training strategies, and transfer evidence." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Pretraining on Code — Code Understanding, Math Reasoning, and Transfer Benefits</h1>
+      <ul class='note-meta'><li><strong>description:</strong> How including code in LLM pretraining improves reasoning, structured generation, and math benchmarks — covering quality filtering, language distribution, mixed training strategies, and transfer evidence.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Pretraining on Code — Code Understanding, Math Reasoning, and Transfer Benefits</h1>
+<p>One of the most surprising findings in LLM research is that pretraining on code dramatically improves performance on tasks that have nothing to do with programming — mathematical reasoning, multi-step logic, and structured instruction following. GPT-4, LLaMA-3, and DeepSeek all include substantial code in their pretraining mixtures, and ablation studies consistently show that removing code hurts NL reasoning benchmarks. Phi-2, a 2.7B parameter model trained almost entirely on code and synthetic textbook data, outperformed 13B models trained on natural language at the time of its release. Understanding why code helps — and how to incorporate it effectively — is essential for pretraining practitioners.</p>
+<h2>Why Code Pretraining Improves Reasoning</h2>
+<p>Code has structural properties that natural language lacks. Every function has an explicit input-output contract enforced by execution. Control flow (loops, conditionals, recursion) teaches the model to reason about state across multiple steps. Type systems enforce precision about what operations are valid. Comments explain the reasoning behind the code, not just what it does — teaching the model to articulate intermediate reasoning steps. These properties align closely with what is needed for chain-of-thought reasoning on math and logic problems: precise step sequencing, state tracking, and explicit intermediate computation.</p>
+<ul>
+<li>Precise syntax: exact token sequences required for valid programs — forces structured generation</li>
+<li>Step-by-step computation: loops and recursion teach multi-step state tracking</li>
+<li>Comments and docstrings: models learn to explain logic in natural language adjacent to code</li>
+<li>Function signatures: teach abstraction — separating interface from implementation</li>
+<li>Test cases: examples of input-output pairs that demonstrate intended behavior</li>
+</ul>
+<h2>Evidence From Major Pretraining Experiments</h2>
+<p>Multiple independent lines of evidence confirm that code transfer is real and substantial. CodeX (GPT-3 fine-tuned on 100B tokens of code) achieved 28% pass@1 on HumanEval — far above GPT-3's near-zero — demonstrating that code data is the primary driver of code capability, not model size alone. Phi-2 (2.7B parameters) was trained on ~250B tokens of code and synthetic textbook-quality data and achieved GSM8K accuracy of 57.2% — competitive with LLaMA-2 13B despite having 5× fewer parameters. DeepSeek-Coder-V2 uses 87% code tokens and achieves math reasoning benchmarks competitive with much larger general models, confirming that code reasoning transfers to math.</p>
+<ul>
+<li>CodeX (GPT-3 + code FT): HumanEval 28% pass@1 vs GPT-3 near-zero — code data drives capability</li>
+<li>Phi-2 2.7B (65% code + textbook): GSM8K 57.2%, MMLU 57.4% — SOTA at size at release</li>
+<li>LLaMA-3 (25% code mix): strong code + math reasoning despite mostly NL training</li>
+<li>DeepSeek-Coder 7B (87% code): HumanEval 65.2%, transfers to math (GSM8K 74.4%)</li>
+<li>StarCoder (80+ languages, 1T tokens): multilingual code reasoning, strong NL transfer reported</li>
+</ul>
+<h2>Code Quality Filtering Pipeline</h2>
+<p>Raw code from GitHub or Common Crawl contains auto-generated boilerplate, minified JavaScript, binary-encoded data, and files with credentials or private keys. Quality filtering removes these before including code in pretraining. The StarCoder project (The Stack dataset) applied filters including file size limits, average line length caps, and repository star count thresholds. Language-specific filters remove files that are almost certainly auto-generated (protobuf outputs, ANTLR parsers). Personal data and credential detection (regex-based API key detection) is an essential safety step.</p>
+<pre><code class="language-python">import re
+
+AUTO_GEN_PATTERNS = [
+    r'# generated by', r'# auto-generated', r'# do not edit',
+    r'this file was generated', r'@generated', r'generated code'
+]
+CREDENTIAL_PATTERNS = [
+    r'(?i)(api[_-]?key|secret[_-]?key|password|token)\s*=\s*[&quot;\'][A-Za-z0-9+/]{20,}',
+    r'(?i)aws[_-]?secret',
+    r'-----BEGIN (RSA |EC )?PRIVATE KEY-----',
+]
+
+def code_quality_score(code, min_lines=5, max_avg_line_len=200):
+    &quot;&quot;&quot;Return (score, reason): score=None means filtered out.&quot;&quot;&quot;
+    if any(re.search(p, code, re.IGNORECASE) for p in CREDENTIAL_PATTERNS):
+        return None, 'credentials'
+    lines = [l for l in code.splitlines() if l.strip()]
+    if len(lines) &lt; min_lines:
+        return None, 'too_short'
+    avg_len = sum(len(l) for l in lines) / len(lines)
+    if avg_len &gt; max_avg_line_len:
+        return None, 'minified'
+    if any(p in code.lower() for p in AUTO_GEN_PATTERNS):
+        return None, 'auto_generated'
+    comment_lines = sum(1 for l in lines if l.strip().startswith(('#', '//', '/*', '*')))
+    comment_ratio = comment_lines / max(len(lines), 1)
+    score = min(1.0, 0.3 + comment_ratio * 0.5 + min(len(lines), 100) / 200)
+    return round(score, 3), 'ok'
+
+samples = [
+    ('good', 'import numpy as np\n# Compute pairwise cosine similarity\ndef cosine_sim(a, b):\n    return np.dot(a,b)/(np.linalg.norm(a)*np.linalg.norm(b))\nprint(cosine_sim([1,0],[0,1]))'),
+    ('auto_gen', '# Generated by protoc-gen-python\n# Do not edit manually\nclass Proto:\n    pass\n'),
+    ('minified', ('a=1;b=2;c=a+b;' * 30)),
+    ('credential', 'API_KEY = &quot;sk-abc123XYZlong_secret_token_value_here&quot;\nprint(API_KEY)'),
+]
+for name, code in samples:
+    score, reason = code_quality_score(code)
+    print(f&quot;{name:12s}: score={score}  reason={reason}&quot;)
+</code></pre>
+<h2>Programming Language Detection and Distribution</h2>
+<p>Python dominates code pretraining datasets at 40–60% of tokens, followed by JavaScript (~15%), Java (~10%), C/C++ (~8%), and TypeScript (~5%). Python's dominance reflects both its prevalence on GitHub and its high information density per line — Python code tends to have many readable function calls with named arguments and docstrings. Multilingual code training (80+ languages in StarCoder) provides robustness and helps the model generalize across syntactic families. Language detection from file extensions is reliable but must be supplemented with content-based detection for files without extensions or with misleading names.</p>
+<pre><code class="language-python">import re
+from collections import Counter
+
+LANG_PATTERNS = {
+    'python':     [r'import \w+', r'def \w+\(', r':\s*$', r'elif ', r'print\('],
+    'javascript': [r'const |let |var ', r'=&gt;', r'function\s+\w+\(', r'===', r'console\.log'],
+    'java':       [r'public class ', r'System\.out', r'@Override', r'public static void main'],
+    'cpp':        [r'#include &lt;', r'std::', r'int main\(', r'cout &lt;&lt;', r'-&gt;'],
+    'rust':       [r'fn main\(\)', r'let mut ', r'impl ', r'use std::', r'println!'],
+    'typescript': [r': string', r': number', r': boolean', r'interface ', r'type \w+ ='],
+}
+
+def detect_language(code):
+    scores = {lang: sum(bool(re.search(p, code)) for p in pats)
+              for lang, pats in LANG_PATTERNS.items()}
+    best = max(scores, key=scores.get)
+    return best if scores[best] &gt; 0 else 'other'
+
+# Simulate language distribution in a hypothetical code corpus
+import random; random.seed(42)
+weights = {'python': 48, 'javascript': 20, 'java': 11, 'cpp': 9, 'rust': 5, 'typescript': 4, 'other': 3}
+sampled = random.choices(list(weights.keys()), weights=list(weights.values()), k=2000)
+dist    = Counter(sampled)
+print(&quot;Simulated code corpus language distribution (N=2000 files):&quot;)
+for lang, count in dist.most_common():
+    bar = '|' * (count // 20)
+    print(f&quot;  {lang:12s}: {count/20:5.1f}%  {bar}&quot;)
+</code></pre>
+<h2>Code-Text Mixed Training</h2>
+<p>Simply concatenating code and natural language data and sampling randomly underrepresents or overrepresents code depending on token counts. A controlled mixed batch sampler explicitly sets a target code ratio (typically 15–25% of tokens) and ensures that each training batch contains the right proportion of code and NL documents. The ratio is a hyperparameter: too little code and reasoning transfer is weak; too much code and the model under-learns natural language fluency and knowledge. Most production recipes use 20% code for general-purpose LLMs, rising to 60–90% for code-specialized models.</p>
+<pre><code class="language-python">import random
+
+def mixed_batch_sampler(code_dataset, text_dataset, code_ratio=0.20, batch_size=8, seed=42):
+    &quot;&quot;&quot;
+    Yield batches with code_ratio fraction code samples and (1-code_ratio) text samples.
+    Shuffles within each batch to prevent domain clustering.
+    &quot;&quot;&quot;
+    rng    = random.Random(seed)
+    n_code = max(1, round(batch_size * code_ratio))
+    n_text = batch_size - n_code
+    code_iter = iter(code_dataset)
+    text_iter = iter(text_dataset)
+    while True:
+        try:
+            code_batch = [next(code_iter) for _ in range(n_code)]
+            text_batch = [next(text_iter) for _ in range(n_text)]
+        except StopIteration:
+            break
+        batch = code_batch + text_batch
+        rng.shuffle(batch)
+        yield batch
+
+# Simulate with 200 code and 800 text documents
+code_data = [{'text': f'def func_{i}(x): return x ** {i}', 'domain': 'code'} for i in range(200)]
+text_data = [{'text': f'Natural language passage number {i} about science.', 'domain': 'text'} for i in range(800)]
+
+batches   = list(mixed_batch_sampler(code_data, text_data, code_ratio=0.20, batch_size=8))
+all_items = [item for batch in batches for item in batch]
+code_pct  = sum(1 for x in all_items if x['domain'] == 'code') / len(all_items) * 100
+print(f&quot;Total batches: {len(batches)}, Total samples: {len(all_items)}&quot;)
+print(f&quot;Code: {code_pct:.1f}%  Text: {100-code_pct:.1f}%  (target code_ratio=20%)&quot;)
+</code></pre>
+<blockquote>
+<p><strong>Tip</strong>: Even 15–20% code in the pretraining mixture significantly improves mathematical reasoning and structured thinking for NL tasks — the mechanism is learning precise syntax and step-by-step execution from code rather than memorizing math facts.</p>
+</blockquote>
+<h2>Evaluating Reasoning Improvement from Code Pretraining</h2>
+<pre><code class="language-python">import re
+
+def extract_numeric_answer(output):
+    &quot;&quot;&quot;Extract the last numeric value from model output (GSM8K-style answer extraction).&quot;&quot;&quot;
+    cleaned = output.replace(',', '')
+    numbers = re.findall(r'-?\d+(?:\.\d+)?', cleaned)
+    return numbers[-1] if numbers else None
+
+def evaluate_gsm8k(model_outputs, ground_truths):
+    &quot;&quot;&quot;Evaluate GSM8K accuracy by matching final numeric answer.&quot;&quot;&quot;
+    correct, total = 0, len(ground_truths)
+    results = []
+    for output, truth in zip(model_outputs, ground_truths):
+        predicted = extract_numeric_answer(output)
+        is_correct = (predicted == str(truth))
+        correct += int(is_correct)
+        results.append({'predicted': predicted, 'truth': truth, 'correct': is_correct})
+    return {'accuracy': correct / total, 'correct': correct, 'total': total, 'details': results}
+
+# Simulated outputs: model WITHOUT code pretraining vs model WITH code pretraining
+ground_truths = [42, 15, 100, 7, 256, 33, 8, 12, 90, 144]
+
+no_code_outputs = [
+    'I estimate the answer is around 42.', 'Approximately 20 items remain.',
+    'The total comes to 100.', 'About 5 parts needed.', 'Result is 256.',
+    'The answer should be roughly 30.', 'Eight units in total: 8.',
+    'I calculate about 15.', 'Ninety percent means 90.', 'Total: 144.'
+]
+
+code_outputs = [
+    'Step 1: 6 * 7 = 42. Final answer: 42.', 'Step 1: 3 * 5 = 15. Answer: 15.',
+    '10 * 10 = 100. The answer is 100.', 'Counting: 7 items total. Answer: 7.',
+    '2 ** 8 = 256. Answer: 256.', 'Step: 3 * 11 = 33. Answer: 33.',
+    'Loop 8 times: answer = 8.', 'Step: 4 * 3 = 12. Final: 12.',
+    'Percentage: 90 out of 100 = 90.', '12 squared = 144. Answer: 144.'
+]
+
+res_no_code = evaluate_gsm8k(no_code_outputs, ground_truths)
+res_code    = evaluate_gsm8k(code_outputs,    ground_truths)
+print(f&quot;Without code pretraining: GSM8K = {res_no_code['accuracy']:.1%} ({res_no_code['correct']}/{res_no_code['total']})&quot;)
+print(f&quot;With code pretraining:    GSM8K = {res_code['accuracy']:.1%} ({res_code['correct']}/{res_code['total']})&quot;)
+print(f&quot;Improvement: +{(res_code['accuracy'] - res_no_code['accuracy']):.1%}&quot;)
+</code></pre>
+<h2>Code Data Impact on Downstream Tasks</h2>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Code %</th>
+<th>HumanEval pass@1</th>
+<th>GSM8K</th>
+<th>MMLU</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Phi-2 2.7B</td>
+<td>~65%</td>
+<td>59.1%</td>
+<td>57.2%</td>
+<td>57.4%</td>
+<td>Code + textbook data; SOTA at size on release</td>
+</tr>
+<tr>
+<td>LLaMA-3 8B</td>
+<td>~25%</td>
+<td>33.5%</td>
+<td>79.6%</td>
+<td>66.6%</td>
+<td>General pretraining with code, strong transfer</td>
+</tr>
+<tr>
+<td>LLaMA-3 70B</td>
+<td>~25%</td>
+<td>54.8%</td>
+<td>93.0%</td>
+<td>79.5%</td>
+<td>Scale amplifies code reasoning transfer</td>
+</tr>
+<tr>
+<td>DeepSeek-Coder 7B</td>
+<td>~87%</td>
+<td>65.2%</td>
+<td>74.4%</td>
+<td>49.2%</td>
+<td>Code-focused; strong math, weaker general NL</td>
+</tr>
+<tr>
+<td>CodeX (GPT-3 FT)</td>
+<td>~100%</td>
+<td>28.0%</td>
+<td>N/A</td>
+<td>N/A</td>
+<td>Code fine-tune only; limited NL capability</td>
+</tr>
+</tbody>
+</table>
+<h2>Code Data Sources and Licensing</h2>
+<p>The largest source of code training data is GitHub, but licensing is a significant constraint. Only repositories with permissive licenses (MIT, Apache 2.0, BSD) are suitable for unrestricted model training. The Stack dataset (BigCode project) applied license filtering to 358M+ GitHub files, retaining approximately 3TB of permissively licensed code across 350+ programming languages. Stack Exchange data (programming questions and answers) is valuable because it includes natural language explanations alongside code. Kaggle notebooks and arXiv LaTeX provide scientific computing code with mathematical context, particularly useful for math reasoning transfer.</p>
+<ul>
+<li>GitHub (permissive licenses only): MIT, Apache 2.0, BSD — largest volume source</li>
+<li>The Stack (BigCode): 3TB permissively licensed code, 350+ languages, deduped</li>
+<li>Stack Overflow: code + natural language explanations — high reasoning density</li>
+<li>Kaggle notebooks: scientific Python with inline prose — bridges code and NL reasoning</li>
+<li>arXiv LaTeX: math equations with code implementations — math-code co-training signal</li>
+<li>Synthetic code: LLM-generated problems and solutions (used by Phi series) — scalable quality</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

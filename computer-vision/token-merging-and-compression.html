@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Token Merging and Compression: Reducing ViT Inference Cost | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Token Merging and Compression: Reducing ViT Inference Cost</h1>
+      
+      <h1>Token Merging and Compression: Reducing ViT Inference Cost</h1>
+<h2>Overview</h2>
+<p>Vision Transformers (ViTs) process images as sequences of patch tokens and apply self-attention at every layer. Attention complexity scales quadratically with token count, making high-resolution or long-sequence inference expensive. Token merging and pruning methods reduce this cost by eliminating redundant tokens as they propagate through the network.</p>
+<p>Token Merging (ToMe) and DynamicViT represent two complementary strategies: ToMe merges similar tokens using bipartite matching without any training, while DynamicViT learns a per-token importance predictor that prunes low-salience tokens during inference. Both achieve 1.4–2.5× throughput gains with less than 1% accuracy drop on standard benchmarks.</p>
+<h2>Token Redundancy in Vision Transformers</h2>
+<p>Empirical analysis of ViT attention maps shows that a large fraction of tokens carry redundant or background information, particularly in later layers. Tokens representing uniform sky, grass, or white backgrounds have nearly identical representations and contribute minimally to the final classification or detection decision.</p>
+<p>This redundancy is measurable: the average cosine similarity between token pairs increases significantly from early to late layers as the network builds global representations. By layer 8 of a ViT-B/16, over 40% of token pairs have cosine similarity above 0.9. This provides a principled basis for safe token reduction without information loss.</p>
+<h2>ToMe Bipartite Matching</h2>
+<p>ToMe splits each layer's token sequence into two equal sets A and B using a fixed alternating pattern, then computes a similarity matrix between them using key vectors from the attention computation (which are available for free). The r most similar A-B pairs are merged by averaging their representations, reducing sequence length by r tokens per layer.</p>
+<pre><code># ToMe bipartite soft matching (simplified)\nA, B = x.chunk(2, dim=1)         # split tokens\nsim = A @ B.transpose(-2, -1) / (d ** 0.5)\nscores = sim.max(dim=-1).values  # best match per A token\n\n# Keep top-(N//2 - r) tokens in A unmerged\nkeep_idx = scores.topk(N//2 - r, largest=False).indices\nmerge_idx = scores.topk(r, largest=True).indices\n\n# Merge: average each A token with its best-matching B token\nmerged = (A[merge_idx] + B[sim[merge_idx].argmax(-1)]) / 2
+</code></pre>
+<p>A key design choice in ToMe is using attention keys rather than raw token values for similarity computation. Keys are already computed during the attention forward pass, so the matching overhead is minimal. The bipartite structure guarantees each token is merged at most once per layer, preventing cascade collapse of information.</p>
+<pre><code># Unmerge for dense output tasks (segmentation, detection)\n# After final layer, expand merged tokens back\ndef unmerge(x_merged, merge_map, orig_size):\n    x_out = torch.zeros(orig_size, device=x_merged.device)\n    for merged_idx, src_indices in merge_map.items():\n        # Broadcast merged token back to original positions\n        x_out[src_indices] = x_merged[merged_idx]\n    return x_out
+</code></pre>
+<blockquote>
+<p>****: ToMe is training-free — wrap any pretrained ViT with apply_patch() and set r. Start at r=8 for ~1.4× speedup with &lt;0.2% accuracy drop. Increase r until the accuracy drop becomes unacceptable for your use case. No fine-tuning required.</p>
+</blockquote>
+<h2>DynamicViT Token Pruning</h2>
+<p>DynamicViT takes a learned approach: a lightweight token predictor module (a 2-layer MLP) is inserted at multiple layers and produces a per-token importance score. During training, Gumbel-sigmoid makes this discrete keep/discard decision differentiable, allowing end-to-end training with a sparsity regularization loss that encourages the target keep ratio.</p>
+<pre><code># DynamicViT token pruning\npred_score = torch.sigmoid(token_predictor(x))  # [B, N, 1]\n\n# Hard keep during inference\nkeep_mask = (pred_score &gt; threshold).squeeze(-1)  # [B, N]\nx_pruned = x[keep_mask].view(B, -1, D)\n\n# Differentiable pruning during training (Gumbel-sigmoid)\ndef gumbel_sigmoid(logits, tau=1.0, hard=False):\n    g = -torch.log(-torch.log(torch.rand_like(logits) + 1e-8) + 1e-8)\n    y = torch.sigmoid((logits + g) / tau)\n    if hard: y = (y &gt; 0.5).float() - y.detach() + y\n    return y
+</code></pre>
+<p>Unlike ToMe, DynamicViT requires training or fine-tuning the predictor heads on the target dataset. The upside is that the predictor learns task-relevant token importance — for a bird classifier, it learns to preserve fine-grained texture tokens and prune background. This makes DynamicViT more accurate than ToMe at aggressive compression ratios.</p>
+<h2>Latency vs Accuracy Tradeoffs</h2>
+<p>Token reduction methods show asymmetric behavior: small r values yield near-lossless compression while large r values cause rapid accuracy degradation. The inflection point depends on the task — classification tolerates more aggressive pruning than dense prediction tasks like segmentation, where per-token spatial information is needed in the output.</p>
+<pre><code># Benchmark ToMe on ImageNet val\nimport timm\nfrom tome import apply_patch\n\nmodel = timm.create_model('vit_base_patch16_224', pretrained=True)\napply_patch(model, trace_source=True, prop_attn=True)\nmodel.r = 16  # merge 16 tokens per layer\nmodel.eval()\n\n# Measure throughput\nimport time\nwith torch.no_grad():\n    x = torch.rand(64, 3, 224, 224).cuda()\n    t0 = time.perf_counter()\n    _ = model(x)\n    print(f'Throughput: {64/(time.perf_counter()-t0):.1f} img/s')
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Params same</th>
+<th>r / ratio</th>
+<th>Throughput gain</th>
+<th>Top-1 drop</th>
+<th>Train needed</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ToMe r=8</td>
+<td>Yes</td>
+<td>r=8</td>
+<td>1.4×</td>
+<td>−0.1%</td>
+<td>No</td>
+</tr>
+<tr>
+<td>ToMe r=16</td>
+<td>Yes</td>
+<td>r=16</td>
+<td>1.7×</td>
+<td>−0.4%</td>
+<td>No</td>
+</tr>
+<tr>
+<td>ToMe r=24</td>
+<td>Yes</td>
+<td>r=24</td>
+<td>2.0×</td>
+<td>−0.9%</td>
+<td>No</td>
+</tr>
+<tr>
+<td>DynamicViT 30%</td>
+<td>No (+pred)</td>
+<td>30% pruned</td>
+<td>1.6×</td>
+<td>−0.2%</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>EViT 50%</td>
+<td>No (+pred)</td>
+<td>50% pruned</td>
+<td>2.1×</td>
+<td>−0.5%</td>
+<td>Yes</td>
+</tr>
+</tbody>
+</table>
+<h2>Key Takeaways</h2>
+<p>ToMe is the fastest path to ViT speedup: zero training, minimal code change, and predictable tradeoffs. It works best for classification tasks where a global CLS token summarizes the image. For detection or segmentation, use ToMe with unmerging or switch to DynamicViT which preserves spatial token positions more carefully.</p>
+<p>The throughput gains from token merging stack multiplicatively with other optimizations. Combining ToMe with FlashAttention 2 and bf16 precision can yield 3–4× end-to-end speedup over a naive ViT baseline. Profile the actual bottleneck before applying token reduction — for small batch sizes, the overhead of the matching step may outweigh the savings.</p>
+<p>Learned pruning methods (DynamicViT, EViT) outperform training-free methods at high compression ratios because they can allocate capacity to task-relevant regions. If your deployment scenario has a strict latency budget that requires more than 50% token reduction, invest the training cost in a learned pruner — the accuracy margin at that regime is substantial.</p>
+<p>Token merging interacts with positional encodings. When tokens are merged, their position information is averaged, which can degrade performance on tasks sensitive to precise spatial layout. For such tasks, consider preserving positional encoding from the dominant (higher-score) token rather than averaging both, or use a position-aware merge strategy.</p>
+<p>Practical deployment tip: measure latency on the actual inference server rather than relying on throughput benchmarks. GPU occupancy effects mean that token reduction often provides larger gains at small batch sizes (batch=1 serving) than at large batch sizes (training-style throughput), which is exactly the regime that matters for real-time inference APIs.</p>
+    </article>
+  </main>
+</body>
+</html>

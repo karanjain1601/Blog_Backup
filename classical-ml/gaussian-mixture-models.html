@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Gaussian Mixture Models (GMMs) | Notes Backup</title>
+  <meta name="description" content="Understand GMMs as probabilistic clustering: the mixture density, soft assignments via responsibilities, EM algorithm for parameter estimation, covariance type selection, BIC/AIC model order selection, and anomaly detection using log-likelihood thresholds." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Gaussian Mixture Models (GMMs)</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Understand GMMs as probabilistic clustering: the mixture density, soft assignments via responsibilities, EM algorithm for parameter estimation, covariance type selection, BIC/AIC model order selection, and anomaly detection using log-likelihood thresholds.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Gaussian Mixture Models (GMMs)</h1>
+<p>Gaussian Mixture Models (GMMs) are a principled probabilistic framework for clustering and density estimation. Unlike k-means, which makes hard cluster assignments, GMMs compute soft responsibilities — the probability that each point belongs to each component. The model is fit by maximum likelihood using the EM algorithm, and the resulting mixture density can be used for density estimation, anomaly detection, and generative modeling in addition to clustering.</p>
+<h2>GMM Formulation</h2>
+<p>A GMM with k components models the data density as p(x) = Σₖ πₖ N(x | μₖ, Σₖ) where πₖ ≥ 0 are mixing weights summing to 1, μₖ is the k-th component mean, and Σₖ is its covariance matrix. The latent variable zᵢ ∈ {1,...,k} indicates which component generated point xᵢ, with P(zᵢ=k) = πₖ. The complete-data likelihood is p(X,Z|θ) = Πᵢ Πₖ [πₖ N(xᵢ|μₖ,Σₖ)]^{1(zᵢ=k)}, which is tractable. The observed-data likelihood Σ_Z p(X,Z|θ) requires summing over all kⁿ assignments and is maximized by EM.</p>
+<h2>EM Algorithm for GMMs</h2>
+<p>EM alternates between: E-step — compute the responsibility rᵢₖ = P(zᵢ=k | xᵢ, θ) = πₖ N(xᵢ|μₖ,Σₖ) / Σⱼ πⱼ N(xᵢ|μⱼ,Σⱼ). This is the posterior probability that component k generated xᵢ. M-step — update parameters using soft-weighted statistics: Nₖ = Σᵢ rᵢₖ (effective count), πₖ = Nₖ/n, μₖ = Σᵢ rᵢₖ xᵢ / Nₖ, Σₖ = Σᵢ rᵢₖ (xᵢ−μₖ)(xᵢ−μₖ)ᵀ / Nₖ. Each iteration monotonically increases the log-likelihood log p(X|θ).</p>
+<pre><code class="language-python">import numpy as np
+from scipy.stats import multivariate_normal
+from sklearn.datasets import make_blobs
+
+def gmm_em(X, k, max_iter=100, tol=1e-4, seed=42):
+    &quot;&quot;&quot;EM algorithm for a k-component GMM.&quot;&quot;&quot;
+    rng = np.random.default_rng(seed)
+    n, d = X.shape
+    # Initialize with random assignments
+    pi = np.ones(k) / k
+    mu = X[rng.choice(n, k, replace=False)]
+    Sigma = [np.eye(d) * X.var() for _ in range(k)]
+    log_liks = []
+    for iteration in range(max_iter):
+        # E-step: responsibilities
+        R = np.zeros((n, k))
+        for j in range(k):
+            R[:, j] = pi[j] * multivariate_normal.pdf(X, mu[j], Sigma[j])
+        ll = np.log(R.sum(axis=1) + 1e-300).sum()
+        log_liks.append(ll)
+        R /= R.sum(axis=1, keepdims=True)
+        # M-step: update parameters
+        Nk = R.sum(axis=0)
+        pi = Nk / n
+        mu = (R.T @ X) / Nk[:, None]
+        for j in range(k):
+            diff = X - mu[j]
+            Sigma[j] = (R[:, j, None] * diff).T @ diff / Nk[j] + 1e-6 * np.eye(d)
+        if iteration &gt; 0 and abs(log_liks[-1] - log_liks[-2]) &lt; tol:
+            print(f&quot;Converged at iteration {iteration + 1}&quot;)
+            break
+    return pi, mu, Sigma, np.array(log_liks)
+
+X, y_true = make_blobs(n_samples=300, centers=3, cluster_std=0.8, random_state=42)
+pi, mu, Sigma, lls = gmm_em(X, k=3)
+labels = np.argmax(np.column_stack([pi[j] * multivariate_normal.pdf(X, mu[j], Sigma[j])
+                                     for j in range(3)]), axis=1)
+print(f&quot;Mixing weights: {pi.round(3)}&quot;)
+print(f&quot;Final log-likelihood: {lls[-1]:.2f} (increased monotonically: {all(np.diff(lls) &gt;= -1e-8)})&quot;)
+</code></pre>
+<h2>Covariance Types</h2>
+<p>The covariance structure of each component controls the shape of clusters it can model. Sklearn's GaussianMixture supports four types, trading flexibility for the number of parameters: full (each component has its own arbitrary covariance, most expressive), tied (all components share one covariance matrix), diagonal (only variances, no covariances — axis-aligned ellipses), and spherical (one scalar variance per component — same as k-means geometry). Simpler structures are faster, need less data, and are less prone to overfitting but may underfit complex data.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.mixture import GaussianMixture
+from sklearn.datasets import make_blobs
+from sklearn.preprocessing import StandardScaler
+
+X, y_true = make_blobs(n_samples=400, centers=4, cluster_std=[0.5, 1.0, 0.3, 0.8], random_state=7)
+X = StandardScaler().fit_transform(X)
+
+print(f&quot;{'Covariance':12s} {'AIC':&gt;10} {'BIC':&gt;10} {'Log-Lik':&gt;12} {'#Params':&gt;8}&quot;)
+for cov_type in ['full', 'tied', 'diag', 'spherical']:
+    gm = GaussianMixture(n_components=4, covariance_type=cov_type,
+                          n_init=5, random_state=42, max_iter=200)
+    gm.fit(X)
+    print(f&quot;{cov_type:12s} {gm.aic(X):&gt;10.2f} {gm.bic(X):&gt;10.2f} &quot;
+          f&quot;{gm.score(X)*len(X):&gt;12.2f} {gm.n_parameters:&gt;8d}&quot;)
+
+print(&quot;\nFull: most expressive but most parameters — risk of degenerate covariances.&quot;)
+print(&quot;Spherical: equivalent to k-means geometry with soft assignments.&quot;)
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Covariance Type</th>
+<th>Shape</th>
+<th>Parameters per Component</th>
+<th>When to Use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>full</td>
+<td>Arbitrary ellipsoid</td>
+<td>d(d+1)/2</td>
+<td>Complex correlated clusters, sufficient data</td>
+</tr>
+<tr>
+<td>tied</td>
+<td>Same ellipsoid for all</td>
+<td>d(d+1)/2 total</td>
+<td>Similar cluster shapes, reduces overfitting</td>
+</tr>
+<tr>
+<td>diag</td>
+<td>Axis-aligned ellipsoid</td>
+<td>d</td>
+<td>Independent features, high-dimensional data</td>
+</tr>
+<tr>
+<td>spherical</td>
+<td>Sphere (isotropic)</td>
+<td>1</td>
+<td>K-means-like behavior, simplest model</td>
+</tr>
+</tbody>
+</table>
+<h2>Model Selection — BIC and AIC</h2>
+<p>AIC = −2 log L(θ̂) + 2p and BIC = −2 log L(θ̂) + p log n, where p is the number of free parameters and L(θ̂) is the maximized likelihood. BIC penalizes model complexity more heavily (by log n vs 2) and is consistent — it selects the true number of components as n→∞ if the true model is in the candidate set. AIC tends to favor larger models. The recommended procedure is to fit GMMs with k=1,...,K_max, plot BIC vs k, and choose the k at the minimum. A degenerate covariance (variance → 0 for a component fitted to a single point) signals overfitting — add regularization or reduce k.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.mixture import GaussianMixture
+from sklearn.datasets import make_blobs
+from sklearn.preprocessing import StandardScaler
+
+X, _ = make_blobs(n_samples=500, centers=4, cluster_std=0.9, random_state=0)
+X = StandardScaler().fit_transform(X)
+
+k_range = range(1, 10)
+aic_vals, bic_vals = [], []
+for k in k_range:
+    gm = GaussianMixture(n_components=k, covariance_type='full',
+                          reg_covar=1e-4, n_init=5, random_state=42)
+    gm.fit(X)
+    aic_vals.append(gm.aic(X))
+    bic_vals.append(gm.bic(X))
+
+best_aic = list(k_range)[np.argmin(aic_vals)]
+best_bic = list(k_range)[np.argmin(bic_vals)]
+print(f&quot;AIC selects k={best_aic},  BIC selects k={best_bic}&quot;)
+print(f&quot;\n{'k':&gt;4} {'AIC':&gt;12} {'BIC':&gt;12}&quot;)
+for k, a, b in zip(k_range, aic_vals, bic_vals):
+    mark_a = &quot; &lt;&lt;&quot; if k == best_aic else &quot;&quot;
+    mark_b = &quot; &lt;&lt;&quot; if k == best_bic else &quot;&quot;
+    print(f&quot;{k:&gt;4} {a:&gt;12.2f}{mark_a:4s} {b:&gt;12.2f}{mark_b}&quot;)
+</code></pre>
+<h2>GMM for Anomaly Detection</h2>
+<p>GMMs provide a full density estimate p(x), making them natural for anomaly detection. A point x is anomalous if log p(x) falls below a threshold τ chosen to accept a desired false-positive rate on the training data. This approach is non-parametric in the sense that the anomaly threshold adapts to the learned data distribution, handling multi-modal data better than single-Gaussian methods. The threshold is typically set at a low percentile (e.g., 2nd or 5th percentile) of the training log-likelihoods.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.mixture import GaussianMixture
+from sklearn.preprocessing import StandardScaler
+from sklearn.datasets import make_blobs
+
+rng = np.random.default_rng(42)
+X_normal, _ = make_blobs(n_samples=400, centers=3, cluster_std=0.7, random_state=0)
+X_anomaly = rng.uniform(-6, 6, size=(30, 2))
+X_normal = StandardScaler().fit_transform(X_normal)
+X_anomaly = (X_anomaly - X_anomaly.mean(axis=0)) / X_anomaly.std(axis=0)
+
+gm = GaussianMixture(n_components=3, covariance_type='full', n_init=5, random_state=42)
+gm.fit(X_normal)
+
+log_probs_train = gm.score_samples(X_normal)
+threshold = np.percentile(log_probs_train, 2)
+
+log_probs_normal = gm.score_samples(X_normal)
+log_probs_anomaly = gm.score_samples(X_anomaly)
+
+fpr = (log_probs_normal &lt; threshold).mean()
+detection_rate = (log_probs_anomaly &lt; threshold).mean()
+
+print(f&quot;Threshold (2nd percentile): {threshold:.4f}&quot;)
+print(f&quot;False positive rate on training data: {fpr:.2%}&quot;)
+print(f&quot;Anomaly detection rate: {detection_rate:.2%}&quot;)
+print(f&quot;Train log-prob: mean={log_probs_train.mean():.2f}, min={log_probs_train.min():.2f}&quot;)
+print(f&quot;Anomaly log-prob: mean={log_probs_anomaly.mean():.2f}, min={log_probs_anomaly.min():.2f}&quot;)
+</code></pre>
+<blockquote>
+<p><strong>GMM vs K-Means — The Hard Assignment Limit</strong>: K-means is a special case of GMM with spherical (isotropic) covariances and hard assignments. As the covariance scale σ→0, the soft GMM responsibilities rᵢₖ converge to one-hot cluster assignments, recovering exactly the k-means objective. This means GMM generalizes k-means to elliptical clusters and probabilistic membership — at the cost of more parameters and slower convergence.</p>
+</blockquote>
+<h2>Degenerate Covariances and Regularization</h2>
+<p>A GMM covariance becomes degenerate when a component collapses to fit only one or a few points: its determinant approaches zero and the likelihood spike to +∞, causing numerical instability and false convergence. This over-fitting happens when k is too large relative to n, or when two components overlap severely. The fix is regularization: add reg_covar (default 1e-6) to the diagonal of each Σₖ, equivalent to adding a weak spherical prior. If degenerate covariances persist, reduce k or switch from 'full' to 'tied' or 'diag' covariance type.</p>
+<h2>Practical Notes and Pitfalls</h2>
+<ul>
+<li>Always set reg_covar &gt; 0 (default 1e-6 in sklearn) to prevent degenerate covariances when a component collapses to a single point.</li>
+<li>Use n_init &gt;= 5 — GMM EM is sensitive to initialization; multiple restarts with random initialization are standard.</li>
+<li>Full covariance with small clusters and high d can overfit; prefer diagonal or tied covariance as a starting point.</li>
+<li>BIC is the standard model selection criterion for GMMs; prefer it over AIC as sample size grows.</li>
+<li>GMM log-likelihood is not directly comparable across different numbers of components without penalization (AIC/BIC).</li>
+<li>For streaming data, use online EM or the sklearn partial_fit interface for incremental updates.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

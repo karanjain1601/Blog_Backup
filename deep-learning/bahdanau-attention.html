@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bahdanau Attention — Additive Attention and Alignment | Notes Backup</title>
+  <meta name="description" content="Deep dive into Bahdanau&#x27;s additive attention mechanism — alignment scores, context vectors, and the interpretable alignment matrix that laid the groundwork for the Transformer." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Bahdanau Attention — Additive Attention and Alignment</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Deep dive into Bahdanau&#x27;s additive attention mechanism — alignment scores, context vectors, and the interpretable alignment matrix that laid the groundwork for the Transformer.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Bahdanau Attention — Additive Attention and Alignment</h1>
+<p>In 2014–2015, Bahdanau, Cho, and Bengio identified a critical bottleneck in sequence-to-sequence models: the entire source sentence was compressed into a single fixed-size context vector before decoding began. For short sentences this works adequately, but for longer sequences the encoder struggles to pack all relevant information into one vector — and BLEU scores degrade sharply as input length grows. Their seminal paper introduced a mechanism that computes a fresh, decoder-step-specific context vector at each decoding step, drawn as a weighted sum of all encoder hidden states.</p>
+<h2>The Seq2Seq Bottleneck Problem</h2>
+<p>A standard seq2seq model encodes the source sequence x₁,...,x_{Ts} into hidden states h₁,...,h_{Ts} using a bidirectional RNN, then passes only the final state to the decoder. The decoder produces output tokens y₁,...,y_{Tt} using a unidirectional RNN initialized with that single context. This forces the encoder to summarize arbitrarily long sequences into a fixed-dimensional vector — an information bottleneck that grows more severe as source length increases.</p>
+<ul>
+<li>Standard seq2seq BLEU degrades significantly for sentences longer than 30 tokens</li>
+<li>A single context vector cannot represent all source positions simultaneously</li>
+<li>Gradient must flow through every decoder step back to the encoder, causing vanishing gradients</li>
+<li>Long-distance dependencies between source and target words are poorly captured</li>
+</ul>
+<h2>The Bahdanau Attention Mechanism</h2>
+<p>Bahdanau attention breaks the bottleneck by allowing the decoder to look back at all encoder hidden states at each decoding step. The alignment score eᵢⱼ = vᵀ tanh(W₁sⱼ₋₁ + W₂hᵢ), where sⱼ₋₁ is the decoder state from the previous step and hᵢ is the i-th encoder hidden state. This additive (concat) formulation passes the sum through tanh and a learned vector v, computing an energy measuring compatibility between positions. The scores are normalized via softmax: αᵢⱼ = softmax(eᵢⱼ). The context vector for step j is the weighted sum cⱼ = Σᵢ αᵢⱼhᵢ.</p>
+<ul>
+<li>eᵢⱼ = vᵀ tanh(W₁sⱼ₋₁ + W₂hᵢ) — additive/concat alignment score</li>
+<li>αᵢⱼ = softmax(eᵢⱼ) over all source positions i — probability distribution summing to 1</li>
+<li>cⱼ = Σᵢ αᵢⱼhᵢ — weighted sum of encoder states, specific to decoder step j</li>
+<li>O(Ts × Tt) alignment scores computed per sequence pair</li>
+<li>Alignment matrix {αᵢⱼ} is interpretable: shows which source tokens decoder focuses on</li>
+</ul>
+<h2>Code 1 — Bahdanau Attention from Scratch</h2>
+<pre><code class="language-python">import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class BahdanauAttention(nn.Module):
+    def __init__(self, enc_hidden_dim, dec_hidden_dim, attn_dim):
+        super().__init__()
+        self.W1 = nn.Linear(dec_hidden_dim, attn_dim, bias=False)
+        self.W2 = nn.Linear(enc_hidden_dim, attn_dim, bias=False)
+        self.v  = nn.Linear(attn_dim, 1, bias=False)
+
+    def forward(self, s_prev, encoder_outputs):
+        # s_prev: (batch, dec_hidden_dim)
+        # encoder_outputs: (batch, src_len, enc_hidden_dim)
+        s      = self.W1(s_prev).unsqueeze(1)           # (batch, 1, attn_dim)
+        h      = self.W2(encoder_outputs)                # (batch, src_len, attn_dim)
+        energy = self.v(torch.tanh(s + h)).squeeze(-1)  # (batch, src_len)
+        alpha  = F.softmax(energy, dim=-1)               # (batch, src_len)
+        # cj = sum_i alpha_ij * h_i
+        context = (alpha.unsqueeze(-1) * encoder_outputs).sum(dim=1)  # (batch, enc_h)
+        return context, alpha
+
+# Quick test
+batch, src_len, enc_h, dec_h, attn_d = 2, 10, 256, 256, 128
+attn    = BahdanauAttention(enc_h, dec_h, attn_d)
+enc_out = torch.randn(batch, src_len, enc_h)
+s       = torch.randn(batch, dec_h)
+ctx, weights = attn(s, enc_out)
+print(f&quot;Context: {ctx.shape}, Weights: {weights.shape}, Sum: {weights.sum(-1)}&quot;)
+</code></pre>
+<h2>Code 2 — Seq2Seq with Bahdanau Attention for Translation</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class Encoder(nn.Module):
+    def __init__(self, vocab_size, embed_dim, hidden_dim):
+        super().__init__()
+        self.embed = nn.Embedding(vocab_size, embed_dim, padding_idx=0)
+        self.rnn   = nn.GRU(embed_dim, hidden_dim, batch_first=True, bidirectional=True)
+        self.fc    = nn.Linear(hidden_dim * 2, hidden_dim)
+    def forward(self, src):
+        emb = self.embed(src)
+        out, hidden = self.rnn(emb)
+        hidden = torch.tanh(self.fc(torch.cat([hidden[-2], hidden[-1]], dim=-1)))
+        return out, hidden  # out: (B, T, 2H), hidden: (B, H)
+
+class Decoder(nn.Module):
+    def __init__(self, vocab_size, embed_dim, enc_h, dec_h, attn_d):
+        super().__init__()
+        self.embed  = nn.Embedding(vocab_size, embed_dim)
+        self.attn_W1 = nn.Linear(dec_h, attn_d, bias=False)
+        self.attn_W2 = nn.Linear(enc_h * 2, attn_d, bias=False)
+        self.attn_v  = nn.Linear(attn_d, 1, bias=False)
+        self.rnn     = nn.GRUCell(embed_dim + enc_h * 2, dec_h)
+        self.fc_out  = nn.Linear(dec_h + enc_h * 2 + embed_dim, vocab_size)
+
+    def attention(self, s, enc_out):
+        e = self.attn_v(torch.tanh(self.attn_W1(s).unsqueeze(1) + self.attn_W2(enc_out))).squeeze(-1)
+        return F.softmax(e, dim=-1)
+
+    def forward(self, token, s, enc_out):
+        emb   = self.embed(token)
+        alpha = self.attention(s, enc_out)
+        ctx   = (alpha.unsqueeze(-1) * enc_out).sum(1)
+        s_new = self.rnn(torch.cat([emb, ctx], dim=-1), s)
+        logits = self.fc_out(torch.cat([s_new, ctx, emb], dim=-1))
+        return logits, s_new, alpha
+
+print(&quot;Encoder and Bahdanau Decoder defined successfully.&quot;)
+</code></pre>
+<h2>Code 3 — Alignment Matrix Visualization</h2>
+<p>The alignment matrix {αᵢⱼ} is one of the most striking features of Bahdanau attention — it is directly interpretable as a soft alignment between source and target words. For well-trained translation models it reveals near-diagonal structure for language pairs with similar word order (French-English) and off-diagonal patterns for languages with different syntactic order (German verb-final). The heatmap below plots decoder steps on the y-axis and source positions on the x-axis.</p>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+
+def plot_attention_heatmap(weights, src_tokens, tgt_tokens, title=&quot;Attention Alignment&quot;):
+    &quot;&quot;&quot;
+    weights: (tgt_len, src_len) numpy array of attention weights alpha_ij
+    src_tokens: list of source words
+    tgt_tokens: list of target/decoder words
+    &quot;&quot;&quot;
+    fig, ax = plt.subplots(figsize=(10, 8))
+    im = ax.imshow(weights, cmap='Blues', aspect='auto', vmin=0, vmax=1)
+    ax.set_xticks(range(len(src_tokens)))
+    ax.set_yticks(range(len(tgt_tokens)))
+    ax.set_xticklabels(src_tokens, rotation=45, ha='right', fontsize=11)
+    ax.set_yticklabels(tgt_tokens, fontsize=11)
+    ax.set_xlabel('Source (Encoder positions)', fontsize=12)
+    ax.set_ylabel('Target (Decoder steps)', fontsize=12)
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    plt.colorbar(im, ax=ax, label='Alpha weight')
+    for i in range(len(tgt_tokens)):
+        for j in range(len(src_tokens)):
+            ax.text(j, i, f'{weights[i,j]:.2f}', ha='center', va='center', fontsize=8)
+    plt.tight_layout()
+    plt.savefig('attention_alignment.png', dpi=150)
+    plt.show()
+
+# Simulated French -&gt; English alignment
+src = ['Je', 'suis', 'etudiant', '&lt;eos&gt;']
+tgt = ['I', 'am', 'a', 'student', '&lt;eos&gt;']
+weights = np.array([[0.85, 0.08, 0.04, 0.03],
+                    [0.10, 0.80, 0.06, 0.04],
+                    [0.05, 0.05, 0.85, 0.05],
+                    [0.04, 0.10, 0.82, 0.04],
+                    [0.02, 0.03, 0.05, 0.90]])
+plot_attention_heatmap(weights, src, tgt, &quot;Bahdanau Attention: French to English&quot;)
+</code></pre>
+<h2>Code 4 — Attention vs No-Attention BLEU vs Length</h2>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+
+def sim_bleu(base, decay, lengths, noise_std=0.5, seed=0):
+    &quot;&quot;&quot;Simulate BLEU scores that decay with sentence length.&quot;&quot;&quot;
+    np.random.seed(seed)
+    scores = []
+    for L in lengths:
+        s = base * np.exp(-decay * max(L - 10, 0)) + np.random.randn() * noise_std
+        scores.append(max(round(s, 2), 1.0))
+    return scores
+
+lengths = list(range(5, 55, 5))
+no_attn  = sim_bleu(28.0, 0.040, lengths, seed=1)
+bahdanau = sim_bleu(30.5, 0.012, lengths, seed=2)
+
+fig, ax = plt.subplots(figsize=(9, 5))
+ax.plot(lengths, no_attn,  'r--o', label='Seq2Seq (no attention)', linewidth=2)
+ax.plot(lengths, bahdanau, 'b-s',  label='Seq2Seq + Bahdanau',    linewidth=2)
+ax.fill_between(lengths, no_attn, bahdanau, alpha=0.15, color='blue')
+ax.set_xlabel('Source Sentence Length (tokens)', fontsize=12)
+ax.set_ylabel('BLEU Score', fontsize=12)
+ax.set_title('BLEU vs Sentence Length: Attention vs No-Attention', fontsize=13)
+ax.legend(fontsize=11)
+ax.grid(True, alpha=0.3)
+ax.annotate('attention gap widens\nwith length', xy=(38, 15),
+            fontsize=10, color='blue', style='italic')
+plt.tight_layout()
+plt.savefig('bleu_vs_length.png', dpi=150)
+plt.show()
+print(&quot;Attention advantage grows from ~2 BLEU at L=10 to ~8 BLEU at L=50.&quot;)
+</code></pre>
+<h2>Hard Attention vs Soft Attention</h2>
+<p>Bahdanau's original attention is soft attention: the context vector is a differentiable weighted sum over all encoder positions, enabling end-to-end backpropagation. Hard attention (Xu et al., 2015, for image captioning) samples a single position stochastically rather than computing a weighted average. Hard attention requires REINFORCE-style policy gradient training, is non-differentiable, and produces sparser — sometimes more interpretable — selections. Most subsequent work defaults to soft attention due to its training simplicity and better optimization landscape.</p>
+<blockquote>
+<p><strong>Attention as Memory Retrieval</strong>: Attention can be viewed as soft key-value retrieval: the decoder hidden state acts as a query Q, encoder hidden states act as keys K, and encoder outputs act as values V. The alignment score computes query-key compatibility, softmax normalizes into a probability, and the context vector is the weighted value sum. This query-key-value framing directly inspired the Transformer's scaled dot-product attention — replace the additive score with qᵀk / sqrt(d_k) and remove the RNN.</p>
+</blockquote>
+<h2>From Bahdanau to Transformer Attention</h2>
+<p>Bahdanau attention established the conceptual template that scaled into the Transformer. Three key evolutions: (1) additive scoring replaced by scaled dot-product eᵢⱼ = qⱼᵀkᵢ / √d_k for computational efficiency on modern hardware; (2) the RNN backbone removed entirely — self-attention replaced recurrence, enabling O(1) depth for any pairwise interaction and full parallelism over the sequence; (3) multi-head attention applies multiple attention functions in parallel, each learning different aspects of alignment. The gradient-flow advantage — direct paths from any decoder position to any encoder position — is preserved across all variants.</p>
+<table>
+<thead>
+<tr>
+<th>Variant</th>
+<th>Score Formula</th>
+<th>Complexity</th>
+<th>Uses RNN</th>
+<th>Original Paper</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Bahdanau (additive)</td>
+<td>vᵀ tanh(W₁s + W₂h)</td>
+<td>O(T²·d)</td>
+<td>Yes (biGRU)</td>
+<td>Bahdanau 2015</td>
+</tr>
+<tr>
+<td>Luong dot</td>
+<td>sᵀh</td>
+<td>O(T²)</td>
+<td>Yes (LSTM)</td>
+<td>Luong 2015</td>
+</tr>
+<tr>
+<td>Luong general</td>
+<td>sᵀWh</td>
+<td>O(T²·d)</td>
+<td>Yes (LSTM)</td>
+<td>Luong 2015</td>
+</tr>
+<tr>
+<td>Luong concat</td>
+<td>vᵀ tanh(W[s;h])</td>
+<td>O(T²·d)</td>
+<td>Yes (LSTM)</td>
+<td>Luong 2015</td>
+</tr>
+<tr>
+<td>Scaled dot-product</td>
+<td>qᵀk / √d_k</td>
+<td>O(T²)</td>
+<td>No</td>
+<td>Vaswani 2017</td>
+</tr>
+</tbody>
+</table>
+<p>Bahdanau attention has aged remarkably well. Its core intuition — that decoding should be conditioned on a content-specific weighted combination of encoder representations rather than a fixed summary — proved fundamental. Every modern sequence model inherits this idea: BERT's bidirectional self-attention, GPT's causal self-attention, cross-attention in diffusion and speech models. The alignment visualization also foreshadowed modern explainability: attention weight analysis remains a primary tool for understanding what sequence models have learned.</p>
+<ul>
+<li>O(Ts × Tt) cost is affordable for sentence-level sequences (T &lt; 200)</li>
+<li>Bidirectional encoder hidden states hᵢ capture local context from both directions</li>
+<li>Direct gradient path from loss to each encoder state — no bottleneck vanishing gradient</li>
+<li>Alignment matrix is interpretable: near-diagonal for similar-order languages</li>
+<li>Foundation for self-attention: when Q=K=V all come from the same sequence</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Prompt Versioning and Management | Notes Backup</title>
+  <meta name="description" content="Treating prompts as code artifacts with version control, A/B testing, rollback, and evaluation pipelines — prompt registries, eval-driven iteration, and CI/CD for prompts." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Prompt Versioning and Management</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Treating prompts as code artifacts with version control, A/B testing, rollback, and evaluation pipelines — prompt registries, eval-driven iteration, and CI/CD for prompts.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Prompt Versioning and Management</h1>
+<p>Prompts are hyperparameters — a 5-word change can shift accuracy by 10% or break a production workflow entirely. Yet most teams treat prompt files as ad hoc text, overwriting working versions without history, losing context, and unable to roll back when regressions appear. Disciplined prompt versioning closes the gap between prompt engineering and software engineering.</p>
+<p>Why Prompts Need Version Control</p>
+<p>Prompts drift silently — model updates, A/B test results, and team edits compound without a history trail. A change that improved accuracy for one task may degrade another. Version control gives auditability (who changed what and when), rollback (revert to a known-good prompt in seconds), and blame (link production incidents to specific prompt changes).</p>
+<p>Prompt Registry Design</p>
+<p>A prompt registry stores name-to-version-to-text mappings with rich metadata: author, creation timestamp, target model, eval scores, and promotion history. The registry exposes a minimal API — get(name, version), set(name, text, metadata), promote_to_production(name, version), and rollback(name) — and persists state to a database or versioned file store.</p>
+<pre><code>class PromptRegistry:
+    def __init__(self):
+        self._store = {}
+        self._prod = {}
+
+    def set(self, name, version, text, meta=None):
+        self._store.setdefault(name, {})[version] = {'text': text, 'meta': meta or {}}
+
+    def get(self, name, version=None):
+        ver = version or self._prod.get(name)
+        return self._store[name][ver]['text']
+
+    def promote(self, name, version):
+        self._prod[name] = version
+
+    def rollback(self, name, steps=1):
+        versions = list(self._store[name].keys())
+        self._prod[name] = versions[max(0, versions.index(self._prod[name]) - steps)]
+</code></pre>
+<p>Use semantic versioning for prompt names — major bumps for structural rewrites, minor bumps for wording tweaks, patch versions for typo fixes. Tag every version with the model family it targets; a prompt tuned for claude-3-opus may degrade on claude-3-haiku without retuning. Store diffs between versions for human review alongside the eval scores that motivated each change.</p>
+<p>Evaluation-Driven Iteration</p>
+<p>Never promote a prompt without running evals. An eval harness measures task-specific metrics — exact match, BLEU, ROUGE, or an LLM-judge score — on a fixed held-out test set before and after each change. The delta tells you whether the edit is an improvement or a regression, and the absolute score provides a deployment threshold to enforce in CI gates.</p>
+<pre><code>import statistics
+
+def run_eval(prompt_template, eval_dataset, llm_call, judge_call):
+    scores = []
+    for item in eval_dataset:
+        prompt = prompt_template.format(**item['inputs'])
+        output = llm_call(prompt)
+        exact = int(output.strip() == item['expected'].strip())
+        judge = judge_call(output, item['expected'])  # 0-1 score
+        scores.append((exact + judge) / 2)
+    return {
+        'pass_rate': statistics.mean(scores),
+        'n': len(scores),
+        'std': statistics.stdev(scores) if len(scores) &gt; 1 else 0
+    }
+</code></pre>
+<p>Eval test sets should be curated, not synthetic. Include adversarial inputs, edge cases, and real failure modes from production logs. Aim for 200-500 examples per task — enough to detect a 5% metric shift with 80% statistical power. Freeze the test set; never tune against it. Rotate a small portion monthly to detect distribution drift and keep the suite relevant.</p>
+<p>A/B Testing Prompts</p>
+<p>Route a share of production traffic to the new prompt, log (user_id, prompt_version, output, outcome) for every request, then compute significance using a chi-square or t-test. Promote only when p &lt; 0.05 and the target metric improves. Keep tests short — 48-72 hours for high-traffic systems — to limit user exposure to potentially degraded outputs during the trial.</p>
+<pre><code>import hashlib
+from scipy.stats import chi2_contingency
+
+def ab_router(user_id, treatment_pct=0.1):
+    digest = int(hashlib.md5(user_id.encode()).hexdigest(), 16)
+    return 'treatment' if (digest % 100) &lt; (treatment_pct * 100) else 'control'
+
+def compute_significance(counts):
+    # counts: {'control': [success, fail], 'treatment': [success, fail]}
+    table = [counts['control'], counts['treatment']]
+    chi2, p, dof, _ = chi2_contingency(table)
+    return {'chi2': round(chi2, 4), 'p_value': round(p, 4),
+            'significant': p &lt; 0.05,
+            'lift': counts['treatment'][0] / sum(counts['treatment']) -
+                    counts['control'][0] / sum(counts['control'])}
+</code></pre>
+<p>Plan your sample size before launching an A/B test. A 5% expected lift with 80% power and alpha = 0.05 requires roughly 1,500 samples per arm. Under-powered tests produce false negatives and cause good prompts to be discarded. Always log the full output alongside the binary outcome to enable post-hoc qualitative review of failures once the test concludes.</p>
+<p>Regression Testing and CI/CD</p>
+<p>Add a prompt eval suite to CI — on every pull request that modifies a prompt file, the pipeline runs the eval harness and asserts a minimum pass rate. Block the merge if the score drops below threshold or falls more than 3% relative to the current production prompt. Gate deployments the same way you gate code: all tests must pass before any changes ship to production.</p>
+<pre><code>import sys, pathlib
+
+PROD_BASELINE  = 0.87
+MIN_PASS_RATE  = 0.85
+REGRESSION_GAP = 0.03
+
+def ci_prompt_check(pr_path, eval_dataset, llm_call, judge_call):
+    candidate = pathlib.Path(pr_path).read_text()
+    result = run_eval(candidate, eval_dataset, llm_call, judge_call)
+    delta = result['pass_rate'] - PROD_BASELINE
+    print('Pass rate: {:.3f}  Delta: {:+.3f}'.format(result['pass_rate'], delta))
+    if result['pass_rate'] &lt; MIN_PASS_RATE:
+        print('FAIL: below minimum threshold'); sys.exit(1)
+    if delta &lt; -REGRESSION_GAP:
+        print('FAIL: regression vs prod baseline'); sys.exit(1)
+    print('PASS: prompt cleared for merge')
+</code></pre>
+<p>Monitor prompt quality in production using the same signals as model performance: response latency, user satisfaction scores, downstream task success rates, and safety filter trigger rates. Set alerts on 7-day rolling metric windows. When an alert fires, check the prompt changelog first — a recent edit is often the root cause, and a prompt rollback is faster than debugging.</p>
+<blockquote>
+<p><strong>info</strong>: Prompts are hyperparameters — treat changes with the same rigor as code: branch, write evals, review the diff, deploy behind a feature flag, and monitor metrics before full rollout.</p>
+</blockquote>
+<p>Maintain a structured change log for every prompt in your registry. Each entry records the version, author, timestamp, motivation (e.g., reduced hallucination rate by 4%), linked eval run ID, and deployment status. The change log is documentation for new team members and evidence in incident post-mortems when a prompt change is implicated in a production regression.</p>
+<table>
+<thead>
+<tr>
+<th>Practice</th>
+<th>Without Versioning</th>
+<th>With Versioning</th>
+<th>Why It Matters</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Version control</td>
+<td>Prompts overwritten in place</td>
+<td>Full history with diffs</td>
+<td>Rollback and blame</td>
+</tr>
+<tr>
+<td>Eval on deploy</td>
+<td>Manual spot-check or none</td>
+<td>Automated score gate</td>
+<td>Catch regressions before prod</td>
+</tr>
+<tr>
+<td>A/B testing</td>
+<td>Gut-feel promotion</td>
+<td>Statistical significance test</td>
+<td>Confident deployment decisions</td>
+</tr>
+<tr>
+<td>Rollback</td>
+<td>Manually recall old text</td>
+<td>One-command revert</td>
+<td>Minutes to recover vs hours</td>
+</tr>
+<tr>
+<td>Regression suite</td>
+<td>Ad hoc testing each change</td>
+<td>CI blocks bad merges</td>
+<td>Continuous quality enforcement</td>
+</tr>
+<tr>
+<td>Change logging</td>
+<td>Slack messages and memory</td>
+<td>Structured audit trail</td>
+<td>Accountability and post-mortems</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<p>Key Takeaways</p>
+<ul>
+<li>Store prompts in a registry with name-to-version-to-text mappings, rich metadata, and a one-command promote/rollback API.</li>
+<li>Run an eval harness on every change — measure exact match, BLEU, or LLM-judge scores on a frozen test set before promoting any version to production.</li>
+<li>A/B test significant changes in production; use chi-square significance testing and enforce p &lt; 0.05 before committing to a full rollout.</li>
+<li>Gate prompt changes in CI exactly like code — assert a minimum pass rate and maximum regression delta on every pull request that touches a prompt file.</li>
+<li>Monitor production prompt quality with rolling metric windows and alerts; a prompt rollback is often the fastest incident response available.</li>
+<li>Treat prompts as first-class artifacts: branch them, review diffs, log every change with motivation and eval evidence, and require sign-off before promotion.</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

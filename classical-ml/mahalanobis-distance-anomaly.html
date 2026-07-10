@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mahalanobis Distance — Multivariate Anomaly Detection | Notes Backup</title>
+  <meta name="description" content="Detect multivariate anomalies using Mahalanobis distance with chi-squared thresholds and robust MCD estimation — and see exactly why Euclidean distance fails on correlated features." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Mahalanobis Distance — Multivariate Anomaly Detection</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Detect multivariate anomalies using Mahalanobis distance with chi-squared thresholds and robust MCD estimation — and see exactly why Euclidean distance fails on correlated features.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Mahalanobis Distance — Multivariate Anomaly Detection</h1>
+<p>Euclidean distance treats every feature dimension as equally important and independent. When features are correlated or have different scales, Euclidean distance misidentifies which points are truly unusual. Mahalanobis distance corrects for both correlation (via the covariance matrix Σ) and scale (via Σ's diagonal), producing a single unitless distance that accounts for the joint distribution of all features simultaneously.</p>
+<h2>Mahalanobis Distance — Definition and Geometry</h2>
+<p>For a point x in d-dimensional space with population mean μ and covariance Σ, the Mahalanobis distance is d_M(x) = √((x−μ)ᵀΣ⁻¹(x−μ)). The term Σ⁻¹ whitens the data: it rotates axes to align with principal components and scales each axis by 1/√λᵢ where λᵢ is the i-th eigenvalue. Under a multivariate Gaussian, d²_M follows a chi-squared distribution with d degrees of freedom — giving a principled statistical threshold for any dimension.</p>
+<p>$$d_M(\mathbf{x}) = \sqrt{(\mathbf{x}-\boldsymbol{\mu})^\top \boldsymbol{\Sigma}^{-1} (\mathbf{x}-\boldsymbol{\mu})}, \quad d_M^2 \sim \chi^2(d) \text{ under Gaussian}$$</p>
+<h2>From Scratch vs scipy</h2>
+<p>The squared Mahalanobis distance can be computed as a quadratic form using the inverse covariance matrix. scipy.spatial.distance.mahalanobis accepts the inverse covariance matrix (VI parameter) directly. For batches of points, use numpy einsum for vectorised computation. When the covariance matrix is near-singular (d close to n), use the pseudoinverse or regularise with a small diagonal: Σ_reg = Σ + εI.</p>
+<pre><code class="language-python">import numpy as np
+from scipy.spatial.distance import mahalanobis
+from scipy.stats import chi2
+
+np.random.seed(42)
+X = np.random.multivariate_normal([0, 0], [[1, 0.8], [0.8, 1]], 200)
+X_test = np.array([[3.0, 3.0], [0.5, -0.5], [-2.0, 2.0]])
+
+mu = X.mean(axis=0)
+Sigma = np.cov(X.T)
+Sigma_inv = np.linalg.inv(Sigma)
+
+def mahal_scratch(x, mu, Sigma_inv):
+    diff = x - mu
+    return np.sqrt(diff @ Sigma_inv @ diff)
+
+d_scratch = np.array([mahal_scratch(x, mu, Sigma_inv) for x in X_test])
+d_scipy   = np.array([mahalanobis(x, mu, Sigma_inv) for x in X_test])
+d_sq      = np.array([(x-mu) @ Sigma_inv @ (x-mu) for x in X_test])
+
+print('Point           | d_scratch | d_scipy | d^2    | p-val (chi2)')
+for i, x in enumerate(X_test):
+    pval = 1 - chi2.cdf(d_sq[i], df=2)
+    print(f'{str(x):16s} | {d_scratch[i]:9.4f} | {d_scipy[i]:7.4f} | {d_sq[i]:6.3f} | {pval:.4f}')
+print(f'Max diff scratch vs scipy: {np.abs(d_scratch - d_scipy).max():.2e}')
+</code></pre>
+<h2>Chi-Squared Threshold for Anomaly Flagging</h2>
+<p>Under a multivariate Gaussian, d²_M ~ χ²(d). An anomaly threshold at significance α is the (1−α) quantile of χ²(d). For d=2, α=0.01 gives threshold ≈ 9.21 (d_M ≈ 3.03). This threshold works regardless of feature scale and automatically tightens as dimension d increases — one of Mahalanobis distance's key advantages over ad-hoc per-feature Z-scores.</p>
+<pre><code class="language-python">import numpy as np
+from scipy.stats import chi2
+
+np.random.seed(42)
+d = 4  # dimensions
+X = np.random.multivariate_normal(np.zeros(d),
+    np.array([[1,0.6,0.3,0.1],[0.6,1,0.4,0.2],[0.3,0.4,1,0.5],[0.1,0.2,0.5,1]]), 500)
+X_anomaly = np.random.uniform(-4, 4, (20, d))
+
+mu = X.mean(axis=0)
+Sigma_inv = np.linalg.inv(np.cov(X.T))
+
+def mahal_sq_batch(points, mu, Sigma_inv):
+    diff = points - mu
+    return np.einsum('ij,jk,ik-&gt;i', diff, Sigma_inv, diff)
+
+for alpha in [0.05, 0.01, 0.001]:
+    thresh = chi2.ppf(1 - alpha, df=d)
+    d2_normal  = mahal_sq_batch(X, mu, Sigma_inv)
+    d2_anomaly = mahal_sq_batch(X_anomaly, mu, Sigma_inv)
+    fp = (d2_normal  &gt; thresh).mean()
+    tp = (d2_anomaly &gt; thresh).mean()
+    print(f'alpha={alpha:.3f}: threshold={thresh:.2f}  FP rate={fp:.3f}  anomaly recall={tp:.2f}')
+</code></pre>
+<h2>Robust Estimation via MCD and EllipticEnvelope</h2>
+<p>Sample mean and covariance are non-robust: a contaminated dataset shifts both estimates toward the outliers, masking the anomalies (masking) or flagging genuine normal points (swamping). The Minimum Covariance Determinant (MCD) estimator finds the subset of h ≥ (n+d+1)/2 observations with the smallest covariance determinant — typically h=75% of n. The resulting robust location and scatter are unaffected by up to ~25% contamination. sklearn wraps MCD in EllipticEnvelope.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.covariance import EllipticEnvelope, MinCovDet
+
+np.random.seed(42)
+X_clean = np.random.multivariate_normal([0, 0], [[1, 0.6], [0.6, 1]], 200)
+X_contaminated = np.vstack([X_clean,
+    np.random.multivariate_normal([5, 5], [[0.3, 0], [0, 0.3]], 20)])
+
+# Standard (non-robust) estimates
+mu_std = X_contaminated.mean(axis=0)
+
+# Robust estimates via MCD
+mcd = MinCovDet(support_fraction=0.75, random_state=42)
+mcd.fit(X_contaminated)
+mu_rob = mcd.location_
+
+# EllipticEnvelope for anomaly detection
+env = EllipticEnvelope(contamination=0.09, support_fraction=0.75, random_state=42)
+env.fit(X_contaminated)
+preds = env.predict(X_contaminated)
+n_detected = (preds == -1).sum()
+
+print(f'Standard mu:  {mu_std.round(3)} (biased toward injected cluster)')
+print(f'Robust mu:    {mu_rob.round(3)} (close to true [0,0])')
+print(f'EllipticEnvelope: {n_detected} anomalies (injected 20)')
+print(f'True positive rate: {((preds[-20:]) == -1).mean():.0%}')
+</code></pre>
+<h2>Mahalanobis vs Euclidean on Correlated Features</h2>
+<p>The key insight: a point that follows the correlation structure of the data (e.g., tall height + high weight) may have large Euclidean distance from the mean but small Mahalanobis distance. Conversely, a point that breaks the correlation (e.g., very tall + very low weight) has small Euclidean distance but large Mahalanobis distance and is the true anomaly. Euclidean distance cannot distinguish these cases.</p>
+<pre><code class="language-python">import numpy as np
+from scipy.stats import chi2
+
+np.random.seed(42)
+cov = [[1.0, 0.95], [0.95, 1.0]]
+X = np.random.multivariate_normal([0, 0], cov, 300)
+
+mu = X.mean(axis=0)
+Sigma = np.cov(X.T)
+Sigma_inv = np.linalg.inv(Sigma)
+
+def euclid_dist(p, mu):
+    return np.sqrt(np.sum((p - mu)**2, axis=1))
+
+def mahal_dist(p, mu, Sigma_inv):
+    d = p - mu
+    return np.sqrt(np.einsum('ij,jk,ik-&gt;i', d, Sigma_inv, d))
+
+# Point A follows correlation: [3, 3] — along the main axis
+# Point B breaks correlation: [1, -1] — against the correlation
+pts = np.array([[3.0, 3.0], [1.0, -1.0]])
+labels = ['A: with correlation (3,3)', 'B: against correlation (1,-1)']
+threshold_mahal = np.sqrt(chi2.ppf(0.99, df=2))
+
+for label, pt in zip(labels, pts):
+    p = pt.reshape(1, -1)
+    ed = euclid_dist(p, mu)[0]
+    md = mahal_dist(p, mu, Sigma_inv)[0]
+    print(f'{label}')
+    print(f'  Euclidean={ed:.3f}  Mahalanobis={md:.3f}  threshold={threshold_mahal:.3f}')
+    print(f'  Anomaly by Euclidean (&gt;3): {ed&gt;3}   by Mahalanobis: {md&gt;threshold_mahal}')
+</code></pre>
+<h2>Method Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Euclidean</th>
+<th>Per-feature Z-score</th>
+<th>Mahalanobis</th>
+<th>Robust Mahalanobis (MCD)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Handles feature correlation</td>
+<td>No</td>
+<td>No</td>
+<td>Yes (via Σ⁻¹)</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Scale invariant</td>
+<td>No</td>
+<td>Yes (per feature)</td>
+<td>Yes</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Multivariate threshold</td>
+<td>No (per-axis)</td>
+<td>No</td>
+<td>Yes (χ²(d))</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Robustness to contamination</td>
+<td>Low</td>
+<td>Low</td>
+<td>Low</td>
+<td>High (50% breakdown)</td>
+</tr>
+<tr>
+<td>Requires d &lt; n/2</td>
+<td>No</td>
+<td>No</td>
+<td>Yes (Σ invertible)</td>
+<td>Less strict</td>
+</tr>
+<tr>
+<td>Computational cost</td>
+<td>O(nd)</td>
+<td>O(nd)</td>
+<td>O(nd² + d³)</td>
+<td>O(n²d²)</td>
+</tr>
+</tbody>
+</table>
+<h2>Limitations and Practical Notes</h2>
+<p>Mahalanobis distance assumes the data follows a multivariate Gaussian. When the true distribution has heavy tails or multiple clusters, the single Gaussian assumption breaks down and anomaly detection suffers. When d &gt; n/2, the sample covariance is singular — use pseudo-inverse, diagonal regularisation (Σ + εI), or reduce dimensions first with PCA. For very high-dimensional data (d &gt; 100), consider Isolation Forest instead.</p>
+<blockquote>
+<p><strong>Mahalanobis for Anomaly Scoring</strong>: Rather than using a hard chi-squared threshold, you can use d²_M directly as a continuous anomaly score — larger values indicate more anomalous points. This avoids committing to an α level and allows downstream ranking or threshold tuning using a validation set with labelled anomalies.</p>
+</blockquote>
+<ul>
+<li>Always use robust MCD estimation (EllipticEnvelope) when contamination is expected</li>
+<li>Verify approximate multivariate normality with Mardia's test or Q-Q plots of d²_M</li>
+<li>When d &gt; n/2, regularise: Sigma_reg = Sigma + lam * np.eye(d)</li>
+<li>For non-Gaussian data, consider kernel Mahalanobis or switch to Isolation Forest</li>
+<li>Use chi2.ppf(1-alpha, df=d) to set the threshold — it scales correctly with dimension</li>
+</ul>
+<p>Mahalanobis distance is also used in novelty detection: fit the covariance on training (normal) data, then score test points. Because the threshold from χ²(d) is theoretically motivated, it does not need manual tuning — a key advantage over methods like LOF or Isolation Forest that require contamination parameter estimation.</p>
+    </article>
+  </main>
+</body>
+</html>

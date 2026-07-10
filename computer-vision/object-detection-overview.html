@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Object Detection: Fundamentals and Pipeline | Notes Backup</title>
+  <meta name="description" content="The object detection task — bounding box formats (xyxy, xywh, cxcywh), IoU computation, NMS, detection pipeline stages, and the one-stage vs two-stage paradigm." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Object Detection: Fundamentals and Pipeline</h1>
+      <ul class='note-meta'><li><strong>description:</strong> The object detection task — bounding box formats (xyxy, xywh, cxcywh), IoU computation, NMS, detection pipeline stages, and the one-stage vs two-stage paradigm.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Object Detection: Fundamentals and Pipeline</h1>
+<h2>Overview</h2>
+<p>Object detection is the task of localizing and classifying multiple objects within an image. Unlike image classification, which outputs a single label, detection models output a set of bounding boxes — each paired with a class label and confidence score. The core pipeline involves feature extraction, region scoring, box regression, and post-processing steps like NMS.</p>
+<p>Detection benchmarks use metrics like mean Average Precision (mAP), measured at specific IoU thresholds (e.g., AP50, AP75, or COCO's AP averaged from 0.5 to 0.95). Understanding box formats and geometric operations like IoU is essential before diving into any detector architecture. This note covers the building blocks shared by virtually every detection pipeline.</p>
+<h2>Bounding Box Representations</h2>
+<p>Bounding boxes are rectangular regions that tightly enclose detected objects. Several coordinate formats are used across frameworks and datasets. xyxy stores the top-left and bottom-right corners. xywh stores the top-left corner plus width and height. cxcywh stores the center point plus width and height. Each format has different algebraic properties that make it more natural for specific operations.</p>
+<p>COCO annotations use xywh with absolute pixel values, while YOLO models work with normalized cxcywh (values in [0,1] relative to image dimensions). torchvision internally uses xyxy format. Efficient detection code must handle conversions cleanly, and NumPy broadcasting makes it straightforward to convert entire arrays of boxes at once without loops.</p>
+<pre><code class="language-python">import numpy as np
+
+def xyxy_to_xywh(boxes):
+    # boxes: [N,4] in xyxy format -&gt; [x1,y1,w,h]
+    return np.stack([boxes[:,0], boxes[:,1],
+                     boxes[:,2]-boxes[:,0],
+                     boxes[:,3]-boxes[:,1]], axis=1)
+
+def xywh_to_cxcywh(boxes):
+    # boxes: [N,4] in xywh format -&gt; [cx,cy,w,h]
+    return np.stack([boxes[:,0]+boxes[:,2]/2,
+                     boxes[:,1]+boxes[:,3]/2,
+                     boxes[:,2], boxes[:,3]], axis=1)
+
+def xyxy_to_cxcywh(boxes):
+    return xywh_to_cxcywh(xyxy_to_xywh(boxes))
+</code></pre>
+<h2>Intersection over Union (IoU)</h2>
+<p>IoU is the ratio of the intersection area to the union area of two bounding boxes. It measures how well two boxes overlap and is used in two critical places: anchor assignment during training (deciding whether an anchor is positive or negative) and NMS during inference (deciding whether two detections refer to the same object). IoU of 0 means no overlap; 1.0 means perfect overlap.</p>
+<p>For a set of predicted boxes and ground-truth boxes, we often need pairwise IoU — a matrix of shape [N_pred, N_gt]. This is computed efficiently using broadcasting. Vectorized IoU is essential for fast anchor matching during training, where thousands of anchors must be compared against dozens of GT boxes without Python loops.</p>
+<pre><code class="language-python">import numpy as np
+
+def compute_iou(box_a, box_b):
+    # Compute IoU between two boxes in xyxy format
+    xa = max(box_a[0], box_b[0])
+    ya = max(box_a[1], box_b[1])
+    xb = min(box_a[2], box_b[2])
+    yb = min(box_a[3], box_b[3])
+
+    inter = max(0, xb - xa) * max(0, yb - ya)
+    area_a = (box_a[2]-box_a[0]) * (box_a[3]-box_a[1])
+    area_b = (box_b[2]-box_b[0]) * (box_b[3]-box_b[1])
+    union = area_a + area_b - inter
+    return inter / union if union &gt; 0 else 0.0
+</code></pre>
+<h2>Non-Maximum Suppression</h2>
+<p>NMS is the post-processing step that removes duplicate detections. Because multiple anchors or grid cells may respond to the same object, detectors often produce hundreds of overlapping boxes for a single instance. NMS retains the highest-scoring box for each object and suppresses all other boxes whose IoU with the kept box exceeds a threshold (typically 0.5 for COCO).</p>
+<p>Soft-NMS is a variant that decays scores of overlapping boxes rather than hard-removing them, improving recall in dense scenes. For multi-class detection, standard NMS is applied per class independently. torchvision's batched_nms handles this efficiently by offsetting boxes by class index before applying class-agnostic NMS.</p>
+<pre><code class="language-python">import numpy as np
+
+def nms(boxes, scores, iou_threshold=0.5):
+    # Greedy NMS. boxes: [N,4] xyxy, scores: [N]
+    order = scores.argsort()[::-1]
+    keep = []
+    while order.size &gt; 0:
+        i = order[0]
+        keep.append(i)
+        ious = np.array([compute_iou(boxes[i], boxes[j])
+                         for j in order[1:]])
+        order = order[1:][ious &lt;= iou_threshold]
+    return keep
+</code></pre>
+<pre><code class="language-python">import torch
+from torchvision.ops import batched_nms
+
+# boxes: [N,4] xyxy float, scores: [N], labels: [N] int
+boxes = torch.tensor([[10,20,50,80],[12,22,52,82],
+                       [100,100,200,200]], dtype=torch.float32)
+scores = torch.tensor([0.9, 0.85, 0.95])
+labels = torch.tensor([0, 0, 1])
+
+keep = batched_nms(boxes, scores, labels, iou_threshold=0.5)
+print('Kept indices:', keep)
+# NMS applied per class; boxes from different classes
+# are never suppressed against each other.
+</code></pre>
+<blockquote>
+<p><strong>warning</strong>: NMS is class-specific by default — use batched_nms in torchvision to apply NMS per class. Class-agnostic NMS can suppress valid boxes from different classes that overlap.</p>
+</blockquote>
+<h2>One-Stage vs Two-Stage Detectors</h2>
+<p>Two-stage detectors (R-CNN family) first generate region proposals using a dedicated network (RPN), then classify and refine each proposal in a second stage. This decoupling allows high accuracy but adds latency. One-stage detectors (YOLO, SSD, RetinaNet) predict boxes and class scores directly from a feature map grid in a single forward pass, trading some accuracy for speed.</p>
+<p>RetinaNet introduced focal loss to address the extreme class imbalance in one-stage detectors — most anchors are easy negatives. Focal loss down-weights well-classified examples, letting the model focus on hard cases. Modern anchor-free one-stage detectors like FCOS predict boxes from every foreground pixel rather than from discrete anchor templates.</p>
+<p>Transformer-based detectors like DETR reformulate detection as a set prediction problem, eliminating NMS entirely by using bipartite matching during training. While slower to train than CNN-based methods, DETR variants (Deformable DETR, DINO) now match or exceed two-stage accuracy on COCO with simpler post-processing pipelines.</p>
+<h2>Key Takeaways</h2>
+<p>A solid grasp of box formats, IoU computation, and NMS is prerequisite knowledge for every detection architecture. These primitives appear in training (anchor assignment, loss computation) and inference (box decoding, duplicate suppression). Building efficient vectorized implementations of these operations is a practical skill for anyone working on custom detectors.</p>
+<table>
+<thead>
+<tr>
+<th>Format</th>
+<th>Fields</th>
+<th>Center?</th>
+<th>Size Fields</th>
+<th>Used By</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>xyxy</td>
+<td>x1,y1,x2,y2</td>
+<td>No</td>
+<td>Implicit</td>
+<td>torchvision, COCO eval</td>
+</tr>
+<tr>
+<td>xywh</td>
+<td>x1,y1,w,h</td>
+<td>No</td>
+<td>w,h</td>
+<td>COCO annotations</td>
+</tr>
+<tr>
+<td>cxcywh</td>
+<td>cx,cy,w,h</td>
+<td>Yes</td>
+<td>w,h</td>
+<td>YOLO absolute coords</td>
+</tr>
+<tr>
+<td>normalized xywh</td>
+<td>cx,cy,w,h (0-1)</td>
+<td>Yes</td>
+<td>w,h</td>
+<td>YOLO label files</td>
+</tr>
+</tbody>
+</table>
+<p>When selecting a detection framework, consider inference speed (FPS), model size, and whether the deployment target has GPU support. Two-stage detectors generally excel at small object detection due to their high-resolution RoI features, while one-stage detectors are preferred for real-time applications. Anchor-free approaches reduce hyperparameter tuning significantly.</p>
+    </article>
+  </main>
+</body>
+</html>

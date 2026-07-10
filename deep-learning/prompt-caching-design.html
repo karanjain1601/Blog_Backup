@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Designing Prompts for Maximum Cache Efficiency | Notes Backup</title>
+  <meta name="description" content="Structuring prompts to maximize prefix cache hit rates — ordering static vs dynamic content, managing cache TTL, and measuring cache savings across API providers." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Designing Prompts for Maximum Cache Efficiency</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Structuring prompts to maximize prefix cache hit rates — ordering static vs dynamic content, managing cache TTL, and measuring cache savings across API providers.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Designing Prompts for Maximum Cache Efficiency</h1>
+<p>Prompt caching is a mechanism offered by major AI API providers — including Anthropic, OpenAI, and Google — that stores computed prefix representations and reuses them on subsequent requests that share the same prefix. When a request arrives with a prefix matching a cached version, the provider skips the attention computation over those tokens and charges a deeply discounted rate, typically 10 to 25 percent of the full input token cost. For applications that send large, repetitive system prompts or retrieval-augmented context alongside each user query, prompt caching can cut input token costs by 70 to 90 percent and reduce time-to-first-token latency by 30 to 60 percent. The catch is structural: prefix caches only match from the start of the token sequence. A single dynamic token appearing before the stable system prompt invalidates the entire cache match, reducing the effective hit rate to zero regardless of how many tokens follow. Designing prompts for cache efficiency therefore requires understanding prefix-matching mechanics, structuring prompts so that static content always precedes dynamic content, and instrumenting requests to measure cache hit rates so improvements can be validated in production.</p>
+<h2>Overview</h2>
+<p>At a high level, prompt caching works by hashing or fingerprinting the exact token sequence at a request's prefix and storing the key-value (KV) pairs produced by the attention layers for that prefix. On a subsequent request with the same prefix, the stored KV pairs are loaded directly into the attention mechanism, and only the new suffix tokens require a full forward pass. The economics are favorable because KV pair storage is cheap relative to recomputing attention: inference cost is dominated by quadratic attention over the context, so skipping prefix computation on cache hits produces both latency and cost savings proportional to prefix length. In practice, a 2,000-token system prompt plus a 5,000-token RAG document block — a 7,000-token stable prefix — costs roughly seven times less on a cache hit than on a miss under Anthropic's published pricing of $0.30 per million cache-read tokens versus $3.00 per million for standard input. At an 80 percent hit rate, the effective blended cost per input token drops by approximately 70 percent. The 20 percent of requests that miss the cache pay the full rate plus a small cache-write fee, but the write fee is recovered after approximately three cache hits over the same prefix.</p>
+<h2>Prefix Cache Mechanics</h2>
+<p>A prefix cache is conceptually a key-value store where the key is the hash of the exact token sequence at the start of a prompt and the value is the tensor of computed KV pairs for those tokens. When a new request arrives, the provider computes the prefix hash and checks the cache. On a hit, it loads the cached KV pairs and continues the forward pass from the first uncached token — the dynamic suffix. On a miss, it runs the full forward pass from token 1, stores the resulting KV pairs under the prefix hash, and charges a cache-write fee in addition to the regular input token cost. The prefix must match exactly: the same bytes in the same order, producing the same token IDs after tokenization. A single character difference anywhere in the prefix, even a whitespace or punctuation change, produces a different hash and a cache miss. This exact-match requirement means that variable data such as timestamps, session IDs, or user names embedded within what would otherwise be a stable system prompt will break cache matches on every request. Common mistakes include f-strings that inject dynamic values into system prompts, per-request logging metadata prepended to context, and randomly shuffled few-shot examples that produce different token orderings on each call.</p>
+<p>Prompt caches have a time-to-live (TTL) that determines how long a cached prefix remains available for reuse. Anthropic sets the ephemeral cache TTL at 5 minutes for standard accounts. OpenAI's automatic prefix caching uses a 1-hour TTL, and Google's context caching also defaults to 1 hour. Requests arriving more than the TTL duration after the most recent cache write will miss and trigger a fresh write. For applications with request rates higher than one request per TTL interval — which includes most production chatbots and batch-processing pipelines — the TTL is effectively never a constraint because the cache is refreshed continuously by incoming traffic. For lower-frequency applications such as overnight batch jobs or periodic document-analysis pipelines, TTL expiry can substantially reduce the effective hit rate. In those cases, pre-warming the cache by sending a lightweight dummy request at the start of a batch ensures that all subsequent batch requests will hit the warm cache. The cache-write cost on Anthropic's platform is 125 percent of the standard input rate per token, meaning a cold-start write on a 5,000-token prefix costs 1.25 times the normal amount for those tokens. Over a batch of 100 requests sharing that prefix, the write overhead is amortized across 99 cache hits and recovered within the first three requests.</p>
+<h2>Static Before Dynamic</h2>
+<p>The single most important design decision for cache efficiency is prompt ordering: all static content must precede all dynamic content in the token sequence. A prefix cache matches only from the beginning, so any dynamic token appearing before a stable segment prevents that segment from being cached. Consider a prompt that places the user question first, followed by a 3,000-token system prompt and a 10,000-token RAG document block. Even when the system prompt and document block are identical on every request, the prefix hash changes with every question because the question appears first — every request is a cache miss. Reversing the order — system prompt first, RAG documents second, user question last — makes the first 13,000 tokens identical across requests, producing cache hits on all requests after the first. This reordering costs nothing in terms of model quality: the transformer attention mechanism processes all tokens in the same forward pass regardless of sequence position, and the model's understanding of the question is not affected by its appearing late in the context. For multi-modal models, the same principle applies to image tokens — static reference images should precede dynamic query images. For tool-use applications, tool definitions that rarely change within an application version should appear before the conversation history and user message.</p>
+<blockquote>
+<p><strong>Static First, Dynamic Last</strong>: Put your longest, most reused content at the beginning of the prompt (system instructions, RAG context, examples) and dynamic content at the end — prefix caches only match from the start of the sequence, so a single dynamic token before the stable content resets the cache hash to a miss on every request.</p>
+</blockquote>
+<pre><code class="language-python">import anthropic
+
+SYSTEM = &quot;You are a helpful assistant. Answer concisely.&quot;
+DOCS = &quot;Context: The Eiffel Tower stands 330 m tall. Paris pop: 2.2 M.&quot;
+client = anthropic.Anthropic()
+
+def call_api(system: str, user: str) -&gt; dict:
+    r = client.messages.create(model=&quot;claude-opus-4-5&quot;, max_tokens=64,
+        system=system, messages=[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: user}])
+    cached = getattr(r.usage, &quot;cache_read_input_tokens&quot;, 0)
+    return {&quot;cached&quot;: cached, &quot;billed&quot;: r.usage.input_tokens}
+
+q = &quot;How tall is the Eiffel Tower?&quot;
+prefix_bad  = q + &quot; &quot; + SYSTEM + &quot; &quot; + DOCS   # dynamic first  =&gt; 0% hit rate
+prefix_good = SYSTEM + &quot; &quot; + DOCS             # static first   =&gt; high hit rate
+bad  = call_api(system=prefix_bad,  user=&quot;Answer.&quot;)
+good = call_api(system=prefix_good, user=q)
+print(f&quot;bad  cached={bad['cached']:&gt;5}  billed={bad['billed']:&gt;5}&quot;)
+print(f&quot;good cached={good['cached']:&gt;5}  billed={good['billed']:&gt;5}&quot;)
+</code></pre>
+<p>The example above demonstrates the core difference between cache-hostile and cache-friendly prompt ordering. In the bad ordering, the dynamic user question appears at the start of the system argument, so the prefix hash changes on every request and the cache is never useful. In the good ordering, the static system prompt and documents appear first — only the user question varies — making the prefix stable across calls. The cache_read_input_tokens field in the response usage object is the definitive measurement: it reports how many tokens were served from cache rather than recomputed. On the first good-ordering call, this value is zero because the cache is being written for the first time. On subsequent calls with different questions but the same system prompt and documents, the value equals the length of the stable prefix, and the billed input_tokens drops correspondingly. Monitoring this ratio in production is essential for detecting accidental prompt changes that break cache alignment — a sudden drop in cache_read_input_tokens reveals a prompt modification that invalidated the existing cache entry and reset the system to cold-start performance.</p>
+<h2>Cache-Friendly Prompt Structures</h2>
+<p>Designing cache-friendly prompt structures requires classifying every element of the prompt as either stable (identical across most or all requests) or dynamic (varying per request), then ordering elements from most stable to least stable. In a typical RAG application, the system prompt — containing role definition, output format instructions, safety guidelines, and behavioral constraints — is the most stable element and belongs first. Next come the retrieved documents, which may vary by query category but are often identical within a batch of related queries. Few-shot examples follow the documents: stable within a task type but occasionally swapped when the task changes. The dynamic user query appears last, immediately before the assistant turn where generation begins. This ordering maximizes the stable prefix length and therefore the fraction of input tokens served from cache on each request. For applications serving multiple query categories with different document sets, cache efficiency improves further by routing queries to category-specific prefixes — each category maintains its own cache entry, and within-category requests share the full prefix. Avoid embedding any request-specific information such as timestamps, request IDs, or per-user personalization data in the stable prefix, as these produce a unique prefix hash on every request regardless of how much other content is shared.</p>
+<ul>
+<li>System prompt (role, format, safety) — most stable element, always first; never inject per-request values here</li>
+<li>Tool definitions — stable within an application version; place after system prompt and before documents</li>
+<li>Few-shot examples — stable within a task type; if shuffled randomly, fix the ordering to a canonical sequence</li>
+<li>RAG documents — varies by category; route similar queries to the same prefix variant to maximize within-category hits</li>
+<li>Conversation history — grows over turns; accumulate by appending, never reconstruct from a database on each request</li>
+<li>User query — the dynamic per-request input; always last, never before any stable element</li>
+</ul>
+<pre><code class="language-python">import anthropic
+def query_with_cache_control(system_prompt: str, document: str, question: str) -&gt; dict:
+    client = anthropic.Anthropic()
+    response = client.messages.create(
+        model=&quot;claude-opus-4-5&quot;,
+        max_tokens=512,
+        system=[
+            {&quot;type&quot;: &quot;text&quot;, &quot;text&quot;: system_prompt,
+             &quot;cache_control&quot;: {&quot;type&quot;: &quot;ephemeral&quot;}},
+            {&quot;type&quot;: &quot;text&quot;, &quot;text&quot;: document,
+             &quot;cache_control&quot;: {&quot;type&quot;: &quot;ephemeral&quot;}},
+        ],
+        messages=[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: question}],
+    )
+    u = response.usage
+    cached = getattr(u, &quot;cache_read_input_tokens&quot;, 0)
+    written = getattr(u, &quot;cache_creation_input_tokens&quot;, 0)
+    total_in = u.input_tokens + cached
+    print(f&quot;cache_read={cached} write={written} billed={u.input_tokens} hit={cached/total_in:.0%}&quot;)
+    return response.content[0].text
+</code></pre>
+<p>The cache_control parameter is Anthropic's explicit API mechanism for specifying which prompt segments should be written to the prefix cache. Marking a content block with cache_control set to type ephemeral instructs the API to cache the KV pairs for that block and all preceding cached blocks together as a contiguous prefix. Blocks not marked with cache_control are processed normally without being stored. This explicit annotation model differs from OpenAI's automatic prefix caching, which caches the longest shared prefix across requests without any client-side annotation. The explicit model gives finer control: you can choose which specific blocks to cache, which matters when the document set changes between requests but the system prompt remains constant — you can cache the system prompt alone even when documents vary. The response usage object exposes three cache-related fields: input_tokens (tokens billed at the full rate, not served from cache), cache_read_input_tokens (tokens served from cache at the 10 percent discounted rate), and cache_creation_input_tokens (tokens written to cache at the 125 percent write rate on cache-miss requests). Tracking the ratio of cache_read_input_tokens to the sum of input_tokens and cache_read_input_tokens provides the per-request cache hit rate and is the primary metric for validating prompt ordering and cache_control configuration in production.</p>
+<table>
+<thead>
+<tr>
+<th>Scenario</th>
+<th>Cache hit rate</th>
+<th>Token savings</th>
+<th>Latency reduction</th>
+<th>Cost reduction</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Same system prompt, rotating user queries</td>
+<td>85-95%</td>
+<td>70-85%</td>
+<td>30-50%</td>
+<td>70-85%</td>
+</tr>
+<tr>
+<td>RAG with fixed document set per category</td>
+<td>70-90%</td>
+<td>60-80%</td>
+<td>25-45%</td>
+<td>60-80%</td>
+</tr>
+<tr>
+<td>10-turn chat conversation, appending pattern</td>
+<td>90-98%</td>
+<td>80-95%</td>
+<td>40-60%</td>
+<td>80-95%</td>
+</tr>
+<tr>
+<td>Single unique query, no shared context</td>
+<td>0%</td>
+<td>0%</td>
+<td>0%</td>
+<td>0%</td>
+</tr>
+<tr>
+<td>Batch processing with shared prefix</td>
+<td>95-99%</td>
+<td>85-92%</td>
+<td>45-65%</td>
+<td>85-92%</td>
+</tr>
+</tbody>
+</table>
+<h2>Multi-Turn Conversation Caching</h2>
+<p>Multi-turn conversation caching requires a different design pattern than single-turn RAG caching. In a single-turn pattern, the stable prefix is the system prompt plus documents and the suffix is the user query. In a multi-turn pattern, the conversation history grows with each exchange — each new turn adds both a user message and an assistant response to the history. This growing history can be either cache-friendly or cache-hostile depending on how it is managed. The cache-hostile pattern reconstructs the full conversation from scratch on each turn by re-fetching message objects from a database and re-serializing them. Even if the underlying text is identical, differences in object structure, key ordering, or serialization whitespace produce different token sequences and cache misses. The cache-friendly pattern maintains a single history list in memory and appends message objects to it rather than reconstructing, ensuring that the token sequence for all prior turns remains exactly identical to what was cached on the previous turn. The critical implementation detail is that message objects appended to the history must be the same dict structures that the API received on the previous turn — not newly constructed dicts with the same content but potentially different key ordering or added metadata fields that alter the serialized token sequence.</p>
+<pre><code class="language-python">import anthropic
+from typing import List
+def chat_with_cache(turns: List[str], system_prompt: str) -&gt; None:
+    client = anthropic.Anthropic()
+    sys_block = [{&quot;type&quot;: &quot;text&quot;, &quot;text&quot;: system_prompt, &quot;cache_control&quot;: {&quot;type&quot;: &quot;ephemeral&quot;}}]
+    history = []
+    for i, msg in enumerate(turns):
+        history.append({&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: msg})
+        resp = client.messages.create(model=&quot;claude-opus-4-5&quot;,
+            max_tokens=256, system=sys_block, messages=history)
+        history.append({&quot;role&quot;: &quot;assistant&quot;, &quot;content&quot;: resp.content[0].text})
+        u = resp.usage
+        cached = getattr(u, &quot;cache_read_input_tokens&quot;, 0)
+        total = u.input_tokens + cached
+        print(f&quot;Turn {i+1}: billed={u.input_tokens} cached={cached} hit_rate={cached/total:.0%}&quot;)
+
+SYSTEM = &quot;You are a concise AI assistant specializing in LLM engineering.&quot;
+QUESTIONS = [&quot;What is prompt caching?&quot;, &quot;How does TTL work?&quot;, &quot;How to measure hit rate?&quot;]
+chat_with_cache(QUESTIONS, SYSTEM)
+</code></pre>
+<p>The code above demonstrates the appending pattern for multi-turn caching with a system prompt marked as cacheable. On each turn, a user message is appended to the history list, the response is generated using the full accumulated history, and the assistant reply is appended for the next turn. This creates a monotonically growing prefix: turn 1 caches the system prompt plus message 1, turn 2 caches the system prompt plus messages 1 and 2, and so on. Each turn's prefix is a strict superset of the previous turn's prefix, and the cache entry grows accordingly. By turn 5 of an active conversation, the cached prefix typically comprises 85 to 95 percent of total input tokens, with only the newest user message in the uncached suffix. By turn 10, effective hit rates above 95 percent are common, and billed input tokens per turn approach the cost of only the newest user message. This geometric improvement in cache efficiency with conversation length is why long-running chat sessions are one of the highest-return use cases for prompt caching — the infrastructure investment in cache-friendly history management pays compound interest as conversations grow longer.</p>
+<ul>
+<li>Maintain a single history list in memory and append to it — never reconstruct history from a database between turns</li>
+<li>Cache hit rate grows monotonically with conversation length: turn 10 typically sees 90-98% hit rates</li>
+<li>Mark the system prompt with cache_control even in multi-turn mode — it never changes within a session</li>
+<li>Never add per-turn metadata such as timestamps or turn IDs to message objects — these break cache alignment</li>
+<li>When conversations exceed the context window, summarize the oldest turns rather than dropping them arbitrarily</li>
+<li>Monitor cache_read_input_tokens per turn: a sudden drop mid-conversation indicates a structural change that broke the cache</li>
+</ul>
+<h2>Provider-Specific APIs</h2>
+<p>The three major AI API providers implement prompt caching with meaningfully different APIs and economic structures. Anthropic requires explicit cache_control annotations on content blocks, giving engineers fine-grained control over which blocks are cached, with a 5-minute TTL for ephemeral caches. Cache hit tokens are priced at 10 percent of the standard input rate — a 90 percent discount — and cache writes cost 125 percent of standard. OpenAI implements automatic prefix caching for requests of 1,024 tokens or more, with no annotation required and a 1-hour TTL. Hit tokens are priced at 50 percent of the full rate — a 50 percent discount — and there is no explicit write fee. Google Gemini context caching is the most structured: you pre-upload a context as a separate API call, receive a cache ID, and reference that ID in subsequent requests rather than re-sending the content. The minimum cache size is 32,000 tokens and the default TTL is 1 hour. Gemini hit tokens cost approximately 25 percent of the standard rate. Anthropic's ephemeral model suits high-frequency applications where 5-minute TTL is adequate and maximum per-token savings are needed. OpenAI's automatic model is the lowest-friction option for applications already using the GPT family. Google's pre-upload model is most efficient for very large, slowly changing contexts such as entire codebases, legal documents, or research corpora where the context size exceeds 32,000 tokens and changes infrequently.</p>
+<pre><code class="language-python">from dataclasses import dataclass
+import anthropic  # used in production alongside this simulator
+@dataclass
+class CacheResult:
+    hit_rate: float; savings_pct: float; cost_reduction_pct: float
+def simulate_cache(n=100, prefix_tok=2000, query_tok=50,
+                   ttl=300, gap_sec=5.0, p_full=3.0, p_cache=0.3):
+    hits, t_last = 0, -ttl
+    for i in range(n):
+        if (t := i * gap_sec) - t_last &lt; ttl: hits += 1
+        else: t_last = t
+    hr = hits / n
+    full  = n * (prefix_tok + query_tok) * p_full / 1e6
+    cheap = ((n-hits)*prefix_tok*p_full + hits*prefix_tok*p_cache + n*query_tok*p_full) / 1e6
+    return CacheResult(round(hr, 3), round(hr*100, 1), round((1-cheap/full)*100, 1))
+for gap in [2, 5, 15, 60, 600]:
+    r = simulate_cache(gap_sec=gap)
+    print(f&quot;gap={gap:&gt;4}s  hit_rate={r.hit_rate:.1%}  cost_reduction={r.cost_reduction_pct}%&quot;)
+</code></pre>
+<ul>
+<li>Anthropic: explicit cache_control annotation; 90% discount on hits; 5-min TTL; minimum ~1024 tokens to benefit</li>
+<li>OpenAI: automatic prefix caching, no annotation; 50% discount on hits; 1-hour TTL; 1024-token minimum prefix</li>
+<li>Google Gemini: pre-upload context via separate API call; ~75% discount; 1-hour TTL; 32K-token minimum</li>
+<li>For high-frequency requests with gaps under 5 minutes: Anthropic ephemeral caching is most cost-effective</li>
+<li>For infrequent requests against very large static contexts over 32K tokens: Google context caching is optimal</li>
+<li>For zero-annotation automatic caching with moderate savings: OpenAI prefix caching is lowest friction</li>
+</ul>
+<h2>Key Takeaways</h2>
+<p>Prompt caching is one of the highest-leverage optimizations available to production LLM applications, offering token cost reductions of 70 to 90 percent and latency improvements of 30 to 60 percent on cache hits — without any change to model behavior or output quality. The returns scale with three factors: prefix length (longer stable prefixes produce larger absolute savings per request), hit rate (determined primarily by prompt ordering and request frequency relative to cache TTL), and the proportion of total cost attributable to the stable prefix (applications with short dynamic queries and long static contexts benefit most). Implementing cache-friendly prompts requires three practices: disciplined static-before-dynamic ordering, explicit cache_control annotations on Anthropic, and production instrumentation to track cache_read_input_tokens per request. Multi-turn conversations benefit from the appending pattern rather than history reconstruction. Batch jobs benefit from pre-warming the cache before the first real request in the batch. High-frequency single-turn RAG applications benefit from keeping document sets stable within a routing category so that within-category requests share a full prefix. The simulator in this note allows engineers to estimate expected savings before committing to a particular prompt architecture, evaluating the trade-off between context flexibility and caching efficiency during the design phase rather than discovering the trade-off only after deployment and incurring avoidable costs.</p>
+<ul>
+<li>Order prompts as: system instructions =&gt; few-shot examples =&gt; RAG documents =&gt; conversation history =&gt; user query</li>
+<li>Use cache_control: {type: ephemeral} on Anthropic to mark system prompts and large document blocks for caching</li>
+<li>Measure cache hit rate as cache_read_input_tokens / (cache_read_input_tokens + input_tokens) per request</li>
+<li>Pre-warm caches before batch jobs by sending a lightweight request to write the cache before the batch starts</li>
+<li>Accumulate multi-turn history by appending message objects — never reconstruct from scratch between turns</li>
+<li>Route similar queries to the same prefix variant to maximize within-category hit rates across requests</li>
+<li>Use the TTL simulator to estimate hit rate from inter-request gap and TTL before finalizing prompt architecture</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

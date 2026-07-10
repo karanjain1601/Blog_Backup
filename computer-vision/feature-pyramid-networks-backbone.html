@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Feature Pyramid Networks: Multi-Scale Backbone Features | Notes Backup</title>
+  <meta name="description" content="FPN builds a top-down pathway with lateral connections to produce rich multi-scale feature maps for detection — better than single-scale features or image pyramids." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Feature Pyramid Networks: Multi-Scale Backbone Features</h1>
+      <ul class='note-meta'><li><strong>description:</strong> FPN builds a top-down pathway with lateral connections to produce rich multi-scale feature maps for detection — better than single-scale features or image pyramids.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Feature Pyramid Networks: Multi-Scale Backbone Features</h1>
+<p>Feature Pyramid Networks (FPN), introduced by Lin et al. (2017), solve a core challenge in object detection: objects appear at vastly different scales, so a single-resolution feature map cannot handle them all well. FPN adds a top-down pathway over a standard CNN backbone to produce a feature pyramid with strong semantics at every scale — without the cost of processing multiple image sizes.</p>
+<h2>Overview</h2>
+<p>Before FPN, detectors either ran on a single feature map (fast but scale-limited) or used image pyramids at inference (accurate but 10x slower). FPN keeps a single-scale input, extracts multi-scale feature maps from backbone stages, then enriches them top-down — striking a balance between accuracy and speed that made it the default backbone for two-stage and single-stage detectors alike.</p>
+<p>FPN is backbone-agnostic. It attaches to any CNN that produces hierarchical features — ResNet, VGG, EfficientNet, or a Vision Transformer with patch tokens. The resulting pyramid levels P3–P7 correspond to backbone stages C3–C5 plus extra pooling stages. Each level P_k has a fixed channel width (typically 256), making downstream detection heads simple and uniform across all scales.</p>
+<h2>Bottom-Up and Top-Down Pathways</h2>
+<p>The bottom-up pathway is simply the forward pass of the backbone. Feature maps shrink spatially by 2x at each stage but grow richer semantically. Typical output strides are 8, 16, and 32 pixels for C3, C4, and C5 respectively. The top-down pathway starts from the deepest, most semantic feature map C5 and progressively upsamples it, merging with shallower, higher-resolution backbone features.</p>
+<pre><code class="language-python">import torch.nn as nn
+import torchvision.models as models
+
+class FPNBackbone(nn.Module):
+    def __init__(self, out_channels=256):
+        super().__init__()
+        backbone = models.resnet50(pretrained=True)
+        self.c3 = nn.Sequential(backbone.layer1, backbone.layer2)  # stride 8
+        self.c4 = backbone.layer3                                   # stride 16
+        self.c5 = backbone.layer4                                   # stride 32
+        self.laterals = nn.ModuleList([
+            nn.Conv2d(512,  out_channels, 1),  # lateral for C3
+            nn.Conv2d(1024, out_channels, 1),  # lateral for C4
+            nn.Conv2d(2048, out_channels, 1),  # lateral for C5
+        ])
+</code></pre>
+<p>The lateral connections take C3, C4, C5 and project each to a common channel width — 256 by default — using 1x1 convolutions. This makes channel dimensions uniform before the top-down merge step. Gradients flow through the lateral convolutions during training, allowing the FPN head to adapt the backbone features without requiring full backbone fine-tuning when transfer-learning to a new detection dataset.</p>
+<pre><code class="language-python">import torch.nn.functional as F
+
+def top_down_pathway(self, c3, c4, c5):
+    p5 = self.laterals[2](c5)
+    p4 = self.laterals[1](c4) + F.interpolate(p5, scale_factor=2, mode='nearest')
+    p3 = self.laterals[0](c3) + F.interpolate(p4, scale_factor=2, mode='nearest')
+    # 3x3 smoother removes nearest-neighbour aliasing after each merge
+    p5 = self.smoothers[2](p5)
+    p4 = self.smoothers[1](p4)
+    p3 = self.smoothers[0](p3)
+    return p3, p4, p5
+</code></pre>
+<h2>Lateral Connections</h2>
+<blockquote>
+<p>****: FPN's key innovation is lateral connections — 1x1 convs that align channel dimensions before addition. Without them, the top-down pathway would overwrite semantics with positional noise from the high-res feature maps.</p>
+</blockquote>
+<p>A 3x3 convolution follows each merge to smooth aliasing artifacts introduced by nearest-neighbor upsampling. These smoothers also help the network blend top-down and lateral signals optimally rather than relying on a fixed 50/50 addition. In practice, omitting the 3x3 smoother reduces AP by 0.3–0.5 points on COCO — a small but consistent and reproducible degradation across detection benchmarks.</p>
+<p>The pyramid levels all share 256-channel output but encode features at different spatial resolutions and semantic abstraction levels. P3 is highest resolution (stride 8) and best for small objects; P5 is lowest resolution (stride 32) but richest semantically, handling large objects well. This complementarity is the core reason FPN outperforms both single-scale feature maps and naive image-pyramid approaches.</p>
+<h2>FPN in Detection Heads</h2>
+<p>Faster R-CNN with FPN assigns each region proposal to exactly one pyramid level based on the proposal's area. Small proposals map to high-resolution levels (P3), large ones to coarser levels (P5). The detection head — two FC layers for classification and regression — is shared across all levels, so the network learns one universal head that generalizes across scales without requiring per-level specialization.</p>
+<table>
+<thead>
+<tr>
+<th>Level</th>
+<th>Stride</th>
+<th>Feature Scale</th>
+<th>Typical Anchors</th>
+<th>Objects Detected</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>P3</td>
+<td>8</td>
+<td>32²</td>
+<td>32²</td>
+<td>Tiny</td>
+</tr>
+<tr>
+<td>P4</td>
+<td>16</td>
+<td>64²</td>
+<td>64²</td>
+<td>Small</td>
+</tr>
+<tr>
+<td>P5</td>
+<td>32</td>
+<td>128²</td>
+<td>128²</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>P6</td>
+<td>64</td>
+<td>256²</td>
+<td>256²</td>
+<td>Large</td>
+</tr>
+<tr>
+<td>P7</td>
+<td>128</td>
+<td>512²</td>
+<td>512²</td>
+<td>Huge</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-python">import math
+
+def assign_fpn_level(box_w, box_h, k0=4, s0=224):
+    &quot;&quot;&quot;Assign a RoI to an FPN level.
+    Lin et al. (2017) Eq. 1: k = floor(k0 + log2(sqrt(wh) / s0))
+    k0=4 maps P4 to the canonical 224x224 reference size.
+    &quot;&quot;&quot;
+    area = box_w * box_h
+    k = math.floor(k0 + math.log2(math.sqrt(area) / s0))
+    k = max(2, min(k, 5))  # clamp to valid FPN levels [P2, P5]
+    return k
+
+# 56x56 proposal  -&gt; P3 (small),  448x448 -&gt; P5 (large)
+print(assign_fpn_level(56, 56))    # -&gt; 3
+print(assign_fpn_level(448, 448))  # -&gt; 5
+</code></pre>
+<p>RetinaNet uses FPN levels P3–P7, where P6 and P7 are produced by strided convolutions on top of C5 rather than backbone stages. RetinaNet attaches a box regression subnetwork and a classification subnetwork — each a stack of four 3x3 convolutions — to every FPN level, achieving state-of-the-art one-stage accuracy while remaining fully convolutional, anchor-based, and free of region proposal stages.</p>
+<h2>PANet and BiFPN Extensions</h2>
+<p>FPN's top-down path creates one-directional information flow: semantics propagate from deep to shallow, but fine spatial detail does not propagate upward. PANet fixes this by adding a bottom-up path augmentation step after FPN produces P3–P5. A second lateral-fuse sequence propagates low-level detail back up to P5, forming a two-path feature pyramid that consistently improves mask and box AP on COCO.</p>
+<pre><code class="language-python">class PANetAugmentation(nn.Module):
+    def __init__(self, channels=256):
+        super().__init__()
+        # Strided convs drive the bottom-up augmentation path
+        self.pa_laterals = nn.ModuleList([
+            nn.Conv2d(channels, channels, 3, stride=2, padding=1),  # P3-&gt;N4
+            nn.Conv2d(channels, channels, 3, stride=2, padding=1),  # N4-&gt;N5
+        ])
+
+    def forward(self, p3, p4, p5):
+        n3 = p3
+        n4 = p4 + self.pa_laterals[0](n3)  # fuse P4 + downsampled N3
+        n5 = p5 + self.pa_laterals[1](n4)  # fuse P5 + downsampled N4
+        return n3, n4, n5
+</code></pre>
+<p>BiFPN, from EfficientDet, makes fusion weighted and learnable. Each node receives a softmax-normalized weight per input edge so the network controls how much of each scale to blend. Single-input nodes are pruned since they add no cross-scale fusion value. The bidirectional fusion block repeats multiple times for extra representational capacity, scaling cleanly alongside the EfficientNet compound-scaling coefficient.</p>
+<p>NAS-FPN uses neural architecture search to discover cross-scale connection topologies, sometimes outperforming PANet and BiFPN by wide margins. Despite this, hand-designed pyramids dominate production: they are interpretable, inference-predictable, and easier to quantize for edge hardware — properties that matter in autonomous driving and mobile vision where latency and on-device deployment are hard constraints.</p>
+<h2>Key Takeaways</h2>
+<p>FPN transformed multi-scale detection from an expensive preprocessing step (image pyramids) into an efficient architectural component. The core insight — merge top-down semantics with bottom-up resolution via lateral 1x1 convolutions — is remarkably simple yet powerful. FPN became the backbone of Mask R-CNN, RetinaNet, and Cascade RCNN, and its descendants (PANet, BiFPN) remain competitive across all detection benchmarks.</p>
+<p>Three common FPN pitfalls: (1) skipping the 3x3 smoother after lateral merge causes aliasing and hurts small-object AP; (2) bilinear upsampling instead of nearest-neighbor introduces coordinate misalignment in fused maps; (3) un-frozen backbone BN with small batch sizes produces noisy cross-scale gradients. Visualizing each pyramid level's activation maps separately is the fastest diagnostic for all three issues.</p>
+    </article>
+  </main>
+</body>
+</html>

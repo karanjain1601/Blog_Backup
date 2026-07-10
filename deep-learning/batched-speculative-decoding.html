@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Batched Speculative Decoding | Notes Backup</title>
+  <meta name="description" content="Extending speculative decoding to work with batched requests where different sequences may accept different numbers of draft tokens, handling variable-length acceptance efficiently." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Batched Speculative Decoding</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Extending speculative decoding to work with batched requests where different sequences may accept different numbers of draft tokens, handling variable-length acceptance efficiently.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Batched Speculative Decoding</h1>
+<p>Speculative decoding accelerates LLM inference by using a fast draft model to propose K candidate tokens at once, then verifying all K tokens in a single parallel forward pass of the large target model. If all drafts are accepted, K+1 tokens are produced for the cost of one target forward pass — a theoretical K+1x speedup. In practice, acceptance rates of 70-90% for related models give 2-4x speedups. Extending this to batched serving introduces a fundamental challenge: different sequences in the batch may accept different numbers of draft tokens, creating ragged outputs that complicate efficient GPU execution. This note covers how batched speculative decoding handles variable acceptance, the trade-off between padded and ragged batching, and how SpecInfer and Lookahead Decoding adapt the concept for serving systems.</p>
+<h2>Overview</h2>
+<p>Single-request speculative decoding generates a fixed-length draft sequence of K tokens from the draft model in K autoregressive steps, then runs one parallel forward pass of the target model over all K draft tokens. The target model produces K probability distributions; we check each draft token against the corresponding target distribution using a rejection sampling rule that guarantees the output distribution matches the target model exactly. Accepted tokens are appended to the sequence; the first rejected token triggers a correction step. The process repeats, with the draft model generating the next K candidates from the last accepted token.</p>
+<p>The compute savings come from the asymmetry between draft and target model sizes. A typical pairing uses a 7B target model with a 160M draft model (44x smaller). Running K=5 draft steps costs 5 × 160M FLOP; running one target verification step costs (K+1) × 7B FLOP = 6 × 7B FLOP ≈ 42B FLOP. If the average accepted length is A, the effective tokens per forward pass is A+1, so the target FLOP per output token is 7B × 1/(A+1). For A=3 (typical), this is a 4x reduction in target FLOP per output token — the dominant cost in inference.</p>
+<h2>Single-Request Speculative Recap</h2>
+<p>The acceptance rule for speculative decoding is designed to produce the correct target distribution. For draft token t with draft probability p(t) and target probability q(t): accept with probability min(1, q(t)/p(t)). If accepted, the next draft token is checked. If rejected, resample from the residual distribution max(0, q - p) / Z (where Z is the normalization constant). This rule guarantees that the distribution of the final output tokens matches the target model distribution exactly, as proven in the original DeepMind paper (Leviathan et al., 2023). This makes speculative decoding a lossless optimization — the output quality is identical to the target model.</p>
+<p>The acceptance rate α = E[min(1, q(t)/p(t))] depends on how closely the draft model's distribution tracks the target model. For a 7B target and 160M draft from the same model family (e.g., Llama-7B and a distilled Llama-160M), typical acceptance rates are 70-85% per token. For K=5 draft tokens, the expected number of accepted tokens is E[A] = α + α² + α³ + α⁴ + α⁵ (geometric series truncated at K), giving E[A] ≈ 2.8 for α=0.75. The effective tokens-per-target-forward-pass is E[A] + 1 ≈ 3.8, achieving roughly 3.8x throughput improvement over standard decoding (which produces 1 token per target forward pass).</p>
+<h2>Batch Acceptance Challenge</h2>
+<p>Batching multiple requests together is essential for GPU utilization in production serving. In a batch of B requests, the draft model generates K candidate tokens for each request: this costs B × K draft forward passes (or one batched forward pass if using a draft model that supports batching). The target model then verifies all K candidates for all B requests in one batched forward pass of shape (B, K+1, vocab). The problem arises during acceptance: sequence 0 might accept all 5 draft tokens, sequence 1 might accept 2, sequence 2 might accept 4, and sequence 3 might accept 0. Each sequence advances by a different number of tokens.</p>
+<p>This variable acceptance creates a ragged batch: after the speculative step, the sequences have different positions in the context. Naively, you could pad all sequences to the length of the most-accepted sequence per step, but this wastes compute for sequences that accepted fewer tokens. Alternatively, you can use gather/scatter operations to advance each sequence's position independently and immediately begin the next draft generation phase with heterogeneous positions — requiring the draft model to handle a ragged input batch where each sequence has a different KV cache length.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+from typing import List, Tuple
+
+def batched_speculative_step(
+    draft_logits: torch.Tensor,   # (batch, n_draft, vocab)
+    target_logits: torch.Tensor,  # (batch, n_draft+1, vocab)
+    n_draft: int = 5
+) -&gt; Tuple[List[torch.Tensor], List[int]]:
+    &quot;&quot;&quot;Verify batch of draft sequences; return accepted tokens and counts per request.&quot;&quot;&quot;
+    batch = draft_logits.shape[0]
+    draft_probs  = F.softmax(draft_logits,  dim=-1)   # (B, K, V)
+    target_probs = F.softmax(target_logits[:, :n_draft], dim=-1)  # (B, K, V)
+    draft_tokens = draft_logits.argmax(dim=-1)  # (B, K) greedy draft
+    accepted_tokens: List[torch.Tensor] = []
+    accepted_counts: List[int] = []
+    for b in range(batch):
+        acc_seq = []
+        for t in range(n_draft):
+            tok = draft_tokens[b, t].item()
+            p_draft  = draft_probs[b, t, tok].item()
+            p_target = target_probs[b, t, tok].item()
+            r = torch.rand(1).item()
+            if r &lt; min(1.0, p_target / (p_draft + 1e-9)):
+                acc_seq.append(tok)
+            else:
+                break  # reject; stop checking further drafts for this sequence
+        # Bonus token: sample from target at position len(acc_seq)
+        bonus = target_logits[b, len(acc_seq)].argmax().item()
+        acc_seq.append(bonus)
+        accepted_tokens.append(torch.tensor(acc_seq))
+        accepted_counts.append(len(acc_seq))
+    print(f'Accepted counts per seq: {accepted_counts}')
+    print(f'Avg accepted: {sum(accepted_counts)/batch:.2f}/{n_draft}  (incl. bonus token)')
+    return accepted_tokens, accepted_counts
+
+draft_log  = torch.randn(4, 5, 1000)
+target_log = torch.randn(4, 6, 1000)
+batched_speculative_step(draft_log, target_log)
+</code></pre>
+<p>The batched verification forward pass is the key efficiency gain: instead of running the target model K+1 times sequentially per request, we run it once with a (B, K+1) input tensor, verifying all draft tokens for all sequences simultaneously. The per-sequence rejection sampling loop is cheap Python-level logic on the resulting logits. The total target model FLOP is B × (K+1) × model_FLOP per token, regardless of how many tokens each sequence accepts.</p>
+<h2>Padded vs Ragged Batching</h2>
+<p>After the speculative step, different sequences have advanced by different amounts. Two approaches handle this: (1) Padded batching pads shorter sequences to the length of the longest accepted sequence in the batch, then runs the next draft generation phase with a rectangular batch. This wastes compute proportional to the acceptance variance. (2) Ragged batching uses specialized kernels (FlashAttention with variable sequence lengths, Triton kernels with block-sparse attention masks) to process sequences of different lengths in one kernel call without padding. vLLM and TensorRT-LLM implement ragged batching for speculative decoding using packed token sequences with per-sequence length metadata.</p>
+<pre><code class="language-python">import torch
+from typing import List, Tuple
+
+def ragged_acceptance_advance(
+    sequences: torch.Tensor,                   # (batch, max_len) token IDs
+    positions: torch.Tensor,                    # (batch,) current position
+    accepted_tokens: List[torch.Tensor],        # variable-length per sequence
+    pad_id: int = 0
+) -&gt; Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    &quot;&quot;&quot;Advance each sequence independently by its accepted token count.&quot;&quot;&quot;
+    batch = sequences.shape[0]
+    new_seqs = sequences.clone()
+    new_pos  = positions.clone()
+    for b in range(batch):
+        toks = accepted_tokens[b]
+        n    = len(toks)
+        start = positions[b].item()
+        end   = start + n
+        if end &lt;= new_seqs.shape[1]:
+            new_seqs[b, start:end] = toks
+        new_pos[b] = end
+    # Build ragged attention mask: 1 for real tokens up to new_pos[b]
+    max_len = sequences.shape[1]
+    mask = torch.zeros(batch, max_len, dtype=torch.bool)
+    for b in range(batch):
+        mask[b, :new_pos[b]] = True
+    deltas = (new_pos - positions).tolist()
+    print(f'Positions before:  {positions.tolist()}')
+    print(f'Positions after:   {new_pos.tolist()}')
+    print(f'Tokens advanced:   {deltas}  (ragged: no padding needed)')
+    return new_seqs, new_pos, mask
+
+seqs = torch.zeros(4, 128, dtype=torch.long)
+pos  = torch.tensor([20, 20, 20, 20])
+acc  = [torch.tensor([10, 20, 30, 40, 50]),   # seq 0: 5 accepted
+        torch.tensor([11]),                     # seq 1: 1 accepted
+        torch.tensor([12, 22, 32, 42]),         # seq 2: 4 accepted
+        torch.tensor([13, 23])]                 # seq 3: 2 accepted
+ragged_acceptance_advance(seqs, pos, acc)
+</code></pre>
+<p>The ragged approach is more compute-efficient but requires specialized kernel support. For most production serving frameworks, padded batching is simpler to implement and the padding overhead is acceptable when acceptance variance is low (all sequences typically accept similar counts when they share topic and vocabulary distribution). When acceptance variance is high — mixed workloads of code, prose, and structured data — ragged batching provides a meaningful speedup.</p>
+<h2>Draft Model Batching</h2>
+<p>The draft model also runs in batch mode to generate K candidates for all B sequences simultaneously. If the draft model supports batched autoregressive generation, each of the K draft steps processes a (B, 1) input token with the accumulated KV cache for each sequence. For K=5 draft steps and batch=16, the draft model runs 5 sequential forward passes each with a (16, 1) input — equivalent to 80 single-request draft forward passes in serial, but executed as 5 batched operations. The draft model must maintain separate KV caches for each sequence in the batch, sized (B, layers, heads, seq_len, head_dim).</p>
+<p>As batch size grows, the draft model increasingly becomes the bottleneck. At batch=1, the draft model is negligible (160M params vs 7B target). At batch=32 with K=5 draft steps, the draft model runs 5 × 32 = 160 token-level forward passes while the target model runs 1 × 32 × (K+1) = 192 token-level forward passes — comparable work. At very large batch sizes, the draft model's overhead can exceed the target model's forward pass, eliminating the speedup. This defines the practical batch size ceiling for speculative decoding, typically around 32-64 depending on the draft-to-target size ratio.</p>
+<h2>SpecInfer and Lookahead Decoding</h2>
+<p>SpecInfer (2023) extends speculative decoding with a tree-structured verification approach. Instead of generating one linear sequence of K draft tokens, the draft model generates a tree of candidates: from each draft token, multiple possible continuations are proposed, forming a branching tree of T total candidate tokens. The target model verifies all T tokens in one forward pass using a tree attention mask (each token attends only to its ancestors in the tree). This increases the expected number of accepted tokens per target forward pass from E[A]+1 to E[tree_accepted]+1, achieving higher speedups for the same target model compute budget.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from typing import List
+
+def lookahead_decoding_step(
+    logits_fn,
+    input_ids: torch.Tensor,   # (1, seq_len) current context
+    lookahead_w: int = 4,      # number of parallel candidate tokens
+    lookahead_n: int = 3,      # n-gram order for verification
+    vocab_size: int = 50257
+) -&gt; torch.Tensor:
+    &quot;&quot;&quot;Lookahead decoding: generate candidates via Jacobi iteration, verify in one pass.&quot;&quot;&quot;
+    # Guess W candidate tokens (no draft model needed)
+    candidates = torch.randint(0, vocab_size, (1, lookahead_w))
+    extended = torch.cat([input_ids, candidates], dim=1)  # (1, seq+W)
+    # One target forward pass verifies all W candidates simultaneously
+    with torch.no_grad():
+        all_logits = logits_fn(extended)  # (1, seq+W, vocab)
+    verified: List[int] = []
+    for i in range(lookahead_w):
+        pred = all_logits[0, input_ids.shape[1] + i - 1].argmax().item()
+        guess = candidates[0, i].item()
+        if pred == guess:
+            verified.append(guess)
+        else:
+            verified.append(pred)  # correct the mismatch
+            break  # stop verifying further
+    new_ids = torch.tensor([verified])
+    out = torch.cat([input_ids, new_ids], dim=1)
+    print(f'Candidates: {candidates[0].tolist()}')
+    print(f'Verified: {verified} ({len(verified)} tokens, 1 target forward pass)')
+    return out
+
+placeholder_logits = lambda x: torch.randn(1, x.shape[1], 50257)
+initial = torch.randint(100, 1000, (1, 16))
+lookahead_decoding_step(placeholder_logits, initial)
+</code></pre>
+<p>Lookahead decoding eliminates the draft model entirely by using Jacobi iteration to generate candidate tokens: starting from random guesses, each iteration uses the target model's output at position i as the input for position i+1, converging to a self-consistent n-gram. The key advantage is that no separate draft model needs to be loaded, reducing memory requirements and simplifying deployment. The downside is that lookahead decoding achieves lower acceptance rates than a well-matched draft model (~50-60% vs 75-85%), because random initialization converges slowly for long sequences.</p>
+<h2>Throughput at Scale</h2>
+<p>The throughput benefit of speculative decoding diminishes as batch size grows because the target model's compute becomes the bottleneck regardless of the draft model's efficiency. At batch=1, the target model is memory-bandwidth-bound (one token at a time) and speculative decoding's ability to generate multiple tokens per target pass is transformative. At batch=64, the target model is already compute-bound (64 tokens processed simultaneously), and the additional tokens from speculative decoding add compute load without proportionally increasing useful output. The optimal operating point is at the batch size where the target model is transitioning from bandwidth-bound to compute-bound — typically batch 4-16 for 7B models.</p>
+<pre><code class="language-python">import torch
+import time
+from typing import List, Dict
+
+def throughput_vs_batch_size(
+    batch_sizes: List[int] = [1, 4, 8, 16, 32],
+    n_draft: int = 5,
+    vocab: int = 50257,
+    hidden: int = 512
+) -&gt; Dict[int, float]:
+    &quot;&quot;&quot;Measure token throughput for speculative decoding at increasing batch sizes.&quot;&quot;&quot;
+    target_model = torch.nn.Linear(hidden, vocab)
+    draft_model  = torch.nn.Linear(hidden // 8, vocab)  # ~8x smaller draft
+    results: Dict[int, float] = {}
+    print(f'{&quot;Batch&quot;:&gt;6} {&quot;Draft (ms)&quot;:&gt;12} {&quot;Target (ms)&quot;:&gt;13} '
+          f'{&quot;Tok/s&quot;:&gt;10} {&quot;Bottleneck&quot;:&gt;12}')
+    print('-' * 58)
+    for bs in batch_sizes:
+        x_draft  = torch.randn(bs * n_draft, hidden // 8)
+        x_target = torch.randn(bs * (n_draft + 1), hidden)
+        # Time draft model (K sequential steps simulated as K*bs parallel)
+        t0 = time.perf_counter()
+        for _ in range(n_draft):
+            _ = draft_model(torch.randn(bs, hidden // 8))
+        draft_ms = (time.perf_counter() - t0) * 1e3
+        # Time target model (1 batched step over K+1 positions)
+        t0 = time.perf_counter()
+        _ = target_model(x_target)
+        target_ms = (time.perf_counter() - t0) * 1e3
+        total_ms  = draft_ms + target_ms
+        tps = (bs * (n_draft + 1) * 1000) / total_ms
+        bottleneck = 'draft' if draft_ms &gt; target_ms else 'target'
+        results[bs] = tps
+        print(f'{bs:&gt;6} {draft_ms:&gt;12.2f} {target_ms:&gt;13.2f} {tps:&gt;10.0f} {bottleneck:&gt;12}')
+    return results
+
+throughput_vs_batch_size()
+</code></pre>
+<p>The throughput-vs-batch curve typically shows a peak at small-to-medium batch sizes (4-16) for speculative decoding, then a plateau or decline relative to standard decoding as the draft model's overhead grows. At batch=32+, standard batched decoding (without speculation) often matches or exceeds speculative decoding in raw token throughput, because the target model can fill its compute capacity with real tokens without draft overhead. Speculative decoding's sweet spot is interactive serving (batch 1-8) where latency-per-request matters more than aggregate throughput.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Draft model needed</th>
+<th>Acceptance rate</th>
+<th>Batch speedup</th>
+<th>Implementation complexity</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Single-request spec decoding</td>
+<td>Yes (matched family)</td>
+<td>70-90%</td>
+<td>2-4x at batch=1</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>Batched spec decoding</td>
+<td>Yes (batched draft)</td>
+<td>70-85%</td>
+<td>1.5-3x at batch=8</td>
+<td>Medium (ragged handling)</td>
+</tr>
+<tr>
+<td>SpecInfer tree</td>
+<td>Yes (tree generation)</td>
+<td>75-90%</td>
+<td>2-4x at batch=4</td>
+<td>High (tree attention mask)</td>
+</tr>
+<tr>
+<td>Lookahead decoding</td>
+<td>No (Jacobi iteration)</td>
+<td>50-65%</td>
+<td>1.3-2x at batch=4</td>
+<td>Medium (Jacobi schedule)</td>
+</tr>
+<tr>
+<td>Medusa (parallel heads)</td>
+<td>No (extra heads on target)</td>
+<td>60-80%</td>
+<td>1.5-2.5x at batch=8</td>
+<td>Medium (training required)</td>
+</tr>
+</tbody>
+</table>
+<h2>Key Takeaways</h2>
+<p>Batched speculative decoding extends the single-request speedup to serving systems by verifying all draft tokens for all batch sequences in one target forward pass. The key challenge is handling variable acceptance lengths — different sequences accept different numbers of draft tokens, requiring ragged or padded batching strategies for subsequent draft generation. The batch size ceiling for speculative decoding speedup is typically 16-32 for standard 7B+160M model pairs; beyond this, the draft model overhead negates the target model savings. For workloads with highly diverse prompts (code, prose, JSON mixed in the same batch), acceptance rates drop significantly and alternative approaches like Medusa or Lookahead may be preferable.</p>
+<blockquote>
+<p><strong>Batch composition matters for acceptance rate</strong>: Batched speculative decoding is most effective when requests share similar token distributions — workloads with highly diverse prompts (code, prose, JSON) may see lower acceptance rates than single-topic batches, because the draft model's learned distribution is mismatched for some sequences in the batch. Consider routing requests by content type to separate speculative decoding pools with domain-matched draft models.</p>
+</blockquote>
+<ul>
+<li>Expected accepted tokens E[A] = sum(alpha^k for k=1..K) for acceptance rate alpha and K draft steps</li>
+<li>Verification cost: one target forward pass of shape (B, K+1, vocab) covers all sequences</li>
+<li>Ragged acceptance requires scatter/gather to advance each sequence position independently</li>
+<li>Draft model becomes bottleneck around batch=32 for typical 7B:160M target:draft pairs</li>
+<li>SpecInfer tree verification achieves higher speedup with the same number of target FLOP</li>
+<li>Lookahead decoding eliminates the draft model requirement at the cost of ~20% lower acceptance</li>
+<li>Speculative decoding is most impactful at batch=1-8 where decode is memory-bandwidth-bound</li>
+<li>Medusa adds K parallel prediction heads to the target model, avoiding a separate draft model</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

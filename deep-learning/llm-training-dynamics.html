@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LLM Training Dynamics — Warmup, Loss Spikes, and Gradient Norm Monitoring | Notes Backup</title>
+  <meta name="description" content="Practical guide to LLM pretraining stability: LR warmup schedules, cosine annealing, loss spike causes and recovery, gradient norm clipping, and checkpoint strategies for robust large-scale training." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>LLM Training Dynamics — Warmup, Loss Spikes, and Gradient Norm Monitoring</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Practical guide to LLM pretraining stability: LR warmup schedules, cosine annealing, loss spike causes and recovery, gradient norm clipping, and checkpoint strategies for robust large-scale training.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>LLM Training Dynamics — Warmup, Loss Spikes, and Gradient Norm Monitoring</h1>
+<p>Training large language models at scale surfaces a class of instability problems that do not appear at smaller scales: loss spikes that can derail a run after thousands of GPU-hours, gradient explosions that corrupt model weights, and scheduling bugs that cause silent underfitting. Understanding the interplay between the learning rate schedule, the Adam optimizer's moment estimates, and gradient norm dynamics is essential for anyone running or debugging LLM pretraining. This note covers the four most important levers: warmup, cosine annealing, gradient norm monitoring, and checkpoint rollback.</p>
+<h2>Learning Rate Warmup and the Adam Bias Problem</h2>
+<p>At step 0, Adam's first-moment estimate m₀ = 0 and second-moment estimate v₀ = 0. The bias correction factors 1/(1 − β₁ᵗ) and 1/(1 − β₂ᵗ) partially compensate for this cold-start, but in practice the effective per-parameter step sizes are poorly calibrated for the first few hundred steps. Starting at the full target learning rate during this period causes large, noisy gradient updates that move parameters far from their initialization. Linear warmup from 0 to η_max over the first ~2000 steps allows the moment estimates to stabilize before the optimizer operates at full learning rate, dramatically reducing early-training divergence risk.</p>
+<ul>
+<li>Linear warmup: LR(t) = η_max × t / T_warmup for t &lt; T_warmup, typically T_warmup = 2000 steps</li>
+<li>β₂ = 0.95–0.999 in large LLMs; higher β₂ means longer moment warm-up period</li>
+<li>Skipping warmup with Adam at LR=3e-4 on a Transformer often causes divergence in first 100 steps</li>
+<li>GPT-3 used T_warmup = 375M tokens; LLaMA used T_warmup ≈ 2000 steps at batch 4M tokens</li>
+<li>bf16 training is more sensitive to early LR spikes than fp32 due to reduced precision range</li>
+</ul>
+<h2>Cosine Annealing After Warmup</h2>
+<p>After warmup, the standard schedule for LLM pretraining is cosine annealing: LR(t) = η_min + (η_max − η_min) × cos(π × t / T) / 2, where T is the total training steps and η_min is a floor (typically 1e-5 or 10% of η_max). Cosine decay is preferred over step decay because it provides a smooth, continuous reduction that avoids sudden LR drops which can destabilize Adam's momentum estimates. The final 10% of training at near-zero LR often recovers 0.3–0.5 perplexity points compared to stopping cosine decay early.</p>
+<pre><code class="language-python">import math
+import matplotlib.pyplot as plt
+
+def get_lr(step, warmup_steps, total_steps, lr_max, lr_min=1e-5):
+    &quot;&quot;&quot;Linear warmup then cosine annealing to lr_min.&quot;&quot;&quot;
+    if step &lt; warmup_steps:
+        return lr_max * step / max(warmup_steps, 1)
+    progress = (step - warmup_steps) / max(total_steps - warmup_steps, 1)
+    return lr_min + 0.5 * (lr_max - lr_min) * (1 + math.cos(math.pi * progress))
+
+warmup_steps, total_steps = 2000, 100_000
+lr_max, lr_min = 3e-4, 1e-5
+
+steps = list(range(0, total_steps, 200))
+lrs   = [get_lr(s, warmup_steps, total_steps, lr_max, lr_min) for s in steps]
+
+fig, ax = plt.subplots(figsize=(10, 4))
+ax.plot(steps, lrs, 'b-', linewidth=2, label='LR schedule')
+ax.axvline(warmup_steps, color='orange', linestyle='--', label=f'Warmup end ({warmup_steps} steps)')
+ax.set_xlabel('Training Step'); ax.set_ylabel('Learning Rate')
+ax.set_title('LR: Linear Warmup + Cosine Annealing (eta_min=1e-5)')
+ax.legend(); ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.savefig('lr_schedule.png', dpi=120)
+print(f&quot;Peak LR: {max(lrs):.2e}  End LR: {lrs[-1]:.2e}  Warmup: {warmup_steps/total_steps:.1%} of training&quot;)
+</code></pre>
+<h2>Loss Spikes — Causes and Detection</h2>
+<p>A loss spike is a sudden sharp increase in training loss — typically 2–10× baseline — followed by gradual recovery over 100–500 steps. Spikes are the most common cause of catastrophic LLM pretraining failures. Most spikes self-heal if the LR is not too high; in severe cases the model never recovers and the run must be restarted from a checkpoint. The primary causes are data-related: malformed Unicode sequences cause tokenizer output anomalies; repeated tokens pad documents to extreme lengths; empty or near-empty documents produce undefined loss values. Hardware faults (NaN-producing FP operations) and LR schedule bugs are secondary causes.</p>
+<ul>
+<li>Data anomalies: malformed Unicode, encoding errors, empty documents, repeated-token padding</li>
+<li>LR too high: gradient step overhoots loss minimum, causes chaotic wandering</li>
+<li>Bad batch: single extremely high-loss document (corrupted label or length outlier)</li>
+<li>Gradient overflow: fp16/bf16 gradients saturate; NaN propagates into weights via Adam update</li>
+<li>Architecture bug: attention logit explosion in deep models with incorrect initialization</li>
+</ul>
+<blockquote>
+<p><strong>Warning</strong>: Loss spikes from data quality issues (malformed Unicode, empty documents, repeated tokens) are the most common cause of LLM training instability — aggressive data filtering and document length capping prevent most spikes.</p>
+</blockquote>
+<h2>Gradient Norm Monitoring and Clipping</h2>
+<p>The global gradient norm ‖∇L‖₂ = sqrt(Σᵢ ‖∇Lᵢ‖²) computed across all parameters is one of the most informative training diagnostics. A healthy LLM run shows gradient norms in the range 0.1–2.0. Sustained norms above 5.0 indicate instability that usually precedes a loss spike by 50–200 steps. Global norm clipping rescales the entire gradient vector when ‖g‖ &gt; clip_norm: g ← g × (clip_norm / ‖g‖). This prevents any single large gradient from driving a destructive parameter update without reducing smaller gradients. Standard clip_norm = 1.0 for most LLM training; some recipes use 0.5 for very deep models.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def compute_global_grad_norm(model):
+    &quot;&quot;&quot;Compute global L2 gradient norm across all parameters.&quot;&quot;&quot;
+    total_norm = 0.0
+    for p in model.parameters():
+        if p.grad is not None:
+            total_norm += p.grad.detach().norm(2).item() ** 2
+    return total_norm ** 0.5
+
+def train_step_with_clip(model, optimizer, loss, clip_norm=1.0):
+    optimizer.zero_grad()
+    loss.backward()
+    pre_clip_norm = compute_global_grad_norm(model)
+    if pre_clip_norm &gt; clip_norm:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), clip_norm)
+    optimizer.step()
+    return pre_clip_norm, pre_clip_norm &gt; clip_norm
+
+# Simulate 10 training steps and log gradient norms
+model     = nn.Sequential(nn.Linear(128, 256), nn.GELU(), nn.Linear(256, 128))
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95))
+norm_log  = []
+for step in range(10):
+    x         = torch.randn(16, 128)
+    loss      = (model(x) ** 2).mean() + 0.01 * torch.randn(1).abs()
+    gnorm, clipped = train_step_with_clip(model, optimizer, loss, clip_norm=1.0)
+    norm_log.append(gnorm)
+    status = 'CLIPPED' if clipped else 'ok'
+    print(f&quot;Step {step:2d}: grad_norm={gnorm:.4f}  [{status}]&quot;)
+print(f&quot;Mean norm: {sum(norm_log)/len(norm_log):.4f}  Max: {max(norm_log):.4f}&quot;)
+</code></pre>
+<h2>Spike Detection and Checkpoint Rollback</h2>
+<p>Automated spike detection compares the current loss to a rolling baseline computed over the last 50 steps. If the current loss exceeds the baseline by more than a threshold (typically 3×), the training loop triggers a rollback: load the most recent good checkpoint, reduce the learning rate by 20–50%, and resume training. Most training frameworks save checkpoints every 500–1000 steps; saving more frequently is expensive but allows finer-grained recovery. The key insight is that spike recovery is much faster when the checkpoint is close to the spike — resuming from step N-100 with reduced LR typically recovers in 200–500 steps.</p>
+<pre><code class="language-python">import torch
+import os
+
+def detect_spike(loss_history, current_loss, threshold=3.0, window=50):
+    &quot;&quot;&quot;Return True if current_loss is threshold× above recent baseline.&quot;&quot;&quot;
+    if len(loss_history) &lt; window:
+        return False
+    baseline = sum(loss_history[-window:]) / window
+    return current_loss &gt; baseline * threshold
+
+def load_last_checkpoint(ckpt_dir, model, optimizer):
+    &quot;&quot;&quot;Load the most recent .pt checkpoint and return the step number.&quot;&quot;&quot;
+    ckpts = sorted([f for f in os.listdir(ckpt_dir) if f.endswith('.pt')])
+    if not ckpts:
+        print(&quot;No checkpoints found.&quot;)
+        return 0
+    path = os.path.join(ckpt_dir, ckpts[-1])
+    ckpt = torch.load(path, map_location='cpu')
+    model.load_state_dict(ckpt['model'])
+    optimizer.load_state_dict(ckpt['optimizer'])
+    print(f&quot;Rolled back to step {ckpt['step']} (loss={ckpt['loss']:.4f})&quot;)
+    return ckpt['step']
+
+# Simulate spike detection over 65 steps
+loss_history = [2.1 + 0.04 * (i % 4) for i in range(60)]
+test_losses  = [(2.0, 'normal'), (2.3, 'elevated'), (7.8, 'SPIKE'), (2.05, 'post-spike')]
+for val, label in test_losses:
+    is_spike = detect_spike(loss_history, val, threshold=3.0)
+    action   = 'ROLLBACK + reduce LR' if is_spike else 'continue'
+    print(f&quot;{label:12s}: loss={val:.2f}  spike={is_spike}  action={action}&quot;)
+    if not is_spike:
+        loss_history.append(val)
+</code></pre>
+<h2>Training Metrics Logging</h2>
+<pre><code class="language-python">import csv, os, time
+import torch
+
+def log_metrics(step, loss, lr, grad_norm, log_file='training_log.csv', use_wandb=False):
+    &quot;&quot;&quot;Log step metrics to CSV and optionally to W&amp;B.&quot;&quot;&quot;
+    ppl = min(2 ** loss, 1e9) if loss &lt; 30 else float('inf')
+    row = {
+        'step':       step,
+        'loss':       round(loss, 4),
+        'perplexity': round(ppl, 2),
+        'lr':         f'{lr:.2e}',
+        'grad_norm':  round(grad_norm, 4),
+        'gpu_mem_gb': round(torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0, 2),
+        'timestamp':  time.strftime('%H:%M:%S'),
+    }
+    write_header = not os.path.exists(log_file)
+    with open(log_file, 'a', newline='') as f:
+        w = csv.DictWriter(f, fieldnames=row.keys())
+        if write_header:
+            w.writeheader()
+        w.writerow(row)
+    if use_wandb:
+        import wandb
+        wandb.log({k: v for k, v in row.items() if k != 'timestamp'}, step=step)
+    return row
+
+# Simulate 5 steps
+for s in range(5):
+    m = log_metrics(s * 500, loss=2.5 - s * 0.07, lr=3e-4 * (1 - s * 0.015),
+                    grad_norm=0.72 + s * 0.04, log_file='training_metrics.csv')
+    print(f&quot;Step {m['step']}: loss={m['loss']}  ppl={m['perplexity']}  gnorm={m['grad_norm']}&quot;)
+</code></pre>
+<h2>Healthy vs Pathological Training Signals</h2>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Healthy Range</th>
+<th>Warning Sign</th>
+<th>Likely Cause</th>
+<th>Response Action</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Training loss</td>
+<td>Smooth monotonic decrease</td>
+<td>Spike &gt;3× rolling avg</td>
+<td>Bad batch / LR too high</td>
+<td>Rollback checkpoint, reduce LR 30%</td>
+</tr>
+<tr>
+<td>Gradient norm ‖g‖</td>
+<td>0.1 – 1.5 per step</td>
+<td>Sustained &gt;5.0 or NaN</td>
+<td>Exploding gradients / data anomaly</td>
+<td>Reduce LR, check data pipeline</td>
+</tr>
+<tr>
+<td>Perplexity</td>
+<td>Consistent decrease</td>
+<td>Plateau for &gt;10K steps</td>
+<td>LR too low or data saturation</td>
+<td>Check schedule, reshuffle data</td>
+</tr>
+<tr>
+<td>LR (actual vs scheduled)</td>
+<td>Follows schedule exactly</td>
+<td>Drift or zero after resume</td>
+<td>Optimizer state not restored</td>
+<td>Verify checkpoint load + step counter</td>
+</tr>
+<tr>
+<td>GPU memory (GB)</td>
+<td>Stable across steps</td>
+<td>Monotonic growth / OOM</td>
+<td>Activation memory leak</td>
+<td>Gradient checkpointing, reduce batch</td>
+</tr>
+<tr>
+<td>Loss spike frequency</td>
+<td>&lt;1 per 5K steps</td>
+<td>&gt;3 spikes per 1K steps</td>
+<td>Data quality issues</td>
+<td>Filter malformed docs, cap doc length</td>
+</tr>
+</tbody>
+</table>
+<h2>bf16 vs fp16 and Checkpointing Strategy</h2>
+<p>bf16 (bfloat16) has the same 8-bit exponent as fp32 but only 7 mantissa bits versus fp16's 10. This means bf16 has a much wider dynamic range (same as fp32: ±3.4×10³⁸) but lower precision for small values. In practice, bf16 training suffers far fewer gradient overflow events than fp16 because activation and gradient magnitudes can span many orders of magnitude during a spike. fp16 training requires loss scaling to avoid underflow; bf16 does not. For checkpointing, save optimizer state (Adam m and v for every parameter), model weights, the random state for data sampling, and the scheduler step. Missing any of these causes silent divergence on resume.</p>
+<ul>
+<li>Save every 1000 steps minimum; every 500 steps if training is unstable or expensive</li>
+<li>Checkpoint includes: model weights, optimizer state (m, v), scheduler step, RNG seeds</li>
+<li>Use mixed precision: weights in fp32, forward/backward in bf16 (AMP with bf16)</li>
+<li>Keep the last 3–5 checkpoints to allow rollback past multiple consecutive spikes</li>
+<li>Validate checkpoint integrity after saving: load and check loss on a fixed validation batch</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Zero-Shot Chain-of-Thought | Notes Backup</title>
+  <meta name="description" content="Appending &#x27;Let&#x27;s think step by step&#x27; (or similar triggers) to a prompt to elicit reasoning without few-shot examples, enabling CoT on novel tasks without example engineering." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Zero-Shot Chain-of-Thought</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Appending &#x27;Let&#x27;s think step by step&#x27; (or similar triggers) to a prompt to elicit reasoning without few-shot examples, enabling CoT on novel tasks without example engineering.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Zero-Shot Chain-of-Thought</h1>
+<p>Few-shot chain-of-thought prompting achieves remarkable accuracy gains on reasoning tasks but requires hand-crafted examples: each demonstration must include a question, a step-by-step reasoning chain, and the final answer. Writing high-quality CoT examples for a new task takes time, requires domain expertise, and must be repeated whenever the task distribution changes. Kojima et al. (2022, "Large Language Models are Zero-Shot Reasoners") discovered that simply appending the phrase "Let's think step by step" to a prompt — with no examples at all — causes LLMs to spontaneously generate a reasoning chain and then produce the correct answer. This zero-shot CoT finding was surprising: it demonstrated that LLMs already possess the reasoning capability needed for multi-step problems; they simply need a trigger phrase to activate it. Zero-shot CoT closes much of the gap between standard zero-shot prompting and few-shot CoT, and on some benchmarks matches few-shot CoT performance entirely, without the overhead of example engineering.</p>
+<h2>Overview</h2>
+<p>Zero-shot CoT (Kojima et al., 2022) is implemented as a two-stage prompting process. In stage 1, the trigger phrase "Let's think step by step" is appended to the question, and the model generates a reasoning chain. In stage 2, the reasoning chain is incorporated back into a new prompt that asks the model to extract the final answer from its own reasoning. This two-stage design is necessary because directly asking for a single-token final answer after the reasoning chain does not always yield a clean parseable output — models sometimes continue reasoning rather than stopping at the answer. By separating reasoning generation from answer extraction, zero-shot CoT achieves reliable structured outputs without requiring demonstrations. On the MultiArith benchmark, zero-shot CoT improves GPT-3 175B from 17.7% (standard zero-shot) to 78.7% — a 61-point gain from adding nine words to the prompt. On GSM8K, it improves from 10.4% to 40.7%, compared to 46.9% for few-shot CoT.</p>
+<h2>The Magic Phrase Discovery</h2>
+<p>Kojima et al. tested 14 different trigger phrases appended to math and reasoning problems to find which phrases most reliably elicit reasoning chains. "Let's think step by step" emerged as the strongest performer, improving accuracy by 30–60 percentage points over zero-shot prompting across multiple benchmarks. Interestingly, similar phrases with slightly different wording performed substantially worse: "Let's think about this logically" improved accuracy by only 5–10 points on the same benchmarks, and "Let's think step by step carefully" sometimes performed worse than the canonical phrase. The superior performance of "Let's think step by step" is attributed to its high prevalence in pretraining data — the phrase appears in educational content, worked examples, tutorials, and explanatory writing, which means it reliably activates the model's representation of explanatory problem-solving. Phrases that are less common in pretraining produce weaker or inconsistent reasoning elicitation.</p>
+<pre><code class="language-python">import openai
+import re
+
+client = openai.OpenAI()
+
+def zero_shot_cot(question, model=&quot;gpt-4o-mini&quot;):
+    &quot;&quot;&quot;Two-stage zero-shot CoT: generate reasoning, then extract answer.&quot;&quot;&quot;
+    # Stage 1: elicit reasoning chain
+    stage1_msgs = [
+        {&quot;role&quot;: &quot;system&quot;, &quot;content&quot;: &quot;You are a helpful reasoning assistant.&quot;},
+        {&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: question + &quot;\nLet's think step by step.&quot;}
+    ]
+    reasoning = client.chat.completions.create(
+        model=model, messages=stage1_msgs, max_tokens=300
+    ).choices[0].message.content.strip()
+
+    # Stage 2: extract final answer from the reasoning
+    stage2_msgs = [
+        {&quot;role&quot;: &quot;system&quot;, &quot;content&quot;: &quot;Extract the final numerical answer from the reasoning.&quot;},
+        {&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: f&quot;Question: {question}\nReasoning: {reasoning}\nThe answer (number only) is:&quot;}
+    ]
+    answer = client.chat.completions.create(
+        model=model, messages=stage2_msgs, max_tokens=20
+    ).choices[0].message.content.strip()
+
+    print(f&quot;Reasoning:\n{reasoning}\n\nExtracted answer: {answer}&quot;)
+    return reasoning, answer
+
+zero_shot_cot(&quot;Roger has 5 tennis balls. He buys 2 cans of 3 balls each. How many tennis balls does he have?&quot;)
+</code></pre>
+<p>The two-stage design cleanly separates the reasoning generation task from the answer extraction task. Stage 1 uses a high max_tokens limit to allow the model to fully elaborate its reasoning chain without being cut off mid-step. Stage 2 uses a low max_tokens limit to force a concise numerical answer. This prevents the common failure mode where a model continues generating after the answer, making regex extraction unreliable. The stage 2 prompt explicitly includes both the original question and the generated reasoning, allowing the model to re-read its own derivation and identify the final numerical result.</p>
+<h2>Two-Stage Prompting</h2>
+<p>The two-stage prompting architecture of zero-shot CoT reflects a broader principle in LLM engineering: separating generation from extraction yields more reliable structured outputs than trying to generate both in a single prompt. Stage 1 is optimised for reasoning quality — it uses a generous token budget, no response format constraints, and a trigger phrase that activates exploratory reasoning. Stage 2 is optimised for answer extraction — it uses a tight token budget, an explicit extraction instruction, and constrains the model's output to a specific format (a number, a word, a short phrase). The same two-stage pattern generalises beyond zero-shot CoT: it is used in self-consistency (generate multiple reasoning chains, extract and majority-vote the answers), in chain-of-density summarisation (iteratively generate and compress), and in plan-then-execute agent architectures. Understanding the two-stage pattern helps practitioners adapt zero-shot CoT to tasks that require structured output extraction beyond simple numerical answers.</p>
+<pre><code class="language-python">import openai
+
+client = openai.OpenAI()
+
+TRIGGERS = [
+    &quot;Think step by step.&quot;,
+    &quot;Let's think step by step.&quot;,
+    &quot;Let's work this out step by step.&quot;,
+    &quot;Let me think carefully about this.&quot;,
+    &quot;Break this problem down step by step.&quot;,
+    &quot;Let's approach this systematically.&quot;,
+    &quot;Before answering, reason through the problem.&quot;,
+    &quot;Let's think about this carefully and step by step.&quot;,
+]
+
+PROBLEM = (&quot;A bakery sells 120 loaves on Monday, 85 on Tuesday, and 140 on Wednesday. &quot;
+           &quot;They bake 100 new loaves each morning. How many loaves do they have at the &quot;
+           &quot;end of Wednesday, given they started Monday with 200 loaves?&quot;)
+ANSWER_KEY = &quot;195&quot;
+
+def test_trigger(trigger):
+    msgs = [{&quot;role&quot;: &quot;system&quot;, &quot;content&quot;: &quot;Solve math problems. End with: Answer: [number]&quot;},
+            {&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: PROBLEM + &quot; &quot; + trigger}]
+    resp = client.chat.completions.create(model=&quot;gpt-4o-mini&quot;, messages=msgs, max_tokens=200)
+    reply = resp.choices[0].message.content.strip()
+    correct = ANSWER_KEY in reply
+    print(f&quot;{trigger[:45]:46s} correct={correct}&quot;)
+    return correct
+
+results = {t: test_trigger(t) for t in TRIGGERS}
+print(f&quot;\nBest trigger accuracy: {sum(results.values())}/{len(TRIGGERS)}&quot;)
+</code></pre>
+<h2>Trigger Phrase Variants</h2>
+<p>Beyond the canonical "Let's think step by step", several trigger phrase variants have been studied for specific task types. "Let's first understand the problem and devise a plan" (the plan-and-solve trigger from Wang et al., 2023) adds an explicit planning phase before execution, which improves performance on complex word problems where misidentifying the relevant quantities is a common failure mode. "Let's work this out step by step to be sure we have the right answer" adds an emphasis on verification that slightly improves accuracy on tasks where plausibility checking matters. For coding tasks, "Let's think about the algorithm before writing code" is more effective than the generic trigger because it activates algorithm-design reasoning rather than general problem-solving reasoning. The empirical finding across studies is that the generic "Let's think step by step" is a strong default, but task-specific variants can provide 3–8% additional improvement when the generic trigger produces systematically wrong reasoning patterns.</p>
+<table>
+<thead>
+<tr>
+<th>Trigger phrase</th>
+<th>GSM8K accuracy</th>
+<th>MultiArith</th>
+<th>AQuA-RAT</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>No trigger (zero-shot)</td>
+<td>10%</td>
+<td>18%</td>
+<td>22%</td>
+<td>Baseline zero-shot; model answers directly</td>
+</tr>
+<tr>
+<td>Let's think step by step</td>
+<td>41%</td>
+<td>79%</td>
+<td>48%</td>
+<td>Canonical trigger; strong across all benchmarks</td>
+</tr>
+<tr>
+<td>Let's work this out step by step</td>
+<td>38%</td>
+<td>76%</td>
+<td>45%</td>
+<td>Close second; emphasises sequential execution</td>
+</tr>
+<tr>
+<td>Break it down step by step</td>
+<td>33%</td>
+<td>71%</td>
+<td>40%</td>
+<td>Slightly weaker; less common phrasing in pretraining</td>
+</tr>
+<tr>
+<td>Plan-and-solve trigger</td>
+<td>45%</td>
+<td>81%</td>
+<td>52%</td>
+<td>Best on complex multi-step; requires longer generation</td>
+</tr>
+<tr>
+<td>Few-shot CoT (8-shot)</td>
+<td>57%</td>
+<td>93%</td>
+<td>60%</td>
+<td>Upper bound with demonstrations; outperforms all triggers</td>
+</tr>
+</tbody>
+</table>
+<h2>Why Zero-Shot CoT Works</h2>
+<p>The effectiveness of zero-shot CoT reveals an important property of large pretrained language models: they already contain the reasoning capability needed for multi-step problem solving, but this capability is only activated when the model is prompted in the right mode. The phrase "Let's think step by step" appears prominently in mathematical explanations, educational walkthroughs, and tutorial content throughout the pretraining corpus. Seeing this phrase shifts the model's generative distribution from "produce a short direct answer" to "produce an educational step-by-step explanation" — a mode where intermediate steps are generated explicitly. The scale dependency (zero-shot CoT only helps large models) aligns with this explanation: smaller models do not have a sufficiently rich representation of step-by-step reasoning to produce valid chains when triggered, whereas larger models have absorbed enough worked-example content to generate reliable decompositions. Instruction tuning further amplifies zero-shot CoT effectiveness by explicitly training models to respond to reasoning-inviting prompts with reasoned explanations.</p>
+<ul>
+<li>The trigger phrase shifts the model's generative mode from direct-answer to explanatory-reasoning, matching a common pretraining pattern</li>
+<li>Large models (100B+) have sufficient worked-example exposure to produce valid step-by-step chains; small models do not</li>
+<li>Instruction-tuned models respond more reliably to reasoning triggers because RLHF explicitly rewards explanatory responses</li>
+<li>The two-stage design separates reasoning (open-ended generation) from extraction (constrained generation) for reliable outputs</li>
+<li>The model's own reasoning chain serves as a scratchpad, allowing it to condition later steps on earlier computed values</li>
+<li>Zero-shot CoT accuracy strongly correlates with the quality of reasoning chains, not just the trigger phrase used</li>
+</ul>
+<h2>Comparison with Few-Shot CoT</h2>
+<p>Zero-shot CoT consistently underperforms few-shot CoT on standard benchmarks: on GSM8K, zero-shot CoT achieves roughly 41% vs 57% for 8-shot CoT on GPT-3 175B; on MultiArith, 79% vs 93%. The gap narrows significantly on larger and more capable models: on GPT-4, zero-shot CoT achieves 87% on GSM8K compared to 92% for 8-shot CoT. This convergence happens because larger models generate higher-quality reasoning chains from the trigger alone, reducing the benefit of demonstrations. For many practical applications, zero-shot CoT is the better starting point because it requires no demonstration engineering, generalises immediately to new problem types, and allows the model to choose its own decomposition strategy rather than following a specific demonstration's style. Few-shot CoT is preferred when (a) the model's zero-shot reasoning style is inappropriate for the task (e.g., generating proofs when simple arithmetic is needed), (b) the output format must strictly match a specific structure, or (c) accuracy requirements demand the highest possible performance on a well-defined task.</p>
+<pre><code class="language-python">import openai
+
+client = openai.OpenAI()
+
+PLAN_AND_SOLVE_TRIGGER = (&quot;Let's first understand the problem and devise a plan to solve it. &quot;
+                          &quot;Then let's carry out the plan and solve the problem step by step.&quot;)
+BASIC_TRIGGER = &quot;Let's think step by step.&quot;
+
+PROBLEMS = [
+    (&quot;Alice has 3 times as many marbles as Bob. Bob has 12 fewer than Carol. Carol has 40. How many does Alice have?&quot;, &quot;84&quot;),
+    (&quot;A train leaves at 9am travelling 60mph. Another leaves at 10am from the same station going 90mph same direction. When does the second catch the first?&quot;, &quot;12pm&quot;),
+]
+
+def solve_with_trigger(question, trigger, label):
+    msgs = [{&quot;role&quot;: &quot;system&quot;, &quot;content&quot;: &quot;Solve the problem. End your response with: Final answer: [answer]&quot;},
+            {&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: f&quot;{question}\n{trigger}&quot;}]
+    resp = client.chat.completions.create(model=&quot;gpt-4o-mini&quot;, messages=msgs, max_tokens=350)
+    reply = resp.choices[0].message.content.strip()
+    print(f&quot;[{label}]\n{reply[:200]}...\n&quot;)
+    return reply
+
+for q, ans in PROBLEMS:
+    print(f&quot;=== Problem: {q[:60]}... ===&quot;)
+    solve_with_trigger(q, BASIC_TRIGGER, &quot;Basic trigger&quot;)
+    solve_with_trigger(q, PLAN_AND_SOLVE_TRIGGER, &quot;Plan-and-solve&quot;)
+    print()
+</code></pre>
+<blockquote>
+<p><strong>Try Zero-Shot CoT First</strong>: Zero-shot CoT is surprisingly competitive with few-shot CoT on standard reasoning benchmarks and requires no example engineering — always try it before spending time crafting few-shot examples for a new reasoning task. Append 'Let's think step by step.' to your prompt, use a two-stage design to extract the answer cleanly, and measure accuracy. Only invest in few-shot CoT example creation if zero-shot CoT falls short of your accuracy target.</p>
+</blockquote>
+<h2>Limitations</h2>
+<p>Zero-shot CoT shares all the limitations of few-shot CoT — scale dependency, increased output token cost, hallucinated reasoning — and adds its own. Because the model chooses its own reasoning style without demonstration guidance, zero-shot CoT can produce highly variable reasoning formats: some responses decompose the problem efficiently in 3 steps while others write elaborate multi-paragraph chains for the same problem. This variance in reasoning format complicates automated answer extraction, since the final answer may appear at different positions in the output and in different grammatical forms. Additionally, zero-shot CoT is more susceptible to reasoning style mismatch — when the model's spontaneous reasoning strategy for a problem type diverges from the optimal approach, there are no demonstrations to correct it. For example, models tend to over-use algebraic formulation for problems that are more naturally solved with arithmetic reasoning, and the absence of demonstrations means this bias goes uncorrected. Finally, zero-shot CoT does not help on tasks where the model lacks the relevant domain knowledge — a reasoning chain cannot compensate for a knowledge gap.</p>
+<pre><code class="language-python">import openai
+from collections import Counter
+
+client = openai.OpenAI()
+
+ERROR_TYPES = [&quot;calculation_error&quot;, &quot;wrong_operation&quot;, &quot;missing_step&quot;,
+               &quot;hallucinated_constraint&quot;, &quot;unit_error&quot;, &quot;correct&quot;]
+
+def categorize_error(question, expected_answer):
+    &quot;&quot;&quot;Generate a CoT trace and ask the model to categorize its own error type.&quot;&quot;&quot;
+    # Generate reasoning
+    resp = client.chat.completions.create(
+        model=&quot;gpt-4o-mini&quot;, max_tokens=250,
+        messages=[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: question + &quot;\nLet's think step by step.&quot;}]
+    )
+    reasoning = resp.choices[0].message.content.strip()
+
+    # Classify error
+    classify_prompt = (f&quot;The correct answer is {expected_answer}.\n&quot;
+                       f&quot;The model's reasoning: {reasoning}\n&quot;
+                       f&quot;Classify the error: {', '.join(ERROR_TYPES)}.&quot;)
+    err_resp = client.chat.completions.create(
+        model=&quot;gpt-4o-mini&quot;, max_tokens=30,
+        messages=[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: classify_prompt}]
+    )
+    error_type = err_resp.choices[0].message.content.strip()
+    print(f&quot;Error type: {error_type}&quot;)
+    return error_type
+
+BAD_PROBLEMS = [(&quot;If 6 workers build a wall in 8 days, how many days for 4 workers?&quot;, &quot;12&quot;),
+               (&quot;A 10% discount on $85 then 5% tax. Final price?&quot;, &quot;84.075&quot;)]
+for q, a in BAD_PROBLEMS:
+    categorize_error(q, a)
+</code></pre>
+<ul>
+<li>Scale dependency: zero-shot CoT requires large models (100B+); do not apply to 7B–13B models without testing</li>
+<li>Reasoning format variance: no demonstrations means the model chooses its own style, complicating answer extraction</li>
+<li>Reasoning style mismatch: model may choose a suboptimal decomposition strategy for certain problem types</li>
+<li>Hallucinated constraints: model occasionally adds assumptions not present in the problem ("assuming the tax is 10%")</li>
+<li>Knowledge-limited: CoT cannot compensate for domain knowledge gaps — reasoning over false premises yields wrong answers</li>
+<li>Higher output token cost: reasoning chains add 50–300 tokens per call; budget for this in production systems</li>
+</ul>
+<h2>Key Takeaways</h2>
+<p>Zero-shot CoT is the most practical entry point to chain-of-thought reasoning: it requires no example engineering, generalises immediately to new task types, and closes much of the gap between standard zero-shot prompting and few-shot CoT. The canonical trigger "Let's think step by step" is the strongest and most reliable phrase, activating the model's pretraining exposure to step-by-step explanatory content. The two-stage architecture — separate reasoning generation from answer extraction — is essential for reliable structured outputs. Zero-shot CoT is competitive with few-shot CoT on capable models (GPT-4, Claude 3, Gemini 1.5) and is the recommended first approach for any new reasoning task. When zero-shot CoT falls short of accuracy requirements, augment with demonstrations (few-shot CoT), or try the plan-and-solve variant for complex multi-step problems. For highest accuracy, combine zero-shot CoT with self-consistency: sample multiple reasoning chains with temperature &gt; 0 and majority-vote the extracted answers.</p>
+<ul>
+<li>Append 'Let's think step by step.' to any reasoning task — try this before engineering few-shot CoT examples</li>
+<li>Use a two-stage design: stage 1 generates the reasoning chain, stage 2 extracts the final answer from the chain</li>
+<li>The plan-and-solve trigger ('Let's first understand the problem and devise a plan...') outperforms the basic trigger on complex problems</li>
+<li>Requires large models (100B+); test on your specific model — small models may produce correct-sounding but wrong reasoning</li>
+<li>For maximum accuracy: sample 5–10 reasoning chains with temperature=0.7 and majority-vote extracted answers (self-consistency)</li>
+<li>Zero-shot CoT closes the gap with few-shot CoT on GPT-4 / Claude 3 class models — demonstrations matter less at the frontier</li>
+<li>Analyse failure modes by categorising error types in wrong reasoning traces to identify systematic weaknesses in the prompt</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

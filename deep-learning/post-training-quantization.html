@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Post-Training Quantization | Notes Backup</title>
+  <meta name="description" content="Reducing model weights and activations to lower bit-widths after training to shrink memory footprint and speed up inference without retraining." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Post-Training Quantization</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Reducing model weights and activations to lower bit-widths after training to shrink memory footprint and speed up inference without retraining.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Post-Training Quantization</h1>
+<p>Post-training quantization (PTQ) is the practice of converting a fully-trained floating-point neural network into a lower-precision integer representation without any additional training passes. Unlike quantization-aware training (QAT), PTQ operates entirely on the finished model, making it practical for models that are expensive to retrain—such as the large language models with billions of parameters that now underpin most AI applications. A 7-billion-parameter model stored in FP32 occupies roughly 28 GB of memory; the same model in INT8 fits in 7 GB and runs noticeably faster on both CPUs and GPUs due to the cheaper integer arithmetic and the improved cache utilization from the smaller footprint. At INT4 the model shrinks to under 4 GB, enabling deployment on consumer GPUs or even mobile accelerators that would otherwise have no hope of hosting such a model. The quality trade-off—perplexity increase, downstream task degradation—depends heavily on which quantization strategy is chosen, how scale factors are computed, and whether activations are also quantized in addition to weights.</p>
+<h2>Overview</h2>
+<p>The fundamental operation in PTQ is the affine mapping of a floating-point tensor onto a fixed grid of integer values. Given a floating-point weight matrix W, we want to find integers Q and scale parameters (scale, zero_point) such that W ≈ scale × (Q − zero_point). The integer Q lives in the range [q_min, q_max]; for signed INT8 this is [−128, 127], for unsigned UINT8 it is [0, 255], and for INT4 it is [−8, 7] or [0, 15]. The quantization error—the difference between W and its reconstructed approximation—determines how much model quality degrades. Modern PTQ methods differ primarily in how they minimize this error: some minimize the mean-squared reconstruction error, some protect specific weight channels that are most sensitive to perturbation, and some leverage second-order Hessian information to propagate and correct errors layer by layer. Understanding the building blocks—scale and zero-point computation, symmetric versus asymmetric schemes, static versus dynamic activation quantization—is essential before choosing a production approach.</p>
+<ul>
+<li>Quantization reduces memory by representing weights in fewer bits (e.g., INT8 = 4× vs FP32)</li>
+<li>Scale factor maps the full float range onto the integer grid without retraining</li>
+<li>Zero point shifts the integer grid so asymmetric distributions are well-covered</li>
+<li>Calibration data is used to measure activation ranges for static quantization</li>
+<li>Per-channel scales allow different weight rows to use independent ranges, reducing error</li>
+<li>Post-training methods avoid retraining but may lose 1–5% accuracy at INT4 without care</li>
+</ul>
+<h2>Weight Quantization Basics</h2>
+<p>Weight quantization maps each element of a weight tensor from its floating-point value to the nearest representable integer. The core formula is: q = clamp(round(w / scale + zero_point), q_min, q_max). The scale is chosen to span the observed float range, and the zero_point shifts the grid to accommodate asymmetric distributions. Dequantization reverses this: w_approx = scale × (q − zero_point). The quantization error for a single weight is bounded by |error| ≤ scale / 2, so using a smaller scale (achieved by narrowing the float range being covered) directly reduces error—but if the scale is too small, weights outside the range get clipped, which is often worse. Good scale estimation therefore requires either knowing the true min/max of the tensor, or using statistics such as the 99.9th percentile to ignore outliers that would otherwise inflate the scale and degrade all other weights.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+def compute_scale_zero_point(tensor, num_bits=8):
+    &quot;&quot;&quot;Asymmetric INT8: map float range [t_min, t_max] to [q_min, q_max].&quot;&quot;&quot;
+    q_min = -(2 ** (num_bits - 1))
+    q_max = (2 ** (num_bits - 1)) - 1
+    t_min, t_max = tensor.min().item(), tensor.max().item()
+    scale = (t_max - t_min) / (q_max - q_min)
+    zero_point = int(round(q_min - t_min / scale))
+    zero_point = max(q_min, min(q_max, zero_point))
+    return scale, zero_point
+
+def quantize(tensor, scale, zero_point, num_bits=8):
+    q_min = -(2 ** (num_bits - 1))
+    q_max = (2 ** (num_bits - 1)) - 1
+    q = torch.clamp(torch.round(tensor / scale + zero_point), q_min, q_max)
+    return q.to(torch.int8)
+
+def dequantize(q_tensor, scale, zero_point):
+    return scale * (q_tensor.float() - zero_point)
+
+layer = nn.Linear(768, 3072)
+weight = layer.weight.data.clone()
+scale, zp = compute_scale_zero_point(weight)
+q_weight = quantize(weight, scale, zp)
+dq_weight = dequantize(q_weight, scale, zp)
+error = (weight - dq_weight).abs().mean().item()
+print(f&quot;Scale={scale:.6f}  ZeroPoint={zp}&quot;)
+print(f&quot;Mean absolute quantization error: {error:.6f}&quot;)
+print(f&quot;Memory FP32={weight.numel()*4}B  INT8={q_weight.numel()}B  ratio=4x&quot;)
+</code></pre>
+<p>The code above demonstrates the full round-trip for a single linear layer weight. In practice, the same functions are applied to every weight matrix in the model. The mean absolute error of roughly 1e-4 for a well-initialized linear layer weight is typically benign; the key risk is when a few outlier weights cause the scale to be much larger than needed, wasting grid resolution on the ordinary weights. This is why activation outliers—not weight outliers—are the harder problem in LLM quantization: activations can have values 100× larger than the median, forcing either a very large scale (high error for the rest) or clipping (losing information about the outliers).</p>
+<h2>Symmetric vs Asymmetric Quantization</h2>
+<p>Symmetric quantization forces zero_point = 0, centering the integer grid at zero. The scale is computed as: scale = max(|t_min|, |t_max|) / q_max. This is simpler—dequantization is just scale × q—and is preferred for weights, which are typically approximately zero-mean after training. Asymmetric quantization sets zero_point ≠ 0, allowing the integer grid to cover any range [t_min, t_max] without wasted grid points. The scale is (t_max − t_min) / (q_max − q_min) and zero_point = round(q_min − t_min / scale). Asymmetric quantization uses all q_max − q_min + 1 integer values efficiently, making it the correct choice for activations: ReLU outputs are always non-negative (range [0, t_max]), so a symmetric scheme would waste half the integer grid on negative values it never uses. PyTorch's quantization APIs expose both schemes via the observer configuration.</p>
+<p>For transformer-based LLMs, a mixed strategy is standard: symmetric INT8 for weights and asymmetric INT8 for activations. Some frameworks use unsigned UINT8 (range 0–255) for ReLU activations because the full range is positive, which simplifies hardware arithmetic. For INT4 weight-only quantization—the dominant strategy in 2024–2025—activations are left in FP16 and only weights are quantized, sidestepping the activation outlier problem entirely while still achieving meaningful memory compression. Weight-only INT4 with FP16 activations delivers a near-4× memory reduction over FP16 while keeping activation precision high enough to avoid the severe accuracy penalties that full INT4 weight-and-activation quantization would incur at LLM scale.</p>
+<h2>Static vs Dynamic Quantization</h2>
+<p>Static quantization computes the activation scale and zero_point once at calibration time, then fixes them for all future inferences. This yields the fastest inference because no range statistics need to be computed at runtime—the activation quantization is a fixed affine mapping known at compile time. The trade-off is that the calibration dataset must be representative of the production distribution; if test inputs have activations outside the calibrated range, they will be clipped and degraded. Dynamic quantization instead measures activation min/max at runtime for each input, computing scale and zero_point on the fly before each quantized operation. This is more accurate—it always uses the actual range of the current input—but adds overhead for computing statistics, making it better for CPU inference (where compute is the bottleneck) than GPU inference (where memory bandwidth is the bottleneck and the statistical overhead is proportionally larger).</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.quantization as tq
+from torch.quantization import MinMaxObserver, HistogramObserver
+import time
+
+class SimpleMLP(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.fc1 = nn.Linear(768, 3072)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(3072, 768)
+    def forward(self, x):
+        return self.fc2(self.relu(self.fc1(x)))
+
+model_fp32 = SimpleMLP().eval()
+model_fp32.qconfig = tq.get_default_qconfig(&quot;x86&quot;)
+model_prepared = tq.prepare(model_fp32)
+
+# Calibration pass: observe weight and activation ranges
+calib_data = [torch.randn(32, 768) for _ in range(50)]
+with torch.no_grad():
+    for batch in calib_data:
+        model_prepared(batch)
+
+model_int8 = tq.convert(model_prepared)
+x = torch.randn(64, 768)
+t0 = time.perf_counter(); _ = model_fp32(x); fp32_ms = (time.perf_counter()-t0)*1000
+t0 = time.perf_counter(); _ = model_int8(x); int8_ms = (time.perf_counter()-t0)*1000
+print(f&quot;FP32 latency: {fp32_ms:.2f} ms&quot;)
+print(f&quot;INT8 latency: {int8_ms:.2f} ms  ({fp32_ms/int8_ms:.1f}x speedup)&quot;)
+</code></pre>
+<p>PyTorch's eager-mode static quantization shown above follows a prepare-calibrate-convert workflow. The prepare step inserts observer modules at each quantizable point; calibration runs real data through the prepared model so observers accumulate min/max or histogram statistics; convert replaces floating-point operations with integer-kernel operations, baking in the observed scales. The converted model is fully quantized and ready for CPU deployment. For GPU inference, frameworks like TensorRT and bitsandbytes implement their own fused INT8 kernels that operate on CUDA rather than x86 intrinsics, but the conceptual workflow is identical.</p>
+<h2>Per-tensor vs Per-channel</h2>
+<p>Per-tensor quantization assigns a single scale and zero_point to an entire weight matrix, meaning all 768 × 3072 elements of a linear layer share one scale. This is simple and memory-efficient for the metadata, but problematic when weight rows have very different magnitudes—which is common in deep transformers where different attention heads or MLP neurons can differ in scale by an order of magnitude. Per-channel quantization assigns one scale per output channel (one per row of a weight matrix, by convention), allowing each row to use its own optimal integer range. The memory overhead is negligible: a 768 × 3072 weight matrix needs 768 scale values, adding only 768 × 4 = 3 KB to a matrix that already occupies 9 MB in FP32. The accuracy benefit, as the code below shows, is often 3–10× lower reconstruction error for a realistic transformer weight distribution.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+
+torch.manual_seed(42)
+W = torch.randn(256, 768) * 0.02   # typical transformer weight scale
+
+q_min_i8, q_max_i8 = -128, 127
+
+# ── Per-tensor quantization ──────────────────────────────────────────────────
+global_min, global_max = W.min(), W.max()
+scale_t = (global_max - global_min).item() / (q_max_i8 - q_min_i8)
+zp_t = int(round(q_min_i8 - global_min.item() / scale_t))
+W_qt = torch.clamp(torch.round(W / scale_t + zp_t), q_min_i8, q_max_i8).to(torch.int8)
+W_qt_dq = scale_t * (W_qt.float() - zp_t)
+rmse_tensor = (W - W_qt_dq).pow(2).mean().sqrt().item()
+
+# ── Per-channel quantization (one scale per output neuron) ───────────────────
+w_min_ch = W.min(dim=1).values
+w_max_ch = W.max(dim=1).values
+scales_ch = (w_max_ch - w_min_ch) / (q_max_i8 - q_min_i8)
+zps_ch = (q_min_i8 - w_min_ch / scales_ch).round().clamp(q_min_i8, q_max_i8)
+W_qc = torch.clamp(
+    torch.round(W / scales_ch.unsqueeze(1) + zps_ch.unsqueeze(1)), q_min_i8, q_max_i8
+).to(torch.int8)
+W_qc_dq = scales_ch.unsqueeze(1) * (W_qc.float() - zps_ch.unsqueeze(1))
+rmse_channel = (W - W_qc_dq).pow(2).mean().sqrt().item()
+
+print(f&quot;Per-tensor RMSE : {rmse_tensor:.6f}&quot;)
+print(f&quot;Per-channel RMSE: {rmse_channel:.6f}&quot;)
+print(f&quot;Improvement     : {rmse_tensor/rmse_channel:.1f}x lower error with per-channel&quot;)
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Bit-width</th>
+<th>Memory reduction</th>
+<th>Accuracy loss</th>
+<th>Speed gain</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FP32 baseline</td>
+<td>32</td>
+<td>1×</td>
+<td>None</td>
+<td>1×</td>
+</tr>
+<tr>
+<td>FP16</td>
+<td>16</td>
+<td>2×</td>
+<td>Negligible</td>
+<td>1.5–2×</td>
+</tr>
+<tr>
+<td>INT8 static</td>
+<td>8</td>
+<td>4×</td>
+<td>&lt;0.5% typical</td>
+<td>2–4×</td>
+</tr>
+<tr>
+<td>INT8 dynamic</td>
+<td>8</td>
+<td>4×</td>
+<td>&lt;1% typical</td>
+<td>1.5–3×</td>
+</tr>
+<tr>
+<td>INT4 GPTQ</td>
+<td>4</td>
+<td>8×</td>
+<td>1–3% typical</td>
+<td>3–5×</td>
+</tr>
+<tr>
+<td>INT4 AWQ</td>
+<td>4</td>
+<td>8×</td>
+<td>0.5–2% typical</td>
+<td>3–5×</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Warning</strong>: Per-tensor quantization for activations almost always underperforms per-channel weight quantization; always use per-channel weight scales in production. For weights, per-tensor scale is acceptable only for very narrow layers (e.g., vocabulary embeddings) where all rows genuinely share the same magnitude distribution. Using per-tensor scale on the query/key/value projection weights of a transformer typically costs 1–2 perplexity points at INT8 that per-channel scale recovers for free.</p>
+</blockquote>
+<h2>Calibration and Scale Factors</h2>
+<p>Calibration is the process of running a representative subset of data through the model to measure activation value distributions, which are then used to set static quantization scales. A good calibration set is small (64–512 samples is usually sufficient) but diverse—covering the topic distribution, token length distribution, and language distribution of the target workload. Common calibration data sources for LLMs include C4, WikiText-2, or a curated sample from the target domain. The calibration statistics can be collected as simple min/max (most conservative—avoids clipping but uses a wide scale), as a histogram with percentile clipping (e.g., 99.99th percentile, which tolerates occasional large activations), or with entropy minimization (finds the clipping threshold that minimizes KL divergence from the full-precision distribution). TensorRT uses entropy minimization by default; PyTorch's HistogramObserver uses percentile clipping.</p>
+<h2>Practical Deployment</h2>
+<p>For deploying quantized LLMs in production, the most battle-tested approaches as of 2025 are: bitsandbytes for research and rapid prototyping (8-bit and 4-bit with minimal code changes via the load_in_8bit and load_in_4bit flags in Hugging Face Transformers), GPTQ for offline quantization of models that will be served repeatedly (the quantized model is saved to disk and reloaded, amortizing the quantization cost), and AWQ for the best accuracy-per-bit at INT4 when serving throughput is critical. For CPU inference, GGUF/llama.cpp supports a wide range of quantization levels (Q4_K_M, Q5_K_S, Q8_0, etc.) with hand-tuned quantization parameters for common model families. TensorRT-LLM provides the highest-throughput GPU serving with INT8/INT4 support and fused attention kernels. The choice between these depends on the deployment hardware, latency requirements, and acceptable accuracy degradation.</p>
+<pre><code class="language-python">import torch
+import bitsandbytes as bnb
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import gc
+
+model_name = &quot;meta-llama/Llama-2-7b-hf&quot;
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+# Baseline: FP16
+model_fp16 = AutoModelForCausalLM.from_pretrained(
+    model_name, torch_dtype=torch.float16
+).cuda()
+mem_fp16 = torch.cuda.memory_allocated() / 1e9
+print(f&quot;FP16 GPU memory: {mem_fp16:.2f} GB&quot;)
+del model_fp16; gc.collect(); torch.cuda.empty_cache()
+
+# INT8 via bitsandbytes LLM.int8()
+model_int8 = AutoModelForCausalLM.from_pretrained(
+    model_name, load_in_8bit=True, device_map=&quot;auto&quot;
+)
+mem_int8 = torch.cuda.memory_allocated() / 1e9
+print(f&quot;INT8 GPU memory: {mem_int8:.2f} GB  ({mem_fp16/mem_int8:.1f}x reduction)&quot;)
+
+inputs = tokenizer(&quot;Quantization reduces model size by&quot;, return_tensors=&quot;pt&quot;).to(&quot;cuda&quot;)
+with torch.no_grad():
+    out = model_int8.generate(**inputs, max_new_tokens=30)
+print(tokenizer.decode(out[0], skip_special_tokens=True))
+</code></pre>
+<ul>
+<li>Use load_in_8bit=True for quick experiments; switch to GPTQ or AWQ for production</li>
+<li>Always benchmark perplexity on a held-out set (WikiText-2 is standard) before deploying</li>
+<li>For batch serving, prefer GPTQ/AWQ + vLLM over bitsandbytes for higher throughput</li>
+<li>On CPU, Q4_K_M (llama.cpp) hits the best quality/speed tradeoff for most use cases</li>
+<li>Monitor memory fragmentation: quantized models still need FP16 buffers for activations</li>
+<li>Use device_map='auto' to shard large models across multiple GPUs automatically</li>
+</ul>
+<h2>Key Takeaways</h2>
+<ul>
+<li>PTQ requires no retraining—only a calibration pass—making it practical for any pre-trained LLM</li>
+<li>Asymmetric quantization beats symmetric for activations; symmetric is preferred for weights</li>
+<li>Per-channel weight scales are essential for transformer accuracy; per-tensor is usually insufficient</li>
+<li>Static quantization is faster at inference time; dynamic quantization is more robust to distribution shift</li>
+<li>INT8 quantization (weight + activation) reduces memory 4× with &lt;1% accuracy loss on most benchmarks</li>
+<li>INT4 weight-only quantization achieves near-8× memory savings with acceptable quality loss at LLM scale</li>
+<li>Calibration dataset quality matters: 128–512 diverse samples are sufficient for stable scale estimates</li>
+<li>bitsandbytes, GPTQ, AWQ, and GGUF are the four dominant PTQ ecosystems for LLMs in 2025</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

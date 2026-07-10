@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AlexNet and VGG — Early Deep CNN Architectures | Notes Backup</title>
+  <meta name="description" content="AlexNet (2012) proved deep CNNs with ReLU, dropout, and GPU training can win ImageNet; VGG (2014) showed that uniform 3×3 convolutions stacked deeply outperform large-kernel shallow networks. Both remain foundational feature extractors." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>AlexNet and VGG — Early Deep CNN Architectures</h1>
+      <ul class='note-meta'><li><strong>description:</strong> AlexNet (2012) proved deep CNNs with ReLU, dropout, and GPU training can win ImageNet; VGG (2014) showed that uniform 3×3 convolutions stacked deeply outperform large-kernel shallow networks. Both remain foundational feature extractors.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>AlexNet and VGG — Early Deep CNN Architectures</h1>
+<p>Before 2012 the dominant computer vision approach was hand-crafted features (SIFT, HOG) combined with shallow classifiers. AlexNet (Krizhevsky, Sutskever, Hinton, 2012) shattered this paradigm by winning ImageNet LSVRC with a 10.9-point top-5 error improvement over the runner-up. It demonstrated that deep CNNs trained on GPUs with large datasets could learn far more powerful representations than any hand-engineered alternative. VGG (Simonyan &amp; Zisserman, 2014) then showed that architectural simplicity — stacking many 3×3 convolutions — could push accuracy further while providing clean, reusable feature extractors.</p>
+<h2>AlexNet Architecture</h2>
+<p>AlexNet consists of five convolutional layers followed by three fully-connected layers. The first conv layer uses 96 11×11 filters with stride 4 (large stride to quickly reduce the 224×224 input). Subsequent conv layers use 3×3 and 5×5 kernels. Max pooling follows layers 1, 2, and 5 to reduce spatial dimensions. Local Response Normalisation (LRN) — a now-deprecated layer that normalises across adjacent feature maps — follows layers 1 and 2. The three FC layers (4096 → 4096 → 1000) dominate the parameter count at 58M of the total 60M parameters.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class AlexNet(nn.Module):
+    '''AlexNet (Krizhevsky et al., 2012) — 5 conv + 3 FC layers.'''
+    def __init__(self, num_classes=1000, dropout=0.5):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 96, 11, stride=4, padding=2), nn.ReLU(inplace=True),
+            nn.LocalResponseNorm(5, alpha=1e-4, beta=0.75, k=2.0),
+            nn.MaxPool2d(3, stride=2),
+            nn.Conv2d(96, 256, 5, padding=2), nn.ReLU(inplace=True),
+            nn.LocalResponseNorm(5, alpha=1e-4, beta=0.75, k=2.0),
+            nn.MaxPool2d(3, stride=2),
+            nn.Conv2d(256, 384, 3, padding=1), nn.ReLU(inplace=True),
+            nn.Conv2d(384, 384, 3, padding=1), nn.ReLU(inplace=True),
+            nn.Conv2d(384, 256, 3, padding=1), nn.ReLU(inplace=True),
+            nn.MaxPool2d(3, stride=2))
+        self.classifier = nn.Sequential(
+            nn.Dropout(dropout), nn.Linear(256 * 6 * 6, 4096), nn.ReLU(inplace=True),
+            nn.Dropout(dropout), nn.Linear(4096, 4096), nn.ReLU(inplace=True),
+            nn.Linear(4096, num_classes))
+
+    def forward(self, x):
+        return self.classifier(self.features(x).flatten(1))
+
+model = AlexNet()
+x = torch.randn(2, 3, 224, 224)
+params = sum(p.numel() for p in model.parameters()) / 1e6
+print('AlexNet output: {}'.format(model(x).shape))
+print('Parameters: {:.1f}M (58M in FC layers alone)'.format(params))
+</code></pre>
+<h2>Training Innovations in AlexNet</h2>
+<p>AlexNet introduced several training techniques that became standard: ReLU activations (instead of tanh or sigmoid) train 6× faster because they do not suffer from the vanishing gradient in the saturation region; dropout (p=0.5) in the two FC layers reduces co-adaptation of neurons and halves test error relative to no regularisation; data augmentation (random 224×224 crops and horizontal flips from 256×256 images, PCA colour jitter) effectively quintuples the training set. Training on two GTX 580 GPUs for six days was essential — the model split across GPUs, with cross-GPU communication only at specific layers.</p>
+<ul>
+<li>ReLU: f(x)=max(0,x) — no saturation for x&gt;0, gradient always 1 or 0, trains ~6x faster than sigmoid/tanh.</li>
+<li>Dropout (p=0.5): applied to FC6 and FC7, forces neurons to learn redundant representations, acts as implicit ensemble of 2^n networks.</li>
+<li>LRN: lateral inhibition across adjacent feature maps — normalises response relative to neighbours, mimics biological lateral inhibition. Dropped in later architectures.</li>
+<li>Data augmentation: 224×224 crops from padded 256×256, horizontal flips, PCA colour jitter — critical for preventing overfitting with 60M parameters.</li>
+<li>GPU training: split architecture across 2 GPUs, cross-GPU communication only at layers 3 and FC layers.</li>
+<li>Weight initialisation: Gaussian(0, 0.01) for weights, constant 0 or 1 for biases (layer-dependent).</li>
+</ul>
+<h2>VGG: Depth Through Small Kernels</h2>
+<p>VGG (Simonyan &amp; Zisserman, 2014) makes one design choice and pursues it relentlessly: use only 3×3 convolutions with stride 1 and padding 1. Two stacked 3×3 convs have the same receptive field as one 5×5 conv but use 2×(3×3×C²) = 18C² parameters instead of 25C². Three stacked 3×3 convs match a 7×7 conv: 27C² vs 49C² params — a 44% saving — plus two extra ReLU nonlinearities which increase expressiveness. VGG is organised into five blocks with progressively doubling channels (64, 128, 256, 512, 512), each ending with a 2×2 max pool. VGG16 has 16 weight layers; VGG19 has 19.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from typing import List
+
+def vgg_block(in_ch: int, out_ch: int, n_convs: int) -&gt; nn.Sequential:
+    '''VGG block: n_convs x (Conv 3x3 + BN + ReLU), then MaxPool 2x2.'''
+    layers: List[nn.Module] = []
+    for _ in range(n_convs):
+        layers += [nn.Conv2d(in_ch, out_ch, 3, padding=1, bias=False),
+                   nn.BatchNorm2d(out_ch), nn.ReLU(inplace=True)]
+        in_ch = out_ch
+    layers.append(nn.MaxPool2d(2, stride=2))
+    return nn.Sequential(*layers)
+
+class VGG16(nn.Module):
+    '''VGG-16 with batch normalisation (Simonyan &amp; Zisserman, 2014).'''
+    def __init__(self, num_classes=1000):
+        super().__init__()
+        self.features = nn.Sequential(
+            vgg_block(3, 64, 2),    # 224 -&gt; 112
+            vgg_block(64, 128, 2),  # 112 -&gt; 56
+            vgg_block(128, 256, 3), # 56  -&gt; 28
+            vgg_block(256, 512, 3), # 28  -&gt; 14
+            vgg_block(512, 512, 3)) # 14  -&gt; 7
+        self.head = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(512 * 7 * 7, 4096), nn.ReLU(inplace=True), nn.Dropout(0.5),
+            nn.Linear(4096, 4096),        nn.ReLU(inplace=True), nn.Dropout(0.5),
+            nn.Linear(4096, num_classes))
+
+    def forward(self, x): return self.head(self.features(x))
+
+model = VGG16()
+x = torch.randn(1, 3, 224, 224)
+params = sum(p.numel() for p in model.parameters()) / 1e6
+print('VGG-16 output: {}'.format(model(x).shape))
+print('Parameters: {:.1f}M'.format(params))
+</code></pre>
+<h2>Receptive Field and Parameter Analysis</h2>
+<p>The effective receptive field of stacked 3×3 convs grows linearly: one 3×3 gives RF=3; two give RF=5 (matching one 5×5); three give RF=7 (matching one 7×7). The parameter savings are significant: two 3×3 convs on C channels cost 2×9C² = 18C² parameters while a single 5×5 costs 25C² (28% more). Three 3×3 convs cost 27C² versus 49C² for a 7×7 (44% more). Additionally, each extra conv layer adds a ReLU nonlinearity, which increases the function class's expressiveness without extra spatial overhead.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def count_params(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+def rf_of_stacked_3x3(n):
+    '''Effective receptive field of n stacked 3x3 convs.'''
+    return 1 + 2 * n
+
+# Parameter comparison: stacked 3x3 vs equivalent large kernel
+C = 256
+configs = [
+    ('one 5x5', nn.Conv2d(C, C, 5, padding=2)),
+    ('two 3x3', nn.Sequential(nn.Conv2d(C, C, 3, padding=1), nn.Conv2d(C, C, 3, padding=1))),
+    ('one 7x7', nn.Conv2d(C, C, 7, padding=3)),
+    ('three 3x3', nn.Sequential(
+        nn.Conv2d(C, C, 3, padding=1), nn.Conv2d(C, C, 3, padding=1),
+        nn.Conv2d(C, C, 3, padding=1)))
+]
+print('{:&lt;14} {:&gt;12} {:&gt;8} {:&gt;12}'.format('Config', 'Params', 'RF', 'Savings'))
+ref5 = count_params(configs[0][1])
+ref7 = count_params(configs[2][1])
+for name, module in configs:
+    p = count_params(module)
+    rf = rf_of_stacked_3x3(2 if '3x3' in name and 'two' in name
+                           else 3 if 'three' in name else 1)
+    ref = ref5 if '5x5' in name or 'two' in name else ref7
+    save = '---' if name in ('one 5x5', 'one 7x7') else '-{:.0f}%'.format(100*(1 - p/ref))
+    print('{:&lt;14} {:&gt;12,} {:&gt;8} {:&gt;12}'.format(name, p, rf, save))
+</code></pre>
+<blockquote>
+<p><strong>VGG's FC Layer Bottleneck</strong>: VGG16 has 138M parameters — but 123M (89%) live in the three FC layers (512×7×7→4096, 4096→4096, 4096→1000). The conv layers that do all the spatial feature extraction account for only 15M parameters. Modern architectures replace FC layers with global average pooling (GAP), eliminating this bottleneck: ResNet-50 has only 25M parameters and GoogLeNet has 5M — both more accurate than VGG.</p>
+</blockquote>
+<h2>VGG as Feature Extractor</h2>
+<p>Despite being surpassed on ImageNet accuracy, VGG's feature representations remain powerful for transfer learning, perceptual loss in style transfer (Gatys et al., 2015), and as a backbone for downstream tasks. The uniform 3×3 conv structure makes it easy to extract features at any depth. Common extraction points: relu3_3 (256 channels, 28×28 for 224×224 input) for texture-rich features; relu4_3 (512 channels, 14×14) for semantic object features; relu5_3 (512 channels, 7×7) for the most abstract features.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from torchvision import models
+
+class VGGFeatureExtractor(nn.Module):
+    '''VGG-16 pretrained backbone with a lightweight classification head.'''
+    def __init__(self, num_classes=10, feature_layer=30, freeze=True):
+        super().__init__()
+        vgg = models.vgg16_bn(weights=models.VGG16_BN_Weights.IMAGENET1K_V1)
+        self.backbone = nn.Sequential(*list(vgg.features.children())[:feature_layer])
+        if freeze:
+            for param in self.backbone.parameters():
+                param.requires_grad = False
+        self.head = nn.Sequential(
+            nn.AdaptiveAvgPool2d((4, 4)), nn.Flatten(),
+            nn.Linear(512 * 16, 512), nn.ReLU(inplace=True),
+            nn.Dropout(0.5), nn.Linear(512, num_classes))
+
+    def forward(self, x):
+        return self.head(self.backbone(x))
+
+model = VGGFeatureExtractor(num_classes=10, freeze=True)
+total = sum(p.numel() for p in model.parameters())
+trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+x = torch.randn(4, 3, 224, 224)
+out = model(x)
+print('Output: {}'.format(out.shape))
+print('Trainable: {:,} / Total: {:,} ({:.1f}%)'.format(
+    trainable, total, 100 * trainable / total))
+</code></pre>
+<h2>Limitations and the Path to ResNet</h2>
+<p>Both AlexNet and VGG suffer from vanishing gradients when depth increases beyond ~20 layers. Simply stacking more layers degrades training accuracy — not test accuracy, indicating an optimisation problem rather than overfitting. VGG19 already shows diminishing returns over VGG16. This degradation problem led He et al. to hypothesise that learning identity mappings is hard, and to introduce explicit shortcut connections (residuals) in ResNet (2015). ResNet-152 outperforms VGG16 with 25M vs 138M parameters and enables networks hundreds of layers deep. LRN (used in AlexNet) was shown to provide negligible benefit by VGG and was dropped. Batch normalisation (Ioffe &amp; Szegedy, 2015) superseded it as the standard normalisation technique.</p>
+<h2>Architecture Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Year</th>
+<th>Depth</th>
+<th>Params</th>
+<th>GFLOPs</th>
+<th>Key Innovation</th>
+<th>Top-5 Error</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>AlexNet</td>
+<td>2012</td>
+<td>8</td>
+<td>60M</td>
+<td>0.7</td>
+<td>ReLU + dropout + GPU</td>
+<td>15.3%</td>
+</tr>
+<tr>
+<td>VGG-16</td>
+<td>2014</td>
+<td>16</td>
+<td>138M</td>
+<td>15.5</td>
+<td>Uniform 3×3 conv stacking</td>
+<td>7.3%</td>
+</tr>
+<tr>
+<td>VGG-19</td>
+<td>2014</td>
+<td>19</td>
+<td>144M</td>
+<td>19.6</td>
+<td>Deeper uniform 3×3 stacks</td>
+<td>7.1%</td>
+</tr>
+<tr>
+<td>GoogLeNet</td>
+<td>2014</td>
+<td>22</td>
+<td>5M</td>
+<td>1.5</td>
+<td>Inception parallel branches</td>
+<td>6.7%</td>
+</tr>
+<tr>
+<td>ResNet-50</td>
+<td>2015</td>
+<td>50</td>
+<td>25M</td>
+<td>4.1</td>
+<td>Residual skip connections</td>
+<td>5.3%</td>
+</tr>
+</tbody>
+</table>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Multi-Head Latent Attention (MLA) — DeepSeek&#x27;s KV Compression | Notes Backup</title>
+  <meta name="description" content="Implement MLA from scratch with low-rank KV compression, build an MLA inference cache storing only latent vectors, compare KV cache memory across MHA/GQA/MLA, and apply decoupled RoPE to the non-cached key component." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Multi-Head Latent Attention (MLA) — DeepSeek&#x27;s KV Compression</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Implement MLA from scratch with low-rank KV compression, build an MLA inference cache storing only latent vectors, compare KV cache memory across MHA/GQA/MLA, and apply decoupled RoPE to the non-cached key component.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Multi-Head Latent Attention (MLA) — DeepSeek's KV Compression</h1>
+<p>Multi-Head Latent Attention (MLA), introduced in DeepSeek-V2 (2024), compresses the KV cache into low-rank latent vectors rather than grouping heads as GQA does. The core idea: instead of caching G × d_head keys and values per token, MLA down-projects the hidden state to a single c_KV-dimensional latent vector cₜ = W_DKV hₜ where c_KV ≪ d_model. At inference, K and V are reconstructed on the fly from cₜ via learned up-projection matrices. Only cₜ is stored in the cache, achieving a compression ratio of c_KV / (2 × h × d_head) — approximately 5× vs MHA for DeepSeek-V2.</p>
+<h2>Standard KV Cache and Its Memory Cost</h2>
+<p>For a model with h heads and head dimension d_head, the MHA KV cache per token per layer is 2 × h × d_head floats. DeepSeek-V2 uses h=128 heads with d_head=128, giving 2 × 128 × 128 = 32768 floats per token per layer. At L=128K tokens (the target context), this is 32768 × 128K × 2 bytes (float16) ≈ 8 GB per layer. MLA reduces the cache to c_KV floats per token — DeepSeek-V2 uses c_KV=512, storing 512 floats instead of 32768: a 64× raw reduction in cache elements.</p>
+<h2>MLA: Low-Rank KV Compression</h2>
+<p>MLA replaces the separate W_K and W_V projections with a shared down-projection W_DKV ∈ ℝ^{c_KV × d_model} followed by separate up-projections W_UK ∈ ℝ^{(h × d_head) × c_KV} and W_UV ∈ ℝ^{(h × d_head) × c_KV}. At each token position t: latent cₜ = W_DKV hₜ (c_KV dims); K = W_UK cₜ (reconstructed, not cached); V = W_UV cₜ (reconstructed, not cached). Only cₜ is appended to the cache. At inference, past cₜ values are retrieved and K,V are reconstructed for the full cached sequence before attention is computed.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+
+class MultiHeadLatentAttention(nn.Module):
+    def __init__(self, d_model, num_heads, d_head, c_kv):
+        super().__init__()
+        self.h, self.d, self.c = num_heads, d_head, c_kv
+        self.W_q  = nn.Linear(d_model, num_heads * d_head, bias=False)
+        self.W_dkv = nn.Linear(d_model, c_kv, bias=False)       # down-project to latent
+        self.W_uk  = nn.Linear(c_kv, num_heads * d_head, bias=False)  # up-project to K
+        self.W_uv  = nn.Linear(c_kv, num_heads * d_head, bias=False)  # up-project to V
+        self.W_o   = nn.Linear(num_heads * d_head, d_model, bias=False)
+
+    def forward(self, x):
+        B, L, _ = x.shape
+        Q = self.W_q(x).view(B, L, self.h, self.d).transpose(1, 2)  # (B,h,L,d)
+        c = self.W_dkv(x)                                              # (B,L,c_kv) -- latent
+        K = self.W_uk(c).view(B, L, self.h, self.d).transpose(1, 2)  # reconstruct K
+        V = self.W_uv(c).view(B, L, self.h, self.d).transpose(1, 2)  # reconstruct V
+        attn = F.softmax(Q @ K.transpose(-2,-1) / math.sqrt(self.d), dim=-1)
+        out = (attn @ V).transpose(1, 2).reshape(B, L, -1)
+        return self.W_o(out), c  # return latent for caching
+
+d_model, h, d_head, c_kv = 512, 8, 64, 128
+model = MultiHeadLatentAttention(d_model, h, d_head, c_kv)
+x = torch.randn(2, 32, d_model)
+out, latent = model(x)
+print(f'Output: {out.shape}, Latent (to cache): {latent.shape}')
+kv_mha  = 2 * h * d_head  # per token, per layer
+kv_mla  = c_kv
+print(f'MHA KV per token: {kv_mha}, MLA KV per token: {kv_mla} ({kv_mha/kv_mla:.1f}x smaller)')
+</code></pre>
+<h2>Inference with Compressed KV Cache</h2>
+<p>At generation time MLA caches only the c_KV-dimensional latent vector for each past token. To compute attention for the current token: retrieve all past latents from the cache (shape: L_past × c_KV per layer), up-project each to get K and V, then compute attention. The up-projections W_UK and W_UV add extra computation but this is bounded by O(L × c_KV × h × d_head) which is small compared to attention for large L. The key trade: compute (reconstructing K,V) for memory (storing only cₜ).</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+
+class MLAInferenceCache:
+    def __init__(self, max_len, c_kv, num_heads, d_head,
+                 W_uk: nn.Linear, W_uv: nn.Linear):
+        self.c_cache = torch.zeros(1, max_len, c_kv)  # only latents cached
+        self.W_uk, self.W_uv = W_uk, W_uv
+        self.h, self.d, self.t = num_heads, d_head, 0
+
+    def step(self, q, c_new):
+        &quot;&quot;&quot;q: (1,h,1,d)  c_new: (1,1,c_kv) latent for current token.&quot;&quot;&quot;
+        self.c_cache[:, self.t:self.t+1] = c_new
+        self.t += 1
+        c_past = self.c_cache[:, :self.t]        # (1,t,c_kv)
+        K = self.W_uk(c_past).view(1, self.t, self.h, self.d).transpose(1,2)  # (1,h,t,d)
+        V = self.W_uv(c_past).view(1, self.t, self.h, self.d).transpose(1,2)
+        scores = q @ K.transpose(-2,-1) / math.sqrt(self.d)
+        return F.softmax(scores, dim=-1) @ V
+
+d_model, h, d_head, c_kv, max_len = 256, 4, 32, 64, 128
+W_uk = nn.Linear(c_kv, h * d_head, bias=False)
+W_uv = nn.Linear(c_kv, h * d_head, bias=False)
+W_dkv = nn.Linear(d_model, c_kv, bias=False)
+W_q   = nn.Linear(d_model, h * d_head, bias=False)
+cache = MLAInferenceCache(max_len, c_kv, h, d_head, W_uk, W_uv)
+for step in range(20):
+    x_t = torch.randn(1, 1, d_model)
+    q = W_q(x_t).view(1, h, 1, d_head)
+    c = W_dkv(x_t)             # (1,1,c_kv)
+    out = cache.step(q, c)
+print(f'After {cache.t} steps, cache holds {cache.t} latents of dim {c_kv}')
+print(f'Cache bytes (float32): {cache.t * c_kv * 4}')
+print(f'Equivalent MHA cache : {cache.t * h * d_head * 2 * 4} bytes ({2*h*d_head//c_kv:.0f}x larger)')
+</code></pre>
+<h2>KV Cache Memory: MHA vs GQA vs MLA</h2>
+<p>The three approaches represent a spectrum of KV cache compression. MHA stores all h×d_head keys and values; GQA stores only G×d_head (G &lt; h); MLA stores a c_KV-dimensional latent and reconstructs K,V on the fly. MLA achieves the smallest cache footprint but adds reconstruction compute. For very long sequences (L &gt; 100K), MLA's cache advantage is dominant — reconstruction compute is O(L × c_KV × h × d_head) which remains tractable relative to the memory savings.</p>
+<pre><code class="language-python">import torch
+
+def kv_cache_bytes(method, h, d_head, G, c_kv, L, dtype_bytes=2):
+    &quot;&quot;&quot;Compute KV cache size in bytes for a single layer, L tokens.&quot;&quot;&quot;
+    if method == 'MHA':
+        return 2 * h * d_head * L * dtype_bytes
+    elif method == 'GQA':
+        return 2 * G * d_head * L * dtype_bytes
+    elif method == 'MLA':
+        return c_kv * L * dtype_bytes  # only latent cached
+    raise ValueError(method)
+
+h, d_head = 64, 128  # LLaMA/DeepSeek scale
+G, c_kv   = 8, 512   # GQA groups and MLA latent dim
+print(f&quot;{'Method':&gt;6} {'L=4K':&gt;12} {'L=32K':&gt;12} {'L=128K':&gt;12} {'vs MHA':&gt;10}&quot;)
+for method in ['MHA', 'GQA', 'MLA']:
+    sizes = [kv_cache_bytes(method, h, d_head, G, c_kv, L) for L in [4096, 32768, 131072]]
+    mha_128k = kv_cache_bytes('MHA', h, d_head, G, c_kv, 131072)
+    ratio = mha_128k / sizes[2]
+    sz = [f'{s/1024**2:.1f}MB' for s in sizes]
+    print(f'{method:&gt;6} {sz[0]:&gt;12} {sz[1]:&gt;12} {sz[2]:&gt;12} {ratio:&gt;8.1f}x')
+print(f'\nDeepSeek-V2: c_kv={c_kv} vs MHA {2*h*d_head} -&gt; {2*h*d_head/c_kv:.1f}x raw compression')
+</code></pre>
+<h2>Decoupled RoPE for Position Encoding</h2>
+<p>Rotary Position Embeddings (RoPE) apply a position-dependent rotation to Q and K. In standard attention, after applying RoPE to K, the rotated values must be cached — but the rotation depends on position and cannot be undone from the latent cₜ. MLA's solution: decouple the positional component. A separate positional key k^R_t (not part of the latent) is computed from the hidden state, RoPE-rotated, and concatenated to the content key reconstructed from the latent. The positional key k^R_t is cached separately but is small (d_R ≪ h × d_head).</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import math
+
+def apply_rope(x, seq_len, base=10000):
+    &quot;&quot;&quot;Apply Rotary Position Embeddings to x of shape (B, heads, L, d).&quot;&quot;&quot;
+    d = x.shape[-1]
+    pos = torch.arange(seq_len, dtype=torch.float32)
+    inv_freq = 1.0 / (base ** (torch.arange(0, d, 2).float() / d))
+    sin = torch.sin(torch.outer(pos, inv_freq))  # (L, d//2)
+    cos = torch.cos(torch.outer(pos, inv_freq))
+    x1, x2 = x[..., ::2], x[..., 1::2]
+    rotated = torch.stack([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
+    return rotated.flatten(-2)
+
+class MLADecoupledRoPE(nn.Module):
+    &quot;&quot;&quot;Decoupled RoPE: small positional keys cached alongside MLA latent.&quot;&quot;&quot;
+    def __init__(self, d_model, h, d_head, c_kv, d_rope=32):
+        super().__init__()
+        self.h, self.d, self.dr = h, d_head, d_rope
+        self.W_q_nope = nn.Linear(d_model, h * d_head, bias=False)
+        self.W_q_rope = nn.Linear(d_model, h * d_rope, bias=False)
+        self.W_dkv    = nn.Linear(d_model, c_kv, bias=False)
+        self.W_uk     = nn.Linear(c_kv, h * d_head, bias=False)
+        self.W_kr     = nn.Linear(d_model, d_rope, bias=False)  # positional key (shared)
+
+    def forward(self, x):
+        B, L, _ = x.shape
+        q_nope = self.W_q_nope(x).view(B, L, self.h, self.d)
+        q_rope = apply_rope(self.W_q_rope(x).view(B, L, self.h, self.dr).transpose(1,2), L).transpose(1,2)
+        c   = self.W_dkv(x)                                        # latent (cache this)
+        k_c = self.W_uk(c).view(B, L, self.h, self.d)             # content key from latent
+        k_r = apply_rope(self.W_kr(x).unsqueeze(2).expand(B,L,self.h,self.dr).transpose(1,2), L).transpose(1,2)
+        return c, k_r  # cache: latent + positional key
+
+model = MLADecoupledRoPE(d_model=256, h=4, d_head=32, c_kv=64, d_rope=16)
+x = torch.randn(2, 16, 256)
+c, k_r = model(x)
+print(f'Latent (content cache): {c.shape}')
+print(f'Positional key (rope cache): {k_r.shape}')
+print(f'Total cache per token: {c.shape[-1] + k_r.shape[-1]} floats (vs {2*4*32} for MHA)')
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Cache per token (floats)</th>
+<th>Compression vs MHA</th>
+<th>Extra inference compute</th>
+<th>Quality</th>
+<th>Used in</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MHA</td>
+<td>2 × h × d_head</td>
+<td>1× (baseline)</td>
+<td>None</td>
+<td>Best</td>
+<td>GPT-2, BERT, LLaMA 1</td>
+</tr>
+<tr>
+<td>GQA</td>
+<td>2 × G × d_head</td>
+<td>h/G× (e.g. 8×)</td>
+<td>repeat_interleave expand</td>
+<td>≈MHA (G≥4)</td>
+<td>LLaMA 2/3, Mistral, Gemma</td>
+</tr>
+<tr>
+<td>MLA</td>
+<td>c_KV (+ d_rope for decoupled)</td>
+<td>~5–64× depending on c_KV</td>
+<td>Up-project W_UK, W_UV per step</td>
+<td>Matches MHA</td>
+<td>DeepSeek-V2, DeepSeek-V3</td>
+</tr>
+</tbody>
+</table>
+<h2>Compression Ratio and Model Quality</h2>
+<p>DeepSeek-V2 uses c_KV = 512 with h=128 heads and d_head=128. The MHA cache would be 2 × 128 × 128 = 32768 floats per token; MLA caches 512 floats — a 64× raw reduction. After accounting for the small decoupled RoPE cache (d_R = 64 per token), the effective cache is 576 floats vs 32768: approximately 57× smaller. On the MMLU, HumanEval, and GSM8K benchmarks, DeepSeek-V2 (236B MoE, 21B active) outperforms GPT-4 level baselines while using this compressed KV scheme to serve 128K context at scale.</p>
+<blockquote>
+<p><strong>MLA vs GQA Trade-off</strong>: GQA reduces cache by grouping heads — no extra computation, but limited by G ≥ 1. MLA reduces cache by low-rank compression — adds W_UK and W_UV reconstruction per step, but can achieve much higher compression independently of head count. For very long contexts (L &gt; 64K) where KV cache dominates memory, MLA's aggressive compression outweighs its compute overhead. GQA remains simpler and lower-latency for moderate contexts.</p>
+</blockquote>
+<h2>DeepSeek-V2 and V3 Architecture</h2>
+<p>DeepSeek-V2 (2024) introduced MLA in a 236B parameter Mixture-of-Experts model with 21B parameters active per token. The model achieves competitive performance with GPT-4 class models while being deployable at lower KV cache cost. DeepSeek-V3 (2024) scaled to 671B total / 37B active parameters with further architectural refinements. Both models use MLA in conjunction with a Multi-head Latent Query (MLQ) — low-rank Q compression — though Q compression does not affect the KV cache since Q is not cached during autoregressive generation.</p>
+<ul>
+<li>DeepSeek-V2: 236B total, 21B active (MoE), c_KV=512, d_R=64, 128K context via MLA.</li>
+<li>DeepSeek-V3: 671B total, 37B active, refined MLA with improved up-projection initialisation.</li>
+<li>MLA can be combined with GQA-style grouping: down-project per group for additional savings.</li>
+<li>Up-projection matrices W_UK and W_UV are fused into a single linear op at inference for efficiency.</li>
+<li>Decoupled RoPE (d_R=64) adds only 64 cached floats per token vs 16384 for full positional keys.</li>
+<li>MLA works best when c_KV ≪ 2 × h × d_head; typical ratio c_KV / (2hd) is 0.02–0.10.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

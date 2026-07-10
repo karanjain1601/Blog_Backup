@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Least-to-Most Prompting | Notes Backup</title>
+  <meta name="description" content="Decomposing complex problems into simpler subproblems sequentially — solving each with the LLM before using its answer in the next step — to handle tasks beyond the model&#x27;s direct capability." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Least-to-Most Prompting</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Decomposing complex problems into simpler subproblems sequentially — solving each with the LLM before using its answer in the next step — to handle tasks beyond the model&#x27;s direct capability.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Least-to-Most Prompting</h1>
+<p>Least-to-most prompting (Zhou et al., 2022) is a two-stage prompting strategy that addresses a fundamental limitation of chain-of-thought reasoning: compositional generalization. When a problem decomposes into an ordered sequence of simpler sub-problems, standard CoT often fails because the model attempts to reach the answer in a single reasoning pass, pattern-matching from training examples rather than systematically composing. Least-to-most prompting instead breaks the problem into ordered sub-questions and solves each one sequentially, using each answer as context for the next. On the SCAN compositional generalization benchmark, standard CoT achieves 18% accuracy on the hardest 'jump around' split while least-to-most achieves over 99.7%. The key insight is that compositionally complex problems are hard not because any individual step exceeds the model's capability, but because solving them all at once overwhelms the model's ability to coordinate sub-operations. By splitting the problem into sequential calls, each individual step stays well within competence, and the composition is enforced by the prompt structure rather than left to implicit pattern recognition.</p>
+<h2>Overview</h2>
+<p>Least-to-most prompting operates in two explicit stages. In the first stage — decomposition — the model is presented with the original problem and asked to identify the ordered list of simpler sub-questions it must answer to reach the final solution. The decomposition prompt uses few-shot examples that demonstrate how to break complex problems into dependency chains. In the second stage — sequential solving — each sub-question is answered in order, with the context for step i including the original problem, all sub-questions, and all answers from steps 1 through i-1. This structure ensures the model knows exactly where it is in the reasoning chain and what facts it has established. The final sub-question is effectively the original problem, answered with full context from every previous step. The decomposition stage can be prompted manually using task-specific few-shot examples, or automatically by asking the LLM to generate its own sub-questions. Automatic decomposition trades 5–10% accuracy for the elimination of task-specific prompt engineering, making it useful when generalizing across many task types without manual curation of decomposition examples.</p>
+<h2>Decomposition Stage</h2>
+<p>The decomposition stage determines the quality of the entire least-to-most chain. The model is given a few-shot prompt that demonstrates how to identify the sub-questions implicit in a complex problem. For a math problem, the decomposition prompt might show: 'Problem: If 5 workers build a wall in 8 days, how long for 3 workers? Sub-questions: 1. How many total worker-days does the wall require? 2. At 3 workers per day, how many days does that take?' The model then applies this decomposition pattern to new problems in the same family. Decomposition quality depends critically on the few-shot examples: poorly chosen examples produce fragmented sub-questions that do not chain properly, while well-chosen examples produce clean dependency structures. Empirically, 2–4 few-shot decomposition examples are sufficient for most task families. The decomposed sub-questions must satisfy two properties: each sub-question must be strictly simpler than the original problem, and each answer must be directly useful as input to the next step. Sub-questions that are parallel or independent (rather than sequential) do not benefit from the least-to-most structure and should be collapsed into a single step.</p>
+<pre><code class="language-python">import re
+import anthropic
+
+def least_to_most_math(problem: str) -&gt; dict:
+    client = anthropic.Anthropic()
+    decomp = client.messages.create(
+        model='claude-opus-4-5', max_tokens=400,
+        messages=[{'role': 'user', 'content': 'Break into numbered simpler subproblems:\n' + problem}]
+    )
+    steps = re.findall(r'\d+\.\s+(.+)', decomp.content[0].text)
+    context = 'Problem: ' + problem + '\nSubproblems:\n' + decomp.content[0].text + '\n'
+    answers: dict[str, str] = {}
+    for i, step in enumerate(steps, 1):
+        resp = client.messages.create(
+            model='claude-opus-4-5', max_tokens=200,
+            messages=[{'role': 'user', 'content': context + 'Solve step ' + str(i) + ': ' + step}]
+        )
+        answers['step_' + str(i)] = resp.content[0].text.strip()
+        context += 'Step ' + str(i) + ' answer: ' + answers['step_' + str(i)] + '\n'
+    return {'problem': problem, 'steps': steps, 'answers': answers, 'api_calls': len(steps) + 1}
+
+problem = 'Tom has 3 bags each with 8 apples. He eats 4, then gives half the rest to a friend. How many does he keep?'
+result = least_to_most_math(problem)
+print('Steps:', len(result['steps']), '| API calls:', result['api_calls'])
+print('Final:', list(result['answers'].values())[-1][:80])
+</code></pre>
+<p>The code above demonstrates context accumulation: each sub-problem's answer is appended to the prompt before the next step. The total prompt length grows linearly with the number of steps, so a 5-step problem will have a prompt roughly 5 times longer for the final step than for the first. In practice, a truncation strategy that retains only the final answer from each previous step — rather than the full reasoning chain — controls token growth while preserving the essential context. The model does not need to re-read the full reasoning of previous steps; it only needs the concluded fact. Note also the api_calls field: for N sub-problems, the total call count is N+1 (one for decomposition, one per sub-problem). This is the primary cost driver compared to standard CoT's single call.</p>
+<h2>Sequential Solving</h2>
+<p>In the sequential solving stage, sub-questions are answered in the dependency order determined by the decomposition stage. The context for step i contains three components: the original problem statement, the full list of sub-questions from the decomposition stage, and the answers to sub-questions 1 through i-1. This context structure gives the model explicit knowledge of the problem structure and the facts established so far, without requiring it to reconstruct that structure from scratch. Unlike standard CoT, which requires the model to simultaneously plan, decompose, and execute the reasoning in a single generation, sequential solving separates these concerns: planning happens once in the decomposition stage, and each solving call focuses on a single, well-defined sub-task. The final answer to the last sub-question is the answer to the original problem. If the problem requires assembling the sub-answers into a final response (for example, a multi-hop QA task that requires synthesizing facts from multiple entities), an additional assembly step can be added after all sub-problems are solved.</p>
+<pre><code class="language-python">import re
+import anthropic
+
+def build_scraper_ltm(goal: str) -&gt; dict:
+    client = anthropic.Anthropic()
+    decomp = client.messages.create(
+        model='claude-opus-4-5', max_tokens=500,
+        messages=[{'role': 'user', 'content': 'List 3-4 numbered sequential steps to implement: ' + goal}]
+    )
+    steps = re.findall(r'\d+\.\s+(.+)', decomp.content[0].text)
+    context = 'Goal: ' + goal + '\nSteps:\n' + decomp.content[0].text + '\n'
+    snippets: list[str] = []
+    for i, step in enumerate(steps, 1):
+        resp = client.messages.create(
+            model='claude-opus-4-5', max_tokens=700,
+            messages=[{'role': 'user', 'content': context + 'Implement step ' + str(i) + ': ' + step}]
+        )
+        code = resp.content[0].text.strip()
+        snippets.append(code)
+        context += 'Step ' + str(i) + ' done:\n' + code[:300] + '\n\n'
+    return {'goal': goal, 'steps': steps, 'snippets': snippets, 'api_calls': len(steps) + 1}
+
+goal = 'Web scraper that extracts product name, price, and rating from a paginated e-commerce site'
+result = build_scraper_ltm(goal)
+print('Steps:', len(result['steps']), '| API calls:', result['api_calls'])
+for i, s in enumerate(result['steps'], 1):
+    print(str(i) + '.', s[:65])
+</code></pre>
+<p>Web scraping is an ideal showcase for least-to-most because the task naturally decomposes into a sequential dependency chain: (a) parse the HTML structure to identify where target data lives, (b) extract individual field values for a single item, (c) handle pagination to iterate across pages, (d) assemble the final dataset. Each stage produces artefacts the next stage depends on — the HTML parse informs the field selectors, the single-item extractor is replicated across pages by the pagination handler. Without decomposition, asking an LLM to write a complete multi-stage scraper in one prompt frequently produces code with missing handoffs between stages. Least-to-most makes each handoff explicit, and the growing context ensures each newly generated function knows the interfaces established by previous functions.</p>
+<h2>Comparison with Standard CoT</h2>
+<p>The SCAN benchmark (Lake and Baroni, 2018) provides the clearest comparative evidence for least-to-most over chain-of-thought. SCAN maps natural language commands to action sequences using compositional rules. The 'jump around right' split requires combining three patterns — 'jump', 'around' (meaning repeat four times), and 'right' (meaning TURN_RIGHT first) — that appear only in isolation in the easier splits. Standard CoT achieves 18.1% on this split because the model pattern-matches to individual patterns rather than systematically composing them. Least-to-most decomposes the command into: (1) what does 'right' mean in action terms, (2) what does 'around' mean, (3) what does 'jump around' expand to, (4) what does 'jump around right' expand to — and answers each in sequence. This systematic decomposition achieves 99.7%. The gap is not a model capability issue; the same model that scores 18% with CoT scores 99.7% with least-to-most. The difference is entirely in the prompting structure: CoT leaves the composition implicit, while least-to-most makes it explicit in the prompt sequence.</p>
+<pre><code class="language-python">import anthropic
+
+SCAN_EASY = [('jump', 'JUMP'), ('walk', 'WALK'), ('run twice', 'RUN RUN'), ('jump left', 'TURN_LEFT JUMP')]
+SCAN_HARD = [
+    ('jump around right', 'TURN_RIGHT JUMP TURN_RIGHT JUMP TURN_RIGHT JUMP TURN_RIGHT JUMP'),
+    ('walk left thrice and run right', 'TURN_LEFT WALK TURN_LEFT WALK TURN_LEFT WALK TURN_RIGHT RUN'),
+]
+
+def translate_scan(cmd: str, use_ltm: bool, client: anthropic.Anthropic) -&gt; str:
+    if use_ltm:
+        decomp = client.messages.create(
+            model='claude-opus-4-5', max_tokens=200,
+            messages=[{'role': 'user', 'content': 'Break SCAN command into atomic sub-operations: ' + cmd}]
+        )
+        prompt = decomp.content[0].text + '\nNow translate full command to TURN_LEFT/RIGHT WALK RUN JUMP actions: ' + cmd
+    else:
+        prompt = 'Translate to SCAN action sequence using only TURN_LEFT TURN_RIGHT WALK RUN JUMP: ' + cmd
+    resp = client.messages.create(
+        model='claude-opus-4-5', max_tokens=120,
+        messages=[{'role': 'user', 'content': prompt}]
+    )
+    return resp.content[0].text.strip().upper()
+
+client = anthropic.Anthropic()
+for split_name, examples in [('Easy', SCAN_EASY), ('Hard', SCAN_HARD)]:
+    cot_hits = sum(1 for c, e in examples if e in translate_scan(c, False, client))
+    ltm_hits = sum(1 for c, e in examples if e in translate_scan(c, True, client))
+    print(split_name + ': CoT=' + str(cot_hits) + '/' + str(len(examples)) + ' LtM=' + str(ltm_hits) + '/' + str(len(examples)))
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Task Type</th>
+<th>Standard CoT</th>
+<th>Least-to-Most</th>
+<th>Gain</th>
+<th>API Calls</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SCAN Easy split</td>
+<td>98.8%</td>
+<td>99.0%</td>
+<td>+0.2%</td>
+<td>4–5x</td>
+<td>CoT already near-perfect; decomposition adds little</td>
+</tr>
+<tr>
+<td>SCAN Jump split</td>
+<td>18.1%</td>
+<td>99.7%</td>
+<td>+81.6%</td>
+<td>4–5x</td>
+<td>Compositional generalization; CoT structurally fails</td>
+</tr>
+<tr>
+<td>Math Grade 4</td>
+<td>81.2%</td>
+<td>87.3%</td>
+<td>+6.1%</td>
+<td>3–4x</td>
+<td>Multi-step arithmetic with clear sub-problem order</td>
+</tr>
+<tr>
+<td>Math Grade 6</td>
+<td>68.7%</td>
+<td>79.4%</td>
+<td>+10.7%</td>
+<td>3–5x</td>
+<td>Multi-concept word problems; decomposition helps most</td>
+</tr>
+<tr>
+<td>Multi-hop QA</td>
+<td>52.3%</td>
+<td>61.8%</td>
+<td>+9.5%</td>
+<td>3–4x</td>
+<td>Entity-chained questions with clear dependency structure</td>
+</tr>
+</tbody>
+</table>
+<h2>Task Categories</h2>
+<p>Least-to-most prompting delivers the largest gains on tasks with sequential dependency structures — where sub-problem i's answer is strictly required to pose sub-problem i+1. Compositional generalization tasks (like SCAN), multi-step math word problems, multi-hop question answering, and code generation tasks with layered abstractions all fit this profile. Tasks with parallel sub-problems or flat structures (where all required facts are available from the start) benefit less, since the sequential solving structure does not add information beyond what a single CoT pass would have. The strategy is least effective on tasks where the problem is hard not because of composition but because of missing knowledge — no amount of decomposition helps if the model lacks the factual knowledge needed to answer any given sub-question. For retrieval-augmented settings, least-to-most can be combined with retrieval: after decomposing the question, retrieve documents for each sub-question and then solve each sub-question in that retrieved context.</p>
+<ul>
+<li>Compositional generalization: tasks requiring systematic combination of simple patterns (SCAN, COGS, CFQ)</li>
+<li>Multi-step arithmetic and algebra: sequential numeric dependencies where each value feeds the next formula</li>
+<li>Multi-hop question answering: entity chains where fact A → fact B → answer requires sequential lookup</li>
+<li>Code generation with layered abstractions: data model → query layer → API layer → frontend</li>
+<li>Structured document parsing: layout identification → field extraction → data validation → assembly</li>
+<li>Planning tasks: goal decomposition → resource estimation → scheduling → execution ordering</li>
+</ul>
+<h2>Implementation</h2>
+<p>Production implementation of least-to-most prompting requires attention to four practical details. First, decomposition quality: the few-shot examples in the decomposition prompt should be drawn from the same task family as the target and should demonstrate the desired granularity of sub-problems — neither too coarse (missing important intermediate steps) nor too fine (creating unnecessary API calls for trivial sub-tasks). Second, context truncation: as sub-problem answers accumulate, the prompt grows. Truncating each answer to its key fact (a number, a named entity, a short phrase) rather than the full reasoning chain keeps prompts manageable without losing the essential context. Third, error propagation: a wrong answer at step i will contaminate all subsequent steps. Adding a sanity-check prompt after each step ('Does this answer make sense given the problem?') can catch gross errors before they propagate. Fourth, parallelism detection: when decomposition produces sub-problems that do not depend on each other, they can be executed in parallel with a single batch API call, reducing latency from O(N) sequential calls to O(depth of the dependency graph) parallel batches.</p>
+<pre><code class="language-python">import re
+import anthropic
+
+def auto_decompose_solve(question: str) -&gt; dict:
+    client = anthropic.Anthropic()
+    auto_decomp = client.messages.create(
+        model='claude-opus-4-5', max_tokens=300,
+        messages=[{'role': 'user', 'content': 'What simpler questions must be answered first to solve:\n' + question}]
+    )
+    steps = re.findall(r'\d+\.\s+(.+)', auto_decomp.content[0].text)
+    context = 'Question: ' + question + '\nSubquestions:\n' + auto_decomp.content[0].text + '\n'
+    step_answers: list[str] = []
+    for step in steps:
+        r = client.messages.create(
+            model='claude-opus-4-5', max_tokens=150,
+            messages=[{'role': 'user', 'content': context + 'Answer: ' + step}]
+        )
+        step_answers.append(r.content[0].text.strip())
+        context += step + ': ' + step_answers[-1] + '\n'
+    cot = client.messages.create(
+        model='claude-opus-4-5', max_tokens=300,
+        messages=[{'role': 'user', 'content': 'Solve step by step: ' + question}]
+    )
+    return {'ltm_steps': len(steps), 'ltm_context': context, 'cot': cot.content[0].text.strip()}
+
+q = 'A factory makes 240 units/day. Demand rises 35% and they add a 10-hour night shift. Units per hour per shift?'
+result = auto_decompose_solve(q)
+print('LtM steps:', result['ltm_steps'], '| CoT preview:', result['cot'][:80])
+</code></pre>
+<blockquote>
+<p><strong>API Cost vs Accuracy</strong>: Least-to-most outperforms chain-of-thought on compositional generalization tasks because it forces systematic decomposition — but costs 3–5x more API calls since each subproblem requires a separate inference. On tasks where standard CoT already achieves high accuracy, the cost multiplier is not justified. Reserve least-to-most for tasks where CoT demonstrably fails on compositional or multi-hop structure.</p>
+</blockquote>
+<h2>Limitations</h2>
+<p>Least-to-most prompting has three structural limitations that determine when it should and should not be used. The first is decomposition sensitivity: the quality of the decomposition stage determines the quality of the entire chain. A decomposition that misses a required intermediate step, or that produces steps in the wrong order, produces a context chain that converges to the wrong answer even if each individual solving step is executed correctly. Automatic decomposition (using the LLM to generate sub-questions) partially mitigates this but introduces its own failure mode — the LLM may generate sub-questions that are parallel rather than sequential, or that miss a key dependency. The second limitation is error propagation: a factual error in step i is silently accepted as ground truth by step i+1 through step N. Without an explicit verification step after each sub-problem, errors compound. The third limitation is API cost: for a problem with N sub-problems, least-to-most uses N+1 calls versus 1 for standard CoT. For tasks with 5–10 sub-problems and expensive model versions, this cost multiplier becomes significant at production scale.</p>
+<ul>
+<li>Incorrect decomposition invalidates the entire chain — the dependency ordering of sub-problems must be correct</li>
+<li>Early-step errors propagate: step i+1 treats step i's answer as ground truth with no error correction</li>
+<li>API cost scales as O(N) calls where N is the number of sub-problems, vs O(1) for standard CoT</li>
+<li>Decomposition quality is highly sensitive to the few-shot examples chosen for the decomposition prompt</li>
+<li>Auto-decomposition trades 5–10% accuracy for the elimination of task-specific prompt engineering</li>
+<li>Does not naturally handle problems with parallel sub-problems or non-sequential dependency graphs</li>
+</ul>
+<h2>Key Takeaways</h2>
+<p>Least-to-most prompting is the technique of choice when a task requires systematic composition of simpler patterns and standard chain-of-thought fails by pattern-matching instead of composing. The two-stage structure — decompose, then sequentially solve — is a powerful inductive bias that mirrors how humans approach multi-step problems: identify the sub-problems first, then solve each in order. On compositional generalization benchmarks, it improves accuracy from 18% to 99.7% at the cost of a 4–6x increase in API calls. For production use, combine least-to-most decomposition with per-step verification to reduce error propagation, implement context truncation to manage token costs, and detect parallelism in the dependency graph to replace sequential calls with parallel batches. When choosing between least-to-most and self-consistency, prefer least-to-most when the problem is compositionally structured and prefer self-consistency when the problem is a single hard inference step that benefits from diverse sampling.</p>
+<ul>
+<li>Stage 1 — Decompose: ask 'What simpler questions must I answer first?' before attempting the problem</li>
+<li>Stage 2 — Solve sequentially: each step prompt includes all previous sub-question answers as context</li>
+<li>Best on compositional tasks where CoT pattern-matches instead of composing sub-operations</li>
+<li>Automatic LLM-generated decomposition works but loses 5–10% accuracy vs hand-crafted examples</li>
+<li>API cost is O(N+1) calls; only use when CoT demonstrably fails on the task family</li>
+<li>Add per-step verification to prevent error propagation from early sub-problem mistakes</li>
+<li>Detect parallel sub-problems and batch them to reduce latency from O(N) to O(depth)</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

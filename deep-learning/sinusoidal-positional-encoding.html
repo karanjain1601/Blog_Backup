@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sinusoidal Positional Encoding — Vaswani et al. Design | Notes Backup</title>
+  <meta name="description" content="Derive Vaswani et al.&#x27;s sinusoidal PE formula, prove the linear-shift property, analyse the multi-frequency design, and compare sinusoidal encoding with learned, RoPE, ALiBi, and NoPE variants." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Sinusoidal Positional Encoding — Vaswani et al. Design</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Derive Vaswani et al.&#x27;s sinusoidal PE formula, prove the linear-shift property, analyse the multi-frequency design, and compare sinusoidal encoding with learned, RoPE, ALiBi, and NoPE variants.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Sinusoidal Positional Encoding — Vaswani et al. Design</h1>
+<p>A vanilla Transformer is permutation equivariant: swapping two tokens in the input produces the same output with those two tokens swapped. This is because dot-product attention treats positions symmetrically — there is no notion of 'position 3 comes before position 7'. Positional encoding injects position information by adding a position-dependent vector to the token embedding before it enters the Transformer stack. Vaswani et al. chose a deterministic sinusoidal encoding with specific mathematical properties that motivated the design of all subsequent positional encoding schemes.</p>
+<h2>The Permutation Equivariance Problem</h2>
+<p>Formally, let f be a Transformer layer. It is permutation equivariant if f(Px) = Pf(x) for any permutation matrix P. This holds because attention weights Aᵢⱼ = softmax(qᵢ·kⱼ/√dₖ) depend only on the content of positions i and j, not on their indices. Consequently, the Transformer cannot distinguish 'the cat ate the fish' from 'the fish ate the cat' without positional information. Positional encoding breaks this symmetry by making token embeddings position-dependent before they are fed to the first layer.</p>
+<h2>Sinusoidal PE Formula</h2>
+<p>Vaswani et al. 2017 defined the positional encoding PE ∈ ℝ^{max_len×d_model} by pairs of sine and cosine functions at geometrically spaced frequencies. For position pos ∈ {0,...,max_len−1} and dimension index i ∈ {0,...,d_model/2−1}: PE(pos, 2i) = sin(pos / 10000^{2i/d_model}) and PE(pos, 2i+1) = cos(pos / 10000^{2i/d_model}). The divisor 10000^{2i/d_model} creates a geometric progression of wavelengths from 2π (at i=0, highest frequency) to 10000·2π (at i=d_model/2−1, lowest frequency). The PE is added (not concatenated) to the token embedding: x = embed(token) + PE[pos].</p>
+<p>$$PE(pos, 2i) = \sin!\left(\frac{pos}{10000^{2i/d_{\text{model}}}}\right), \qquad PE(pos, 2i+1) = \cos!\left(\frac{pos}{10000^{2i/d_{\text{model}}}}\right)$$</p>
+<pre><code class="language-python">import numpy as np
+
+def sinusoidal_pe(max_len, d_model):
+    # Returns PE matrix: (max_len, d_model)
+    PE = np.zeros((max_len, d_model))
+    pos = np.arange(max_len)[:, np.newaxis]          # (max_len, 1)
+    i   = np.arange(0, d_model, 2)[np.newaxis, :]   # (1, d_model/2)
+    div = np.power(10000.0, i / d_model)
+    PE[:, 0::2] = np.sin(pos / div)    # even dims: sin
+    PE[:, 1::2] = np.cos(pos / div)    # odd  dims: cos
+    return PE
+
+pe = sinusoidal_pe(50, 128)
+print('PE shape:', pe.shape)
+print('PE values bounded in [-1, 1]:', pe.min().round(3), 'to', pe.max().round(3))
+print('PE[pos=0, :4]:', pe[0, :4].round(4))
+print('PE[pos=1, :4]:', pe[1, :4].round(4))
+print('PE[pos=10,:4]:', pe[10, :4].round(4))
+
+# Text heatmap of PE values across positions x selected dimensions
+print('\nHeatmap (+ pos, . near-zero, - neg) rows=pos, cols=dim:')
+sel_dims = [0, 8, 16, 32, 64, 96, 126]
+print('pos' + ''.join(' d{:&gt;3}'.format(d) for d in sel_dims))
+for pos in [0, 5, 10, 20, 30, 40, 49]:
+    row = '  {:&gt;2}:'.format(pos)
+    for d in sel_dims:
+        v = pe[pos, d]
+        row += '  +++' if v &gt; 0.5 else '  +  ' if v &gt; 0.1 else '  .  ' if abs(v) &lt; 0.1 else '  -  ' if v &gt; -0.5 else '  ---'
+    print(row)
+</code></pre>
+<h2>Four Key Properties</h2>
+<p>The sinusoidal PE design satisfies four properties that guided the choice over simpler alternatives like integer encoding or learned embeddings. Each position gets a unique vector. The encoding generalises deterministically to positions beyond the training sequence length. Relative distances are recoverable from the encodings via linear combination (proven below). And the encoding values are bounded in [−1, 1], preventing them from dominating the token embedding signal regardless of sequence length.</p>
+<ol>
+<li>Uniqueness: every position pos has a unique PE vector — proven because the set of frequencies is incommensurate (no two frequencies are rational multiples of each other for typical d_model and max_len values)</li>
+<li>Generalisation: the formula is defined for any pos ≥ 0; positions beyond max_len during training get encodings that are smooth continuations of the trained range</li>
+<li>Linear-shift property: PE(pos+k) can be expressed as a fixed linear (rotation) function of PE(pos) for any offset k — this allows the model to reason about relative positions via learned linear operations</li>
+<li>Bounded magnitude: all PE values lie in [−1, 1], so the added positional signal has the same scale regardless of pos — no position receives a disproportionately large encoding</li>
+</ol>
+<blockquote>
+<p><strong>Why Addition, Not Concatenation?</strong>: Concatenating the PE to the embedding would double the input dimension to 2·d_model, doubling the cost of every projection matrix. Adding instead keeps dimension d_model while allowing the network to learn to separate the semantic content (primarily encoded in token embedding directions) and positional information (encoded in PE directions) using the projection matrices. In practice the network learns to use different dimensions of d_model for content vs position, achieving the same expressiveness as concatenation without the extra parameters.</p>
+</blockquote>
+<h2>Linear-Shift Property — Proof</h2>
+<p>For dimension pair (2i, 2i+1) with frequency fᵢ = 1/10000^{2i/d_model}, the encodings are sin(pos·fᵢ) and cos(pos·fᵢ). For a fixed offset k: sin((pos+k)·fᵢ) = sin(pos·fᵢ)cos(k·fᵢ) + cos(pos·fᵢ)sin(k·fᵢ) and cos((pos+k)·fᵢ) = cos(pos·fᵢ)cos(k·fᵢ) − sin(pos·fᵢ)sin(k·fᵢ). This is a 2×2 rotation matrix applied to [sin(pos·fᵢ), cos(pos·fᵢ)]ᵀ with rotation angle k·fᵢ. Stacking over all d_model/2 frequency pairs, PE(pos+k) = M_k · PE(pos) where M_k is a block-diagonal rotation matrix that depends only on k, not on pos. This means PE(pos+k) is an exact linear function of PE(pos) for any fixed offset k.</p>
+<pre><code class="language-python">import numpy as np
+
+def sinusoidal_pe(max_len, d_model):
+    PE = np.zeros((max_len, d_model))
+    pos = np.arange(max_len)[:, np.newaxis]
+    i   = np.arange(0, d_model, 2)[np.newaxis, :]
+    div = np.power(10000.0, i / d_model)
+    PE[:, 0::2] = np.sin(pos / div)
+    PE[:, 1::2] = np.cos(pos / div)
+    return PE
+
+def linear_shift_matrix(k, d_model):
+    # Block-diagonal rotation matrix M_k such that PE(pos+k) = M_k @ PE(pos)
+    M = np.zeros((d_model, d_model))
+    for idx in range(0, d_model, 2):
+        freq = 10000 ** (idx / d_model)
+        c, s = np.cos(k / freq), np.sin(k / freq)
+        M[idx,   idx]   =  c;  M[idx,   idx+1] = s
+        M[idx+1, idx]   = -s;  M[idx+1, idx+1] = c
+    return M
+
+pe = sinusoidal_pe(200, 64)
+print('Verifying: PE(pos+k) = M_k @ PE(pos)')
+for pos, k in [(5, 3), (20, 7), (50, 13), (100, 25)]:
+    M_k       = linear_shift_matrix(k, 64)
+    predicted = M_k @ pe[pos]
+    actual    = pe[pos + k]
+    err = np.abs(predicted - actual).max()
+    status = 'PASS' if err &lt; 1e-10 else 'FAIL'
+    print('  PE({:&gt;3}+{:&gt;2}) = M_{} @ PE({:&gt;3}): max_err={:.2e}  {}'.format(
+        pos, k, k, pos, err, status))
+print('PE(pos+k) is an exact linear function of PE(pos) for any k.')
+print('The model can learn to decode relative offsets via linear attention ops.')
+</code></pre>
+<h2>Frequency Analysis — Low vs High Dimensions</h2>
+<p>The lowest-indexed dimensions (i=0,1) use the highest frequency fᵢ=1 (wavelength 2π ≈ 6.3 tokens): these dimensions oscillate rapidly, changing substantially between adjacent positions. The highest-indexed dimensions (i≈d_model/2) use the lowest frequency fᵢ ≈ 1/10000 (wavelength ≈ 62,800 tokens): these dimensions change very slowly, encoding coarse position at the sequence level. The combined multi-scale representation resembles a binary counter generalised to sinusoidal bases: low dimensions encode fine-grained position, high dimensions encode coarse position.</p>
+<h2>Generalisation to Longer Sequences</h2>
+<p>Because the PE formula is deterministic and not learned, it produces well-defined values for any position pos regardless of the maximum length seen during training. The encoding at positions beyond max_len_train are smooth continuations of the same sinusoidal curves. In practice, models trained with sinusoidal PE can often process sequences up to 2× the training length without significant degradation, though accuracy does decline because the attention layers have not seen such positions during training. Learned positional embeddings, by contrast, are undefined beyond the training vocabulary and require interpolation or extrapolation heuristics.</p>
+<pre><code class="language-python">import numpy as np
+
+def sinusoidal_pe(max_len, d_model):
+    PE = np.zeros((max_len, d_model))
+    pos = np.arange(max_len)[:, np.newaxis]
+    i   = np.arange(0, d_model, 2)[np.newaxis, :]
+    PE[:, 0::2] = np.sin(pos / np.power(10000.0, i / d_model))
+    PE[:, 1::2] = np.cos(pos / np.power(10000.0, i / d_model))
+    return PE
+
+train_len, d_model = 128, 64
+pe_train = sinusoidal_pe(train_len, d_model)
+pe_long  = sinusoidal_pe(train_len * 2, d_model)    # 2x longer at test time
+
+assert np.allclose(pe_train, pe_long[:train_len]), 'PE within train range must match!'
+print('PE[0:{:d}] identical in train and long context: PASS'.format(train_len))
+
+delta_train = np.diff(pe_train, axis=0)
+delta_extra = np.diff(pe_long[train_len:], axis=0)
+print('Mean |delta| in train region: {:.4f}'.format(np.abs(delta_train).mean()))
+print('Mean |delta| in extra region: {:.4f}'.format(np.abs(delta_extra).mean()))
+print('Similar -&gt; smooth continuation beyond train length.')
+
+pe_test = pe_long
+norms = np.linalg.norm(pe_test, axis=1, keepdims=True) + 1e-9
+cos_sim = (pe_test / norms) @ (pe_test / norms).T
+np.fill_diagonal(cos_sim, 0)
+print('Max off-diagonal cos similarity (all positions): {:.4f}'.format(cos_sim.max()))
+print('Low -&gt; unique encoding even beyond training length.')
+</code></pre>
+<h2>With vs Without Positional Encoding</h2>
+<p>Without positional encoding, the Transformer treats its input as a set rather than a sequence. For any task where the output depends on token order (translation, language modelling, sequence classification based on word order), removing PE causes significant degradation. The degradation is total for tasks where two different orderings map to completely different semantics (e.g., 'man bites dog' vs 'dog bites man'). For bag-of-words tasks (sentiment classification of short text) the effect is mild.</p>
+<pre><code class="language-python">import numpy as np
+
+def softmax(S):
+    S = S - S.max(axis=-1, keepdims=True)
+    e = np.exp(S); return e / e.sum(axis=-1, keepdims=True)
+
+def sdp_attn(Q, K, V):
+    A = softmax(Q @ K.T / np.sqrt(Q.shape[-1]))
+    return A @ V
+
+def sinusoidal_pe(n, d):
+    PE = np.zeros((n, d))
+    pos = np.arange(n)[:, np.newaxis]
+    i   = np.arange(0, d, 2)[np.newaxis, :]
+    PE[:, 0::2] = np.sin(pos / np.power(10000.0, i / d))
+    PE[:, 1::2] = np.cos(pos / np.power(10000.0, i / d))
+    return PE
+
+np.random.seed(0)
+n, d = 8, 32
+W = np.random.randn(d, d) * 0.1
+X = np.random.randn(n, d)
+X_pe = X + sinusoidal_pe(n, d)
+
+# Test: is the output permutation equivariant without PE?
+perm = np.random.permutation(n)
+out_no_pe        = sdp_attn(X @ W, X @ W, X)
+out_perm_no_pe   = sdp_attn((X[perm] @ W), (X[perm] @ W), X[perm])
+no_pe_equiv = np.allclose(out_no_pe[perm], out_perm_no_pe, atol=1e-10)
+print('No PE  — permutation equivariant (output reorders with input):', no_pe_equiv)
+
+out_pe           = sdp_attn(X_pe @ W, X_pe @ W, X_pe)
+X_pe_perm = X[perm] + sinusoidal_pe(n, d)
+out_perm_pe      = sdp_attn(X_pe_perm @ W, X_pe_perm @ W, X_pe_perm)
+pe_equiv = np.allclose(out_pe[perm], out_perm_pe, atol=1e-5)
+print('With PE — permutation equivariant:', pe_equiv)
+print('PE breaks permutation symmetry: model distinguishes token order.')
+</code></pre>
+<h2>Comparison of Positional Encodings</h2>
+<p>Sinusoidal PE was the standard until learned positional embeddings (BERT, GPT-2) showed that data-driven positions improve downstream task performance at the cost of extrapolation ability. RoPE and ALiBi later restored length generalisation with different mechanisms: RoPE rotates Q and K directly in the complex plane (introducing relative position into the attention score), while ALiBi subtracts a linear position bias from attention scores without modifying Q or K. Current best practice for models that need to extend to long contexts is RoPE with frequency interpolation (YaRN, LongRoPE).</p>
+<table>
+<thead>
+<tr>
+<th>Encoding</th>
+<th>Extrapolates Beyond Train Len</th>
+<th>Relative Position Info</th>
+<th>Learnable Params</th>
+<th>Used In</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Sinusoidal (Vaswani 2017)</td>
+<td>Yes — formula extrapolates smoothly</td>
+<td>Implicit via linear-shift property</td>
+<td>None</td>
+<td>Original Transformer, some encoder-decoder models</td>
+</tr>
+<tr>
+<td>Learned absolute</td>
+<td>No — undefined beyond vocab size</td>
+<td>None explicit</td>
+<td>max_len × d_model</td>
+<td>BERT, GPT-2, ViT</td>
+</tr>
+<tr>
+<td>RoPE (Su et al. 2021)</td>
+<td>Yes with frequency scaling</td>
+<td>Yes — explicit rotation by relative angle</td>
+<td>None</td>
+<td>LLaMA, Mistral, Falcon, Gemma, PaLM 2</td>
+</tr>
+<tr>
+<td>ALiBi (Press et al. 2022)</td>
+<td>Yes — linear bias extrapolates</td>
+<td>Yes — linear distance penalty per head</td>
+<td>h learnable slopes (or fixed)</td>
+<td>BLOOM, MPT, some OPT variants</td>
+</tr>
+<tr>
+<td>NoPE (no PE)</td>
+<td>Yes (no position at all)</td>
+<td>None — bag-of-words</td>
+<td>None</td>
+<td>Some encoder-only models; relative PE in T5</td>
+</tr>
+</tbody>
+</table>
+<p>For new architectures intended to handle variable or long context, RoPE with rope_theta tuning (increasing 10000 to 500,000 for context extension) is the current default. ALiBi offers simpler implementation and strong length generalisation but lacks the relative-position expressiveness of RoPE. Sinusoidal PE remains valuable for understanding — its linear-shift property is the conceptual ancestor of RoPE's rotation mechanism.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Transposed Convolution — Upsampling and Checkerboard Artifacts | Notes Backup</title>
+  <meta name="description" content="Understand transposed convolution as learnable upsampling, diagnose and fix checkerboard artifacts, and compare pixel shuffle and bilinear resize alternatives." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Transposed Convolution — Upsampling and Checkerboard Artifacts</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Understand transposed convolution as learnable upsampling, diagnose and fix checkerboard artifacts, and compare pixel shuffle and bilinear resize alternatives.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Transposed Convolution — Upsampling and Checkerboard Artifacts</h1>
+<p>Encoder-decoder architectures — U-Net for segmentation, DCGAN and StyleGAN generators, super-resolution networks — need to increase spatial resolution in the decoder. Transposed convolution (also called deconvolution or fractionally-strided convolution) is the learnable alternative to fixed upsampling like bilinear or nearest-neighbour interpolation. However, transposed conv is notorious for producing checkerboard artifacts — periodic amplitude patterns caused by uneven kernel overlap. Understanding why this happens and how to avoid it is essential for anyone building generative or dense-prediction models.</p>
+<h2>Transposed Convolution Mechanics</h2>
+<p>A transposed conv with stride s inserts s-1 zeros between each input element along each spatial axis, then applies a standard convolution. This is the transpose of the forward convolution operator in its matrix form. If forward conv is y = Cx, transposed conv computes x̂ = Cᵀy. The output size is: H_out = (H_in - 1)·s - 2p + k. For H_in=4, k=4, s=2, p=1: H_out = (4-1)·2 - 2 + 4 = 8 — exactly doubling. This is the standard configuration in DCGAN and U-Net decoders. The learnable weights give the network freedom to learn the best upsampling filter for the task, unlike fixed bilinear interpolation.</p>
+<pre><code class="language-python">import numpy as np
+
+def transposed_conv1d_scratch(x, kernel, stride=2):
+    &quot;&quot;&quot;1D transposed conv: insert zeros then convolve (no padding).&quot;&quot;&quot;
+    # Step 1: insert (stride-1) zeros between elements
+    x_up = np.zeros((x.shape[0] - 1) * stride + x.shape[0] -
+                    (x.shape[0] - 1) * (stride - 1))
+    # Simpler: use np repeat trick
+    expanded = np.zeros((x.shape[0] - 1) * stride + 1)
+    expanded[::stride] = x
+    # Step 2: convolve (cross-correlate) with kernel (no flip for CNN)
+    k = len(kernel)
+    out_len = len(expanded) + k - 1
+    output = np.zeros(out_len)
+    for i in range(len(expanded)):
+        output[i:i+k] += expanded[i] * kernel
+    return output
+
+x = np.array([1.0, 2.0, 3.0, 4.0])
+kernel = np.array([1.0, 2.0, 1.0])
+out = transposed_conv1d_scratch(x, kernel, stride=2)
+print(f'Input length:  {len(x)}')
+print(f'Kernel length: {len(kernel)}')
+print(f'Output length: {len(out)}  (expected: (4-1)*2+1 + 3-1 = 9)')
+print(f'Output values: {out}')
+print('Zero insertion doubles spacing; kernel blends adjacent elements.')
+</code></pre>
+<h2>Checkerboard Artifacts and Their Cause</h2>
+<p>Checkerboard artifacts arise when kernel_size is not divisible by stride. With k=3, s=2: some output pixels receive contributions from 2 input pixels while others receive from only 1 — a systematic amplitude imbalance that repeats with period s. The result is a spatially periodic intensity pattern visible in GAN-generated images and segmentation masks. Odena et al. (2016) documented this in 'Deconvolution and Checkerboard Artifacts' and showed that any k not divisible by s produces overlap imbalance. Odd k=4 with s=2 is divisible; k=3 with s=2 is not.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+
+def overlap_pattern(k, s, size=8):
+    &quot;&quot;&quot;Count how many input pixels contribute to each output position.&quot;&quot;&quot;
+    # Use a ones input to count overlaps
+    x = torch.ones(1, 1, size, size)
+    conv_t = nn.ConvTranspose2d(1, 1, k, stride=s, padding=0, bias=False)
+    nn.init.ones_(conv_t.weight)
+    with torch.no_grad():
+        out = conv_t(x)
+    return out[0, 0].numpy()
+
+print('Overlap counts — k=4 s=2 (divisible, uniform):')
+ow = overlap_pattern(4, 2, size=4)
+print(ow[:8, :8].astype(int))
+
+print('\nOverlap counts — k=3 s=2 (NOT divisible, checkerboard):')
+ow = overlap_pattern(3, 2, size=4)
+print(ow[:8, :8].astype(int))
+
+print('\nFix: resize then conv (no transposed conv at all):')
+def upsample_resize_conv(x_in, C_in, C_out):
+    x_up = F.interpolate(x_in, scale_factor=2, mode='bilinear', align_corners=False)
+    conv = nn.Conv2d(C_in, C_out, 3, padding=1)
+    return conv(x_up)
+
+print('Bilinear + conv = uniform overlap by construction.')
+</code></pre>
+<h2>U-Net Decoder — Transposed Conv vs Bilinear+Conv</h2>
+<p>The original U-Net used transposed conv in the decoder. Modern segmentation models often replace it with bilinear upsampling followed by a 3×3 conv, which avoids checkerboard artifacts with minimal accuracy loss. The tradeoff: transposed conv is fully learnable (can learn non-symmetric upsampling), while bilinear+conv fixes the upsampling to bilinear but lets the conv refine features. For tasks where fine-grained detail matters (e.g., cell boundary segmentation), transposed conv with careful initialisation (bilinear init) can outperform fixed bilinear upsampling. In practice, the choice is often hardware-and-latency-driven.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class UNetDecoder(nn.Module):
+    &quot;&quot;&quot;Compare transposed conv vs bilinear+conv decoder blocks.&quot;&quot;&quot;
+    def __init__(self, C_in, C_out, mode='transpose'):
+        super().__init__()
+        self.mode = mode
+        if mode == 'transpose':
+            self.up = nn.ConvTranspose2d(C_in, C_out, kernel_size=2, stride=2)
+        else:  # bilinear + conv
+            self.up   = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
+            self.conv = nn.Conv2d(C_in, C_out, 3, padding=1)
+        self.refine = nn.Sequential(
+            nn.Conv2d(C_out * 2, C_out, 3, padding=1),  # after skip concat
+            nn.BatchNorm2d(C_out), nn.ReLU(inplace=True)
+        )
+
+    def forward(self, x, skip):
+        x = self.up(x) if self.mode == 'transpose' else self.conv(self.up(x))
+        x = torch.cat([x, skip], dim=1)
+        return self.refine(x)
+
+for mode in ['transpose', 'bilinear']:
+    dec = UNetDecoder(256, 128, mode=mode)
+    x = torch.randn(2, 256, 14, 14)
+    skip = torch.randn(2, 128, 28, 28)
+    out = dec(x, skip)
+    p = sum(q.numel() for q in dec.parameters())
+    print(f'{mode:&lt;12}: output={tuple(out.shape)}, params={p:,}')
+</code></pre>
+<h2>Pixel Shuffle — Sub-Pixel Convolution</h2>
+<p>Pixel shuffle (sub-pixel convolution, Shi et al. 2016) is an elegant alternative for super-resolution. Instead of inserting zeros and filtering, it applies a standard conv in the low-resolution space to produce C×r²×H×W features, then rearranges (shuffles) the r² channels into a spatial r×r grid: output is C×(H·r)×(W·r). The computation happens entirely at low resolution — far cheaper than operating at high resolution — and the upsampling is fully learned. ESPCN used this for real-time video super-resolution. The key property: no checkerboard artifacts when the preceding conv is initialised correctly (ICNR initialisation).</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class PixelShuffleUpsample(nn.Module):
+    &quot;&quot;&quot;Sub-pixel convolution for 2x upsampling.&quot;&quot;&quot;
+    def __init__(self, C_in, C_out, scale_factor=2):
+        super().__init__()
+        # Conv produces C_out * r^2 channels at low resolution
+        self.conv = nn.Conv2d(C_in, C_out * scale_factor**2, kernel_size=3, padding=1)
+        self.ps   = nn.PixelShuffle(scale_factor)  # rearranges to spatial
+        self._init_weights(C_out, scale_factor)
+
+    def _init_weights(self, C_out, r):
+        &quot;&quot;&quot;ICNR init: tile C_out filters to avoid checkerboard at init.&quot;&quot;&quot;
+        kernel = self.conv.weight.data.clone()[:C_out]
+        for i in range(r * r):
+            self.conv.weight.data[i*C_out:(i+1)*C_out] = kernel
+
+    def forward(self, x):
+        return self.ps(self.conv(x))
+
+# Compare transposed conv vs pixel shuffle
+C_in, C_out, r = 64, 32, 2
+transp = nn.ConvTranspose2d(C_in, C_out, kernel_size=2, stride=2, bias=False)
+pixshu = PixelShuffleUpsample(C_in, C_out, scale_factor=r)
+
+x = torch.randn(2, C_in, 14, 14)
+print(f'Transposed conv output: {tuple(transp(x).shape)}')
+print(f'Pixel shuffle output:   {tuple(pixshu(x).shape)}')
+print(f'Transposed params: {sum(p.numel() for p in transp.parameters()):,}')
+print(f'PixelShuffle params: {sum(p.numel() for p in pixshu.parameters()):,}')
+</code></pre>
+<blockquote>
+<p><strong>Always Check Kernel Divisibility</strong>: The single most common cause of checkerboard artifacts in GAN generators is using kernel_size=3 with stride=2 in ConvTranspose2d. The fix is either: (1) use kernel_size=4 with stride=2 (divisible), (2) replace with Upsample(scale_factor=2) + Conv2d(3x3), or (3) use PixelShuffle. If your GAN outputs have a faint grid pattern, this is almost certainly the culprit. Check every ConvTranspose2d in your decoder: is k % s == 0?</p>
+</blockquote>
+<h2>Upsampling Methods Comparison</h2>
+<p>Each upsampling method carries different tradeoffs in learnability, artifact risk, memory, and computational cost. Nearest-neighbour is fastest but produces blocky outputs with sharp transitions. Bilinear is smoother but also fixed. Transposed conv is fully learnable but artifact-prone. Pixel shuffle learns upsampling at low resolution — the most compute-efficient learnable option. In practice, segmentation models (like DeepLabV3+) use bilinear upsampling throughout the decoder for simplicity, while super-resolution models exclusively use pixel shuffle.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Learnable</th>
+<th>Checkerboard Risk</th>
+<th>Memory Use</th>
+<th>Main Use Case</th>
+<th>Artifact Fix</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Nearest neighbour</td>
+<td>No</td>
+<td>None</td>
+<td>Low</td>
+<td>Simple baselines, quick prototyping</td>
+<td>N/A</td>
+</tr>
+<tr>
+<td>Bilinear upsample</td>
+<td>No</td>
+<td>None</td>
+<td>Low</td>
+<td>Segmentation decoders (DeepLab)</td>
+<td>N/A</td>
+</tr>
+<tr>
+<td>Transposed conv</td>
+<td>Yes</td>
+<td>High (if k%s≠0)</td>
+<td>Medium</td>
+<td>U-Net, DCGAN, VAE decoders</td>
+<td>Use k%s==0 or switch method</td>
+</tr>
+<tr>
+<td>Bilinear + Conv</td>
+<td>Partial (conv)</td>
+<td>None</td>
+<td>Medium</td>
+<td>Modern segmentation decoders</td>
+<td>N/A — inherently safe</td>
+</tr>
+<tr>
+<td>Pixel Shuffle</td>
+<td>Yes</td>
+<td>Low (with ICNR init)</td>
+<td>Low (works at LR)</td>
+<td>Super-resolution (ESPCN, ESRGAN)</td>
+<td>ICNR initialisation</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>output_padding in ConvTranspose2d adds extra rows/cols to resolve ambiguity when stride &gt; 1.</li>
+<li>ICNR (Initialisation via Convolutional Neural network Rearrangement) init for pixel shuffle avoids early-training checkerboard.</li>
+<li>Progressive growing GANs (ProGAN) add transposed conv layers gradually during training to stabilise.</li>
+<li>In segmentation, ASPP (Atrous Spatial Pyramid Pooling) avoids transposed conv entirely by using dilated convs.</li>
+<li>nn.Upsample with align_corners=True vs False gives different results — False is recommended for most tasks.</li>
+</ul>
+<h2>Practical Decoder Design Patterns</h2>
+<p>Modern encoder-decoder architectures have converged on a few reliable decoder patterns. FPN (Feature Pyramid Network) uses top-down lateral connections with nearest-neighbour upsampling + 1×1 conv for channel matching, then 3×3 conv for smoothing. This avoids transposed conv entirely and is robust to checkerboard artifacts. U-Net variants for medical imaging often keep transposed conv because high-frequency detail preservation is critical and artifact-free bilinear upsampling discards some learned sharpness.</p>
+<p>For GAN generators, the community has largely moved away from transposed conv in favour of resize+conv (StyleGAN2 uses modulated conv) or pixel shuffle (ESRGAN). The checkerboard artifact is particularly visible in GAN outputs because the discriminator is specifically trained to distinguish real from generated images — any systematic pattern is immediately penalised. Stable Diffusion's VAE decoder uses nearest-neighbour upsampling followed by ResNet blocks, avoiding transposed conv completely.</p>
+<ul>
+<li>SegFormer decoder: simple MLP + bilinear upsample — no transposed conv, state-of-the-art segmentation.</li>
+<li>ESRGAN generator: pixel shuffle (RRDB blocks) for super-resolution with no checkerboard artifacts.</li>
+<li>output_padding parameter in ConvTranspose2d is needed when input size is ambiguous given stride.</li>
+<li>ConvTranspose1d and ConvTranspose3d follow the same mechanics — same checkerboard risk applies.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

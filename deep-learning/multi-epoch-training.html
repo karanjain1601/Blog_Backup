@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Multi-Epoch Training for LLMs — Data Repetition Effects and Degradation | Notes Backup</title>
+  <meta name="description" content="How training language models on repeated data degrades quality — DeepMind findings on loss increases at 4x and 32x repetition, double descent in multi-epoch regimes, domain-specific repetition thresholds, model memorization measurement, and mitigation via data augmentation and synthetic data mixing." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Multi-Epoch Training for LLMs — Data Repetition Effects and Degradation</h1>
+      <ul class='note-meta'><li><strong>description:</strong> How training language models on repeated data degrades quality — DeepMind findings on loss increases at 4x and 32x repetition, double descent in multi-epoch regimes, domain-specific repetition thresholds, model memorization measurement, and mitigation via data augmentation and synthetic data mixing.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Multi-Epoch Training for LLMs — Data Repetition Effects and Degradation</h1>
+<p>Modern large language models are trained on trillions of tokens — LLaMA-3.1-8B on 15 trillion, for example — yet the total unique web data available falls well short of that threshold. The result is inevitable: some documents are seen multiple times during training. Understanding how repetition affects model quality, memorization, and downstream performance is essential for anyone designing a pretraining data pipeline. The Chinchilla paper established that for a compute-optimal model, training on roughly 1 epoch is ideal; but inference-optimized models intentionally overtrain past that point, surfacing the multi-epoch problem at scale.</p>
+<h2>Chinchilla Scaling and the Single-Epoch Assumption</h2>
+<p>Hoffmann et al. (2022) showed that compute-optimal training balances model parameters N and training tokens D as D ≈ 20N: a 70B model trained on 1.4T tokens, roughly one pass over a large Common Crawl snapshot. The implicit assumption is a single pass over the data. Inference-optimized models — LLaMA-3.1, Mistral, Gemma — deliberately violate this by overtraining on 15–30T tokens with smaller parameter counts, producing cheaper-to-serve models that still perform well. The tradeoff is data repetition: any 1T-token source in a 15T-token run appears roughly 15 times if not diversified with fresh crawl data.</p>
+<h2>Data Repetition Effects — DeepMind Research</h2>
+<p>DeepMind's research into multi-epoch training (Hernandez et al. 2022, Muennighoff et al. 2023) produced quantitative baselines: repeating the training corpus 4 times causes approximately 5% validation loss increase versus a single-epoch baseline; 32 repetitions causes approximately 20% loss increase. The degradation is non-linear — the first repetition adds almost no cost, the fourth adds a noticeable amount, and each subsequent doubling adds proportionally more. Muennighoff et al. also observed a double descent analog: after enough repetition, loss initially worsens, briefly improves as the model memorizes, then worsens again as memorization dominates generalization.</p>
+<pre><code class="language-python">import random
+from typing import List, Iterator
+from torch.utils.data import IterableDataset
+
+class MultiEpochDataset(IterableDataset):
+    &quot;&quot;&quot;Shuffle documents across epochs; track per-document repetition count.&quot;&quot;&quot;
+    def __init__(self, documents: List, max_epochs: int = 4, seed: int = 42):
+        self.documents = documents
+        self.max_epochs = max_epochs
+        self.rng = random.Random(seed)
+        self.epoch_counts = [0] * len(documents)
+
+    def __iter__(self) -&gt; Iterator:
+        for epoch in range(self.max_epochs):
+            indices = list(range(len(self.documents)))
+            self.rng.shuffle(indices)          # different order each epoch
+            for idx in indices:
+                self.epoch_counts[idx] += 1
+                yield {&quot;tokens&quot;: self.documents[idx], &quot;epoch&quot;: epoch,
+                       &quot;doc_id&quot;: idx, &quot;repetition_count&quot;: self.epoch_counts[idx]}
+
+# 1,000 documents x 4 epochs -- no document exceeds 4x repetition
+docs = [list(range(512)) for _ in range(1_000)]
+dataset = MultiEpochDataset(docs, max_epochs=4)
+total = sum(1 for _ in dataset)
+print(f&quot;Total samples: {total}, max repetitions: {max(dataset.epoch_counts)}&quot;)
+assert max(dataset.epoch_counts) == 4, &quot;Repetition limit violated&quot;
+print(&quot;All documents stay within the 4x repetition limit&quot;)
+</code></pre>
+<h2>Measuring Degradation Empirically</h2>
+<p>Degradation from data repetition is measured by training identical model architectures on 1x, 2x, 4x, and 8x repetitions of the same fixed dataset, then evaluating on a held-out set that was never repeated. The key is ensuring held-out data comes from the same distribution but is completely disjoint from training — otherwise the measurement conflates distribution shift with repetition effects. The metric is absolute validation loss and the percentage increase relative to the 1x baseline. Perplexity is less useful here because it grows exponentially with loss, amplifying small absolute changes.</p>
+<pre><code class="language-python">import random
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+
+def measure_repetition_degradation(token_corpus, rep_counts, seq_len=64, steps=300):
+    &quot;&quot;&quot;Train a tiny LM on corpus repeated N times; return eval loss per rep count.&quot;&quot;&quot;
+    vocab_size = max(token_corpus) + 1
+    results = {}
+    for reps in rep_counts:
+        tokens = token_corpus * reps
+        random.shuffle(tokens)
+        seqs = [tokens[i:i+seq_len+1] for i in range(0, len(tokens)-seq_len, seq_len)]
+        xs   = torch.tensor([s[:-1] for s in seqs])
+        ys   = torch.tensor([s[1:]  for s in seqs])
+        loader = DataLoader(TensorDataset(xs, ys), batch_size=64, shuffle=True)
+        model  = nn.Sequential(nn.Embedding(vocab_size, 64), nn.Linear(64, vocab_size))
+        opt    = torch.optim.Adam(model.parameters(), lr=3e-4)
+        for step, (x, y) in zip(range(steps), loader):
+            emb  = model[0](x).mean(1)
+            loss = nn.functional.cross_entropy(model[1](emb), y[:, seq_len // 2])
+            opt.zero_grad(); loss.backward(); opt.step()
+        results[reps] = loss.item()
+    return results
+
+corpus = list(range(500)) * 200    # 100K token corpus
+losses = measure_repetition_degradation(corpus, rep_counts=[1, 2, 4, 8])
+base   = losses[1]
+for r, l in losses.items():
+    print(f&quot;  {r}x: loss={l:.4f}  (+{(l - base) / base * 100:.1f}% vs 1x)&quot;)
+</code></pre>
+<h2>Domain-Specific Repetition Strategies</h2>
+<p>Not all data domains degrade equally with repetition. Repeated code data shows less loss degradation than repeated web text, possibly because code has more structured, learnable patterns with lower entropy. Books tolerate moderate repetition (3–4x) because signal density is high and redundancy is low. Web crawl text — the largest and noisiest source — should be kept at 1x wherever possible. The practical solution is a domain-weighted mixing schedule: assign per-domain epoch budgets that reflect each domain's repetition tolerance rather than repeating the entire corpus uniformly.</p>
+<pre><code class="language-python">import random
+from typing import Dict, List
+
+def build_mixed_dataset(domain_corpora: Dict[str, List], domain_epochs: Dict[str, int],
+                        seed: int = 42) -&gt; List:
+    &quot;&quot;&quot;Mix domain corpora with different repetition counts into one training set.&quot;&quot;&quot;
+    rng = random.Random(seed)
+    mixed = []
+    for domain, corpus in domain_corpora.items():
+        epochs = domain_epochs.get(domain, 1)
+        repeated = corpus * epochs
+        rng.shuffle(repeated)
+        mixed.extend(repeated)
+        print(f&quot;  {domain:10s}: {len(corpus):&gt;8,} docs x {epochs}ep = {len(repeated):&gt;8,} samples&quot;)
+    rng.shuffle(mixed)    # global shuffle across all domains
+    return mixed
+
+# LLaMA-3.1-style domain mixing: high-quality sources get more repetitions
+DOMAIN_CORPORA = {
+    &quot;books&quot;:  [f&quot;book_doc_{i}&quot;  for i in range(50_000)],
+    &quot;code&quot;:   [f&quot;code_doc_{i}&quot;  for i in range(80_000)],
+    &quot;web&quot;:    [f&quot;web_doc_{i}&quot;   for i in range(500_000)],
+}
+DOMAIN_EPOCHS = {&quot;books&quot;: 4, &quot;code&quot;: 2, &quot;web&quot;: 1}  # stay below 4x for books
+mixed = build_mixed_dataset(DOMAIN_CORPORA, DOMAIN_EPOCHS)
+print(f&quot;Total training samples: {len(mixed):,}&quot;)
+</code></pre>
+<h2>Model Memorization and Privacy Risk</h2>
+<p>Carlini et al. (2021, 2023) demonstrated that LLMs memorize training data verbatim in measurable ways, and that memorization rate scales with repetition count. A document appearing once is rarely extractable via prefix completion; a document appearing 100 times is often recoverable with a short prefix. Beyond quality degradation, memorization carries privacy and legal risk: PII in repeated documents, copyright text, or proprietary code can be extracted by adversaries. Measuring extraction rate — the fraction of training documents recoverable via greedy decoding given a 50-token prefix — is the standard empirical proxy for memorization.</p>
+<pre><code class="language-python">import torch
+from typing import List
+
+def compute_extraction_rate(model, tokenizer, train_docs: List[str],
+                            prefix_len: int = 50, gen_len: int = 50,
+                            match_threshold: float = 0.7) -&gt; float:
+    &quot;&quot;&quot;Estimate fraction of training docs recoverable via greedy prefix completion.&quot;&quot;&quot;
+    extracted = 0
+    for doc in train_docs:
+        ids = tokenizer(doc, return_tensors=&quot;pt&quot;, truncation=True, max_length=200).input_ids
+        prefix = ids[:, :prefix_len]
+        suffix = ids[:, prefix_len:prefix_len + gen_len]
+        with torch.no_grad():
+            gen = model.generate(prefix, max_new_tokens=gen_len, do_sample=False)
+        gen_suffix = gen[:, prefix_len:]
+        min_len = min(gen_suffix.shape[1], suffix.shape[1])
+        match = (gen_suffix[:, :min_len] == suffix[:, :min_len]).float().mean().item()
+        extracted += int(match &gt;= match_threshold)
+    return extracted / len(train_docs)
+
+# Synthetic proxy: memorization rate grows with repetition count
+print(&quot;Repetition | Extraction Rate | Memorization Risk&quot;)
+print(&quot;-&quot; * 48)
+for reps, rate in [(1, 0.02), (2, 0.06), (4, 0.15), (8, 0.31), (16, 0.52)]:
+    risk = &quot;Low&quot; if rate &lt; 0.1 else (&quot;Medium&quot; if rate &lt; 0.3 else &quot;High&quot;)
+    print(f&quot;   {reps:&gt;2}x    |     {rate:.0%}          | {risk}&quot;)
+</code></pre>
+<h2>Mitigation Strategies</h2>
+<p>When the data budget is exhausted and additional repetition becomes necessary, several strategies reduce quality degradation. Data augmentation — back-translation, paraphrase models, sentence reordering — creates semantically similar but token-distinct variants that provide fresh signal. Mixing fresh web crawl snapshots with high-quality repeated sources dilutes the effective repetition rate. Curriculum learning, presenting less-repeated data later in training when the model is more capable, can help, though evidence for language models specifically is mixed. Deduplication is the complementary defense: aggressive MinHash or exact-match deduplication before training removes implicit repetition from near-duplicate web pages.</p>
+<ul>
+<li>Back-translation: translate documents to a second language and back to produce near-duplicate but token-distinct training examples.</li>
+<li>Paraphrase augmentation: use a separately trained paraphrase model to rewrite documents before each repetition epoch.</li>
+<li>Crawl diversification: mix fresh CommonCrawl snapshots from different months rather than repeating the same snapshot.</li>
+<li>Synthetic data insertion: use the model itself or a smaller teacher to generate text on training topics, injecting it as pseudo-fresh data.</li>
+<li>Domain epoch budgeting: assign per-source repetition limits rather than repeating the entire corpus uniformly.</li>
+<li>Pre-training deduplication: apply MinHash LSH or exact-match deduplication to remove near-duplicate web pages before any repetition counting.</li>
+</ul>
+<h2>Synthetic Data and RLHF Considerations</h2>
+<p>Model-generated synthetic data serves as pseudo-fresh training signal: it has never appeared in the training set exactly as written, so it does not count as a repetition of existing documents. The risk is mode collapse — if synthetic data dominates, the model converges on its own outputs. Practical recipes (Phi-3, LLaMA-3.1) mix 5–20% synthetic data with fresh web crawls. RLHF preference data is always trained for a single epoch: human annotation is expensive, the dataset is small relative to pretraining corpora, and repeated passes cause severe overfitting on the reward signal rather than generalizable human preference.</p>
+<table>
+<thead>
+<tr>
+<th>Repetitions</th>
+<th>Loss Increase vs 1x</th>
+<th>Memorization Rate</th>
+<th>Recommended Limit</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1x</td>
+<td>0% (baseline)</td>
+<td>~2%</td>
+<td>Always safe</td>
+<td>Chinchilla-optimal regime</td>
+</tr>
+<tr>
+<td>2x</td>
+<td>~1–2%</td>
+<td>~5–8%</td>
+<td>All source types</td>
+<td>Negligible quality impact</td>
+</tr>
+<tr>
+<td>4x</td>
+<td>~5%</td>
+<td>~15%</td>
+<td>Books and code only</td>
+<td>DeepMind threshold; avoid for web text</td>
+</tr>
+<tr>
+<td>8x</td>
+<td>~10–12%</td>
+<td>~30%</td>
+<td>Code only</td>
+<td>Significant memorization; avoid for books and web</td>
+</tr>
+<tr>
+<td>16x</td>
+<td>~18%</td>
+<td>~50%</td>
+<td>Not recommended</td>
+<td>Strong memorization artifacts, visible quality drop</td>
+</tr>
+<tr>
+<td>32x</td>
+<td>~20%+</td>
+<td>&gt;60%</td>
+<td>Never</td>
+<td>DeepMind upper bound; severe degradation</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>The 4x Repetition Threshold</strong>: Beyond 4x repetition of the same documents, LLMs show significant memorization artifacts and downstream quality degradation — if you exhaust your data budget, invest in new data collection rather than additional repetition epochs.</p>
+</blockquote>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

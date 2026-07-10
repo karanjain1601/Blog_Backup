@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Normalizing Flows — Change of Variables and Exact Likelihood | Notes Backup</title>
+  <meta name="description" content="Normalizing flows learn a bijective mapping f: X &lt;-&gt; Z where Z~N(0,I), enabling exact likelihood computation via the change of variables formula log p_X(x) = log p_Z(f(x)) + log|det J_f(x)|. Covers coupling layers, NICE, autoregressive flows, and the comparison with VAE, GAN, and diffusion." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Normalizing Flows — Change of Variables and Exact Likelihood</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Normalizing flows learn a bijective mapping f: X &lt;-&gt; Z where Z~N(0,I), enabling exact likelihood computation via the change of variables formula log p_X(x) = log p_Z(f(x)) + log|det J_f(x)|. Covers coupling layers, NICE, autoregressive flows, and the comparison with VAE, GAN, and diffusion.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Normalizing Flows — Change of Variables and Exact Likelihood</h1>
+<p>A normalizing flow is a generative model that learns a bijective (invertible) function f: X ↔ Z, where Z follows a simple base distribution such as N(0,I). The name comes from the idea that the transformation 'normalises' the complex data distribution into a Gaussian. Flows offer a property unique among deep generative models: exact log-likelihood computation. Unlike VAEs (lower bound) and GANs (implicit distribution), flows give the exact log p(x) via the change of variables formula, enabling direct maximum likelihood training.</p>
+<h2>Change of Variables Formula</h2>
+<p>If Z ~ p_Z and x = f⁻¹(z) where f is bijective, then the density of X satisfies: p_X(x) = p_Z(f(x)) |det J_f(x)|. Taking logs: log p_X(x) = log p_Z(f(x)) + log|det J_f(x)|. The first term is the log-likelihood under the simple base distribution. The second term is the log absolute Jacobian determinant of f — it accounts for how f stretches or compresses volume. Training maximises E_x[log p_X(x)] over the dataset. The challenge: for a general neural network, computing det J_f costs O(d³) for a d-dimensional input — prohibitive for images.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+
+def change_of_variables_demo():
+    '''1D: Z ~ N(0,1), x = f^{-1}(z) = z^3. Verify p_X integrates to 1.'''
+    z = torch.linspace(-2.5, 2.5, 1000)
+    x = z ** 3              # forward map: z -&gt; x
+    # Change of variables: p_X(x) = p_Z(z) / |df/dz|
+    # df/dz = 3z^2, so p_X = p_Z(z) / (3z^2)
+    pz  = torch.exp(-0.5 * z**2) / (2 * torch.pi) ** 0.5
+    jac = (3 * z**2).clamp(min=1e-6)
+    px  = pz / jac
+    # Numerical integration to verify p_X integrates to 1
+    dx  = (x[1:] - x[:-1]).abs()
+    px_mid = (px[1:] + px[:-1]) / 2
+    integral = (px_mid * dx).sum().item()
+    print('Integral of p_X (should be ~1): {:.4f}'.format(integral))
+    # Log-likelihood at specific x values
+    for xi in [-8.0, 0.001, 8.0]:
+        zi  = np.sign(xi) * abs(xi) ** (1.0/3)
+        pzi = np.exp(-0.5 * zi**2) / np.sqrt(2 * np.pi)
+        pxi = pzi / (3 * zi**2 + 1e-8)
+        print('  x={:5.1f}  z={:.3f}  log p_X={:.3f}'.format(
+              xi, zi, np.log(pxi + 1e-30)))
+
+change_of_variables_demo()
+</code></pre>
+<h2>Tractable Jacobian Determinants</h2>
+<p>The key computational challenge is computing log|det J_f|. For a general invertible neural network, this is O(d³). The solution is to design f with a triangular Jacobian, whose determinant is just the product of diagonal entries — O(d). A lower-triangular Jacobian arises from autoregressive models: x_i = f(x_{<i}, z_i), so ∂x_i/∂z_j = 0 for j > i. An upper-triangular Jacobian arises from coupling layers. Both enable O(d) log-determinant computation. This structural constraint on the Jacobian is the core design principle behind all practical flow architectures.</p>
+<h2>Coupling Layers: NICE and RealNVP</h2>
+<p>NICE (Dinh et al. 2014) introduces additive coupling layers: split x into [x₁, x₂], pass x₁ through unchanged, and compute y₂ = x₂ + m(x₁) where m is an arbitrary neural network. The Jacobian is lower-triangular with 1s on the diagonal, so log|det J| = 0. Inversion is trivial: x₂ = y₂ − m(y₁). RealNVP extends this to affine coupling: y₂ = x₂ ⊙ exp(s(x₁)) + t(x₁). The Jacobian diagonal is exp(s(x₁)), giving log|det J| = Σᵢ sᵢ(x₁). Both s and t are unrestricted neural networks; only the coupling structure must be preserved.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class AdditiveCoupling(nn.Module):
+    '''NICE (Dinh 2014): y2 = x2 + m(x1), y1 = x1. log|det J| = 0.'''
+    def __init__(self, d, hidden=64):
+        super().__init__()
+        d1 = d // 2
+        self.d1 = d1
+        self.m  = nn.Sequential(
+            nn.Linear(d1, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+            nn.Linear(hidden, d - d1))
+
+    def forward(self, x):
+        x1, x2  = x[:, :self.d1], x[:, self.d1:]
+        y2       = x2 + self.m(x1)              # translate only
+        log_det  = torch.zeros(x.size(0))       # unit-volume map
+        return torch.cat([x1, y2], dim=1), log_det
+
+    def inverse(self, y):
+        y1, y2 = y[:, :self.d1], y[:, self.d1:]
+        x2     = y2 - self.m(y1)               # trivial inversion
+        return torch.cat([y1, x2], dim=1)
+
+layer = AdditiveCoupling(d=8)
+x = torch.randn(4, 8)
+y, ld = layer(x)
+x_rec = layer.inverse(y)
+print('Reconstruction error:', (x - x_rec).abs().max().item())
+print('log|det J|:', ld.tolist())  # should be [0,0,0,0]
+</code></pre>
+<h2>Exact Log-Likelihood Computation</h2>
+<p>A normalizing flow stacks K coupling layers: log p_X(x) = log p_Z(z_K) + Σₖ log|det J_fₖ(zₖ₋₁)|, where z₀ = x and z_K is the final latent. The sum of log-determinants accumulates across layers. Training directly maximises this exact log-likelihood — no variational bound, no score matching, no adversarial training. The exact likelihood also enables direct comparison between models in nats or bits-per-dim (BPD = −log₂ p(x) / D for D-dimensional x), unlike GANs where likelihood is unavailable.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.distributions as dist
+
+class SimpleNICEFlow(nn.Module):
+    def __init__(self, d=8, n_layers=4, hidden=64):
+        super().__init__()
+        self.layers = nn.ModuleList(
+            [AdditiveCoupling(d, hidden=hidden) for _ in range(n_layers)])
+        self.prior  = dist.MultivariateNormal(
+            torch.zeros(d), torch.eye(d))
+
+    def log_prob(self, x):
+        z, log_det = x, torch.zeros(x.size(0))
+        for layer in self.layers:
+            z, ld = layer(z)
+            log_det = log_det + ld
+        return self.prior.log_prob(z) + log_det   # exact log p(x)
+
+    def sample(self, n):
+        z = self.prior.sample((n,))
+        for layer in reversed(self.layers):
+            z = layer.inverse(z)
+        return z
+
+flow = SimpleNICEFlow(d=8, n_layers=4)
+x = torch.randn(16, 8)
+log_px = flow.log_prob(x)
+print('Mean log p(x): {:.3f}  (NICE: log_det always 0, so = log p_Z(z))'.format(
+      log_px.mean().item()))
+</code></pre>
+<blockquote>
+<p><strong>Exact Likelihood vs Lower Bound vs Implicit</strong>: VAEs maximise the ELBO = E[log p(x|z)] - KL(q(z|x) || p(z)), a lower bound on log p(x). The gap between ELBO and true log p(x) can be large. GANs have no likelihood at all — the model is implicit and likelihood cannot be computed. Flows compute log p(x) exactly via the change of variables formula. This makes flows uniquely suited for density estimation tasks, anomaly detection, and any application requiring calibrated probabilities.</p>
+</blockquote>
+<h2>Autoregressive Flows: MAF and IAF</h2>
+<p>Masked Autoregressive Flow (MAF, Papamakarios 2017) uses an autoregressive model to define the scale-and-shift parameters: xᵢ = zᵢ · exp(sᵢ(x_{&lt;i})) + tᵢ(x_{&lt;i}). The Jacobian is lower-triangular so log|det J| = Σ sᵢ. MAF allows parallel density evaluation (all sᵢ can be computed in one forward pass of a MADE network) but requires sequential sampling. Inverse Autoregressive Flow (IAF) reverses this: sampling is parallel but density evaluation is sequential. MAF is better for density estimation; IAF is better for fast sampling (as in VAE decoders).</p>
+<h2>Generative Sampling via Inversion</h2>
+<p>To generate new samples from a flow: (1) sample z ~ p_Z = N(0,I) (trivially fast); (2) apply the inverse f⁻¹ to obtain x = f⁻¹(z). For coupling layers, the inverse is analytically tractable and fast — O(d) per layer, and all dimensions can be computed in parallel. For autoregressive flows (MAF), inversion requires d sequential steps — one per dimension. This sequential dependency makes autoregressive flows slower at generation; coupling-layer flows (RealNVP, Glow) are preferred when fast sampling matters.</p>
+<pre><code class="language-python">import torch
+
+def flow_sample_and_evaluate(flow, n_samples=16):
+    '''Generate samples via inversion; compute their log-likelihoods.'''
+    flow.eval()
+    with torch.no_grad():
+        samples = flow.sample(n_samples)
+        log_px  = flow.log_prob(samples)
+    print('Samples shape : {}'.format(samples.shape))
+    print('Sample mean   : {:.4f}'.format(samples.mean().item()))
+    print('Sample std    : {:.4f}'.format(samples.std().item()))
+    print('Mean log p(x) : {:.3f}'.format(log_px.mean().item()))
+    print('BPD (bits/dim): {:.3f}'.format(-log_px.mean().item() / (8 * 0.6931)))
+    return samples
+
+flow = SimpleNICEFlow(d=8, n_layers=4)
+samples = flow_sample_and_evaluate(flow)
+print('Flows: exact likelihood + O(d) parallel sampling via coupling inversion.')
+</code></pre>
+<ul>
+<li>Exact log-likelihood: log p_X(x) = log p_Z(f(x)) + log|det J_f(x)| — no bound, no approximation.</li>
+<li>Coupling layers: triangular Jacobian with O(d) determinant; parallel forward and inverse.</li>
+<li>Additive coupling (NICE): log|det J| = 0; volume-preserving; limited expressivity.</li>
+<li>Affine coupling (RealNVP): log|det J| = sum of log-scales; more expressive.</li>
+<li>MAF: parallel density estimation, sequential sampling — best for density estimation tasks.</li>
+<li>IAF: parallel sampling, sequential density — used in VAE decoders for fast generation.</li>
+<li>Glow: 1x1 invertible convolutions + affine coupling for high-resolution image synthesis.</li>
+</ul>
+<h2>Comparison: VAE vs GAN vs Flow vs Diffusion</h2>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>VAE</th>
+<th>GAN</th>
+<th>Normalizing Flow</th>
+<th>Diffusion</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Exact likelihood</td>
+<td>No (ELBO lower bound)</td>
+<td>No (implicit)</td>
+<td>Yes (change of vars)</td>
+<td>No (but tractable bound)</td>
+</tr>
+<tr>
+<td>Sample quality</td>
+<td>Medium</td>
+<td>High</td>
+<td>Medium</td>
+<td>Very high</td>
+</tr>
+<tr>
+<td>Training stability</td>
+<td>Stable</td>
+<td>Unstable (adversarial)</td>
+<td>Stable (MLE)</td>
+<td>Stable</td>
+</tr>
+<tr>
+<td>Sample speed</td>
+<td>Fast (1-step decode)</td>
+<td>Fast (1-step G)</td>
+<td>Fast (coupling inverse)</td>
+<td>Slow (many denoising steps)</td>
+</tr>
+<tr>
+<td>Latent space</td>
+<td>Yes, structured</td>
+<td>Partial (z)</td>
+<td>Yes, exact inverse</td>
+<td>Noise sequence</td>
+</tr>
+</tbody>
+</table>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

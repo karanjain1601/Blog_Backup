@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ConvNeXt: Modernizing CNNs to Match Vision Transformers | Notes Backup</title>
+  <meta name="description" content="How ConvNeXt incrementally modernizes ResNet-50 by adopting ViT training techniques — depthwise 7×7 convolutions, inverted bottleneck, GELU, and layer scale — achieving accuracy parity with Swin Transformer." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>ConvNeXt: Modernizing CNNs to Match Vision Transformers</h1>
+      <ul class='note-meta'><li><strong>description:</strong> How ConvNeXt incrementally modernizes ResNet-50 by adopting ViT training techniques — depthwise 7×7 convolutions, inverted bottleneck, GELU, and layer scale — achieving accuracy parity with Swin Transformer.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>ConvNeXt: Modernizing CNNs to Match Vision Transformers</h1>
+<h2>Overview</h2>
+<p>ConvNeXt (2022, Liu et al., Meta AI) asks a simple question: can a plain CNN match Swin Transformer when trained with the same recipe? Starting from ResNet-50, the authors apply ViT-era improvements one at a time — macro design, depthwise convolutions, inverted bottleneck, larger kernels, GELU, fewer activations — measuring accuracy at each step to isolate each contribution.</p>
+<p>The resulting ConvNeXt family (T/S/B/L/XL) spans 29–350 M parameters. ConvNeXt-T matches Swin-T at 82.1% ImageNet-1K top-1 with ~27% higher throughput, while ConvNeXt-L reaches 84.3%. The architecture is purely convolutional — no self-attention — yet competes on classification, object detection, and semantic segmentation benchmarks.</p>
+<p>Published as 'A ConvNet for the 2020s' at CVPR 2022, ConvNeXt challenges the narrative that transformers are inherently superior to CNNs. It shows that with equalized training conditions — AdamW, cosine decay, extended schedules, and modern augmentation — a well-designed convolutional network can match or exceed hierarchical vision transformers.</p>
+<h2>Modernization Roadmap</h2>
+<p>The authors begin with ResNet-50 at 76.1% top-1 and apply the ViT training recipe: AdamW optimizer, cosine schedule with warmup, 300 training epochs, Mixup, CutMix, RandAugment, and Label Smoothing. This alone raises accuracy to 78.8% — a 2.7-point gain with no architectural change, revealing that much of the CNN-vs-transformer gap stems from training procedures.</p>
+<p>Architectural changes applied sequentially: stage ratio (3,4,6,3)→(3,3,9,3) → 79.4%; patchify stem → 79.5%; depthwise separable layers → 80.5%; inverted bottleneck (4× expand) → 80.6%; 7×7 depthwise kernel → 80.6%; GELU + single activation per block → 81.3%; separate downsampling layers → 82.0%. Each step is small; compounded they close the gap.</p>
+<h2>ConvNeXt Block Design</h2>
+<p>The ConvNeXt block mirrors a transformer block: depthwise 7×7 conv for large-kernel spatial mixing, then a pointwise expand-4× linear layer, GELU, and a pointwise projection back. Unlike ResNet's bottleneck, the depthwise conv runs at full channel width before expansion. Batch Norm is swapped for Layer Norm, and a single activation per block matches transformer convention.</p>
+<pre><code class="language-python">import torch, torch.nn as nn
+class ConvNeXtBlock(nn.Module):
+    def __init__(self, dim, ls_init=1e-6):
+        super().__init__()
+        self.dw = nn.Conv2d(dim, dim, 7, padding=3, groups=dim)
+        self.norm = nn.LayerNorm(dim)
+        self.pw1 = nn.Linear(dim, 4 * dim)
+        self.act = nn.GELU()
+        self.pw2 = nn.Linear(4 * dim, dim)
+        self.gamma = nn.Parameter(ls_init * torch.ones(dim))
+    def forward(self, x):
+        r = x
+        x = self.dw(x).permute(0, 2, 3, 1)  # NCHW-&gt;NHWC
+        x = self.pw2(self.act(self.pw1(self.norm(x))))
+        return r + (self.gamma * x).permute(0, 3, 1, 2)
+</code></pre>
+<p>Layer scale is a per-channel learnable scalar γ initialized to a tiny value (1e-6). It multiplies the block output before adding the residual, zeroing new blocks at initialization so training starts as if the network were shallow. This prevents gradient explosion in large ConvNeXt models and is critical for stable training at ConvNeXt-B scale and above.</p>
+<pre><code class="language-python">import torch, torch.nn as nn
+
+class LayerScale(nn.Module):
+    def __init__(self, dim, init=1e-6):
+        super().__init__()
+        self.gamma = nn.Parameter(init * torch.ones(dim))
+    def forward(self, x):
+        # x: (B, H, W, C) -- NHWC layout
+        return self.gamma * x  # broadcasts over B, H, W
+
+# Gradient effect: grad w.r.t. block params scaled by gamma
+# gamma ~= 0 at init -&gt; new blocks contribute near-zero
+# -&gt; network behaves like a shallower model at start of training
+</code></pre>
+<pre><code class="language-python">import torch.nn as nn
+
+# Patchify stem: replaces ResNet's 7x7 conv + MaxPool
+# Produces non-overlapping 4x4 patches (stride = kernel_size)
+stem = nn.Sequential(
+    nn.Conv2d(3, 96, kernel_size=4, stride=4),  # C_out=96 for ConvNeXt-T
+    nn.LayerNorm(96, eps=1e-6),
+)
+# Input : (B, 3, 224, 224)
+# Output: (B, 96, 56, 56)
+# No overlap between patches; stride == kernel_size
+# LayerNorm normalises over channel dim (applied after NHWC permute)
+</code></pre>
+<h2>Macro Architecture</h2>
+<p>ConvNeXt uses a 4-stage hierarchy: spatial resolution halves and channels double at each stage boundary. Channel counts are (96, 192, 384, 768) for ConvNeXt-T. Downsampling between stages uses a separate LayerNorm + 2×2 stride-2 conv, decoupling spatial reduction from feature transformation. The stage ratio shifts to (3,3,9,3), concentrating compute in stage 3 like Swin.</p>
+<table>
+<thead>
+<tr>
+<th>Architecture</th>
+<th>Top-1 %</th>
+<th>Params (M)</th>
+<th>FLOPs (G)</th>
+<th>Throughput (img/s)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ResNet-50</td>
+<td>76.1</td>
+<td>25</td>
+<td>4.1</td>
+<td>1226</td>
+</tr>
+<tr>
+<td>Swin-T</td>
+<td>81.3</td>
+<td>28</td>
+<td>4.5</td>
+<td>755</td>
+</tr>
+<tr>
+<td>ConvNeXt-T</td>
+<td>82.1</td>
+<td>29</td>
+<td>4.5</td>
+<td>960</td>
+</tr>
+<tr>
+<td>ConvNeXt-S</td>
+<td>83.1</td>
+<td>50</td>
+<td>8.7</td>
+<td>592</td>
+</tr>
+<tr>
+<td>ConvNeXt-B</td>
+<td>83.8</td>
+<td>89</td>
+<td>15.4</td>
+<td>373</td>
+</tr>
+<tr>
+<td>ConvNeXt-L</td>
+<td>84.3</td>
+<td>198</td>
+<td>34.4</td>
+<td>205</td>
+</tr>
+</tbody>
+</table>
+<p>ConvNeXt's separate downsampling layers contrast with ResNet, where the first block in each stage simultaneously halves resolution and doubles channels. This clean separation makes each component's role explicit. The 4-stage feature maps at strides (4, 8, 16, 32) plug directly into FPN for detection and UPerNet for segmentation without architectural modification.</p>
+<h2>ConvNeXt vs Swin</h2>
+<p>ConvNeXt-T and Swin-T are a fair comparison at ~29 M parameters and ~4.5 GFLOPs. ConvNeXt-T achieves 82.1% vs Swin-T's 81.3% on ImageNet-1K, with ~27% higher throughput (960 vs 755 img/s on A100). ConvNeXt avoids shifted window operations and relative position biases, giving it simpler CUDA kernels and better compatibility with deep learning compilers.</p>
+<pre><code class="language-python">import timm, torch, time
+
+device = torch.device(&quot;cuda&quot; if torch.cuda.is_available() else &quot;cpu&quot;)
+pairs = [(&quot;convnext_tiny&quot;, 82.1), (&quot;swin_tiny_patch4_window7_224&quot;, 81.3)]
+for name, top1 in pairs:
+    m = timm.create_model(name, pretrained=False).eval().to(device)
+    x = torch.randn(32, 3, 224, 224, device=device)
+    with torch.no_grad():
+        for _ in range(3): m(x)          # warmup
+        t0 = time.perf_counter()
+        for _ in range(20): m(x)
+        fps = 32 * 20 / (time.perf_counter() - t0)
+    print(f&quot;{name}: top-1={top1}%  throughput={fps:.0f} img/s&quot;)
+</code></pre>
+<p>Beyond throughput, ConvNeXt supports arbitrary input resolutions without retraining, integrates cleanly with torchvision and timm, and requires no specialized CUDA extensions. On downstream tasks, ConvNeXt-B with Cascade Mask R-CNN achieves 54.0 box AP on COCO vs Swin-B 51.9, and with UPerNet on ADE20K reaches 52.1 mIoU vs Swin-B 51.6.</p>
+<blockquote>
+<p><strong>info</strong>: ConvNeXt shows the accuracy gap between CNNs and transformers was largely a training recipe gap — with AdamW, cosine schedule, Mixup, CutMix, and RandAugment, a pure CNN matches Swin Transformer.</p>
+</blockquote>
+<p>At scale, ConvNeXt-XL fine-tuned on ImageNet-22K reaches 87.8% top-1 at 384² resolution. ConvNeXt-L pre-trained on ImageNet-22K scores 86.6% at 224². These results confirm that the architectural improvements transfer across scales and pretraining datasets, making ConvNeXt a strong backbone for visual recognition tasks requiring large-scale pretraining.</p>
+<h2>Key Takeaways</h2>
+<p>ConvNeXt proves that locality and translation equivariance, combined with ViT training recipes, can match attention-based models. Key changes: depthwise 7×7 conv for large receptive field, inverted bottleneck (4× expansion), GELU + single activation per block, Layer Norm replacing Batch Norm, separate downsampling layers, and layer scale for deep model stability.</p>
+<p>For practitioners, ConvNeXt-T is the default drop-in for ResNet-50, offering +6 points top-1 accuracy at similar FLOPs. ConvNeXt-B/L suit higher-compute scenarios. On mobile or edge hardware, depthwise convolutions may underperform on some accelerators — benchmark both before committing. Use timm for pretrained weights and reliable fine-tuning baselines.</p>
+    </article>
+  </main>
+</body>
+</html>

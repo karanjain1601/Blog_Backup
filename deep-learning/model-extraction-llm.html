@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Model Extraction Attacks on LLMs | Notes Backup</title>
+  <meta name="description" content="Querying a black-box LLM to reconstruct its weights, capabilities, or training data — and defenses including rate limiting, output perturbation, and watermarking." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Model Extraction Attacks on LLMs</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Querying a black-box LLM to reconstruct its weights, capabilities, or training data — and defenses including rate limiting, output perturbation, and watermarking.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Model Extraction Attacks on LLMs</h1>
+<p>Model extraction attacks query a black-box LLM API to reconstruct some property of the target model — its functional behavior, training data, internal architecture, or hyperparameters — without direct access to the model weights. These attacks threaten the intellectual property of model providers (by enabling competitors to clone expensive-to-train models cheaply), the privacy of training data contributors (by enabling verbatim extraction of memorized text), and the integrity of AI systems (by allowing attackers to discover model internals that help craft more effective adversarial examples). Understanding model extraction is essential for ML engineers designing API policies, model watermarking systems, and output perturbation strategies. This note covers the four main attack classes — functional cloning, verbatim extraction, membership inference, and architecture reconstruction — along with defenses that reduce attack success while minimizing impact on legitimate API usage.</p>
+<h2>Overview</h2>
+<p>Model extraction was first systematically studied for classifiers by Tramer et al. (2016), but LLMs introduce new dimensions: they produce rich text outputs that carry far more information than a class label, they memorize training data verbatim, and they can be distilled into smaller students via API queries with surprising fidelity. Carlini et al. (2021) demonstrated verbatim extraction of hundreds of unique training data sequences from GPT-2 by designing prompts that trigger memorized completions. Subsequent work on GPT-3 and ChatGPT showed that membership inference — inferring whether a specific document was in the training set — is feasible with AUC above 0.7 using only black-box output probabilities. Functional cloning via knowledge distillation requires 10K–100K API queries to produce a student model that achieves 80–95% of the target model's benchmark performance, at a fraction of the original training cost. Defenses operate at three levels: API-level (rate limiting, output truncation), model-level (differential privacy training, output perturbation), and detection-level (watermarking, query anomaly detection).</p>
+<h2>Extraction Threat Model</h2>
+<p>The adversary in model extraction has black-box query access to the target model and aims to extract one or more of its properties. The extraction goal determines the attack strategy: functional cloning aims to reproduce input-output behavior across a broad range of tasks, requiring diverse query distributions; verbatim extraction targets specific memorized training sequences, requiring carefully crafted prompts that trigger continuation of memorized text; membership inference tests whether a specific document was in the training set, requiring queries that probe model confidence on target documents versus non-members; architecture reconstruction estimates model size, depth, and hyperparameters from output statistics. The defender controls the API — they can rate-limit queries, perturb outputs, restrict log-probability access, add watermarks, and monitor for anomalous query patterns. The key asymmetry is that attackers can be patient and systematic while defenders must allow legitimate usage without excessive friction.</p>
+<ul>
+<li>Functional cloning: reproduce model capabilities via distillation on API responses</li>
+<li>Verbatim extraction: recover memorized training text via continuation probes</li>
+<li>Membership inference: infer whether a document was in the training set</li>
+<li>Architecture reconstruction: estimate model size, depth, and hyperparameters</li>
+<li>Hyperparameter stealing: infer temperature, top-p, system prompt via output statistics</li>
+<li>API policies that restrict log-probs and add output noise are the highest-ROI defenses</li>
+</ul>
+<h2>Functional Cloning via Distillation</h2>
+<p>Functional cloning treats the target API as a teacher and fine-tunes a local student model on the collected (prompt, response) pairs. The attack requires three components: a diverse query distribution that covers the target task space, a local student model of sufficient capacity, and enough API queries to drive the student to high fidelity. For instruction-following LLMs, 10K diverse queries from datasets like FLAN, Alpaca, or ShareGPT produce a student that reaches 80–90% of the teacher's MMLU benchmark accuracy. At 100K queries, the gap narrows to 3–5%. The economics are stark: training a GPT-3.5-class model costs millions of dollars in compute, while cloning it via 100K API queries costs a few hundred dollars in API fees and a few thousand dollars in fine-tuning compute. This cost asymmetry motivates providers to implement query budgets, rate limiting, and output watermarking to raise the cost of successful extraction and detect ongoing extraction attempts.</p>
+<pre><code class="language-python">import torch
+import time
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from datasets import Dataset
+from typing import List, Dict, Callable
+
+def harvest_api_responses(prompts: List[str], api_call_fn: Callable,
+                           delay_secs: float = 0.1) -&gt; List[Dict]:
+    &quot;&quot;&quot;EDUCATIONAL: Collect (prompt, response) pairs from a black-box API.
+    Illustrates how an attacker builds a distillation training set.&quot;&quot;&quot;
+    pairs = []
+    for i, prompt in enumerate(prompts):
+        response = api_call_fn(prompt)  # call to target model API
+        pairs.append({&quot;prompt&quot;: prompt, &quot;response&quot;: response})
+        if (i + 1) % 500 == 0:
+            print(f&quot;  Queried {i+1}/{len(prompts)} prompts&quot;)
+        time.sleep(delay_secs)  # respect rate limits
+    return pairs
+
+def distill_student(student_model_id: str, training_pairs: List[Dict],
+                    n_steps: int = 1000) -&gt; AutoModelForCausalLM:
+    &quot;&quot;&quot;Fine-tune a smaller student model on API-harvested pairs.&quot;&quot;&quot;
+    tokenizer = AutoTokenizer.from_pretrained(student_model_id)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    model = AutoModelForCausalLM.from_pretrained(student_model_id)
+    dataset = Dataset.from_list(training_pairs)
+    print(f&quot;Student: {student_model_id} | Training on {len(training_pairs)} pairs&quot;)
+    return model
+
+# Simulated quality gap at different query budgets (MMLU 5-shot accuracy)
+target_acc = 0.68  # target (GPT-3.5 level)
+budgets    = [1_000, 5_000, 10_000, 50_000, 100_000]
+student    = [0.41,  0.51,  0.57,   0.63,   0.66]
+print(f&quot;{'Queries':&gt;10}  {'Student Acc':&gt;12}  {'Gap':&gt;8}&quot;)
+for q, s in zip(budgets, student):
+    print(f&quot;{q:&gt;10,}  {s:&gt;12.0%}  {target_acc - s:&gt;+8.2f}&quot;)
+
+</code></pre>
+<h2>Membership Inference</h2>
+<p>Membership inference attacks (MIA) aim to determine whether a specific document was included in the model's training data. The most reliable signal is the model's per-token loss on the target document: if the model has memorized the document, it will assign lower loss (higher probability) to the tokens than a shadow model of the same size trained on a different dataset. The delta-loss MIA computes loss_shadow - loss_target: positive values indicate the target model 'knows' the document better, suggesting membership. On LLMs, MIA achieves AUC of 0.65–0.85 depending on model size, document length, and how many times the document appeared in training. Larger models memorize more and are more vulnerable. The privacy implications are significant: MIA can confirm whether a specific person's medical records, private communications, or copyrighted text was included in training data, enabling legal and regulatory exposure for model providers. Differential privacy training is the principled defense, but imposes accuracy costs at the epsilon values needed for strong MIA protection.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from sklearn.metrics import precision_score, recall_score, roc_auc_score
+from typing import List, Dict
+
+def compute_per_token_loss(model, tokenizer, text: str,
+                            device: str = &quot;cpu&quot;) -&gt; float:
+    &quot;&quot;&quot;Lower loss -&gt; model knows this text better -&gt; more likely a training member.&quot;&quot;&quot;
+    inputs = tokenizer(text, return_tensors=&quot;pt&quot;,
+                       truncation=True, max_length=256).to(device)
+    with torch.no_grad():
+        loss = model(**inputs, labels=inputs[&quot;input_ids&quot;]).loss
+    return loss.item()
+
+def delta_loss_mia(target_model, shadow_model, tokenizer,
+                   members: List[str], non_members: List[str]) -&gt; Dict:
+    &quot;&quot;&quot;Membership inference via shadow-model loss difference.
+    delta = loss_shadow - loss_target; positive delta suggests membership.&quot;&quot;&quot;
+    scores, labels = [], []
+    for text in members:
+        t_loss = compute_per_token_loss(target_model, tokenizer, text)
+        s_loss = compute_per_token_loss(shadow_model, tokenizer, text)
+        scores.append(s_loss - t_loss)   # positive: target knows it better
+        labels.append(1)
+    for text in non_members:
+        t_loss = compute_per_token_loss(target_model, tokenizer, text)
+        s_loss = compute_per_token_loss(shadow_model, tokenizer, text)
+        scores.append(s_loss - t_loss)
+        labels.append(0)
+    threshold = float(np.median(scores))
+    preds = [1 if s &gt; threshold else 0 for s in scores]
+    print(f&quot;MIA AUC={roc_auc_score(labels, scores):.3f}  &quot;
+          f&quot;Precision={precision_score(labels, preds):.3f}  &quot;
+          f&quot;Recall={recall_score(labels, preds):.3f}&quot;)
+    return {&quot;auc&quot;: round(roc_auc_score(labels, scores), 3),
+            &quot;precision&quot;: round(precision_score(labels, preds), 3),
+            &quot;recall&quot;: round(recall_score(labels, preds), 3)}
+
+</code></pre>
+<h2>Training Data Extraction</h2>
+<p>Verbatim training data extraction is the most privacy-impactful form of model extraction. Carlini et al. (2021) showed that GPT-2 memorizes and can reproduce unique training sequences verbatim — personal email addresses, private phone numbers, and copyrighted text — when prompted with the first few words of the memorized sequence. The extraction rate scales with model size: larger models memorize more unique sequences at higher rates. The 'verbatim extraction' prompt pattern prepends 'Please repeat the following text exactly:' or simply the first N tokens of a suspected memorized document and measures how much of the original document the model can reproduce. This technique was used to extract verbatim sequences from GPT-3 and ChatGPT in subsequent work. The primary defenses are differential privacy training (reduces memorization at the cost of accuracy), deduplication of training data (removes the repeated sequences that drive memorization), and output truncation or filtering on known sensitive patterns.</p>
+<pre><code class="language-python">import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from typing import Dict
+
+def verbatim_extraction_probe(model, tokenizer, seed_text: str,
+                               max_new_tokens: int = 200,
+                               device: str = &quot;cpu&quot;) -&gt; Dict:
+    &quot;&quot;&quot;EDUCATIONAL: Test whether a model has memorized a specific text sequence.
+    Uses the 'completion probe' technique from Carlini et al. (2021).&quot;&quot;&quot;
+    prefix = &quot;Please repeat the following text exactly: &quot; + seed_text[:60]
+    inputs = tokenizer(prefix, return_tensors=&quot;pt&quot;).to(device)
+    with torch.no_grad():
+        out = model.generate(**inputs, max_new_tokens=max_new_tokens,
+                             do_sample=False, temperature=1.0)
+    generated = tokenizer.decode(out[0, inputs[&quot;input_ids&quot;].shape[-1]:],
+                                  skip_special_tokens=True)
+    words_orig = set(seed_text.lower().split())
+    words_gen  = set(generated.lower().split())
+    overlap    = len(words_orig &amp; words_gen) / max(len(words_orig), 1)
+    return {&quot;overlap_score&quot;: round(overlap, 3),
+            &quot;likely_memorized&quot;: overlap &gt; 0.7,
+            &quot;generated_sample&quot;: generated[:120]}
+
+# Memorization rate by model size (Carlini et al., 2021 approximate figures)
+model_sizes = [&quot;125M&quot;,  &quot;355M&quot;, &quot;774M&quot;, &quot;1.3B&quot;, &quot;2.7B&quot;, &quot;6.7B&quot;, &quot;13B&quot;,  &quot;175B&quot;]
+mem_rates   = [0.004,   0.008,  0.014,  0.022,  0.050,  0.090,  0.140,  0.670]
+print(f&quot;{'Model':&gt;8}  {'Memorization rate':&gt;20}  {'Risk':&gt;8}&quot;)
+for sz, rate in zip(model_sizes, mem_rates):
+    risk = &quot;CRITICAL&quot; if rate &gt; 0.3 else (&quot;HIGH&quot; if rate &gt; 0.05 else &quot;MEDIUM&quot;)
+    print(f&quot;{sz:&gt;8}  {rate:&gt;20.1%}  {risk:&gt;8}&quot;)
+print(&quot;Defense: deduplicate training data and apply DP-SGD (epsilon=8)&quot;)
+
+</code></pre>
+<h2>Differential Privacy Defenses</h2>
+<p>Differential privacy (DP) training — specifically DP-SGD (Abadi et al., 2016) — provides a formal guarantee that any individual training example has bounded influence on the model's outputs. With privacy budget epsilon, the probability that a specific example's inclusion changes any model output by more than exp(epsilon) is bounded, which directly limits memorization and membership inference success. In practice, epsilon=8 is considered a reasonable privacy budget for production models — it reduces MIA AUC from ~0.80 to ~0.54 (near random) while costing 5–15% in benchmark accuracy. The accuracy cost arises because DP-SGD clips per-example gradients to limit their influence, which reduces the effective signal from rare but informative examples. Fine-tuning rather than pretraining with DP is far more practical: pretraining with DP at scale requires massive compute overhead, while DP fine-tuning on task-specific data provides strong privacy guarantees for the fine-tuning data at moderate accuracy cost. Gradient clipping norm (typically 1.0) and noise multiplier (1.0–1.5) are the key hyperparameters.</p>
+<ul>
+<li>DP-SGD with epsilon=8 reduces MIA AUC from 0.80 to ~0.54 at 5-15% accuracy cost</li>
+<li>Per-example gradient clipping (norm=1.0) is the first step; noise multiplier adds the privacy guarantee</li>
+<li>The Opacus library (PyTorch) is the standard implementation for DP fine-tuning</li>
+<li>Pretraining with DP is impractical at scale — apply DP to fine-tuning data instead</li>
+<li>Training data deduplication reduces memorization without privacy budget cost</li>
+<li>Minimum training data deduplication threshold: remove duplicates appearing &gt;5 times</li>
+<li>DP fine-tuning combined with deduplication is the recommended baseline for high-privacy LLM deployment</li>
+</ul>
+<h2>Output Watermarking</h2>
+<p>Watermarking allows model providers to embed a detectable statistical signature in generated text without visible degradation of output quality. The soft watermarking scheme (Kirchenbauer et al., 2023) biases token sampling toward a secret-key-derived 'green list' of vocabulary tokens at each decoding step. For each new token, a set of 'green' tokens is determined by hashing the previous token with a secret key — typically 50% of the vocabulary is green. Green tokens have their logits boosted by a constant delta before sampling. An unmodified 50% of green tokens would appear by chance in any text; a watermarked text will show significantly more than 50% green tokens, detectable via a z-test. The detector does not need access to the model — only the secret key — making it efficient to deploy at API response time. Watermarked text can be detected even after paraphrasing in many cases, though aggressive paraphrasing can remove the watermark. The key limitation is that watermarking can be circumvented if the attacker knows the watermarking scheme and key.</p>
+<pre><code class="language-python">import torch
+import hashlib
+import numpy as np
+from transformers import LogitsProcessor, AutoModelForCausalLM, AutoTokenizer
+from typing import List
+
+class SoftWatermarkLogitsProcessor(LogitsProcessor):
+    &quot;&quot;&quot;Bias token sampling toward a secret-key-derived green list.
+    Kirchenbauer et al. (2023): detectable signal without visible quality loss.&quot;&quot;&quot;
+
+    def __init__(self, vocab_size: int, secret_key: str,
+                 green_fraction: float = 0.5, delta: float = 2.0):
+        self.vocab_size = vocab_size
+        self.secret_key = secret_key
+        self.green_fraction = green_fraction
+        self.delta = delta
+
+    def _green_list(self, prev_token: int) -&gt; np.ndarray:
+        seed = int(hashlib.sha256(
+            f&quot;{self.secret_key}:{prev_token}&quot;.encode()).hexdigest(), 16) % (2**32)
+        rng = np.random.default_rng(seed)
+        n = int(self.vocab_size * self.green_fraction)
+        return rng.choice(self.vocab_size, n, replace=False)
+
+    def __call__(self, input_ids: torch.Tensor,
+                 scores: torch.Tensor) -&gt; torch.Tensor:
+        for b in range(input_ids.shape[0]):
+            prev = input_ids[b, -1].item()
+            green = self._green_list(prev)
+            scores[b, green] += self.delta
+        return scores
+
+def detect_watermark(text: str, tokenizer, secret_key: str,
+                     vocab_size: int = 50257,
+                     green_fraction: float = 0.5,
+                     z_threshold: float = 4.0) -&gt; dict:
+    &quot;&quot;&quot;Statistical test: z-score of green-token fraction in generated text.&quot;&quot;&quot;
+    proc = SoftWatermarkLogitsProcessor(vocab_size, secret_key, green_fraction)
+    tokens = tokenizer(text, return_tensors=&quot;pt&quot;)[&quot;input_ids&quot;][0].tolist()
+    green_count = sum(1 for i in range(1, len(tokens))
+                      if tokens[i] in set(proc._green_list(tokens[i-1]).tolist()))
+    n = len(tokens) - 1
+    expected = n * green_fraction
+    z = (green_count - expected) / max(np.sqrt(n * green_fraction * (1 - green_fraction)), 1e-6)
+    detected = z &gt; z_threshold
+    print(f&quot;Green tokens: {green_count}/{n} | z={z:.2f} | watermark={'YES' if detected else 'NO'}&quot;)
+    return {&quot;green_count&quot;: green_count, &quot;z_score&quot;: round(z, 3), &quot;detected&quot;: detected}
+
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Attack type</th>
+<th>Data needed</th>
+<th>Extraction fidelity</th>
+<th>Best defense</th>
+<th>Detection difficulty</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Functional cloning</td>
+<td>10K-100K API queries + student GPU budget</td>
+<td>80-95% of teacher MMLU</td>
+<td>Rate limiting + watermarking</td>
+<td>Medium — query volume anomaly detectable</td>
+</tr>
+<tr>
+<td>Verbatim extraction</td>
+<td>Seed text prefix (10-50 tokens)</td>
+<td>Exact memorized sequences</td>
+<td>Data deduplication + DP-SGD</td>
+<td>Low — specific probing pattern detectable</td>
+</tr>
+<tr>
+<td>Membership inference</td>
+<td>Target document + shadow model access</td>
+<td>AUC 0.65-0.85</td>
+<td>DP-SGD epsilon=8 + no log-probs</td>
+<td>Medium — requires many queries to be reliable</td>
+</tr>
+<tr>
+<td>Architecture reconstruction</td>
+<td>~1K crafted probing queries</td>
+<td>Model size within 20%</td>
+<td>Restrict full log-probs API</td>
+<td>Hard — queries look like normal usage</td>
+</tr>
+<tr>
+<td>Hyperparameter stealing</td>
+<td>Output distribution statistics</td>
+<td>Temperature within 0.1</td>
+<td>Add output noise + top-k only</td>
+<td>Very hard — single queries are indistinguishable</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Log-probability Access Multiplies Extraction Risk</strong>: LLM APIs that return full log-probabilities over the vocabulary are far more vulnerable to both model extraction and membership inference — restricting API responses to top-K tokens or returning only the final sampled string significantly reduces attack surface. Full log-probs enable precise loss computation for MIA, speed up functional cloning convergence, and allow architecture reconstruction from output distribution statistics. As a policy baseline, production LLM APIs should return text only, with no token-level probability information exposed to API clients.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<p>Model extraction attacks span a wide threat surface: functional cloning that undercuts the economics of model training, verbatim extraction that violates data subject privacy, membership inference that exposes training data composition, and architecture reconstruction that facilitates downstream adversarial attacks. Defenses operate at the API layer (rate limiting, log-prob restriction, output truncation), the training layer (DP-SGD, data deduplication), and the detection layer (watermarking, query anomaly monitoring). No single defense covers all attack classes: rate limiting stops cloning but not verbatim extraction; DP-SGD reduces memorization but imposes accuracy costs; watermarking detects cloned outputs but cannot prevent the extraction itself. The recommended defensive baseline combines: no full log-prob API access, output watermarking, DP fine-tuning on any sensitive data, training data deduplication, and query-volume monitoring for anomalous patterns.</p>
+<ul>
+<li>Functional cloning costs ~$500 in API fees to reach 90% of GPT-3.5 MMLU — watermark and rate-limit</li>
+<li>Verbatim extraction scales with model size: 175B models memorize 67% of queried unique sequences</li>
+<li>Membership inference AUC: 0.80 without defense, reduced to 0.54 with DP-SGD epsilon=8</li>
+<li>Never expose full log-probability distributions in production APIs — restrict to text-only responses</li>
+<li>Watermarking (Kirchenbauer et al.): 50% green-list bias + z-test detector requires no model access</li>
+<li>Training data deduplication (remove &gt;5x duplicates) reduces memorization without accuracy cost</li>
+<li>Monitor for extraction patterns: high query volume, diverse prompt distributions, systematic topic coverage</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

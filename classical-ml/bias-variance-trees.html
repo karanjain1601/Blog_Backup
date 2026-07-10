@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bias-Variance in Decision Trees | Notes Backup</title>
+  <meta name="description" content="Explore how tree depth controls the bias-variance tradeoff, demonstrate tree instability as a symptom of high variance, and show how ensembles (bagging, boosting) address each component independently." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Bias-Variance in Decision Trees</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Explore how tree depth controls the bias-variance tradeoff, demonstrate tree instability as a symptom of high variance, and show how ensembles (bagging, boosting) address each component independently.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Bias-Variance in Decision Trees</h1>
+<p>Decision trees provide one of the clearest illustrations of the bias-variance tradeoff in machine learning. A fully grown tree memorises the training data perfectly (zero bias, extreme variance), while a shallow tree can only represent coarse decision rules (high bias, low variance). Understanding this tradeoff in trees — and why it motivates ensemble methods — is foundational to understanding random forests, gradient boosting, and modern ensemble techniques.</p>
+<h2>Fully Grown Trees — Zero Bias, Maximum Variance</h2>
+<p>A decision tree grown to full depth will create a unique leaf for every training sample (or small group of identical samples). Its training error is zero or near-zero — it has memorised the labels perfectly. However, any small perturbation to the training data — swapping a few samples, adding noise, or drawing a different bootstrap sample — will produce a completely different tree structure. This extreme sensitivity to the training data is the definition of high variance. In the bias-variance decomposition E[(y-ŷ)²] = Bias² + Var + σ², the variance term dominates for unpruned trees.</p>
+<h2>Tree Instability — High Variance in Action</h2>
+<p>Tree instability is the most intuitive symptom of high variance: two trees trained on nearly identical datasets look structurally very different. This happens because splits near the top of the tree are chosen greedily — a small difference in the training sample can flip the choice of the root split, cascading into a completely different tree structure below. In contrast, logistic regression coefficients change only slightly when a few samples are perturbed — a stable, low-variance model. This instability is what makes single trees unsuitable for high-stakes decisions but motivates powerful ensemble methods that average over many unstable trees.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.datasets import make_classification
+
+np.random.seed(42)
+X, y = make_classification(n_samples=200, n_features=8, n_informative=4,
+                            n_redundant=2, random_state=42)
+
+rng = np.random.RandomState(0)
+n = len(X)
+trees = []
+for trial in range(2):
+    idx = rng.choice(n, n, replace=True)  # bootstrap resample
+    dt = DecisionTreeClassifier(max_depth=4, random_state=trial)
+    dt.fit(X[idx], y[idx])
+    trees.append(dt)
+    print(f'Bootstrap {trial+1}: root_feature={dt.tree_.feature[0]}, '
+          f'threshold={dt.tree_.threshold[0]:.3f}, leaves={dt.get_n_leaves()}')
+
+# Measure prediction disagreement on unseen data
+X_test = rng.randn(500, 8)
+disagreement = np.mean(trees[0].predict(X_test) != trees[1].predict(X_test))
+print(f'Prediction disagreement on unseen data: {disagreement:.3f}')
+</code></pre>
+<h2>Depth as the Primary Bias-Variance Knob</h2>
+<p>Tree depth is the single most important hyperparameter controlling the bias-variance tradeoff in decision trees. Shallow trees (depth 1–2): high bias because they can only partition the feature space into 2–4 regions — they can only capture very coarse patterns. Deep trees (depth &gt; 10, unlimited): low bias but extreme variance. The optimal depth depends on the true complexity of the decision boundary and the amount of training data — more data tolerates deeper trees because variance decreases with n. Other hyperparameters like min_samples_split and min_samples_leaf act as indirect depth limiters by stopping splits early when nodes are too small to be reliable.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.tree import DecisionTreeRegressor
+from sklearn.model_selection import cross_val_score
+from sklearn.datasets import make_regression
+
+np.random.seed(42)
+X, y = make_regression(n_samples=300, n_features=10, n_informative=5,
+                        noise=15.0, random_state=42)
+
+depths = range(1, 20)
+train_errors, cv_errors = [], []
+for depth in depths:
+    dt = DecisionTreeRegressor(max_depth=depth, random_state=42)
+    dt.fit(X, y)
+    train_mse = np.mean((y - dt.predict(X))**2)
+    cv_mse = -cross_val_score(dt, X, y, cv=5,
+                               scoring='neg_mean_squared_error').mean()
+    train_errors.append(train_mse)
+    cv_errors.append(cv_mse)
+
+best_depth = list(depths)[np.argmin(cv_errors)]
+print(f'{'Depth':&gt;6} {'Train MSE':&gt;10} {'CV MSE':&gt;10}')
+for d, tr, cv in zip(depths, train_errors, cv_errors):
+    marker = ' &lt;-- best CV' if d == best_depth else ''
+    print(f'{d:&gt;6} {tr:&gt;10.1f} {cv:&gt;10.1f}{marker}')
+</code></pre>
+<h2>Bias-Variance Decomposition via Bootstrap</h2>
+<p>To empirically measure bias and variance for a tree model, we repeatedly draw bootstrap training sets, fit the model on each, and collect predictions on a fixed test set. The squared bias at each test point is (mean_prediction - true_value)², and the variance is the variance of predictions across bootstrap runs. This decomposition confirms the theoretical expectation: as depth increases, bias² falls and variance rises. The total expected test error is bias² + variance + irreducible noise.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.tree import DecisionTreeRegressor
+
+def bias_variance_tree(max_depth, n_bootstraps=200, n_train=100,
+                        n_test=300, noise=1.0, seed=0):
+    rng = np.random.RandomState(seed)
+    X_test = np.linspace(0, 6, n_test).reshape(-1, 1)
+    f_true = np.sin(X_test).ravel() + 0.3 * X_test.ravel()
+    preds = np.zeros((n_bootstraps, n_test))
+    for b in range(n_bootstraps):
+        X_tr = rng.uniform(0, 6, n_train).reshape(-1, 1)
+        y_tr = np.sin(X_tr).ravel() + 0.3 * X_tr.ravel() + rng.randn(n_train) * noise
+        dt = DecisionTreeRegressor(max_depth=max_depth)
+        dt.fit(X_tr, y_tr)
+        preds[b] = dt.predict(X_test)
+    bias_sq = np.mean((preds.mean(axis=0) - f_true)**2)
+    variance = np.mean(preds.var(axis=0))
+    return bias_sq, variance, noise**2
+
+print(f'{'Depth':&gt;8} {'Bias^2':&gt;10} {'Variance':&gt;10} {'Noise':&gt;8} {'Total':&gt;10}')
+for d in [1, 2, 3, 5, 8, 15, None]:
+    label = str(d) if d else 'None'
+    b2, v, nz = bias_variance_tree(d)
+    print(f'{label:&gt;8} {b2:&gt;10.4f} {v:&gt;10.4f} {nz:&gt;8.4f} {b2+v+nz:&gt;10.4f}')
+</code></pre>
+<pre><code class="language-python">import numpy as np
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+
+np.random.seed(42)
+X, y = make_classification(n_samples=500, n_features=20, n_informative=10,
+                            n_redundant=5, random_state=42)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.3, random_state=42)
+
+# Unpruned tree
+dt_full = DecisionTreeClassifier(random_state=42)
+dt_full.fit(X_tr, y_tr)
+
+# Cost-complexity pruned tree
+path = dt_full.cost_complexity_pruning_path(X_tr, y_tr)
+best_alpha = path.ccp_alphas[len(path.ccp_alphas)//2]
+dt_pruned = DecisionTreeClassifier(ccp_alpha=best_alpha, random_state=42)
+dt_pruned.fit(X_tr, y_tr)
+
+rf = RandomForestClassifier(n_estimators=200, random_state=42)
+rf.fit(X_tr, y_tr)
+
+print(f'{'Model':20s} {'Train Acc':&gt;10} {'Test Acc':&gt;10} {'Leaves':&gt;8} {'Gap':&gt;8}')
+for name, model in [('Unpruned Tree', dt_full), ('Pruned Tree', dt_pruned), ('Random Forest', rf)]:
+    tr = accuracy_score(y_tr, model.predict(X_tr))
+    te = accuracy_score(y_te, model.predict(X_te))
+    leaves = model.get_n_leaves() if hasattr(model, 'get_n_leaves') else 'N/A'
+    print(f'{name:20s} {tr:&gt;10.4f} {te:&gt;10.4f} {str(leaves):&gt;8} {tr-te:&gt;8.4f}')
+</code></pre>
+<blockquote>
+<p><strong>Single Tree Interpretability vs Accuracy Tradeoff</strong>: A shallow tree (depth ≤ 3) is highly interpretable — a business analyst can trace any prediction to a sequence of at most 3 simple rules. But achieving competitive accuracy often requires depth &gt; 6, at which point the tree is too large to inspect manually. Ensembles (random forests, gradient boosted trees) achieve high accuracy but sacrifice this interpretability. Use shallow trees when you need explainable rules; use ensembles when accuracy is paramount and interpretability can be approximated with SHAP.</p>
+</blockquote>
+<h2>How Ensembles Fix the Problem</h2>
+<p>Bagging (Bootstrap AGGregating) addresses the variance problem: train B trees on different bootstrap samples and average their predictions. Because each tree has E[prediction] ≈ same (low bias unchanged), but Var(average) = Var(single tree)/B for uncorrelated trees, bagging dramatically reduces variance. Random forests add feature randomisation at each split (only a random subset of sqrt(p) features considered), which decorrelates the trees further and reduces variance even more. Boosting takes a different approach: it reduces bias by sequentially fitting weak learners to the residuals, at some cost to variance.</p>
+<h2>Alternative Stopping Criteria</h2>
+<p>Beyond max_depth, decision trees offer several stopping criteria that indirectly control the bias-variance tradeoff. min_samples_split: a node must have at least this many samples to be split; prevents fitting to very small, noisy subsets. min_samples_leaf: each leaf must contain at least this many samples; more directly controls leaf size and stability. max_leaf_nodes: limits total leaves rather than depth, allowing asymmetric trees to grow deeper where data is dense. min_impurity_decrease: only split if the impurity reduction exceeds a threshold — a cost-benefit stopping rule. In practice, min_samples_leaf=10–30 is a robust alternative to tuning max_depth directly.</p>
+<table>
+<thead>
+<tr>
+<th>Depth</th>
+<th>Bias</th>
+<th>Variance</th>
+<th>Interpretability</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1–2 (stump)</td>
+<td>Very high</td>
+<td>Very low</td>
+<td>Excellent — 2–4 rules</td>
+<td>Only captures simple linear-like splits</td>
+</tr>
+<tr>
+<td>3–5 (shallow)</td>
+<td>Moderate</td>
+<td>Low</td>
+<td>Good — fits on one page</td>
+<td>Good balance for tabular data with n &lt; 1000</td>
+</tr>
+<tr>
+<td>6–10 (medium)</td>
+<td>Low</td>
+<td>Moderate</td>
+<td>Poor — too many paths</td>
+<td>Typical optimal range for single trees</td>
+</tr>
+<tr>
+<td>Unlimited (full)</td>
+<td>Near zero</td>
+<td>Very high</td>
+<td>Unusable</td>
+<td>Memorises training data; use only inside ensembles</td>
+</tr>
+<tr>
+<td>Pruned (CCP)</td>
+<td>Moderate</td>
+<td>Low-moderate</td>
+<td>Better than full</td>
+<td>Cost-complexity pruning finds good bias-var balance automatically</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>Use max_depth=3-5 for interpretable rules; use ensembles when accuracy matters more.</li>
+<li>min_samples_leaf is often more stable than max_depth for controlling overfitting in practice.</li>
+<li>Tree instability (different structure from small data changes) is the clearest high-variance signal.</li>
+<li>Bagging reduces variance proportionally to the number of trees and their decorrelation.</li>
+<li>Boosting reduces bias by fitting residuals; shrinkage (small learning rate) additionally reduces variance.</li>
+<li>For feature importance from trees, prefer permutation importance over Gini importance (less biased toward high-cardinality features).</li>
+<li>Cost-complexity pruning (ccp_alpha) automatically selects the depth that balances training fit and leaf size.</li>
+</ul>
+<p>The bias-variance lens makes decision trees particularly instructive: they are the simplest model where you can directly observe both failure modes. A stump clearly underfits (cannot capture nonlinear patterns); an unpruned tree clearly overfits (cannot generalise beyond its training samples). The gap between these extremes — and why averaging over many unstable trees resolves it — is the core intuition behind the most powerful tabular ML methods today.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

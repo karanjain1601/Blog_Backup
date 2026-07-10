@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OOD Detection — Energy Score, Mahalanobis, and MaxSoftmax | Notes Backup</title>
+  <meta name="description" content="Compare OOD detection methods for neural classifiers: MaxSoftmax baseline, ODIN with temperature scaling and input perturbation, Mahalanobis distance in feature space, and the energy score — with AUROC benchmarks and post-hoc implementation guidance." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>OOD Detection — Energy Score, Mahalanobis, and MaxSoftmax</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Compare OOD detection methods for neural classifiers: MaxSoftmax baseline, ODIN with temperature scaling and input perturbation, Mahalanobis distance in feature space, and the energy score — with AUROC benchmarks and post-hoc implementation guidance.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>OOD Detection — Energy Score, Mahalanobis, and MaxSoftmax</h1>
+<p>Out-of-distribution (OOD) detection asks: given a model trained on in-distribution (ID) data, can we detect inputs from a different distribution at test time without retraining? Unlike anomaly detection in unsupervised settings, OOD detection exploits the structure of a pretrained classifier — its softmax outputs, internal feature representations, and logits — to derive a separation score. The key challenge is that neural networks are often overconfident on OOD inputs.</p>
+<ul>
+<li>MaxSoftmax (Hendrycks &amp; Gimpel 2017): simplest baseline — max class probability is low for OOD; works poorly due to overconfidence.</li>
+<li>ODIN (Liang et al. 2018): temperature scaling + adversarial perturbation; large AUROC improvement over MaxSoftmax.</li>
+<li>Mahalanobis (Lee et al. 2018): class-conditional Gaussians in feature space; strongest feature-based post-hoc method.</li>
+<li>Energy score (Liu et al. 2020): −T·log Σ exp(fₖ/T); theoretically grounded and easy to compute.</li>
+<li>ViM (Wang et al. 2022): virtual-matched logits via null-space projection; top performer on ImageNet-scale benchmarks.</li>
+</ul>
+<h2>In-Distribution vs Out-of-Distribution</h2>
+<p>A model trained on CIFAR-10 (natural images) sees semantically different inputs at deployment: medical images, satellite images, adversarial examples. OOD detection must flag these before the model makes a dangerously confident wrong prediction. Evaluation uses two metrics: AUROC (area under the ROC curve for ID vs OOD binary classification) and FPR95 (false-positive rate when TPR=95%). The benchmark involves the model predicting ID correctly on its test set while being exposed to a separate OOD dataset.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+from sklearn.metrics import roc_auc_score
+
+class SimpleClassifier(nn.Module):
+    def __init__(self, d_in, n_classes):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Linear(d_in, 128), nn.ReLU(),
+            nn.Linear(128, 64), nn.ReLU())
+        self.head = nn.Linear(64, n_classes)
+    def forward(self, x):
+        return self.head(self.features(x))
+    def feature_map(self, x):
+        return self.features(x)
+
+def maxsoftmax_score(model, x):
+    '''Baseline OOD: 1 - max softmax probability.'''
+    model.eval()
+    with torch.no_grad():
+        logits = model(x)
+        probs = torch.softmax(logits, dim=-1)
+    return 1.0 - probs.max(dim=-1).values.numpy()
+
+torch.manual_seed(0); np.random.seed(0)
+n_cls, d = 5, 20
+model = SimpleClassifier(d, n_cls)
+X_id  = torch.randn(100, d)
+X_ood = torch.randn(30, d) * 3 + 5
+y = np.array([0]*100 + [1]*30)
+X_all = torch.cat([X_id, X_ood])
+scores = maxsoftmax_score(model, X_all)
+print(f'MaxSoftmax AUROC: {roc_auc_score(y, scores):.4f}')
+print('MaxSoftmax is overconfident — softmax can be high even for OOD inputs.')
+</code></pre>
+<h2>ODIN: Temperature Scaling and Input Perturbation</h2>
+<p>ODIN (Liang et al., 2018) improves OOD separation via two operations applied to the pretrained classifier. Temperature scaling: replace softmax(f(x)/1) with softmax(f(x)/T) where T&gt;1 — this broadens the softmax distribution, amplifying the gap between ID (high confidence) and OOD (low confidence) scores. Input perturbation: add a small adversarial perturbation δ in the direction that increases the max softmax probability: x' = x + ε·sign(∇_x max p_T(x)). Both operations are post-hoc — no retraining needed.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+from sklearn.metrics import roc_auc_score
+
+def odin_score(model, x, T=100.0, eps=0.002):
+    '''ODIN: temperature scaling + input perturbation OOD score.'''
+    model.eval()
+    x_var = x.clone().detach().requires_grad_(True)
+    logits = model(x_var)
+    max_logit_idx = logits.argmax(dim=-1)
+    # Input perturbation: maximise confidence in predicted class
+    score_for_grad = torch.softmax(logits / T, dim=-1)
+    score_for_grad[range(len(x)), max_logit_idx].sum().backward()
+    with torch.no_grad():
+        perturbation = eps * x_var.grad.sign()
+        x_perturbed = x_var + perturbation
+        logits_p = model(x_perturbed)
+        probs_p = torch.softmax(logits_p / T, dim=-1)
+        ood_score = 1.0 - probs_p.max(dim=-1).values
+    return ood_score.numpy()
+
+odin_scores = odin_score(model, X_all, T=100.0, eps=0.002)
+print(f'ODIN AUROC (T=100, eps=0.002): {roc_auc_score(y, odin_scores):.4f}')
+base_scores = maxsoftmax_score(model, X_all)
+print(f'MaxSoftmax AUROC baseline:     {roc_auc_score(y, base_scores):.4f}')
+print('ODIN improvement comes from calibration + adversarial amplification.')
+</code></pre>
+<h2>Mahalanobis Distance in Feature Space</h2>
+<p>Lee et al. (2018) fit class-conditional Gaussians N(μₖ, Σ) in the penultimate feature space of the classifier, using a shared tied covariance Σ estimated from all training features. The OOD score for a test point x is the Mahalanobis distance to the nearest class centroid: M(x) = min_k (f(x)−μₖ)ᵀ Σ⁻¹ (f(x)−μₖ). This score captures proximity to the learned class manifolds in feature space rather than in input space, often outperforming logit-based methods.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+from sklearn.metrics import roc_auc_score
+from sklearn.covariance import EmpiricalCovariance
+
+def fit_mahalanobis(model, X_train, y_train, n_classes):
+    '''Fit class-conditional Gaussians in feature space.'''
+    model.eval()
+    with torch.no_grad():
+        feats = model.feature_map(X_train).numpy()
+    class_means, class_feats = [], []
+    for c in range(n_classes):
+        idx = (y_train == c)
+        cf = feats[idx]
+        class_means.append(cf.mean(axis=0))
+        class_feats.append(cf)
+    all_feats = np.vstack(class_feats)
+    cov = EmpiricalCovariance().fit(all_feats)
+    prec = cov.precision_
+    return np.array(class_means), prec
+
+def mahalanobis_score(model, X_test, class_means, precision):
+    model.eval()
+    with torch.no_grad():
+        feats = model.feature_map(X_test).numpy()
+    scores = np.zeros(len(feats))
+    for i, f in enumerate(feats):
+        dists = [float((f - mu) @ precision @ (f - mu)) for mu in class_means]
+        scores[i] = min(dists)
+    return scores
+
+n_cls2 = 5
+y_tr = np.random.randint(0, n_cls2, size=100)
+X_tr_t = torch.randn(100, d)
+mu_arr, prec_mat = fit_mahalanobis(model, X_tr_t, y_tr, n_cls2)
+mah_scores = mahalanobis_score(model, X_all, mu_arr, prec_mat)
+print(f'Mahalanobis AUROC: {roc_auc_score(y, mah_scores):.4f}')
+</code></pre>
+<h2>Energy Score for OOD Detection</h2>
+<p>Liu et al. (2020) proposed the energy score: E(x;f) = −T·log Σₖ exp(fₖ(x)/T) where fₖ are the class logits. Unlike MaxSoftmax, the energy score integrates information from all class logits rather than just the maximum — it is the log-sum-exp of logits, related to the free energy in statistical mechanics. Theoretically, aligned energy scores correspond to log p(x) up to a constant when the model is calibrated. In practice, energy scores consistently outperform MaxSoftmax and are competitive with Mahalanobis.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+from sklearn.metrics import roc_auc_score
+
+def energy_score(model, x, T=1.0):
+    '''Energy score: -T * logsumexp(logits / T).'''
+    model.eval()
+    with torch.no_grad():
+        logits = model(x)
+        return (-T * torch.logsumexp(logits / T, dim=-1)).numpy()
+
+energy_scores = energy_score(model, X_all, T=1.0)
+base_scores  = maxsoftmax_score(model, X_all)
+odin_sc      = odin_score(model, X_all, T=100.0, eps=0.002)
+mah_sc       = mahalanobis_score(model, X_all, mu_arr, prec_mat)
+
+print('OOD detector comparison (higher AUROC = better):')
+print(f'  MaxSoftmax:       {roc_auc_score(y, base_scores):.4f}')
+print(f'  ODIN (T=100):     {roc_auc_score(y, odin_sc):.4f}')
+print(f'  Mahalanobis:      {roc_auc_score(y, mah_sc):.4f}')
+print(f'  Energy (T=1.0):   {roc_auc_score(y, energy_scores):.4f}')
+print()
+print('Energy score advantages: no feature fitting, no perturbation, single forward pass.')
+</code></pre>
+<h2>OOD Evaluation and Benchmark Results</h2>
+<p>Standard evaluation compares a model's ability to separate ID test data from OOD test data using AUROC and FPR95. Common ID datasets: CIFAR-10, CIFAR-100, ImageNet. Common OOD datasets: SVHN, LSUN, iSUN, Textures. Near-OOD (similar domain, e.g., CIFAR-10 vs CIFAR-100) is harder than far-OOD (e.g., CIFAR-10 vs SVHN). Modern baselines like ViM (Virtual Matched Logit) and KNN-based methods achieve AUROC&gt;95% on standard benchmarks.</p>
+<p>FPR95 — the false-positive rate when the true-positive rate is fixed at 95% — is often more informative than AUROC alone. A low AUROC model might still be deployable if FPR95 is low (few false alarms when catching most anomalies). Conversely, a high AUROC model with high FPR95 generates too many false alarms in production. Report both metrics together; optimise threshold on a validation set to match operational tolerance for false positives.</p>
+<ul>
+<li>Near-OOD: semantically similar but different class (CIFAR-10 vs CIFAR-100) — requires strong feature-space methods like Mahalanobis or ViM.</li>
+<li>Far-OOD: visually very different domain (CIFAR-10 vs SVHN digits) — MaxSoftmax already achieves high AUROC.</li>
+<li>FPR95: lower is better; target &lt;20% for production deployment to keep false-alarm rate acceptable.</li>
+<li>AUROC: threshold-independent measure; a score of 1.0 means perfect separation; random baseline = 0.5.</li>
+</ul>
+<blockquote>
+<p><strong>Post-Hoc OOD Without Retraining</strong>: All methods above (MaxSoftmax, ODIN, Mahalanobis, energy score) are post-hoc: they use a pretrained classifier without modification. For production deployment, energy score is the easiest to implement — one line of code using existing logits. Mahalanobis requires fitting class-conditional Gaussians (inexpensive) but needs access to training set features. ODIN requires gradient computation at inference which adds latency.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>AUROC (near-OOD)</th>
+<th>AUROC (far-OOD)</th>
+<th>Requires Retraining</th>
+<th>Feature Layer</th>
+<th>Inference Cost</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MaxSoftmax</td>
+<td>70–80%</td>
+<td>85–90%</td>
+<td>No</td>
+<td>None (logits)</td>
+<td>1× forward pass</td>
+</tr>
+<tr>
+<td>ODIN</td>
+<td>80–88%</td>
+<td>92–96%</td>
+<td>No</td>
+<td>None (logits)</td>
+<td>2× forward + grad</td>
+</tr>
+<tr>
+<td>Mahalanobis</td>
+<td>85–92%</td>
+<td>94–97%</td>
+<td>No</td>
+<td>Penultimate</td>
+<td>1× forward + distance</td>
+</tr>
+<tr>
+<td>Energy Score</td>
+<td>83–90%</td>
+<td>93–97%</td>
+<td>No</td>
+<td>None (logits)</td>
+<td>1× forward pass</td>
+</tr>
+<tr>
+<td>ViM (Virtual Matched)</td>
+<td>90–95%</td>
+<td>96–99%</td>
+<td>No</td>
+<td>Penultimate</td>
+<td>1× forward + projection</td>
+</tr>
+</tbody>
+</table>
+<p>In practice: start with the energy score as it requires no additional fitting and is one line of code. If performance is insufficient, add the Mahalanobis distance as a complementary score — both can be linearly combined. Use ODIN when you have time budget for gradient computation and need to maximise AUROC on near-OOD benchmarks.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VQ-VAE-2 — Hierarchical Discrete Latents for High-Resolution Generation | Notes Backup</title>
+  <meta name="description" content="VQ-VAE-2 extends vector-quantized autoencoders to 256x256 generation via two hierarchical codebook levels: an 8x8 top level capturing global structure and a 32x32 bottom level capturing local details, with bottom encoding conditioned on top codes and a two-stage PixelSnail prior for high-fidelity class-conditional generation." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>VQ-VAE-2 — Hierarchical Discrete Latents for High-Resolution Generation</h1>
+      <ul class='note-meta'><li><strong>description:</strong> VQ-VAE-2 extends vector-quantized autoencoders to 256x256 generation via two hierarchical codebook levels: an 8x8 top level capturing global structure and a 32x32 bottom level capturing local details, with bottom encoding conditioned on top codes and a two-stage PixelSnail prior for high-fidelity class-conditional generation.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>VQ-VAE-2 — Hierarchical Discrete Latents for High-Resolution Generation</h1>
+<p>VQ-VAE-2 (Razavi et al. 2019) extends the original VQ-VAE to high-resolution image synthesis by introducing a hierarchy of discrete latent codes. A single codebook at one resolution cannot simultaneously capture both global image structure (object layout, colour palette) and local fine details (textures, edges). Two levels solve this: a top level at 8x8 encodes coarse global information, and a bottom level at 32x32 encodes local detail conditioned on the already-quantized top representation. The result is 256x256 class-conditional generation at FID ~2.5 on ImageNet — competitive with BigGAN at the time — using a two-stage discrete autoregressive prior.</p>
+<h2>Introduction: Hierarchical Motivation</h2>
+<p>The original VQ-VAE used a single-level codebook and was limited to 32x32 or 64x64 generation. Scaling to 256x256 with one codebook forces a tradeoff: a large spatial grid preserves local detail but the codebook must span the entire space of image patches; a small grid loses spatial resolution. Hierarchical representation solves this by factorising image information across levels. The top level need only describe scene-level structure — which regions contain foreground objects, approximate colour distribution, dominant shapes — while the bottom level fills in local texture conditioned on that global context. This mirrors how humans perceive images: global scene understanding precedes local detail.</p>
+<h2>Two-Level Architecture</h2>
+<p>The VQ-VAE-2 encoder-decoder pair has two quantization stages with separate codebooks. The bottom encoder maps 256x256 images to 32x32 feature maps capturing local detail. The top encoder further compresses 32x32 features to 8x8, capturing global structure. Each level has its own codebook (typically 512 entries each, embedding dimension 64). During encoding, top features are quantized first; the quantized top codes are then upsampled and concatenated to the bottom features before bottom quantization, so the bottom codebook only needs to represent residual local information not already explained by the top. The decoder reverses this process top-down.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class VectorQuantize(nn.Module):
+    def __init__(self, codebook_size=512, embed_dim=64):
+        super().__init__()
+        self.codebook = nn.Embedding(codebook_size, embed_dim)
+
+    def forward(self, z):
+        B, C, H, W = z.shape
+        z_flat = z.permute(0, 2, 3, 1).reshape(-1, C)
+        dist = (z_flat.unsqueeze(1) - self.codebook.weight.unsqueeze(0)).pow(2).sum(-1)
+        indices = dist.argmin(dim=1)
+        z_q = self.codebook(indices).reshape(B, H, W, C).permute(0, 3, 1, 2)
+        z_q = z + (z_q - z).detach()   # straight-through estimator
+        return z_q, indices.reshape(B, H, W)
+
+class HierarchicalVQVAE(nn.Module):
+    def __init__(self, in_ch=3, hidden=128, codebook_size=512, embed_dim=64):
+        super().__init__()
+        self.bottom_enc = nn.Sequential(
+            nn.Conv2d(in_ch, hidden, 4, 2, 1), nn.ReLU(),
+            nn.Conv2d(hidden, hidden, 4, 2, 1), nn.ReLU(),
+            nn.Conv2d(hidden, hidden, 4, 2, 1), nn.ReLU(),
+            nn.Conv2d(hidden, embed_dim, 1)        # 256-&gt;32 (3 strides of 2)
+        )
+        self.top_enc = nn.Sequential(
+            nn.Conv2d(embed_dim, hidden, 4, 2, 1), nn.ReLU(),
+            nn.Conv2d(hidden, hidden, 4, 2, 1), nn.ReLU(),
+            nn.Conv2d(hidden, embed_dim, 1)        # 32-&gt;8 (2 strides of 2)
+        )
+        self.vq_top    = VectorQuantize(codebook_size, embed_dim)
+        self.vq_bottom = VectorQuantize(codebook_size, embed_dim)
+
+torch.manual_seed(0)
+model = HierarchicalVQVAE()
+x = torch.randn(2, 3, 256, 256)
+b_feat = model.bottom_enc(x)        # (2, 64, 32, 32)
+t_feat = model.top_enc(b_feat)      # (2, 64,  8,  8)
+t_q, t_idx = model.vq_top(t_feat)
+print(f'Top quantized: {t_q.shape}, indices: {t_idx.shape}')  # (2,64,8,8), (2,8,8)
+</code></pre>
+<h2>Top-Level Encoding</h2>
+<p>The top encoder takes the 32x32 bottom feature map as input and applies two further stride-2 convolutions to reach 8x8. This 8x8 top representation is quantized against the top codebook using nearest-neighbor lookup in embedding space (512 entries). The result is 64 discrete tokens per image — enough to represent coarse semantic layout without redundancy. Because the top codebook is small (8x8 = 64 tokens), PixelSnail can model its prior autoregressively in reasonable time: a 64-token sequence is tractable for a convolutional autoregressive model with masking.</p>
+<h2>Bottom-Level Conditioning</h2>
+<p>The key innovation in VQ-VAE-2 is that bottom quantization is conditioned on the top codes. After computing the top quantized codes t_q at 8x8, they are upsampled (via nearest-neighbor interpolation) to 32x32 and concatenated channel-wise with the raw bottom encoder features. A learned projection then maps the combined representation to the embedding space before bottom VQ lookup. This means the bottom codebook only needs to encode residual local information not already captured by the top level — a much easier task than encoding everything from scratch. The bottom codes carry local textures, edge orientations, and fine colour variations.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class BottomConditionedEncoder(nn.Module):
+    &quot;&quot;&quot;Encodes bottom features conditioned on upsampled top quantized codes.&quot;&quot;&quot;
+    def __init__(self, embed_dim=64, hidden=128):
+        super().__init__()
+        self.condition_proj = nn.Sequential(
+            nn.Conv2d(embed_dim * 2, hidden, 3, 1, 1), nn.ReLU(),
+            nn.Conv2d(hidden, embed_dim, 1)
+        )
+
+    def forward(self, bottom_feat, top_q):
+        # Upsample 8x8 top codes to match 32x32 bottom resolution
+        top_up = F.interpolate(top_q, size=bottom_feat.shape[-2:], mode='nearest')
+        combined = torch.cat([bottom_feat, top_up], dim=1)  # (B, 2*C, 32, 32)
+        return self.condition_proj(combined)                # (B, C,   32, 32)
+
+torch.manual_seed(0)
+enc   = BottomConditionedEncoder(embed_dim=64, hidden=128)
+b_raw = torch.randn(2, 64, 32, 32)  # raw bottom encoder output
+t_q   = torch.randn(2, 64,  8,  8)  # quantized top codes
+conditioned = enc(b_raw, t_q)       # (2, 64, 32, 32)
+print(f'Bottom raw:       {b_raw.shape}')
+print(f'Top upsampled to: {F.interpolate(t_q, size=(32,32)).shape}')
+print(f'Conditioned feat: {conditioned.shape}')  # ready for VQ lookup
+</code></pre>
+<h2>Decoder Path</h2>
+<p>The VQ-VAE-2 decoder reconstructs images top-down. The 8x8 top quantized codes are first decoded by a small network that upsamples them to 32x32 feature maps. These decoded top features are then concatenated with the 32x32 bottom quantized codes, and a final decoder network upsamples the combined representation from 32x32 back to 256x256 RGB. The top-decoded features provide global structure guidance; the bottom codes inject local detail. This two-path merge allows the decoder to benefit from both levels of abstraction simultaneously.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class TopDownDecoder(nn.Module):
+    &quot;&quot;&quot;Decodes: top codes (8x8) -&gt; upsample -&gt; merge with bottom codes (32x32) -&gt; image.&quot;&quot;&quot;
+    def __init__(self, embed_dim=64, hidden=128, out_ch=3):
+        super().__init__()
+        self.top_dec = nn.Sequential(
+            nn.Conv2d(embed_dim, hidden, 3, 1, 1), nn.ReLU(),
+            nn.Upsample(scale_factor=4, mode='nearest'),  # 8x8  -&gt; 32x32
+            nn.Conv2d(hidden, embed_dim, 3, 1, 1), nn.ReLU()
+        )
+        self.final_dec = nn.Sequential(
+            nn.Conv2d(embed_dim * 2, hidden, 3, 1, 1), nn.ReLU(),
+            nn.Upsample(scale_factor=4, mode='nearest'),  # 32x32 -&gt; 128x128
+            nn.Conv2d(hidden, hidden, 3, 1, 1), nn.ReLU(),
+            nn.Upsample(scale_factor=2, mode='nearest'),  # 128x128 -&gt; 256x256
+            nn.Conv2d(hidden, out_ch, 3, 1, 1), nn.Tanh()
+        )
+
+    def forward(self, top_q, bottom_q):
+        top_decoded = self.top_dec(top_q)                      # (B, C, 32, 32)
+        combined    = torch.cat([top_decoded, bottom_q], dim=1) # (B, 2C, 32, 32)
+        return self.final_dec(combined)                        # (B, 3, 256, 256)
+
+torch.manual_seed(0)
+decoder  = TopDownDecoder()
+top_q    = torch.randn(2, 64,  8,  8)
+bottom_q = torch.randn(2, 64, 32, 32)
+recon    = decoder(top_q, bottom_q)
+print(f'Top codes:   {top_q.shape}')     # (2, 64, 8, 8)
+print(f'Bottom codes:{bottom_q.shape}')  # (2, 64, 32, 32)
+print(f'Reconstruction: {recon.shape}')  # (2, 3, 256, 256)
+</code></pre>
+<h2>Two-Stage Prior Models</h2>
+<p>Generation with VQ-VAE-2 requires sampling discrete codes and decoding them — the VQ-VAE itself provides no generative prior. VQ-VAE-2 uses PixelSnail, a convolutional autoregressive model with attention, as a prior at each level. Stage 1: a PixelSnail top prior models p(z_top | class) autoregressively over the 8x8 = 64 top tokens. Stage 2: a conditioned PixelSnail bottom prior models p(z_bottom | z_top, class) autoregressively over the 1024 bottom tokens at 32x32, conditioned on the fully sampled top codes. Once both code maps are sampled, the VQ-VAE-2 decoder produces the final 256x256 image. The two-stage approach allows the top prior to establish global coherence before the bottom prior fills in local details.</p>
+<ul>
+<li>Top prior: PixelSnail over 8x8=64 discrete tokens; receptive field covers the full 8x8 grid via global self-attention.</li>
+<li>Bottom prior: conditioned PixelSnail over 32x32=1024 tokens; top codes are embedded and used as context via cross-attention.</li>
+<li>Sampling order: sample all 64 top tokens first (row-major autoregressive), then sample all 1024 bottom tokens conditioned on sampled top.</li>
+<li>Class conditioning: class label embedding is added to both top and bottom PixelSnail inputs, enabling class-conditional generation.</li>
+<li>FID ~2.5 on class-conditional ImageNet 256x256, competitive with BigGAN while using a fundamentally different (non-adversarial) training objective.</li>
+</ul>
+<h2>VQGAN and Beyond</h2>
+<p>VQGAN (Esser et al. 2021) upgrades the VQ-VAE reconstruction quality by adding a PatchGAN adversarial discriminator and a VGG perceptual loss to the standard commitment + reconstruction objective. The discriminator pushes the decoder to produce perceptually sharp outputs rather than blurry MSE-optimal reconstructions. Critically, VQGAN also replaces PixelSnail with a GPT-style Transformer as the prior — the discrete tokens produced by the VQGAN encoder become a sequence modeled by a causal Transformer, enabling much longer-range dependencies. DALL-E v1 used exactly this architecture: a VQGAN tokenizer (256 image tokens at 32x32 from a 256x256 image) paired with a GPT-style Transformer conditioned on text tokens. Modern systems extend further: MAGVIT-v2 uses improved lookup-free quantization and an LLM-style masked prior, while LlamaGen applies LLaMA-style autoregressive Transformers to VQ image tokens with competitive FID.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torchvision.models import vgg16
+
+class PatchGANDiscriminator(nn.Module):
+    &quot;&quot;&quot;70x70 PatchGAN: classifies overlapping image patches as real/fake.&quot;&quot;&quot;
+    def __init__(self, in_ch=3, ndf=64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(in_ch,    ndf,   4, 2, 1), nn.LeakyReLU(0.2, True),
+            nn.Conv2d(ndf,   ndf*2, 4, 2, 1, bias=False), nn.BatchNorm2d(ndf*2), nn.LeakyReLU(0.2, True),
+            nn.Conv2d(ndf*2, ndf*4, 4, 2, 1, bias=False), nn.BatchNorm2d(ndf*4), nn.LeakyReLU(0.2, True),
+            nn.Conv2d(ndf*4, ndf*8, 4, 1, 1, bias=False), nn.BatchNorm2d(ndf*8), nn.LeakyReLU(0.2, True),
+            nn.Conv2d(ndf*8, 1, 4, 1, 1)  # patch-level logits
+        )
+    def forward(self, x):
+        return self.net(x)
+
+def perceptual_loss(vgg_feats, recon, target, layers=(3, 8, 15)):
+    loss, x, y = 0.0, recon, target
+    for i, layer in enumerate(vgg_feats):
+        x, y = layer(x), layer(y)
+        if i in layers:
+            loss = loss + F.mse_loss(x, y)
+    return loss
+
+def vqgan_loss(recon, target, disc, vgg_feats, cb_loss, lam_d=0.8, lam_p=1.0):
+    rec   = F.l1_loss(recon, target)
+    perc  = perceptual_loss(vgg_feats, recon.detach(), target.detach())
+    fake  = disc(recon)
+    adv   = F.binary_cross_entropy_with_logits(fake, torch.ones_like(fake))
+    return rec + lam_p * perc + lam_d * adv + cb_loss
+
+disc = PatchGANDiscriminator()
+vgg  = vgg16(weights=None)
+recon, target = torch.randn(2, 3, 256, 256), torch.randn(2, 3, 256, 256)
+loss = vqgan_loss(recon, target, disc, vgg.features, cb_loss=torch.tensor(0.05))
+print(f'VQGAN total loss: {loss.item():.4f}')
+print('L1 + VGG perceptual + PatchGAN adversarial + codebook commitment')
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Levels</th>
+<th>Prior</th>
+<th>Resolution</th>
+<th>FID (ImageNet 256)</th>
+<th>Tokens / Image</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>VQ-VAE</td>
+<td>1</td>
+<td>PixelCNN</td>
+<td>32x32 native (upsampled)</td>
+<td>~67 (32x32)</td>
+<td>32x32 = 1024</td>
+</tr>
+<tr>
+<td>VQ-VAE-2</td>
+<td>2 (8x8 + 32x32)</td>
+<td>PixelSnail (two-stage)</td>
+<td>256x256</td>
+<td>~2.5 (class-cond)</td>
+<td>64 top + 1024 bottom</td>
+</tr>
+<tr>
+<td>VQGAN</td>
+<td>1</td>
+<td>GPT Transformer</td>
+<td>256x256</td>
+<td>~7.9 (unconditional)</td>
+<td>16x16 = 256</td>
+</tr>
+<tr>
+<td>DALL-E v1</td>
+<td>1 (VQGAN tokens)</td>
+<td>GPT-3 style Transformer (text-cond)</td>
+<td>256x256</td>
+<td>~17.9 (zero-shot)</td>
+<td>32x32 = 1024</td>
+</tr>
+<tr>
+<td>MAGVIT-v2</td>
+<td>1 (lookup-free VQ)</td>
+<td>MaskGIT / LLM masked prior</td>
+<td>256x256</td>
+<td>~1.78 (class-cond)</td>
+<td>16x16 = 256</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Training Order Matters</strong>: Train the VQ-VAE reconstruction model completely before training the PixelSnail priors — the prior quality depends on stable, well-utilized codebooks. If you train the prior on a still-evolving codebook, the token distribution shifts under the prior and you must retrain from scratch. Monitor codebook utilization (fraction of active codes) during VQ-VAE training; utilization below 50% signals codebook collapse and requires a reset or EMA updates before proceeding to prior training.</p>
+</blockquote>
+<h2>Practical Guidance</h2>
+<p>VQ-VAE-2 training has several failure modes to watch for. Codebook collapse — where most codes are never selected — is the most common issue. It occurs when the encoder variance is much smaller than the codebook spread, causing the same small subset of codes to win every nearest-neighbor lookup. Remedies include exponential moving average (EMA) codebook updates (instead of gradient-based), codebook reset (reinitialize dead codes to random encoder outputs), and reducing the commitment loss weight. The straight-through estimator gradient only approximates the true gradient; reparameterization-free quantization methods (MAGVIT-v2's lookup-free quantization) avoid this approximation entirely.</p>
+<ul>
+<li>Use EMA codebook updates: e_i &lt;- decay * e_i + (1-decay) * mean(assigned z) gives smoother utilization than gradient-based commitment loss.</li>
+<li>Monitor codebook perplexity per level: healthy utilization targets ~70-80% of codes active; collapse shows perplexity &lt; 10 out of 512.</li>
+<li>Bottom prior is the bottleneck: 1024 tokens autoregressively requires O(1024^2) attention; use local/dilated attention or Transformers with linear complexity.</li>
+<li>Separate learning rates: VQ-VAE encoder/decoder benefit from 1e-4; PixelSnail priors train stably at 3e-4 with gradient clipping at 1.0.</li>
+<li>For VQGAN: apply adaptive discriminator weighting — scale the adversarial loss by ||grad_last_dec(L_rec)|| / ||grad_last_dec(L_adv)||, preventing the GAN term from dominating early training.</li>
+</ul>
+<h2>Key Takeaways</h2>
+<p>VQ-VAE-2 demonstrates that hierarchical discrete representations can match or exceed continuous latent models at high resolution without adversarial training in the reconstruction stage. The separation of global structure (top level, 8x8) from local detail (bottom level, 32x32) — with bottom encoding conditioned on top codes — is the architectural insight that makes 256x256 generation feasible. The two-stage prior training (top PixelSnail first, then conditioned bottom PixelSnail) is the generative mechanism. Subsequent work (VQGAN, DALL-E v1, MAGVIT-v2, LlamaGen) all follow the same paradigm of discrete image tokenization followed by a powerful sequence prior, with improvements in tokenizer quality (perceptual loss, adversarial training, lookup-free quantization) and prior expressiveness (Transformers over PixelCNNs).</p>
+<ul>
+<li>Two codebook levels with conditioning: bottom quantization conditioned on top codes means each level has a well-defined, non-overlapping role.</li>
+<li>Straight-through estimator makes discrete quantization end-to-end differentiable by passing gradients through the argmin as if it were identity.</li>
+<li>Two-stage autoregressive prior: sample top 8x8 tokens first (global), then bottom 32x32 tokens conditioned on top (local detail).</li>
+<li>VQGAN upgrade: replacing MSE/commitment loss with perceptual + adversarial loss dramatically sharpens reconstruction quality with no change to the discrete bottleneck.</li>
+<li>Modern trajectory: VQ-VAE-2 -&gt; VQGAN -&gt; DALL-E v1 -&gt; MAGVIT-v2 / LlamaGen; all share discrete tokenization + sequence prior, differing in tokenizer quality and prior architecture.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

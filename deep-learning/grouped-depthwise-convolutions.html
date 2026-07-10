@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Grouped and Depthwise Convolutions — MobileNet Efficiency | Notes Backup</title>
+  <meta name="description" content="Understand how grouped and depthwise separable convolutions slash parameters and FLOPs, with MobileNetV1/V2 and ShuffleNet as case studies." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Grouped and Depthwise Convolutions — MobileNet Efficiency</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Understand how grouped and depthwise separable convolutions slash parameters and FLOPs, with MobileNetV1/V2 and ShuffleNet as case studies.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Grouped and Depthwise Convolutions — MobileNet Efficiency</h1>
+<p>Standard convolution treats all input channels jointly: each output channel sees every input channel through its own kernel, enabling full cross-channel communication but at the cost of C_in×C_out×k² parameters. Grouped and depthwise convolutions break this coupling selectively. By splitting channels into groups or processing each channel independently, these operations achieve dramatic parameter and FLOP reductions while retaining most of the representational power — the foundation of efficient CNNs for mobile and edge deployment.</p>
+<h2>Grouped Convolution</h2>
+<p>Grouped convolution (nn.Conv2d(..., groups=g)) splits C_in into g groups of C_in/g channels each, and C_out into g groups of C_out/g. Each group processes only its corresponding input channels independently. Total parameters: C_in × C_out × k² / g — a factor-g reduction. FLOPs reduce by the same factor. AlexNet used groups=2 as a practical workaround to fit on two GPUs in 2012. ResNeXt (2017) reframed grouped conv as 'aggregated residual transformations': groups=32 with wider channels matches ResNet accuracy with fewer FLOPs. The cost: no cross-group communication without an additional mixing step.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+C_in, C_out, k = 256, 256, 3
+
+configs = [
+    ('Standard (g=1)',  1),
+    ('Grouped g=2',     2),
+    ('Grouped g=4',     4),
+    ('Grouped g=8',     8),
+    ('Grouped g=32',   32),
+    ('Depthwise g=C', C_in),
+]
+
+print(f'{'Config':&lt;22} {'Params':&gt;10} {'Reduction':&gt;10}')
+standard_params = None
+for name, g in configs:
+    conv = nn.Conv2d(C_in, C_out, k, padding=1, groups=g, bias=False)
+    p = sum(x.numel() for x in conv.parameters())
+    if standard_params is None:
+        standard_params = p
+    print(f'{name:&lt;22} {p:&gt;10,} {p/standard_params:&gt;9.3f}x')
+
+# Verify output shape is same for all
+x = torch.randn(2, C_in, 14, 14)
+for name, g in configs:
+    conv = nn.Conv2d(C_in, C_out, k, padding=1, groups=g, bias=False)
+    assert conv(x).shape == (2, C_out, 14, 14), f'Shape mismatch for {name}'
+print('\nAll produce identical output shape (2, 256, 14, 14) ✓')
+</code></pre>
+<h2>Depthwise Separable Convolution</h2>
+<p>Depthwise separable convolution factorises a standard conv into two steps. Step 1 — Depthwise conv: apply one k×k kernel per input channel independently (groups=C_in), producing C_in output channels with C_in×k² parameters. Step 2 — Pointwise conv: apply a 1×1 conv to mix channels (C_in×C_out parameters). Total: C_in×k² + C_in×C_out vs C_in×C_out×k² for standard. The ratio is 1/C_out + 1/k² ≈ 1/k² = 1/9 for k=3 and large C_out. This is the core innovation of MobileNetV1: replace every 3×3 conv with a depthwise separable block, achieving ~8–9× reduction in computation with only ~1% top-1 accuracy loss on ImageNet.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class DepthwiseSeparableConv(nn.Module):
+    &quot;&quot;&quot;MobileNetV1-style depthwise separable conv block.&quot;&quot;&quot;
+    def __init__(self, C_in, C_out, stride=1):
+        super().__init__()
+        self.dw = nn.Sequential(
+            nn.Conv2d(C_in, C_in, 3, stride=stride, padding=1,
+                      groups=C_in, bias=False),  # depthwise
+            nn.BatchNorm2d(C_in),
+            nn.ReLU6(inplace=True)
+        )
+        self.pw = nn.Sequential(
+            nn.Conv2d(C_in, C_out, 1, bias=False),  # pointwise
+            nn.BatchNorm2d(C_out),
+            nn.ReLU6(inplace=True)
+        )
+
+    def forward(self, x):
+        return self.pw(self.dw(x))
+
+# Compare parameter counts
+C_in, C_out = 128, 256
+standard = nn.Conv2d(C_in, C_out, 3, padding=1, bias=False)
+dws      = DepthwiseSeparableConv(C_in, C_out)
+
+p_std = sum(p.numel() for p in standard.parameters())
+p_dws = sum(p.numel() for p in dws.parameters())
+print(f'Standard conv params:      {p_std:,}')
+print(f'Depthwise-sep params:      {p_dws:,}')
+print(f'Reduction factor:          {p_std/p_dws:.2f}x')
+
+x = torch.randn(4, C_in, 28, 28)
+print(f'\nInput {tuple(x.shape)} -&gt; Output {tuple(dws(x).shape)}')
+</code></pre>
+<h2>MobileNetV2 — Inverted Residuals and Linear Bottleneck</h2>
+<p>MobileNetV2 introduces two key ideas. First, the inverted residual: unlike ResNet's bottleneck (wide → narrow → wide), MobileNetV2 expands channels (narrow → wide → narrow), applying the depthwise conv in the expanded high-dimensional space where spatial mixing is richer, then projects back. Second, the linear bottleneck: the final pointwise projection uses no activation (linear), because ReLU in low-dimensional spaces destroys information by collapsing the manifold. The skip connection is added only when input and output have the same shape. This design achieves better accuracy/FLOP tradeoff than MobileNetV1.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class InvertedResidual(nn.Module):
+    &quot;&quot;&quot;MobileNetV2 inverted residual block.&quot;&quot;&quot;
+    def __init__(self, C_in, C_out, stride=1, expand_ratio=6):
+        super().__init__()
+        C_mid = C_in * expand_ratio
+        self.use_skip = (stride == 1 and C_in == C_out)
+        layers = []
+        if expand_ratio != 1:  # expansion phase
+            layers += [nn.Conv2d(C_in, C_mid, 1, bias=False),
+                       nn.BatchNorm2d(C_mid), nn.ReLU6(inplace=True)]
+        layers += [
+            nn.Conv2d(C_mid, C_mid, 3, stride=stride,  # depthwise
+                      padding=1, groups=C_mid, bias=False),
+            nn.BatchNorm2d(C_mid), nn.ReLU6(inplace=True),
+            nn.Conv2d(C_mid, C_out, 1, bias=False),    # linear projection
+            nn.BatchNorm2d(C_out)
+            # NO activation after last BN — linear bottleneck
+        ]
+        self.conv = nn.Sequential(*layers)
+
+    def forward(self, x):
+        out = self.conv(x)
+        return out + x if self.use_skip else out
+
+block = InvertedResidual(32, 32, stride=1, expand_ratio=6)
+x = torch.randn(4, 32, 28, 28)
+print(f'Output: {tuple(block(x).shape)}')
+p = sum(q.numel() for q in block.parameters())
+print(f'Params (C=32, t=6): {p:,}')
+</code></pre>
+<h2>ShuffleNet — Channel Shuffle for Cross-Group Communication</h2>
+<p>Grouped convolution cuts FLOP and parameter counts but prevents information flow between groups. ShuffleNet (Zhang et al. 2018) solves this with a channel shuffle operation: after a grouped pointwise conv, the output channels are divided into g groups and then interleaved so each group of the next layer sees channels from all previous groups. The shuffle is a simple reshape + transpose + flatten — zero extra parameters, zero extra FLOPs. ShuffleNetV2 (Ma et al. 2018) further shows that equal channel widths in input/output, fewer groups, and split+concat (not add) give the best throughput on real hardware.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def channel_shuffle(x, groups):
+    &quot;&quot;&quot;Rearrange channels so grouped conv outputs get cross-group info.&quot;&quot;&quot;
+    N, C, H, W = x.shape
+    assert C % groups == 0
+    x = x.view(N, groups, C // groups, H, W)
+    x = x.transpose(1, 2).contiguous()  # swap group and channel dims
+    return x.view(N, C, H, W)
+
+class ShuffleBlock(nn.Module):
+    def __init__(self, C_in, C_out, groups=4):
+        super().__init__()
+        self.groups = groups
+        C_mid = C_out
+        self.pw1 = nn.Sequential(
+            nn.Conv2d(C_in, C_mid, 1, groups=groups, bias=False),
+            nn.BatchNorm2d(C_mid), nn.ReLU(inplace=True)
+        )
+        self.dw = nn.Sequential(
+            nn.Conv2d(C_mid, C_mid, 3, padding=1, groups=C_mid, bias=False),
+            nn.BatchNorm2d(C_mid)
+        )
+        self.pw2 = nn.Sequential(
+            nn.Conv2d(C_mid, C_out, 1, groups=groups, bias=False),
+            nn.BatchNorm2d(C_out), nn.ReLU(inplace=True)
+        )
+
+    def forward(self, x):
+        x = self.pw1(x)
+        x = channel_shuffle(x, self.groups)  # &lt;-- cross-group communication
+        x = self.dw(x)
+        x = self.pw2(x)
+        return x
+
+blk = ShuffleBlock(64, 64, groups=4)
+x = torch.randn(2, 64, 14, 14)
+print(f'Output: {tuple(blk(x).shape)}')
+print(f'Params: {sum(p.numel() for p in blk.parameters()):,}')
+</code></pre>
+<blockquote>
+<p><strong>Depthwise Conv is Slow on Accelerators</strong>: Depthwise separable convolution has fewer FLOPs than standard conv on paper, but it can be slower on GPUs because its memory access pattern is less cache-friendly and it under-utilises tensor cores designed for large matrix multiplications. ShuffleNetV2 explicitly benchmarks wall-clock time rather than FLOPs, finding that fewer groups and balanced channel widths matter more than raw FLOP counts for actual throughput. Always profile on target hardware.</p>
+</blockquote>
+<h2>Accuracy-Efficiency Tradeoffs</h2>
+<p>The efficiency gains from grouped and depthwise separable convolutions come with an accuracy cost — fewer cross-channel interactions mean the network must learn to compensate with more depth or width. In practice, the tradeoff is excellent for mobile deployment: MobileNetV3-Large achieves 75.2% ImageNet top-1 at 219M MFLOPs, compared to ResNet-50's 76.1% at 4100M MFLOPs — 19× fewer FLOPs for nearly the same accuracy. The key enabler is the Neural Architecture Search (NAS) used to tune the channel widths and expansion ratios per layer.</p>
+<table>
+<thead>
+<tr>
+<th>Conv Type</th>
+<th>Params</th>
+<th>FLOPs</th>
+<th>Cross-Channel Mixing</th>
+<th>Accuracy Tradeoff</th>
+<th>Use Case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Standard</td>
+<td>C_in·C_out·k²</td>
+<td>2HW·C_in·C_out·k²</td>
+<td>Full (all→all)</td>
+<td>Baseline</td>
+<td>General, accuracy-first</td>
+</tr>
+<tr>
+<td>Grouped (g)</td>
+<td>C_in·C_out·k²/g</td>
+<td>Same ÷g</td>
+<td>Within group only</td>
+<td>Small drop</td>
+<td>ResNeXt, multi-GPU</td>
+</tr>
+<tr>
+<td>Depthwise</td>
+<td>C_in·k²</td>
+<td>2HW·C_in·k²</td>
+<td>None (per-channel)</td>
+<td>Large drop alone</td>
+<td>Always paired with PW</td>
+</tr>
+<tr>
+<td>DW-Separable</td>
+<td>C_in·k²+C_in·C_out</td>
+<td>2HW·C_in·(k²+C_out)</td>
+<td>Via PW conv</td>
+<td>~1% drop vs standard</td>
+<td>MobileNet, edge devices</td>
+</tr>
+<tr>
+<td>Shuffle (g)</td>
+<td>Same as grouped÷g</td>
+<td>Same ÷g</td>
+<td>Cross-group via shuffle</td>
+<td>Minimal drop</td>
+<td>ShuffleNet, mobile</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>MobileNetV1 width multiplier α: scales all channels by α, reducing params by α², FLOPs by α².</li>
+<li>MobileNetV1 resolution multiplier ρ: scales input resolution, reducing FLOPs by ρ².</li>
+<li>EfficientNet: compound scaling of depth, width, and resolution simultaneously via NAS.</li>
+<li>For groups=C_in (depthwise), PyTorch requires C_out==C_in; use a subsequent 1×1 to change channel count.</li>
+<li>TFLite and CoreML optimise depthwise conv separately from standard conv — check platform support.</li>
+</ul>
+<h2>Hardware-Aware Design with Grouped Convolutions</h2>
+<p>The computational advantage of depthwise separable and grouped convolutions is real in FLOP terms but can be elusive on GPU hardware. cuDNN's GEMM-based convolution is highly tuned for large matrix multiplications that arise in standard conv; grouped conv with many small groups underutilises tensor cores. NVIDIA's Ampere A100 added dedicated support for grouped convolutions at the hardware level. On ARM CPUs (mobile SoCs), depthwise conv benefits from NEON SIMD instructions and is genuinely faster — Apple's Neural Engine, Qualcomm's AI Engine, and Google's Edge TPU all have first-class depthwise conv support.</p>
+<p>Practical deployment recommendation: benchmark your specific architecture on your specific target hardware. Tools like AI Benchmark, MLPerf Mobile, and torch.utils.benchmark provide accurate latency numbers. A rule of thumb: for server GPU inference, prefer standard conv with moderate channel counts; for mobile CPU/NPU inference, depthwise separable conv with width multiplier α=0.75–1.0 gives the best latency/accuracy tradeoff.</p>
+<ul>
+<li>Use groups=C_in (depthwise) only when followed immediately by a pointwise 1×1 conv — alone it has limited expressivity.</li>
+<li>EfficientNet-B0 through B7 use compound scaling: depth α^φ, width β^φ, resolution γ^φ with α·β²·γ² ≈ 2.</li>
+<li>GhostNet: generates 'ghost' feature maps by cheap linear operations on a subset of real conv outputs.</li>
+<li>CondConv and DynamicConv: input-conditioned combinations of multiple kernels — adaptive grouped conv.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

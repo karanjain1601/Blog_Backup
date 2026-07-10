@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>UMAP — Topological Data Analysis and Fuzzy Simplicial Sets | Notes Backup</title>
+  <meta name="description" content="UMAP&#x27;s mathematical foundations in fuzzy simplicial sets and Riemannian geometry, how it optimises a cross-entropy objective, key hyperparameters, comparison with t-SNE, supervised UMAP, and parametric UMAP with a neural encoder." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>UMAP — Topological Data Analysis and Fuzzy Simplicial Sets</h1>
+      <ul class='note-meta'><li><strong>description:</strong> UMAP&#x27;s mathematical foundations in fuzzy simplicial sets and Riemannian geometry, how it optimises a cross-entropy objective, key hyperparameters, comparison with t-SNE, supervised UMAP, and parametric UMAP with a neural encoder.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>UMAP — Topological Data Analysis and Fuzzy Simplicial Sets</h1>
+<p>UMAP (Uniform Manifold Approximation and Projection) is grounded in algebraic topology and Riemannian geometry rather than probabilistic modelling. It outperforms t-SNE on speed, global structure preservation, and scalability, and it supports out-of-sample projection — making it useful beyond visualisation.</p>
+<h2>Fuzzy Simplicial Sets</h2>
+<p>UMAP models the high-dimensional data as a fuzzy simplicial set: each point xᵢ defines an open ball of radius ρᵢ (distance to nearest neighbour, making the local metric adaptive). Overlap between balls defines fuzzy set membership: μᵢⱼ = exp(-(dᵢⱼ - ρᵢ)/σᵢ), where σᵢ is tuned so that Σⱼ μᵢⱼ = log₂(n_neighbors). The union of these local fuzzy sets forms the high-dimensional topological representation.</p>
+<h2>Cross-Entropy Optimisation</h2>
+<p>UMAP optimises the low-dimensional layout by minimising the cross-entropy between the high-dimensional fuzzy graph and a low-dimensional counterpart: C = Σᵢⱼ [μᵢⱼ log(μᵢⱼ/νᵢⱼ) + (1-μᵢⱼ) log((1-μᵢⱼ)/(1-νᵢⱼ))], where νᵢⱼ = (1 + a‖yᵢ-yⱼ‖²ᵇ)⁻¹ is the low-dim similarity. Unlike t-SNE, the repulsive term (1-μ)(1-ν) is explicitly included and balanced. Optimisation uses stochastic gradient descent with negative sampling.</p>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.datasets import fetch_openml
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+import umap  # pip install umap-learn
+
+mnist = fetch_openml('mnist_784', version=1, as_frame=False)
+X = mnist.data[:5000].astype(float)
+y = mnist.target[:5000].astype(int)
+X = StandardScaler().fit_transform(X)
+X_pca = PCA(n_components=50, random_state=42).fit_transform(X)
+
+# n_neighbors controls local vs global tradeoff
+n_neighbors_vals = [5, 15, 50, 200]
+fig, axes = plt.subplots(1, 4, figsize=(20, 5))
+
+for ax, n_neigh in zip(axes, n_neighbors_vals):
+    reducer = umap.UMAP(n_neighbors=n_neigh, min_dist=0.1,
+                        random_state=42, n_components=2)
+    X_umap = reducer.fit_transform(X_pca)
+    ax.scatter(X_umap[:, 0], X_umap[:, 1], c=y, cmap='tab10', s=3, alpha=0.7)
+    ax.set_title(f'n_neighbors={n_neigh}')
+    ax.axis('off')
+
+plt.suptitle('UMAP: n_neighbors Controls Local vs Global Structure', fontsize=13)
+plt.tight_layout()
+plt.show()
+</code></pre>
+<h2>Key Hyperparameters</h2>
+<ul>
+<li>n_neighbors (5–200): controls the balance between local and global structure. Small → fine local detail, disconnected clusters. Large → global topology preserved but local detail smoothed.</li>
+<li>min_dist (0.0–0.9): controls how tightly points are packed in the embedding. Small → tight clusters. Large → uniform, spread-out layout.</li>
+<li>metric: the distance metric in input space. Cosine for text/embeddings, euclidean for images, correlation for time-series.</li>
+<li>n_components: usually 2 for visualisation, but UMAP is effective for higher-dimensional preprocessing (e.g. 10–50 dims before clustering).</li>
+<li>n_epochs: more epochs → more refined embedding. Default 200 (small data) or 500 (large data).</li>
+</ul>
+<blockquote>
+<p><strong>Hyperparameter Starting Points</strong>: For visualisation: n_neighbors=15, min_dist=0.1, metric='euclidean'. For downstream clustering: n_neighbors=30, min_dist=0.0 to produce compact clusters. For preserving global structure: n_neighbors=50–100. Always pre-reduce with PCA to 50 dims before UMAP when input dimensionality is &gt; 100.</p>
+</blockquote>
+<h2>UMAP vs t-SNE: Speed and Global Structure</h2>
+<pre><code class="language-python">import numpy as np
+import time
+import matplotlib.pyplot as plt
+from sklearn.datasets import fetch_openml
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+import umap
+
+mnist = fetch_openml('mnist_784', version=1, as_frame=False)
+X = mnist.data[:10000].astype(float)
+y = mnist.target[:10000].astype(int)
+X = StandardScaler().fit_transform(X)
+X_pca = PCA(n_components=50, random_state=42).fit_transform(X)
+
+t0 = time.time()
+X_tsne = TSNE(n_components=2, perplexity=30, random_state=42,
+              n_iter=500).fit_transform(X_pca)
+tsne_t = time.time() - t0
+print(f't-SNE: {tsne_t:.1f}s')
+
+t0 = time.time()
+X_umap = umap.UMAP(n_neighbors=15, min_dist=0.1, random_state=42).fit_transform(X_pca)
+umap_t = time.time() - t0
+print(f'UMAP: {umap_t:.1f}s  (speedup: {tsne_t / umap_t:.1f}x)')
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+ax1.scatter(X_tsne[:, 0], X_tsne[:, 1], c=y, cmap='tab10', s=2, alpha=0.5)
+ax1.set_title(f't-SNE ({tsne_t:.0f}s): good local, poor global')
+ax2.scatter(X_umap[:, 0], X_umap[:, 1], c=y, cmap='tab10', s=2, alpha=0.5)
+ax2.set_title(f'UMAP ({umap_t:.0f}s): better global structure')
+plt.tight_layout()
+plt.show()
+</code></pre>
+<h2>Supervised UMAP</h2>
+<p>UMAP can incorporate class labels to guide the embedding: supervised UMAP pulls same-class points together and pushes different-class points apart. The embedding becomes more class-discriminative, making it useful as a feature extractor before classification. A metric parameter controls the relative weight of supervised vs unsupervised signal.</p>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.datasets import load_digits
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+import umap
+
+X, y = load_digits(return_X_y=True)
+X = StandardScaler().fit_transform(X)
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.3, random_state=42)
+
+fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+# Unsupervised UMAP
+unsup = umap.UMAP(n_neighbors=15, min_dist=0.1, random_state=42)
+X_tr_u = unsup.fit_transform(X_train)
+X_te_u = unsup.transform(X_test)
+axes[0].scatter(X_tr_u[:, 0], X_tr_u[:, 1], c=y_train, cmap='tab10', s=10, alpha=0.6)
+axes[0].set_title('Unsupervised UMAP (train)')
+
+# Supervised UMAP (pass y to fit)
+sup = umap.UMAP(n_neighbors=15, min_dist=0.1, random_state=42)
+X_tr_s = sup.fit_transform(X_train, y=y_train)  # labels guide embedding
+X_te_s = sup.transform(X_test)
+axes[1].scatter(X_tr_s[:, 0], X_tr_s[:, 1], c=y_train, cmap='tab10', s=10, alpha=0.6)
+axes[1].set_title('Supervised UMAP (train) — cleaner separation')
+axes[2].scatter(X_te_s[:, 0], X_te_s[:, 1], c=y_test, cmap='tab10', s=10, alpha=0.6)
+axes[2].set_title('Supervised UMAP (test) — out-of-sample')
+
+plt.suptitle('Supervised vs Unsupervised UMAP')
+plt.tight_layout()
+plt.show()
+</code></pre>
+<h2>Parametric UMAP</h2>
+<p>Standard UMAP is a non-parametric embedding — it cannot directly embed new points without refitting. Parametric UMAP trains a neural network encoder that approximates the UMAP mapping, enabling fast out-of-sample inference and providing a continuous, differentiable latent space. It is particularly useful for online learning scenarios or when combining dimensionality reduction with downstream neural models.</p>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.datasets import load_digits
+from sklearn.preprocessing import StandardScaler
+
+X, y = load_digits(return_X_y=True)
+X = StandardScaler().fit_transform(X).astype(np.float32)
+
+try:
+    import tensorflow as tf
+    from umap.parametric_umap import ParametricUMAP
+
+    encoder = tf.keras.Sequential([
+        tf.keras.layers.Dense(128, activation='relu', input_shape=(64,)),
+        tf.keras.layers.Dense(64, activation='relu'),
+        tf.keras.layers.Dense(2)
+    ])
+
+    p_umap = ParametricUMAP(
+        encoder=encoder,
+        n_components=2,
+        n_epochs=50,
+        batch_size=64,
+        random_state=42
+    )
+    X_emb = p_umap.fit_transform(X)
+    print(f'Embedding shape: {X_emb.shape}')
+
+    # Fast out-of-sample inference via neural network
+    X_new_emb = p_umap.transform(X[:20])
+    print(f'New points shape: {X_new_emb.shape}')
+
+    plt.figure(figsize=(7, 6))
+    plt.scatter(X_emb[:, 0], X_emb[:, 1], c=y, cmap='tab10', s=15)
+    plt.title('Parametric UMAP (neural encoder)')
+    plt.colorbar(label='Digit class')
+    plt.show()
+except ImportError:
+    print('pip install umap-learn[parametric_umap] tensorflow')
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>PCA</th>
+<th>t-SNE</th>
+<th>UMAP</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Global structure</td>
+<td>Excellent</td>
+<td>Poor</td>
+<td>Good</td>
+</tr>
+<tr>
+<td>Local structure</td>
+<td>Moderate</td>
+<td>Excellent</td>
+<td>Excellent</td>
+</tr>
+<tr>
+<td>Speed (n=50k)</td>
+<td>Fast</td>
+<td>Slow (~hours)</td>
+<td>Fast (~minutes)</td>
+</tr>
+<tr>
+<td>Deterministic</td>
+<td>Yes</td>
+<td>No</td>
+<td>Yes (fixed seed)</td>
+</tr>
+<tr>
+<td>New point projection</td>
+<td>Yes</td>
+<td>No</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Cluster separation</td>
+<td>Poor</td>
+<td>Good</td>
+<td>Very good</td>
+</tr>
+<tr>
+<td>Scalability</td>
+<td>Yes (sparse SVD)</td>
+<td>No</td>
+<td>Yes (approximate NN)</td>
+</tr>
+</tbody>
+</table>
+<h2>UMAP for Downstream Tasks</h2>
+<p>Unlike t-SNE, UMAP can embed new (unseen) points using the transform() method without refitting. This makes it viable as a preprocessing step before classification or clustering: fit on training data, transform test data, then train a classifier in the low-dimensional space. For clustering, use min_dist=0.0 and n_neighbors=30 to produce compact, well-separated clusters that feed cleanly into HDBSCAN or k-means.</p>
+<hr />
+<blockquote>
+<p><strong>Reproducibility</strong>: UMAP is deterministic when random_state is set AND when using a single thread (n_jobs=1). Multi-threaded runs may produce slightly different results. For publication-quality figures, always set random_state and n_jobs=1, or save the embedding and reload it.</p>
+</blockquote>
+    </article>
+  </main>
+</body>
+</html>

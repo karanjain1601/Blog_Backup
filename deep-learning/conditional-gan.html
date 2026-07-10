@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Conditional GAN (cGAN) — Class-Conditional and Projection Discriminator | Notes Backup</title>
+  <meta name="description" content="Condition both generator G(z,y) and discriminator D(x,y) on class label y; derive the projection discriminator D(x,y)=phi(x)^T V_y + psi(phi(x)); implement class-conditional BatchNorm as used in BigGAN; and apply the truncation trick to trade sample quality for diversity." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Conditional GAN (cGAN) — Class-Conditional and Projection Discriminator</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Condition both generator G(z,y) and discriminator D(x,y) on class label y; derive the projection discriminator D(x,y)=phi(x)^T V_y + psi(phi(x)); implement class-conditional BatchNorm as used in BigGAN; and apply the truncation trick to trade sample quality for diversity.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Conditional GAN (cGAN) — Class-Conditional and Projection Discriminator</h1>
+<p>A conditional GAN (cGAN) extends the vanilla GAN by supplying both the generator G and discriminator D with a conditioning signal y — typically a class label. The generator learns G: (z,y) → x, producing images belonging to class y. The discriminator learns to distinguish real (x,y) pairs from fake ones. Conditioning enables class-specific generation, reduces within-class sample diversity, and allows controllable synthesis — the foundation for large-scale models such as BigGAN and modern text-conditional diffusion models.</p>
+<h2>Conditioning Generator and Discriminator</h2>
+<p>The simplest strategy embeds y into a dense vector via a learned nn.Embedding, then concatenates it to the noise vector z before feeding G. For D, the label embedding is concatenated to the flattened image. Embedding dimension (50–256) is a hyperparameter. The objective remains the standard GAN loss — BCE or hinge — with the pair (x,y) as input rather than x alone. This approach is called label concatenation conditioning and serves as the baseline against which projection discriminators are compared.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class ConditionalGenerator(nn.Module):
+    def __init__(self, z_dim=100, n_classes=10, img_dim=784, embed_dim=50):
+        super().__init__()
+        self.label_embed = nn.Embedding(n_classes, embed_dim)
+        self.net = nn.Sequential(
+            nn.Linear(z_dim + embed_dim, 256), nn.LeakyReLU(0.2),
+            nn.Linear(256, 512), nn.LeakyReLU(0.2),
+            nn.Linear(512, img_dim), nn.Tanh())
+    def forward(self, z, labels):
+        return self.net(torch.cat([z, self.label_embed(labels)], 1))
+
+class ConditionalDiscriminator(nn.Module):
+    def __init__(self, n_classes=10, img_dim=784, embed_dim=50):
+        super().__init__()
+        self.label_embed = nn.Embedding(n_classes, embed_dim)
+        self.net = nn.Sequential(
+            nn.Linear(img_dim + embed_dim, 512), nn.LeakyReLU(0.2),
+            nn.Linear(512, 256), nn.LeakyReLU(0.2),
+            nn.Linear(256, 1))
+    def forward(self, x, labels):
+        return self.net(torch.cat([x, self.label_embed(labels)], 1))
+
+torch.manual_seed(0)
+G, D = ConditionalGenerator(), ConditionalDiscriminator()
+z = torch.randn(8, 100)
+labels = torch.randint(0, 10, (8,))
+fake = G(z, labels)
+score = D(fake.detach(), labels)
+print('Fake shape:', fake.shape, '| Score shape:', score.shape)
+</code></pre>
+<h2>Projection Discriminator (Miyato 2018)</h2>
+<p>Concatenating the label embedding to D's input treats x and y symmetrically, ignoring their different statistical roles. The projection discriminator (Miyato &amp; Koyama 2018) computes D(x,y) = φ(x)ᵀV_y + ψ(φ(x)), where φ is a deep feature extractor, V is the label embedding matrix, and ψ is an unconditional linear head. The inner product φ(x)ᵀV_y directly scores how well image features align with the class embedding — a principled factorisation grounded in the theory of energy-based models that empirically achieves lower FID than concatenation conditioning.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class ProjectionDiscriminator(nn.Module):
+    '''Miyato &amp; Koyama 2018: D(x,y) = phi(x)^T V_y + psi(phi(x)).'''
+    def __init__(self, feature_dim=256, n_classes=10):
+        super().__init__()
+        self.phi = nn.Sequential(
+            nn.Linear(784, 512), nn.LeakyReLU(0.2),
+            nn.Linear(512, feature_dim), nn.LeakyReLU(0.2))
+        self.V   = nn.Embedding(n_classes, feature_dim)  # label matrix
+        self.psi = nn.Linear(feature_dim, 1)             # unconditional head
+
+    def forward(self, x, labels):
+        h   = self.phi(x)                         # (B, feature_dim)
+        v_y = self.V(labels)                      # (B, feature_dim)
+        proj   = (h * v_y).sum(1, keepdim=True)  # inner product (B, 1)
+        uncond = self.psi(h)                      # bias term    (B, 1)
+        return proj + uncond
+
+torch.manual_seed(1)
+D_proj = ProjectionDiscriminator()
+x = torch.randn(8, 784)
+labels = torch.randint(0, 10, (8,))
+out = D_proj(x, labels)
+print('Projection D output shape:', out.shape)  # (8, 1)
+</code></pre>
+<h2>Class-Conditional Batch Normalization</h2>
+<p>Class-conditional BatchNorm (cBN) uses a separate (γ_y, β_y) pair for each class y instead of global γ and β. Features are normalised across the batch as usual, but the affine transform is class-specific: h = γ_y · BN(h) + β_y. BigGAN applies cBN throughout the generator, allowing the network to modulate activations at every layer based on class identity. In BigGAN, γ_y and β_y are linear projections of a shared class embedding rather than direct lookups, making the conditioning parametrically efficient.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class ConditionalBatchNorm(nn.Module):
+    '''Separate gamma/beta per class, as used in BigGAN generator.'''
+    def __init__(self, num_features, n_classes=10):
+        super().__init__()
+        self.bn    = nn.BatchNorm1d(num_features, affine=False)
+        self.gamma = nn.Embedding(n_classes, num_features)
+        self.beta  = nn.Embedding(n_classes, num_features)
+        nn.init.ones_(self.gamma.weight)
+        nn.init.zeros_(self.beta.weight)
+
+    def forward(self, x, labels):
+        out = self.bn(x)
+        g   = self.gamma(labels)  # (B, num_features)
+        b   = self.beta(labels)   # (B, num_features)
+        return g * out + b
+
+cbn = ConditionalBatchNorm(64, 10)
+x   = torch.randn(16, 64)
+y0  = cbn(x, torch.zeros(16, dtype=torch.long))  # class 0
+y1  = cbn(x, torch.ones(16,  dtype=torch.long))  # class 1
+diff = (y0 - y1).abs().mean().item()
+print('Class-0 vs class-1 output diff:', round(diff, 4), '(expect &gt; 0)')
+</code></pre>
+<h2>BigGAN: Large-Scale Conditional Generation</h2>
+<p>BigGAN (Brock et al. 2018) scales conditional GANs to ImageNet 512×512 using batch size 2048, channel multiplier ×4, self-attention at 64×64 resolution, spectral normalisation on D, and orthogonal regularisation on weights. Class-conditional BatchNorm is applied at every residual block in G, with γ_y and β_y computed from a shared class embedding concatenated to z. BigGAN achieves FID ~7 on ImageNet 128×128 versus ~28 for the prior best — demonstrating that scale and well-designed conditioning together close much of the realism gap.</p>
+<blockquote>
+<p><strong>BigGAN Truncation and Class Leakage</strong>: BigGAN uses truncated Normal sampling at test time (truncation trick) and observes a trade-off: smaller truncation threshold gives sharper but less diverse images. A known failure mode is class leakage — generating features from nearby classes — which worsens at high truncation. BigGAN mitigates this by training with orthogonal regularisation that keeps weights on the unit sphere, reducing mode collapse and leakage.</p>
+</blockquote>
+<h2>Truncation Trick: Quality vs Diversity</h2>
+<p>The truncation trick samples z from a truncated Normal: reject samples with ‖z‖/√d &gt; τ and resample. Small τ constrains z to a high-density region of N(0,I), so G maps it to high-quality typical images. Large τ allows rare z values, increasing diversity but risking artefacts. The FID–IS trade-off as τ varies traces a Pareto frontier. Truncation is a test-time technique; G is trained without it, then truncation is applied only during evaluation or generation.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+
+def truncated_sample(G, n_classes=10, n_samples=8,
+                     z_dim=100, thresholds=(0.3, 0.7, 1.0, 1.5)):
+    '''Sample z from truncated Normal; report diversity per threshold.'''
+    G.eval()
+    for tau in thresholds:
+        pool  = torch.randn(n_samples * 200, z_dim)
+        norms = pool.norm(dim=1) / np.sqrt(z_dim)
+        ok = pool[norms &lt; tau]
+        ok = ok[:n_samples] if len(ok) &gt;= n_samples else pool[:n_samples]
+        lbl = torch.randint(0, n_classes, (len(ok),))
+        with torch.no_grad():
+            fake = G(ok, lbl)
+        print('tau={:.1f}  accepted={}  fake_std={:.4f}'.format(
+              tau, len(ok), fake.std().item()))
+
+G_demo = ConditionalGenerator()
+truncated_sample(G_demo)
+print('Lower tau: fewer outlier z -&gt; higher quality, lower diversity')
+</code></pre>
+<h2>Text and Cross-Attention Conditioning</h2>
+<p>Modern text-conditional generation replaces the class embedding with a rich text encoder. CLIP encodes a text prompt into a 512-d vector that serves as the conditioning signal — passed to G via projection or cross-attention. In cross-attention conditioning (LDM/Stable Diffusion), queries come from spatial image features and keys/values from the text embedding, allowing the model to attend to specific words for specific regions. CLIP conditioning also enables zero-shot generation: describe any concept in text and generate samples without class-specific training data.</p>
+<ul>
+<li>Label concatenation: embed y, concatenate to z and D input — simplest approach for small n_classes.</li>
+<li>Projection D: D(x,y)=phi(x)^T V_y + psi(phi(x)) — principled inner-product factorisation, better FID.</li>
+<li>Class-conditional BN: per-class gamma/beta at every layer — BigGAN approach for large-scale generation.</li>
+<li>Truncation trick: sample z from truncated Normal at test time — trades diversity for quality.</li>
+<li>CLIP conditioning: text embedding as y — enables open-vocabulary zero-shot generation.</li>
+<li>Cross-attention: attend over text tokens at each spatial scale — Stable Diffusion / LDM architecture.</li>
+</ul>
+<h2>Unconditional vs Conditional GAN Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Aspect</th>
+<th>Unconditional GAN</th>
+<th>cGAN (concat)</th>
+<th>Projection D</th>
+<th>BigGAN</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Label input</td>
+<td>None</td>
+<td>concat to z and D input</td>
+<td>inner product in D only</td>
+<td>cBN + shared class embed</td>
+</tr>
+<tr>
+<td>Controls class</td>
+<td>No</td>
+<td>Yes</td>
+<td>Yes</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>BN conditioning</td>
+<td>Standard BN</td>
+<td>Standard BN</td>
+<td>Standard BN</td>
+<td>Class-conditional BN</td>
+</tr>
+<tr>
+<td>FID CIFAR-10 (approx)</td>
+<td>20–30</td>
+<td>12–18</td>
+<td>9–14</td>
+<td>7–9</td>
+</tr>
+<tr>
+<td>Strengths</td>
+<td>Simple baseline</td>
+<td>Easy to implement</td>
+<td>Principled, better FID</td>
+<td>SOTA quality at scale</td>
+</tr>
+</tbody>
+</table>
+<p>The projection discriminator and class-conditional BatchNorm are complementary: the former improves how D uses the label, while the latter improves how G uses it. Combined in BigGAN, they achieve substantially better class-conditional FID than naive concatenation, setting the standard for large-scale conditional image synthesis before the diffusion era.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

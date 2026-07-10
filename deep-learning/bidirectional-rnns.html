@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bidirectional RNNs — Forward and Backward Pass Concatenation | Notes Backup</title>
+  <meta name="description" content="Bidirectional LSTMs run a forward RNN left-to-right and a backward RNN right-to-left, concatenating hidden states at each position to give full-sequence context. Covers manual BiLSTM construction, PyTorch shape handling, pack_padded_sequence for variable-length batching, and BiLSTM for NER token classification." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Bidirectional RNNs — Forward and Backward Pass Concatenation</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Bidirectional LSTMs run a forward RNN left-to-right and a backward RNN right-to-left, concatenating hidden states at each position to give full-sequence context. Covers manual BiLSTM construction, PyTorch shape handling, pack_padded_sequence for variable-length batching, and BiLSTM for NER token classification.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Bidirectional RNNs — Forward and Backward Pass Concatenation</h1>
+<p>A unidirectional RNN computes ht from x1, x2, ..., xt — each position sees only past context. Many tasks (named entity recognition, machine translation encoding, sentiment analysis) benefit from knowing the full sequence at every position. Bidirectional RNNs run two RNNs on the same sequence: one processes left to right (forward), one right to left (backward). Their hidden states are concatenated at each step, giving [h→t, h←t] — a representation that has seen both past and future context.</p>
+<h2>Unidirectional vs Bidirectional Context</h2>
+<p>In the forward direction h→t depends on x1...xt; in the backward direction h←t depends on xT...xt. Concatenating them at each position gives access to the full context x1...xT from both ends. This is crucial for tasks where the meaning of a word depends on what comes after it: in 'I went to the bank to withdraw cash' vs 'I sat by the river bank', the word 'bank' cannot be classified without seeing downstream context. Bidirectional processing makes this information available at every position simultaneously.</p>
+<h2>Manual BiLSTM — Forward and Backward Concatenation</h2>
+<p>Implementing BiLSTM manually clarifies exactly what concatenation happens where. The forward LSTM processes the sequence normally. The backward LSTM processes the time-reversed sequence, then its outputs are re-aligned to the original time axis by reversing again. At each position t, the output is [fwd_outt, bwd_outt] ∈ ℝ²ᴴ. The final hidden state for a classifier is typically [h→T, h←1] — the forward final step and the backward final step (which processed x1).</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def manual_bilstm(x, input_size, hidden_size, seed=0):
+    &quot;&quot;&quot;Run forward + backward LSTMs and concatenate outputs at each step.&quot;&quot;&quot;
+    torch.manual_seed(seed)
+    fwd = nn.LSTM(input_size, hidden_size, batch_first=True)
+    bwd = nn.LSTM(input_size, hidden_size, batch_first=True)
+
+    fwd_out, (fwd_h, _) = fwd(x)                       # (B, T, H) left-to-right
+    x_rev = torch.flip(x, dims=[1])                    # reverse sequence
+    bwd_out_rev, (bwd_h, _) = bwd(x_rev)               # (B, T, H) right-to-left
+    bwd_out = torch.flip(bwd_out_rev, dims=[1])         # re-align to original time axis
+
+    combined = torch.cat([fwd_out, bwd_out], dim=2)    # (B, T, 2H)
+    final_h  = torch.cat([fwd_h, bwd_h], dim=2)        # (1, B, 2H)
+    return combined, final_h
+
+B, T, I, H = 4, 10, 8, 16
+torch.manual_seed(99)
+x = torch.randn(B, T, I)
+out, h = manual_bilstm(x, I, H)
+
+print('Manual BiLSTM:')
+print('  Input:        {}'.format(tuple(x.shape)))
+print('  Output:       {}  (fwd+bwd context at each position)'.format(tuple(out.shape)))
+print('  Final hidden: {}'.format(tuple(h.shape)))
+print()
+print('  t=0:   forward has seen x[0] only; backward has seen full sequence')
+print('  t=T/2: both directions have partial context -- richest representation')
+print('  t=T-1: forward has seen full sequence; backward has seen x[T-1] only')
+</code></pre>
+<h2>PyTorch Built-in — Shape Guide</h2>
+<p>PyTorch's nn.LSTM with bidirectional=True handles the forward and backward passes internally. The output tensor has shape (B, T, 2<em>H) and h_n has shape (2</em>num_layers, B, H) where directions are interleaved: h_n[0] is the forward final hidden, h_n[1] is the backward final hidden. Understanding these shape conventions prevents the common bug of accidentally using only the forward or only the backward hidden for downstream tasks.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+torch.manual_seed(0)
+B, T, I, H = 4, 15, 8, 16
+
+bilstm = nn.LSTM(input_size=I, hidden_size=H, num_layers=1,
+                 bidirectional=True, batch_first=True)
+
+x = torch.randn(B, T, I)
+out, (h_n, c_n) = bilstm(x)
+
+print('Shape guide for nn.LSTM(bidirectional=True, batch_first=True):')
+print('  x   {}'.format(tuple(x.shape)))
+print('  out {}  &lt;- 2*H per position'.format(tuple(out.shape)))
+print('  h_n {}  &lt;- [fwd_last, bwd_last] stacked on dim 0'.format(tuple(h_n.shape)))
+print('  c_n {}'.format(tuple(c_n.shape)))
+print()
+h_fwd = h_n[0]                              # (B, H) last forward hidden
+h_bwd = h_n[1]                              # (B, H) last backward hidden
+h_cat = torch.cat([h_fwd, h_bwd], dim=1)   # (B, 2H) for classifier
+print('  h_fwd {}  &lt;- final forward hidden (reads from x[T-1])'.format(tuple(h_fwd.shape)))
+print('  h_bwd {}  &lt;- final backward hidden (reads from x[0])'.format(tuple(h_bwd.shape)))
+print('  h_cat {}   &lt;- concatenated for sentence-level classifier'.format(tuple(h_cat.shape)))
+out_fwd = out[:, :, :H]
+out_bwd = out[:, :, H:]
+print('  out_fwd {}  per-step forward outputs'.format(tuple(out_fwd.shape)))
+print('  out_bwd {}  per-step backward outputs'.format(tuple(out_bwd.shape)))
+</code></pre>
+<h2>Efficient Batching with pack_padded_sequence</h2>
+<p>Variable-length sequences in a batch must be padded to the same length, creating wasted computation on padding tokens. PyTorch's pack_padded_sequence removes padding before the LSTM, passing only real tokens through the recurrent computation. The LSTM processes a compressed representation and pad_packed_sequence restores the padded form afterward. For bidirectional LSTMs with variable-length sequences, this optimization is especially important since both directions process the same padding.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence, pad_sequence
+
+def batch_variable_length(lengths, input_size=4, hidden_size=16):
+    torch.manual_seed(1)
+    seqs = [torch.randn(l, input_size) for l in lengths]
+    bilstm = nn.LSTM(input_size, hidden_size, bidirectional=True, batch_first=True)
+
+    seqs_sorted = sorted(seqs, key=len, reverse=True)
+    len_sorted  = sorted(lengths, reverse=True)
+    len_tensor  = torch.tensor(len_sorted)
+
+    padded = pad_sequence(seqs_sorted, batch_first=True, padding_value=0.0)
+    wasted = padded.numel() - sum(l * input_size for l in len_sorted)
+    print('Padded batch: {}  ({} wasted elements)'.format(tuple(padded.shape), wasted))
+
+    packed = pack_padded_sequence(padded, len_tensor, batch_first=True)
+    out_packed, (h_n, _) = bilstm(packed)
+    print('Packed data:  {}  (no wasted computation)'.format(tuple(packed.data.shape)))
+
+    out_pad, out_lens = pad_packed_sequence(out_packed, batch_first=True)
+    print('Unpacked out: {}  actual lengths: {}'.format(
+        tuple(out_pad.shape), out_lens.tolist()))
+    print('h_n shape:    {}  &lt;- [fwd_final, bwd_final] x batch'.format(tuple(h_n.shape)))
+
+batch_variable_length(lengths=[12, 8, 5, 3])
+</code></pre>
+<h2>Sequence Labeling — BiLSTM for NER</h2>
+<p>Named entity recognition (NER) requires tagging each token with a label (e.g. B-PER, I-ORG, O using BIO notation). BiLSTM is the canonical pre-Transformer architecture for NER: each token's representation benefits from both left and right context. Two stacked BiLSTM layers are standard — the first captures local syntactic patterns, the second integrates them into higher-level entity representations. A linear classifier on top of each BiLSTM output position produces per-token logits.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class BiLSTMNER(nn.Module):
+    &quot;&quot;&quot;Bidirectional 2-layer LSTM for token-level NER (sequence labeling).&quot;&quot;&quot;
+    def __init__(self, vocab_size, embed_dim, hidden_size, n_tags, pad_idx=0):
+        super().__init__()
+        self.embed  = nn.Embedding(vocab_size, embed_dim, padding_idx=pad_idx)
+        self.bilstm = nn.LSTM(embed_dim, hidden_size, num_layers=2,
+                              bidirectional=True, batch_first=True, dropout=0.3)
+        self.drop   = nn.Dropout(0.5)
+        self.fc     = nn.Linear(2 * hidden_size, n_tags)
+
+    def forward(self, token_ids):
+        emb    = self.drop(self.embed(token_ids))    # (B, T, E)
+        out, _ = self.bilstm(emb)                    # (B, T, 2H)
+        out    = self.drop(out)
+        return self.fc(out)                           # (B, T, n_tags)
+
+torch.manual_seed(42)
+V, E, H, TAGS = 5000, 64, 128, 9   # 9 BIO tags: O + B/I for 4 entity types
+model = BiLSTMNER(V, E, H, TAGS)
+tokens = torch.randint(1, V, (8, 20))      # batch=8, seq_len=20
+labels = torch.randint(0, TAGS, (8, 20))
+
+logits = model(tokens)
+loss = nn.CrossEntropyLoss()(logits.view(-1, TAGS), labels.view(-1))
+print('BiLSTM-NER (2-layer, bidirectional):')
+print('  Input tokens: {}'.format(tuple(tokens.shape)))
+print('  Output logits: {}  (per-token tag scores)'.format(tuple(logits.shape)))
+print('  Loss: {:.4f}'.format(loss.item()))
+print('  Params: {:,}'.format(sum(p.numel() for p in model.parameters())))
+</code></pre>
+<blockquote>
+<p><strong>BiRNN Cannot Be Used Autoregressively</strong>: Bidirectional RNNs require the full input sequence to be available before processing — they cannot generate output tokens one at a time because the backward pass has not run yet. This makes them unsuitable for autoregressive generation (language modeling, machine translation decoding). They are appropriate only for encoding tasks where the full input is known: classification, tagging, named entity recognition, or as the encoder in encoder-decoder architectures.</p>
+</blockquote>
+<h2>Unidirectional vs Bidirectional Comparison</h2>
+<p>The choice between unidirectional and bidirectional depends primarily on whether future context is available at inference time. For sequence encoding tasks (classification, tagging, translation encoding) bidirectional is almost always better. For generation tasks it is impossible. Memory doubles because there are two sets of hidden states, and training is slower but generally produces significantly better representations for fixed-input tasks.</p>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Unidirectional</th>
+<th>Bidirectional</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Context at t</td>
+<td>x1...xt (causal only)</td>
+<td>x1...xT (full sequence)</td>
+</tr>
+<tr>
+<td>Autoregressive generation</td>
+<td>Yes — outputs token by token</td>
+<td>No — needs full input first</td>
+</tr>
+<tr>
+<td>Memory (H=128)</td>
+<td>128 per step</td>
+<td>256 per step (2x)</td>
+</tr>
+<tr>
+<td>Training speed</td>
+<td>Faster (1 LSTM pass)</td>
+<td>~2x slower (2 LSTM passes)</td>
+</tr>
+<tr>
+<td>NER / tagging</td>
+<td>Weaker — no right context</td>
+<td>Standard choice — both contexts</td>
+</tr>
+<tr>
+<td>Language model</td>
+<td>Standard — causal constraint</td>
+<td>Not applicable for generation</td>
+</tr>
+<tr>
+<td>Encoder in seq2seq</td>
+<td>Common</td>
+<td>Preferred — richer source repr</td>
+</tr>
+</tbody>
+</table>
+<h2>Applications and Common Patterns</h2>
+<p>BiLSTM is used as the encoder in many NLP architectures: BiLSTM-CRF for NER (add a Conditional Random Field on top of BiLSTM logits to enforce label consistency), BiLSTM + attention for text classification, and BiLSTM encoder + unidirectional LSTM decoder for sequence-to-sequence tasks (machine translation before Transformers). BERT pre-trains bidirectional Transformer encoders rather than BiLSTMs, but the core idea — full context at every position — is the same.</p>
+<ul>
+<li>BiLSTM-CRF: gold standard pre-Transformer NER — BiLSTM features + Viterbi decoding.</li>
+<li>BiLSTM encoder + unidirectional decoder: standard seq2seq for translation (Bahdanau 2015).</li>
+<li>DeepSpeech: stacked BiLSTMs for acoustic modeling in speech recognition.</li>
+<li>ELMo: deep BiLSTM language model used as contextual word embeddings (Peters et al. 2018).</li>
+<li>Sentiment analysis: BiLSTM over sentence with max-pool or attention over all positions.</li>
+<li>Document encoding: hierarchical BiLSTM — word-level then sentence-level.</li>
+</ul>
+<p>Bidirectional processing is one of the most reliable improvements available for any fixed-input sequence task. The engineering cost is minimal (one flag in PyTorch, careful shape handling for h_n) while the accuracy gain from full context can be substantial. Modern Transformer encoders are also bidirectional by nature — BERT's self-attention attends to all positions simultaneously — making BiLSTM understanding directly relevant to interpreting why encoder-only Transformers work so well.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Open-Vocabulary Segmentation: Beyond Fixed Category Sets | Notes Backup</title>
+  <meta name="description" content="Open-vocabulary segmentation uses vision-language models to segment arbitrary text-specified categories at test time — enabling zero-shot and open-world dense prediction." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Open-Vocabulary Segmentation: Beyond Fixed Category Sets</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Open-vocabulary segmentation uses vision-language models to segment arbitrary text-specified categories at test time — enabling zero-shot and open-world dense prediction.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Open-Vocabulary Segmentation: Beyond Fixed Category Sets</h1>
+<h2>Overview</h2>
+<p>Open-vocabulary segmentation enables models to segment image regions corresponding to arbitrary category names specified at inference time. Unlike traditional models trained on fixed label sets, these systems generalize to unseen categories by grounding visual regions in the shared embedding space of vision-language models like CLIP.</p>
+<p>The core insight is that CLIP’s contrastive pre-training aligns image and text representations in a shared latent space. Segmentation models exploit this by using text embeddings of class names as dynamic classifier weights — swapping in any set of category names at test time without retraining the underlying vision backbone.</p>
+<h2>Closed vs Open Vocabulary</h2>
+<p>Closed-vocabulary models such as DeepLab or Mask R-CNN are trained end-to-end on a fixed ontology — typically 80 COCO or 150 ADE20K categories. The final classification head is a learned linear layer with category-specific weights. Adding a new class requires fine-tuning on labeled examples, making deployment to new domains expensive.</p>
+<p>Open-vocabulary models replace fixed classifier weights with text-derived embeddings. Given any category name — even one never encountered during training — the model computes a text embedding and uses it as a query against visual features. This zero-shot capability suits specialized domains like medical imaging, satellite analysis, or retail.</p>
+<h2>CLIP-Based Mask Classification</h2>
+<p>The standard pipeline for CLIP-based segmentation extracts region proposals using a class-agnostic network, then classifies each region independently. Each crop is encoded by the CLIP image encoder, and cosine similarity is computed against text embeddings of all candidate class names to assign the highest-scoring label to each region.</p>
+<pre><code class="language-python">import torch
+import clip
+
+def classify_proposals(proposals, class_names, clip_model):
+    text_tokens = clip.tokenize(class_names)
+    text_feats = clip_model.encode_text(text_tokens)
+    text_feats = text_feats / text_feats.norm(dim=-1, keepdim=True)
+    results = []
+    for region in proposals:
+        img_feat = clip_model.encode_image(region)
+        img_feat = img_feat / img_feat.norm(dim=-1, keepdim=True)
+        sims = img_feat @ text_feats.T
+        results.append(class_names[sims.argmax()])
+    return results
+</code></pre>
+<p>A key challenge is the region-level versus image-level mismatch: CLIP was trained on full images paired with captions, not on cropped regions. Models like MaskCLIP and RegionCLIP address this by generating region-level pseudo-labels during pre-training, or by using attention maps and modified pooling to align cropped features with CLIP’s training distribution.</p>
+<h2>FC-CLIP and Unified Architectures</h2>
+<p>FC-CLIP unifies proposal generation and mask classification into a single forward pass using one shared CLIP backbone. Earlier two-stage systems encoded proposals and full images with separate encoders, causing feature inconsistency. FC-CLIP feeds the image through CLIP once, producing per-pixel features used for both mask proposal generation and classification.</p>
+<pre><code class="language-python">class FCCLIP(nn.Module):
+    def forward(self, image, class_names):
+        # Shared CLIP backbone -&gt; per-pixel features
+        pixel_feats = self.clip_backbone(image)
+        # Mask proposals from query transformer
+        mask_proposals, query_feats = self.mask_transformer(pixel_feats)
+        # Text embeddings as classifier weights
+        text_feats = self.encode_text(class_names)
+        text_feats = text_feats / text_feats.norm(dim=-1, keepdim=True)
+        # Cosine similarity for classification
+        query_feats = query_feats / query_feats.norm(dim=-1, keepdim=True)
+        logits = query_feats @ text_feats.T
+        return mask_proposals, logits
+</code></pre>
+<blockquote>
+<p><strong>info</strong>: Open-vocabulary segmentation repurposes CLIP’s cross-modal alignment for dense prediction — text embeddings of class names serve as classifier weights. The model never sees novel class images during training, yet segments them at test time via language.</p>
+</blockquote>
+<h2>Evaluation on Novel Categories</h2>
+<p>Evaluating zero-shot generalization requires held-out novel categories unseen during training. A standard protocol uses COCO panoptic classes as seen categories and evaluates on LVIS rare categories or PASCAL VOC as novel targets. The primary metric is mean Intersection-over-Union (mIoU) computed exclusively over novel class predictions and ground truth.</p>
+<pre><code class="language-python">seen_classes = coco_80  # 80 COCO categories used in training
+novel_classes = coco_80_to_lvis_novel  # 300+ LVIS not in COCO
+
+# Test on novel categories without retraining
+model = load_checkpoint(&quot;fc_clip_coco.pth&quot;)
+results = []
+for image, gt_mask in novel_eval_loader:
+    pred = model(image, novel_classes)
+    results.append(compute_miou(pred, gt_mask, novel_classes))
+
+# Metric: mIoU on novel categories only
+novel_miou = sum(results) / len(results)
+print(f&quot;Novel category mIoU: {novel_miou:.2f}&quot;)
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Backbone</th>
+<th>COCO (A-150) mIoU</th>
+<th>ADE20K mIoU</th>
+<th>Novel Categories</th>
+<th>Zero-shot?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SPNet</td>
+<td>ResNet-101</td>
+<td>15.7</td>
+<td>11.4</td>
+<td>495</td>
+<td>No</td>
+</tr>
+<tr>
+<td>ZegFormer</td>
+<td>ResNet-101</td>
+<td>36.6</td>
+<td>16.4</td>
+<td>847</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>FC-CLIP</td>
+<td>ConvNeXt-L</td>
+<td>54.4</td>
+<td>26.8</td>
+<td>1203+</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>ODISE</td>
+<td>Stable Diffusion</td>
+<td>55.3</td>
+<td>29.9</td>
+<td>1203+</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>OpenSeg</td>
+<td>ViT-L</td>
+<td>42.1</td>
+<td>15.3</td>
+<td>1203+</td>
+<td>Yes</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-python">from fc_clip import load_fc_clip
+
+model = load_fc_clip(&quot;fc_clip_coco.pth&quot;)
+image = load_image(&quot;street_scene.jpg&quot;)
+
+text_queries = [&quot;traffic cone&quot;, &quot;surgical mask&quot;, &quot;holographic fan&quot;]
+
+masks, scores = model(image, text_queries)
+
+for query, mask, score in zip(text_queries, masks, scores):
+    print(f&quot;{query}: confidence={score:.3f}, area={mask.sum().item()}&quot;)
+    visualize_mask(image, mask, label=query)
+</code></pre>
+<p>Generalized zero-shot evaluation is more demanding: the model distinguishes between seen and novel categories simultaneously without prior knowledge of which type a region belongs to. The harmonic mean of seen and novel mIoU (HM) is the standard metric for this setting, penalizing models that collapse novel category predictions onto the nearest seen class.</p>
+<h2>Key Takeaways</h2>
+<p>Open-vocabulary segmentation bridges dense prediction and language-grounded understanding. Replacing fixed classifier heads with text-embedding classifiers enables zero-shot generalization to novel categories, making these models suitable for open-world deployment where the target ontology evolves or is entirely unknown at training time.</p>
+<p>Unified architectures like FC-CLIP demonstrate that single-encoder designs reduce feature inconsistency between proposal and classification stages while achieving competitive efficiency. The key design principle is to maximize reuse of the CLIP backbone’s pre-trained representations rather than adding category-specific components that limit generalization.</p>
+<p>Remaining challenges include fine-grained category disambiguation, handling overlapping class hierarchies, and scaling to large ontologies at inference time. Future directions encompass retrieval-augmented classification, hierarchical text embeddings for part-whole reasoning, and grounded video segmentation across temporally consistent open-vocabulary masks.</p>
+    </article>
+  </main>
+</body>
+</html>

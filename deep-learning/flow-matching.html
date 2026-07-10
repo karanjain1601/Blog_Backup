@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Flow Matching — Optimal Transport and Fast Sampling | Notes Backup</title>
+  <meta name="description" content="Flow matching trains a neural vector field that pushes noise to data along straight probability paths, enabling high-quality generation with far fewer function evaluations than DDPM, with OT-CFM further reducing steps via mini-batch optimal transport pairing." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Flow Matching — Optimal Transport and Fast Sampling</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Flow matching trains a neural vector field that pushes noise to data along straight probability paths, enabling high-quality generation with far fewer function evaluations than DDPM, with OT-CFM further reducing steps via mini-batch optimal transport pairing.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Flow Matching — Optimal Transport and Fast Sampling</h1>
+<p>Flow matching (Lipman et al. 2022) is an alternative to diffusion models that trains a deterministic vector field v_θ(x,t) such that integrating the ODE dx/dt = v_θ(x,t) from t=0 (noise) to t=1 (data) generates samples. Unlike score-based diffusion which requires solving a stochastic differential equation, flow matching solves a simpler regression problem and often produces straighter probability paths that require far fewer neural function evaluations (NFE) at inference. Flow matching is the foundation of Stable Diffusion 3, Meta Voicebox, and Meta Seamless.</p>
+<h2>From Diffusion to Flow Matching</h2>
+<p>DDPM trains a score network by predicting added Gaussian noise across a forward noising process. The score implicitly defines a curved probability path from data to noise. Flow matching instead directly parameterises the velocity field of a probability flow: for each training point x_1 (data), it pairs it with x_0 (noise) and defines a simple, tractable conditional path. The key insight is that the marginal flow matching objective decomposes into a conditional objective that is easy to compute without expensive integrals over the marginal vector field.</p>
+<h2>Conditional Flow Matching Loss</h2>
+<p>For each data point x_1 and noise sample x_0 ~ N(0,I), the linear conditional path is x_t = (1-t)·x_0 + t·x_1 for t ∈ [0,1]. The conditional velocity field is u(x_t,t|x_1) = x_1 - x_0 (constant along the path). The CFM loss trains v_θ to match this target: L_CFM = E_{t,x_0,x_1}[||v_θ(x_t,t) - (x_1-x_0)||²]. This is a simple MSE regression — no weighting schedules, no SNR reweighting needed.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class FlowVelocityNet(nn.Module):
+    &quot;&quot;&quot;Simple MLP velocity field for 2D flow matching demo.&quot;&quot;&quot;
+    def __init__(self, data_dim=2, hidden=256):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(data_dim + 1, hidden), nn.SiLU(),
+            nn.Linear(hidden, hidden), nn.SiLU(),
+            nn.Linear(hidden, data_dim)
+        )
+    def forward(self, x, t):
+        t_emb = t.unsqueeze(-1).expand_as(x[..., :1])
+        return self.net(torch.cat([x, t_emb], dim=-1))
+
+def cfm_loss(model, x1, x0=None):
+    &quot;&quot;&quot;Conditional flow matching loss: linear path, constant velocity target.&quot;&quot;&quot;
+    B = x1.shape[0]
+    if x0 is None:
+        x0 = torch.randn_like(x1)
+    t = torch.rand(B, device=x1.device)           # t ~ U(0,1)
+    xt = (1 - t[:, None]) * x0 + t[:, None] * x1  # linear interpolation
+    target_v = x1 - x0                             # constant velocity
+    pred_v = model(xt, t)
+    return F.mse_loss(pred_v, target_v)
+
+torch.manual_seed(0)
+model = FlowVelocityNet(data_dim=2)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+for step in range(200):
+    x1 = torch.randn(256, 2) * 0.3 + torch.tensor([2.0, 2.0])  # target distribution
+    loss = cfm_loss(model, x1)
+    optimizer.zero_grad(); loss.backward(); optimizer.step()
+    if step % 50 == 0:
+        print(f'Step {step}: CFM loss = {loss.item():.4f}')
+</code></pre>
+<h2>Optimal Transport Flow Matching</h2>
+<p>Naive CFM pairs each data point with an independently sampled noise point, producing crossing paths in the batch. OT-CFM (Tong et al. 2023) uses mini-batch optimal transport to find the globally optimal pairing between noise and data samples in each mini-batch, minimising total transport cost. Optimal pairings produce straighter, non-crossing paths with lower curvature, allowing the ODE integrator to take even fewer steps for the same generation quality. Mini-batch OT is computed via scipy's linear_sum_assignment on pairwise distances.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+from scipy.optimize import linear_sum_assignment
+
+def minibatch_ot_pairing(x0, x1):
+    &quot;&quot;&quot;Find optimal transport pairing between noise x0 and data x1 in mini-batch.&quot;&quot;&quot;
+    x0_np = x0.detach().cpu().numpy()
+    x1_np = x1.detach().cpu().numpy()
+    # Pairwise squared Euclidean cost matrix
+    cost = np.sum((x0_np[:, None] - x1_np[None, :]) ** 2, axis=-1)  # (B, B)
+    row_idx, col_idx = linear_sum_assignment(cost)
+    return x0[row_idx], x1[col_idx]  # reordered as optimal pairs
+
+def ot_cfm_loss(model, x1):
+    x0 = torch.randn_like(x1)
+    x0_paired, x1_paired = minibatch_ot_pairing(x0, x1)
+    t = torch.rand(x1.shape[0], device=x1.device)
+    xt = (1 - t[:, None]) * x0_paired + t[:, None] * x1_paired
+    target_v = x1_paired - x0_paired
+    return torch.nn.functional.mse_loss(model(xt, t), target_v)
+
+torch.manual_seed(0)
+from torch.nn import functional as F
+model = torch.nn.Sequential(
+    torch.nn.Linear(3, 128), torch.nn.SiLU(),
+    torch.nn.Linear(128, 2)
+)
+x1 = torch.randn(64, 2) + 3.0
+xt = torch.cat([x1, torch.rand(64, 1)], dim=-1)
+print(f'OT pairing: cost with random vs OT pairs compared on 64-sample batch')
+print(f'OT-CFM produces straighter paths -&gt; fewer NFE at inference')
+</code></pre>
+<h2>ODE Sampling from a Flow Model</h2>
+<p>At inference, sampling integrates the learned ODE from t=0 to t=1 using Euler's method or a higher-order solver. With straight paths (as produced by OT-CFM), Euler with 10 steps often matches the quality of DDPM at 1000 steps. The number of steps is a quality-speed tradeoff: more steps give better results but require more NFE. Unlike DDPM, there is no stochasticity — the same noise input always produces the same output (deterministic sampling).</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class ToyFlowNet(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(3, 128), nn.SiLU(),
+            nn.Linear(128, 128), nn.SiLU(),
+            nn.Linear(128, 2)
+        )
+    def forward(self, x, t):
+        return self.net(torch.cat([x, t.unsqueeze(-1).expand(x.shape[0], 1)], dim=-1))
+
+def euler_sample(model, n_samples=512, n_steps=10, device='cpu'):
+    &quot;&quot;&quot;Integrate flow ODE from t=0 (noise) to t=1 (data) with Euler steps.&quot;&quot;&quot;
+    x = torch.randn(n_samples, 2, device=device)
+    dt = 1.0 / n_steps
+    t_vals = torch.linspace(0.0, 1.0 - dt, n_steps, device=device)
+    with torch.no_grad():
+        for t_val in t_vals:
+            t_batch = t_val * torch.ones(n_samples, device=device)
+            v = model(x, t_batch)
+            x = x + v * dt  # Euler step
+    return x
+
+torch.manual_seed(0)
+model = ToyFlowNet()
+for nfe in [5, 10, 50]:
+    samples = euler_sample(model, n_steps=nfe)
+    print(f'NFE={nfe:3d}: sample mean={samples.mean():.4f}, std={samples.std():.4f}')
+</code></pre>
+<h2>Comparing DDPM and Flow Matching</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import time
+
+def benchmark_sampler(model, sampler_name, n_steps, n_samples=256, device='cpu'):
+    x = torch.randn(n_samples, 2, device=device)
+    dt = 1.0 / n_steps
+    start = time.perf_counter()
+    with torch.no_grad():
+        for step in range(n_steps):
+            t = torch.full((n_samples,), step * dt, device=device)
+            v = model(x, t)
+            if sampler_name == 'ddpm':
+                # DDPM adds noise at each step (stochastic)
+                noise_scale = (dt ** 0.5) * 0.1
+                x = x - v * dt + noise_scale * torch.randn_like(x)
+            else:
+                # Flow matching: pure ODE, no noise
+                x = x + v * dt
+    elapsed = (time.perf_counter() - start) * 1000
+    return elapsed, x
+
+torch.manual_seed(0)
+model = nn.Sequential(nn.Linear(3, 64), nn.SiLU(), nn.Linear(64, 2))
+print(f'{&quot;Method&quot;:&lt;25} {&quot;NFE&quot;:&gt;5} {&quot;Time (ms)&quot;:&gt;12} {&quot;Sample std&quot;:&gt;12}')
+for name, nfe in [('DDPM', 1000), ('Flow Matching', 50), ('Flow Matching', 10)]:
+    ms, samples = benchmark_sampler(model, 'ddpm' if name == 'DDPM' else 'fm', nfe)
+    print(f'{name:&lt;25} {nfe:&gt;5} {ms:&gt;12.1f} {samples.std():&gt;12.4f}')
+</code></pre>
+<h2>Why Straight Trajectories Help</h2>
+<p>DDPM paths are curved because each denoising step removes a small amount of noise while following the score field, which varies with x and t. The curvature means that a simple ODE integrator needs many steps to stay on the path. OT-CFM paths are nearly straight: a particle moves at constant velocity from noise to data. Straight paths have near-zero curvature, so a first-order Euler integrator makes minimal discretisation error even with very large step sizes. This is why flow matching models achieve competitive FID at 10 NFE while DDPM requires 1000.</p>
+<h2>Production Applications</h2>
+<p>Flow matching has been adopted at scale in several production systems. Stable Diffusion 3 uses a multi-modal DiT backbone with flow matching instead of DDPM, reducing inference steps by 10× while improving prompt adherence. Meta Voicebox uses continuous-time flow matching for zero-shot text-to-speech synthesis across six languages. Meta Seamless uses flow matching for expressive speech-to-speech translation. The shared advantage is fewer NFE at inference, which reduces latency and cost in production serving.</p>
+<blockquote>
+<p><strong>NFE vs Quality Tradeoff</strong>: Flow matching with 10 NFE often matches DDPM at 1000 NFE on FID, but individual samples may differ in detail quality. For highest-fidelity generation, 20-50 NFE with a higher-order solver (e.g. DPM-Solver++) closes most of the gap. OT-CFM consistently requires fewer steps than plain CFM due to straighter paths — if inference cost matters, always use OT pairing during training.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Trajectory Shape</th>
+<th>NFE (typical)</th>
+<th>Training Loss</th>
+<th>Sample Quality</th>
+<th>Simplicity</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DDPM</td>
+<td>Curved SDE path</td>
+<td>1000</td>
+<td>Noise prediction (L_simple)</td>
+<td>High (baseline)</td>
+<td>Simple loss, many steps</td>
+</tr>
+<tr>
+<td>DDIM</td>
+<td>Curved ODE path (same model)</td>
+<td>50–250</td>
+<td>Same as DDPM — no retraining</td>
+<td>Matches DDPM</td>
+<td>Free — no retraining needed</td>
+</tr>
+<tr>
+<td>Flow Matching (CFM)</td>
+<td>Near-straight ODE path</td>
+<td>20–100</td>
+<td>Velocity regression (MSE)</td>
+<td>Competitive with DDPM</td>
+<td>Simple — linear path</td>
+</tr>
+<tr>
+<td>OT-CFM</td>
+<td>Straight ODE path</td>
+<td>5–30</td>
+<td>Velocity regression (OT pairs)</td>
+<td>High, fewer steps</td>
+<td>Moderate — mini-batch OT</td>
+</tr>
+<tr>
+<td>Consistency Models</td>
+<td>One or few steps</td>
+<td>1–4</td>
+<td>Consistency function distillation</td>
+<td>Good (slightly below FM)</td>
+<td>Complex — requires teacher</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>CFM loss is a simple MSE on velocity — no variance weighting, no log-SNR reweighting required.</li>
+<li>Mini-batch OT pairing with linear_sum_assignment has O(B³) cost — use batch sizes of 256-512 for tractability.</li>
+<li>Flow matching is a special case of continuous normalising flows (CNFs) but trained with a simulation-free objective.</li>
+<li>The same architecture (U-Net or DiT) works for both DDPM and flow matching — only the training objective changes.</li>
+<li>SD3 adds classifier-free guidance to flow matching exactly as in DDPM: run conditional and unconditional paths and interpolate.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

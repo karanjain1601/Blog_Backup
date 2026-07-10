@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Regularisation — L1, L2, and ElasticNet | Notes Backup</title>
+  <meta name="description" content="Understand Ridge (L2), LASSO (L1), and ElasticNet regularisation from geometric, optimisation, and Bayesian perspectives — including why L1 produces exact zeros while L2 does not, and when ElasticNet is preferred." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Regularisation — L1, L2, and ElasticNet</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Understand Ridge (L2), LASSO (L1), and ElasticNet regularisation from geometric, optimisation, and Bayesian perspectives — including why L1 produces exact zeros while L2 does not, and when ElasticNet is preferred.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Regularisation — L1, L2, and ElasticNet</h1>
+<p>Regularisation modifies the loss function to penalise model complexity, trading higher bias for lower variance. The two most common penalties in linear models are L2 (Ridge) and L1 (LASSO), each with distinct geometric, optimisation, and Bayesian interpretations. ElasticNet combines them to get the benefits of both. Choosing the right penalty depends on the structure of the problem: sparsity in the true model, presence of correlated predictors, and whether interpretability requires explicit feature selection.</p>
+<h2>L2 Regularisation — Ridge</h2>
+<p>Ridge regression minimises ‖y − Xθ‖² + λ‖θ‖². The unique closed-form solution θ̂_ridge = (XᵀX + λI)⁻¹Xᵀy shrinks all coefficients proportionally toward zero. Ridge can be written as a constrained problem: minimise ‖y − Xθ‖² subject to ‖θ‖² ≤ t (the L2 ball — a sphere in ℝᵖ). The SVD of X = UΣVᵀ gives θ̂_ridge = V(Σ² + λI)⁻¹ΣUᵀy — small singular values are shrunk most aggressively. Bayesian interpretation: θ ~ N(0, σ²/λ · I) → MAP = Ridge solution.</p>
+<h2>L1 Regularisation — LASSO</h2>
+<p>LASSO (Least Absolute Shrinkage and Selection Operator) minimises ‖y − Xθ‖² + λ‖θ‖₁. The L1 penalty ‖θ‖₁ = Σ|θⱼ| is not differentiable at zero, so there is no closed form (except for the orthogonal design case). The key geometric property: the L1 ball is a diamond (polytope) with corners on the coordinate axes. The constrained optimum typically lands on a corner, setting some coefficients exactly to zero — producing sparse solutions. For orthogonal X, the LASSO solution is soft-thresholding: θ̂_LASSO,j = sign(θ̂_OLS,j) · max(|θ̂_OLS,j| − λ/2, 0). Bayesian interpretation: θ ~ Laplace(0, 1/λ) → MAP = LASSO solution.</p>
+<blockquote>
+<p><strong>When to Choose L1 vs L2</strong>: Use L1 (LASSO) when you expect the true model to be sparse — only a few features matter. Use L2 (Ridge) when most features contribute and you want stability under multicollinearity. Use ElasticNet when features are highly correlated and you want grouping with some sparsity. As a default starting point, try Ridge first; switch to LASSO or ElasticNet if feature selection is needed.</p>
+</blockquote>
+<h2>ElasticNet</h2>
+<p>ElasticNet combines L1 and L2 penalties: minimise ‖y − Xθ‖² + λ[α‖θ‖₁ + (1−α)‖θ‖²]. The mixing parameter α ∈ [0,1] controls the balance: α=1 gives LASSO, α=0 gives Ridge. ElasticNet handles the two main weaknesses of LASSO: (1) when p &gt; n, LASSO selects at most n variables; ElasticNet can select more; (2) when predictors are highly correlated, LASSO arbitrarily picks one; ElasticNet tends to select groups of correlated predictors together.</p>
+<h2>Geometric Interpretation — Why L1 Sparsifies</h2>
+<p>The constrained form of regularisation reveals the geometry. The unconstrained OLS minimum is at θ̂_OLS. With an L2 constraint, the feasible region is a sphere — the OLS minimum is pulled smoothly onto the sphere boundary, almost never at a coordinate axis. With an L1 constraint, the feasible region is a diamond polytope — its corners are on the coordinate axes. The first contact between the elliptical OLS contours and the L1 ball is most likely at a corner, setting one or more coefficients exactly to zero.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.linear_model import Ridge, Lasso, ElasticNet
+from sklearn.datasets import make_regression
+from sklearn.preprocessing import StandardScaler
+
+np.random.seed(42)
+X, y = make_regression(n_samples=150, n_features=20, n_informative=5,
+                        noise=10.0, random_state=42)
+scaler = StandardScaler()
+X_s = scaler.fit_transform(X)
+
+lam = 1.0
+ridge = Ridge(alpha=lam).fit(X_s, y)
+lasso = Lasso(alpha=lam, max_iter=10000).fit(X_s, y)
+enet  = ElasticNet(alpha=lam, l1_ratio=0.5, max_iter=10000).fit(X_s, y)
+
+print(f'Ridge: {(np.abs(ridge.coef_) &lt; 1e-6).sum()} exact zeros out of 20')
+print(f'LASSO: {(np.abs(lasso.coef_) &lt; 1e-6).sum()} exact zeros out of 20')
+print(f'ElNet: {(np.abs(enet.coef_)  &lt; 1e-6).sum()} exact zeros out of 20')
+
+print(f'\nRidge coef norm: {np.linalg.norm(ridge.coef_):.3f}')
+print(f'LASSO coef norm: {np.linalg.norm(lasso.coef_):.3f}')
+print(f'ElNet  coef norm: {np.linalg.norm(enet.coef_):.3f}')
+
+# Verify: LASSO zeros match low-information features
+print(f'\nLASSO nonzero indices: {np.where(np.abs(lasso.coef_) &gt; 1e-6)[0].tolist()}')
+</code></pre>
+<pre><code class="language-python">import numpy as np
+from sklearn.linear_model import RidgeCV, LassoCV
+from sklearn.datasets import make_regression
+from sklearn.preprocessing import StandardScaler
+
+# Ridge uses SVD shrinkage: theta_ridge = V diag(s^2/(s^2+lam)) diag(1/s) U^T y
+np.random.seed(42)
+X, y = make_regression(n_samples=200, n_features=15, n_informative=5,
+                        noise=10.0, random_state=42)
+X_s = StandardScaler().fit_transform(X)
+
+U, s, Vt = np.linalg.svd(X_s, full_matrices=False)
+print('Singular values of X_s:', np.round(s, 2))
+print('Ridge shrinkage factors s^2/(s^2+lam):')
+for lam in [0.1, 1.0, 10.0, 100.0]:
+    factors = s**2 / (s**2 + lam)
+    print(f'  lambda={lam:&gt;6.1f}: min={factors.min():.3f}, max={factors.max():.3f}')
+
+# Soft-thresholding closed form for orthogonal design
+rng = np.random.RandomState(99)
+X_orth, _ = np.linalg.qr(rng.randn(200, 8))
+X_orth *= np.sqrt(200)
+true_coef = np.array([3.0, 0.0, 2.0, 0.0, -1.5, 0.0, 0.0, 0.8])
+y_orth = X_orth @ true_coef + 0.3 * rng.randn(200)
+theta_ols_orth = (X_orth.T @ y_orth) / 200.0
+lam_st = 0.5
+theta_lasso_orth = np.sign(theta_ols_orth) * np.maximum(np.abs(theta_ols_orth) - lam_st, 0.0)
+print(f'\nOrthogonal LASSO (lam={lam_st}): {np.round(theta_lasso_orth, 3)}')
+print(f'True coefs:                       {true_coef}')
+</code></pre>
+<h2>Bayesian Interpretation</h2>
+<p>Both Ridge and LASSO have elegant Bayesian interpretations. Assuming y|X,θ ~ N(Xθ, σ²I), the MAP estimate under a prior θ ~ N(0, τ²I) gives the Ridge solution with λ = σ²/τ². The MAP estimate under θ ~ Laplace(0, b·I) gives the LASSO solution with λ = σ²/(2b). The Laplace prior has heavier tails than Gaussian and a sharper peak at zero — it 'believes' coefficients are either zero or large, which promotes sparsity. The posterior mean under Laplace prior is not the LASSO solution (only MAP is).</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.linear_model import Ridge, Lasso
+from sklearn.datasets import make_regression
+from sklearn.preprocessing import StandardScaler
+
+# Simulate correlated features to show ElasticNet grouping
+np.random.seed(7)
+n = 200
+Z = np.random.randn(n, 3)   # latent factors
+X_corr = np.column_stack([
+    Z[:, 0] + 0.1 * np.random.randn(n),
+    Z[:, 0] + 0.1 * np.random.randn(n),   # highly correlated with col 0
+    Z[:, 0] + 0.1 * np.random.randn(n),   # highly correlated with col 0
+    Z[:, 1] + 0.1 * np.random.randn(n),
+    Z[:, 2] + 0.1 * np.random.randn(n),
+])
+y_corr = 2*Z[:, 0] + 1.5*Z[:, 1] - Z[:, 2] + 0.3*np.random.randn(n)
+
+from sklearn.linear_model import ElasticNet
+for name, model in [('Ridge   ', Ridge(alpha=1.0)),
+                     ('LASSO   ', Lasso(alpha=0.5, max_iter=10000)),
+                     ('ElasticNet', ElasticNet(alpha=0.5, l1_ratio=0.5, max_iter=10000))]:
+    model.fit(X_corr, y_corr)
+    print(f'{name}: coefs = {np.round(model.coef_, 3)}')
+</code></pre>
+<pre><code class="language-python">import numpy as np
+
+# Bayesian sampling: Gaussian prior -&gt; Ridge shrinkage
+# Laplace prior -&gt; LASSO-like sparse shrinkage
+rng = np.random.RandomState(0)
+n_samples = 5000
+
+# Gaussian prior samples
+gaussian_samples = rng.normal(loc=0, scale=1.0, size=n_samples)
+# Laplace prior samples
+laplace_samples = rng.laplace(loc=0, scale=1.0, size=n_samples)
+
+thresholds = [0.5, 1.0, 1.5, 2.0]
+print('Fraction of |sample| &lt; threshold (sparsity proxy):')
+print(f'{&quot;Prior&quot;:&gt;12} ', end='')
+for t in thresholds:
+    print(f'  |x|&lt;{t}', end='')
+print()
+for name, samples in [('Gaussian', gaussian_samples), ('Laplace', laplace_samples)]:
+    print(f'{name:&gt;12} ', end='')
+    for t in thresholds:
+        frac = np.mean(np.abs(samples) &lt; t)
+        print(f'  {frac:.3f}  ', end='')
+    print()
+print('\nLaplace concentrates more mass near zero -&gt; sparsity-inducing prior.')
+</code></pre>
+<h2>Comparison Table</h2>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>L2 Ridge</th>
+<th>L1 LASSO</th>
+<th>ElasticNet</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Penalty term</td>
+<td>λ‖θ‖²</td>
+<td>λ‖θ‖₁</td>
+<td>λ[α‖θ‖₁ + (1−α)‖θ‖²]</td>
+</tr>
+<tr>
+<td>Closed form</td>
+<td>Yes — (XᵀX+λI)⁻¹Xᵀy</td>
+<td>No — non-smooth at 0</td>
+<td>No — non-smooth</td>
+</tr>
+<tr>
+<td>Exact sparsity</td>
+<td>No (shrinks ≠ 0)</td>
+<td>Yes</td>
+<td>Yes (partial)</td>
+</tr>
+<tr>
+<td>Correlated features</td>
+<td>Keeps all, shrinks equally</td>
+<td>Picks one arbitrarily</td>
+<td>Tends to select groups</td>
+</tr>
+<tr>
+<td>Max non-zeros (p&gt;n)</td>
+<td>p</td>
+<td>≤ n</td>
+<td>&gt; n possible</td>
+</tr>
+<tr>
+<td>Bayesian prior</td>
+<td>Gaussian N(0, σ²/λ)</td>
+<td>Laplace(0, 1/λ)</td>
+<td>Combination</td>
+</tr>
+</tbody>
+</table>
+<h2>Practical Guidelines</h2>
+<p>In practice, always standardise features before applying any regularisation — the penalty treats all coefficients equally, so un-standardised features with large magnitudes are unfairly penalised. Use cross-validation to select λ (and α for ElasticNet). sklearn's RidgeCV, LassoCV, and ElasticNetCV compute efficient cross-validated paths. As a starting heuristic: if interpretability and feature selection matter, prefer LASSO; if most features are relevant and stability is paramount, prefer Ridge; if features are correlated, use ElasticNet.</p>
+<ul>
+<li>Always standardise (zero mean, unit variance) features before applying L1 or L2 penalties.</li>
+<li>Use RidgeCV, LassoCV, ElasticNetCV for efficient cross-validated λ selection.</li>
+<li>LASSO may not converge for very large p — increase max_iter and use the 'saga' solver.</li>
+<li>For feature selection, examine the LASSO path: features entering early (small λ) are more important.</li>
+<li>ElasticNet with l1_ratio=0.5 is a good default when you expect some correlated groups.</li>
+<li>For p &gt;&gt; n (genomics, text), prefer ElasticNet over pure LASSO to avoid the n-variable limit.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

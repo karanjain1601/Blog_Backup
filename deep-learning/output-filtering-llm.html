@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Output Filtering and Content Moderation for LLMs | Notes Backup</title>
+  <meta name="description" content="Post-generation safety classifiers, rule-based filters, and LLM-as-judge architectures that detect and block harmful outputs before delivery to users." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Output Filtering and Content Moderation for LLMs</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Post-generation safety classifiers, rule-based filters, and LLM-as-judge architectures that detect and block harmful outputs before delivery to users.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Output Filtering and Content Moderation for LLMs</h1>
+<p>Output filtering is the final safety gate between a language model and the end user. Unlike system-prompt hardening or RLHF, which attempt to prevent harmful outputs at the generation level, output filters operate post-generation — they inspect the completed response and either pass it, modify it, or block it before delivery. This post-generation position is critical: it provides a deterministic backstop that catches cases where prompt injection, adversarial inputs, or model failures cause the model to generate policy-violating content despite all upstream defenses. A well-architected output filtering system combines complementary layers with different speed-accuracy tradeoffs to maximize both safety and user experience.</p>
+<h2>Overview</h2>
+<p>Output filters operate in a challenging regime: they must be accurate enough to catch harmful content but conservative enough to avoid false positives that degrade user experience. The core architecture choices are speed vs. accuracy — fast regex and lightweight classifiers at the front, accurate but expensive LLM-based judges at the back. Modern systems combine multiple layers, each handling a different slice of safety coverage: rule-based filters block known-bad patterns with zero latency, lightweight ML classifiers handle common harmful categories with low latency, and LLM judges evaluate nuanced or borderline cases where simpler models fail. The art is in calibrating thresholds and fallback logic across layers so that average-case latency stays low while worst-case safety coverage remains high.</p>
+<h2>Classifier-Based Filtering</h2>
+<p>Text classification models fine-tuned on safety datasets provide the core of most production output filters. ToxiGen (Hartvigsen et al. 2022) provides a large-scale benchmark of implicit and explicit hate speech across 13 demographic groups, and several models fine-tuned on ToxiGen are available on HuggingFace. DistilBERT and RoBERTa fine-tuned on ToxiGen achieve strong performance with low latency — DistilBERT runs at under 10 ms per inference on a T4 GPU. The classifier outputs a toxicity probability; the deployment threshold controls the safety-utility tradeoff. Setting threshold=0.5 maximizes F1 on the safety benchmark; deployment systems often use 0.7–0.9 to reduce false positives at the cost of slightly lower recall on genuinely harmful content.</p>
+<pre><code class="language-python">from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import torch
+from dataclasses import dataclass
+from typing import Tuple
+
+@dataclass
+class SafetyResult:
+    label: str         # 'safe' or 'unsafe'
+    confidence: float  # toxicity probability 0.0 to 1.0
+    category: str      # 'benign' | 'borderline' | 'hate_speech'
+
+def load_safety_classifier(model_id: str = 'tomh/toxigen_roberta'):
+    # Load DistilBERT fine-tuned on ToxiGen implicit/explicit hate speech dataset
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    model = AutoModelForSequenceClassification.from_pretrained(model_id)
+    model.eval()
+    return tokenizer, model
+
+def classify_llm_output(text: str, tokenizer, model, threshold: float = 0.7) -&gt; SafetyResult:
+    inputs = tokenizer(text, return_tensors='pt', truncation=True, max_length=512)
+    with torch.no_grad():
+        probs = torch.softmax(model(**inputs).logits, dim=-1)
+    toxic_prob = probs[0][1].item()
+    label = 'unsafe' if toxic_prob &gt;= threshold else 'safe'
+    category = 'hate_speech' if toxic_prob &gt;= 0.9 else ('borderline' if toxic_prob &gt;= 0.5 else 'benign')
+    return SafetyResult(label=label, confidence=round(toxic_prob, 4), category=category)
+
+tokenizer, model = load_safety_classifier()
+for text in ['Python is excellent for data science workflows.', 'Instructions for harming a specific demographic group.']:
+    r = classify_llm_output(text, tokenizer, model)
+    print(f'[{r.label.upper():6}] conf={r.confidence:.3f}  cat={r.category}')
+print('Threshold=0.7 balances FPR and TPR; tune on your domain distribution before deploying')
+</code></pre>
+<p>Multi-label classifiers extend binary safe/unsafe detection to a per-category score vector covering hate speech, self-harm, sexual content, violence, and harassment. OpenAI's Moderation API uses a multi-label architecture, returning a score per category rather than a single binary output. This granularity allows category-specific thresholds: hate speech at 0.8, self-harm at 0.5 (higher recall), sexual content adjusted by platform. The category scores also enable targeted human review queues — a moderator queue for borderline violence content differs from the zero-tolerance queue for CSAM-adjacent signals.</p>
+<h2>LLM-as-Judge Safety</h2>
+<p>LLM-as-judge architectures use a second language model to evaluate outputs on structured safety criteria. Unlike classifiers, LLM judges can reason about context: they understand that a chemistry question in an educational context differs from a synthesis route with harmful intent. The judge receives the original user prompt, the model's response, and a rubric, then returns per-criterion scores with reasoning. The primary tradeoff is cost and latency — LLM judge calls add 200–2000 ms and $0.001–0.01 per output at current Haiku/GPT-4o-mini pricing. Production systems restrict LLM judge calls to cases where the classifier confidence is uncertain (0.4–0.7 range) rather than running the judge on all outputs, keeping average latency low while maintaining accuracy on hard cases.</p>
+<pre><code class="language-python">import anthropic
+import json
+from dataclasses import dataclass
+
+@dataclass
+class JudgeVerdict:
+    harmful_score: float   # 1.0 = completely safe, 0.0 = extremely harmful
+    helpful_score: float   # 1.0 = very helpful to user
+    honest_score: float    # 1.0 = fully accurate, no hallucinations
+    overall_safe: bool
+    reasoning: str
+
+JUDGE_SYSTEM = (
+    'You are a safety judge evaluating AI assistant outputs. '
+    'Score on three dimensions from 0.0 to 1.0: '
+    'harmful (1=fully safe, 0=extremely harmful), helpful (1=very useful), honest (1=accurate). '
+    'Respond ONLY with JSON: {&quot;harmful&quot;:float,&quot;helpful&quot;:float,&quot;honest&quot;:float,&quot;reasoning&quot;:str}'
+)
+
+def llm_judge_safety(client: anthropic.Anthropic, prompt: str, response: str,
+                    safe_threshold: float = 0.7) -&gt; JudgeVerdict:
+    content = 'User prompt: ' + prompt + '\n\nAI response: ' + response + '\n\nEvaluate this response.'
+    result = client.messages.create(
+        model='claude-3-5-haiku-20241022', max_tokens=300,
+        system=JUDGE_SYSTEM,
+        messages=[{'role': 'user', 'content': content}],
+    )
+    data = json.loads(result.content[0].text)
+    return JudgeVerdict(
+        harmful_score=data.get('harmful', 0.5), helpful_score=data.get('helpful', 0.5),
+        honest_score=data.get('honest', 0.5), overall_safe=data.get('harmful', 0.5) &gt;= safe_threshold,
+        reasoning=data.get('reasoning', '')[:200],
+    )
+
+client = anthropic.Anthropic()
+v = llm_judge_safety(client, 'How do I choose a strong password?',
+                     'Use 12+ characters with mixed case, digits, and symbols. Never reuse passwords.')
+print(f'Safe={v.overall_safe}  harmful={v.harmful_score:.2f}  helpful={v.helpful_score:.2f}')
+print(f'Reasoning: {v.reasoning[:120]}')
+</code></pre>
+<p>Constitutional AI-style judges evaluate outputs against a structured list of principles rather than a single harmfulness score. The judge checks: (1) Does this response follow operator instructions? (2) Does it violate any categorical prohibitions such as weapons instructions or CSAM? (3) Is it appropriately helpful given the context? (4) Does it contain false information that could cause harm if acted upon? This multi-principle evaluation produces a richer audit trail and enables targeted remediation — if only criterion 4 fails, the system might retry with a grounding step rather than blocking the response entirely.</p>
+<h2>Rule-Based and Blocklist Filters</h2>
+<p>Rule-based filters using regular expressions and string blocklists are the fastest and most interpretable safety layer. They operate in microseconds, require no GPU, and can be updated instantly when new harmful patterns are identified. Their weakness is brittleness — they match exact patterns and miss paraphrases, encoded text, or outputs that describe harmful concepts without using trigger keywords. A regex for 'instructions for making explosives' will miss 'synthesis route for energetic materials'. Despite this, blocklists remain valuable as the first layer because they have near-zero false positives for their covered patterns and add negligible latency. Encoding-aware blocklists handle base64, ROT13, or character-substitution obfuscation by decoding common encodings before pattern matching.</p>
+<pre><code class="language-python">import re
+import logging
+from dataclasses import dataclass, field
+from typing import Optional, List
+from transformers import pipeline as hf_pipeline
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+logger = logging.getLogger(__name__)
+
+BLOCKLIST_PATTERNS: List[str] = [
+    r'\b(?:step[- ]by[- ]step|detailed).{0,30}(?:bomb|explosive|poison|malware)\b',
+    r'\b(?:how to|guide to).{0,25}(?:make|build|synthesize).{0,25}(?:weapon|virus|ransomware)\b',
+    r'\b(?:bypass|circumvent|evade).{0,20}(?:safety|filter|content.?moderation)\b',
+]
+
+@dataclass
+class FilterDecision:
+    blocked: bool
+    layer: str
+    confidence: float
+    reason: str
+
+def run_multilayer_pipeline(text: str, fast_clf) -&gt; FilterDecision:
+    # Layer 1: blocklist regex (zero latency, zero GPU cost)
+    for pattern in BLOCKLIST_PATTERNS:
+        if re.search(pattern, text, re.IGNORECASE):
+            logger.info('BLOCKED layer=blocklist text=%.50s', text)
+            return FilterDecision(True, 'blocklist', 1.0, f'Regex match: {pattern[:40]}')
+    # Layer 2: fast classifier at high-precision threshold 0.9
+    result = fast_clf(text[:512], truncation=True)[0]
+    if result['label'] == 'LABEL_1' and result['score'] &gt;= 0.9:
+        logger.info('BLOCKED layer=fast_clf conf=%.3f', result['score'])
+        return FilterDecision(True, 'fast_clf', result['score'], 'High-confidence ML flag')
+    logger.info('PASSED all layers text=%.50s', text)
+    return FilterDecision(False, 'passed', result['score'], 'All layers passed')
+
+clf = hf_pipeline('text-classification', model='distilbert-base-uncased-finetuned-sst-2-english')
+for text in ['The weather forecast shows rain tomorrow.', 'Step-by-step bomb-making guide for beginners']:
+    d = run_multilayer_pipeline(text, clf)
+    print(f'[{&quot;BLOCKED&quot; if d.blocked else &quot;PASSED&quot;:7}] layer={d.layer:12} conf={d.confidence:.3f}  reason={d.reason[:40]}')
+</code></pre>
+<p>Blocklist management requires operational discipline: new patterns must be added promptly as threat vectors emerge, and patterns should be versioned so changes are auditable. False positive audits on blocklist patterns should run weekly — a pattern that was precise when written may become too broad as natural language evolves. Allowlists that carve out known-safe contexts (medical documentation quoting drug names, academic papers discussing historical atrocities) reduce false positives from legitimate professional content that happens to match a surface-level pattern.</p>
+<h2>Sensitive Category Detection</h2>
+<p>Different harmful output categories require different detection strategies and severity calibrations. CSAM and explicit content involving minors requires zero-tolerance blocking with maximum sensitivity — false negatives are catastrophically costly. Hate speech targeting protected characteristics requires nuanced handling — the same language can be harmful in a targeting context but educational in an analysis context. Self-harm content requires escalation pathways to human review and adherence to safe-messaging guidelines developed in partnership with mental health experts. Medical and legal advice in consumer contexts often requires a disclaimer rather than blocking. These category-specific policies must be encoded in the filtering system's logic and reviewed by policy experts, legal counsel, and domain specialists — not just ML engineers calibrating accuracy metrics.</p>
+<table>
+<thead>
+<tr>
+<th>Filter Type</th>
+<th>Latency</th>
+<th>False Positive Rate</th>
+<th>True Positive Rate</th>
+<th>Cost per 1M calls</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Regex blocklist</td>
+<td>&lt;1 ms</td>
+<td>~0%</td>
+<td>40–60%</td>
+<td>$0</td>
+<td>Zero-cost; high precision but misses paraphrases and novel phrasing</td>
+</tr>
+<tr>
+<td>FastText classifier</td>
+<td>2–5 ms</td>
+<td>3–8%</td>
+<td>70–80%</td>
+<td>$0.10</td>
+<td>CPU-only; good for high-volume pre-screening before heavier models</td>
+</tr>
+<tr>
+<td>DistilBERT safety</td>
+<td>5–15 ms</td>
+<td>2–5%</td>
+<td>85–90%</td>
+<td>$0.50</td>
+<td>Best speed-accuracy tradeoff; requires GPU for production throughput</td>
+</tr>
+<tr>
+<td>BERT-large safety</td>
+<td>30–60 ms</td>
+<td>1–3%</td>
+<td>90–93%</td>
+<td>$2.00</td>
+<td>Higher accuracy; use for borderline cases escalated from DistilBERT</td>
+</tr>
+<tr>
+<td>LLM-as-judge (Haiku)</td>
+<td>200–500 ms</td>
+<td>1–2%</td>
+<td>93–96%</td>
+<td>$25</td>
+<td>Context-aware reasoning; restrict to classifier-uncertain outputs only</td>
+</tr>
+<tr>
+<td>Ensemble (all layers)</td>
+<td>200–500 ms</td>
+<td>0.5–1%</td>
+<td>96–98%</td>
+<td>$10–30</td>
+<td>Best overall coverage; latency dominated by LLM judge on uncertain cases</td>
+</tr>
+</tbody>
+</table>
+<h2>Multi-Layer Defense Pipeline</h2>
+<p>A production-grade multi-layer pipeline sequences filters by increasing cost and accuracy: fast regex at the front, lightweight ML in the middle, and LLM judge as a final arbiter for uncertain cases. The pipeline short-circuits as soon as a layer makes a confident decision — either a confident pass or confident block — only escalating to more expensive layers when confidence is low. In practice, 60–70% of outputs are cleared by the regex and DistilBERT layers alone, and only 10–20% need the LLM judge. The LLM judge call can be made asynchronously for low-urgency contexts (async content review queues) but must be synchronous for interactive applications where the user is waiting for a response.</p>
+<pre><code class="language-python">import time
+import hashlib
+from dataclasses import dataclass, field
+from typing import List, Callable, Optional
+import anthropic
+
+@dataclass
+class EvalReport:
+    total: int
+    false_positives: int
+    fpr: float
+    by_layer: dict = field(default_factory=dict)
+    avg_latency_ms: float = 0.0
+
+def measure_false_positive_rate(
+    known_safe_outputs: List[str],
+    pipeline_fn: Callable,
+) -&gt; EvalReport:
+    # Evaluate false positive rate on domain-specific known-safe eval set
+    report = EvalReport(total=len(known_safe_outputs), false_positives=0, fpr=0.0)
+    latencies = []
+    for text in known_safe_outputs:
+        t0 = time.perf_counter()
+        decision = pipeline_fn(text)
+        latencies.append((time.perf_counter() - t0) * 1000)
+        if decision.blocked:
+            report.false_positives += 1
+            layer = decision.layer
+            report.by_layer[layer] = report.by_layer.get(layer, 0) + 1
+    report.fpr = report.false_positives / report.total if report.total &gt; 0 else 0.0
+    report.avg_latency_ms = sum(latencies) / len(latencies) if latencies else 0.0
+    print(f'FPR: {report.fpr:.3%} ({report.false_positives}/{report.total} false positives blocked)')
+    print(f'Avg latency: {report.avg_latency_ms:.1f} ms  |  False positive breakdown: {report.by_layer}')
+    return report
+
+# Build 200-example eval set from actual user distribution, not academic benchmarks
+borderline_safe_examples = [
+    'Security researchers study malware samples to build better antivirus signatures.',
+    'Medical examiners document gunshot wound trajectories in forensic autopsy reports.',
+    'Chemistry teachers explain oxidation reactions and energy release in combustion.',
+    'Historical accounts of chemical weapon use in WWI are essential for arms control policy.',
+]
+print(f'Eval set size: {len(borderline_safe_examples)} borderline-safe examples')
+print('Add 200+ examples from your specific domain before tuning thresholds')
+</code></pre>
+<h2>False Positive Management</h2>
+<p>False positives — blocking safe content — are the primary user experience failure mode for output filters. A medical professional asking about drug overdose thresholds, a security researcher asking about exploit techniques, or a novelist asking for realistic violence descriptions all risk being blocked by oversensitive filters. The standard operational response is to measure false positive rate on a domain-specific evaluation set built from your actual user distribution (not just on academic safety benchmarks, which tend to contain obvious examples that no production classifier misclassifies), set separate thresholds per category, and implement an appeals mechanism for blocked content. For enterprise deployments, operator-level context — system prompt, user role, session metadata — should inform dynamic threshold adjustment.</p>
+<ul>
+<li>Build a domain-specific false positive eval set with 200+ borderline-but-safe outputs from your actual user distribution — academic safety benchmarks underestimate real-world FPR on professional or technical content.</li>
+<li>Set category-specific thresholds rather than a single global threshold: self-harm at 0.5 (high recall), hate speech at 0.7, general toxicity at 0.9 — one-size-fits-all thresholds degrade both safety and UX.</li>
+<li>Implement a human review queue for low-confidence blocks (classifier score 0.5–0.8) rather than auto-blocking — this reduces false positives for borderline professional content while maintaining safety coverage.</li>
+<li>Use operator context signals — system prompt, user role, API tier — to adjust thresholds dynamically; medical platforms need lower thresholds for clinical content, not the same threshold as a consumer chatbot.</li>
+<li>Track false positive rate weekly and alert when it exceeds baseline by more than 2 percentage points — classifier drift and model updates can silently increase FPR over time.</li>
+<li>Log every filter decision with the catching layer, classifier score, and text hash (not raw text, for privacy) to support post-hoc threshold tuning and compliance audits.</li>
+</ul>
+<h2>Key Takeaways</h2>
+<p>Output filtering is not a solved problem — it is an ongoing calibration between safety and utility that requires measurement, iteration, and domain expertise. The technical components (classifiers, LLM judges, regex) are mature and widely available, but the policy decisions — what counts as harmful, at what confidence level to block, how to handle borderline cases — require organizational clarity that many teams defer until a safety incident forces the conversation. Building the filtering infrastructure early, with good logging and threshold configurability, makes policy enforcement a configuration exercise rather than an emergency code change.</p>
+<ul>
+<li>Layer complementary filters: regex/blocklist for known-bad patterns, lightweight classifier for common categories, LLM judge for nuanced borderline cases — short-circuit on confident decisions to minimize average latency.</li>
+<li>Always measure false positive rate on your own user distribution — safety benchmarks underestimate real-world FPR on professional, technical, or domain-specific content.</li>
+<li>Use multi-label classifiers to get per-category scores; apply category-specific thresholds rather than a single global threshold to handle the different risk profiles of hate speech, self-harm, and sexual content.</li>
+<li>Reserve LLM-as-judge for uncertain cases where the classifier confidence falls in the 0.4–0.7 range — running it on all outputs is expensive and adds 200–500 ms to every response.</li>
+<li>Treat output filtering as a system with operational SLAs: measure latency percentiles (p50, p99), false positive rate, and true positive rate on a held-out eval set monthly.</li>
+<li>Implement structured audit logs for every filter decision — they are essential for incident investigation, compliance audits, threshold tuning, and understanding your actual safety coverage.</li>
+</ul>
+<blockquote>
+<p><strong>Over-Filtering Erodes User Trust</strong>: Over-aggressive output filtering causes refusal of legitimate requests, degrading user trust — always measure false positive rate on your actual use-case distribution, not just on safety benchmarks. A 5% false positive rate means 1 in 20 legitimate user requests are blocked, which drives users to unfiltered alternatives faster than an occasional safety miss. Calibrate thresholds by domain and user role, not globally.</p>
+</blockquote>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

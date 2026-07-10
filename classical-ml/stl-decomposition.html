@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>STL Decomposition — Seasonal-Trend via LOESS | Notes Backup</title>
+  <meta name="description" content="Understand STL&#x27;s inner and outer loop algorithm using LOESS smoothing, tune the key parameters (seasonal, trend, robust), extend to multiple seasonal periods with MSTL, and validate decomposition quality via residual analysis." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>STL Decomposition — Seasonal-Trend via LOESS</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Understand STL&#x27;s inner and outer loop algorithm using LOESS smoothing, tune the key parameters (seasonal, trend, robust), extend to multiple seasonal periods with MSTL, and validate decomposition quality via residual analysis.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>STL Decomposition — Seasonal-Trend via LOESS</h1>
+<p>STL (Seasonal-Trend decomposition using LOESS) overcomes three critical limitations of classical decomposition: it handles any seasonal period (not just integer multiples of 12), it can use a robust option that down-weights outliers, and it allows the seasonal component to evolve slowly over time. Published by Cleveland et al. (1990), STL remains the gold standard for exploratory decomposition and is the backbone of several production forecasting frameworks including Facebook Prophet and the Nixtla stack.</p>
+<h2>LOESS — Locally Estimated Scatterplot Smoothing</h2>
+<p>LOESS fits a weighted local polynomial regression at each point xₜ. Observations closer to xₜ receive higher weights (typically using a tricubic kernel). The bandwidth parameter controls the fraction of data used in each local fit: smaller bandwidth gives more flexible, wiggly smoothing; larger bandwidth gives smoother, more global estimates. STL uses LOESS as a building block for both the seasonal and trend smoothers, with separate bandwidth parameters for each component.</p>
+<h2>STL Algorithm — Inner and Outer Loops</h2>
+<p>STL alternates between an inner loop and an outer loop. The inner loop iterates several times, updating seasonal and trend estimates: (1) detrend the series (subtract current trend estimate), (2) smooth each seasonal sub-series (all January values, all February values, etc.) with a LOESS of window nₛ to get a raw seasonal estimate, (3) apply a low-pass filter (MA then LOESS) to remove low-frequency contamination from the seasonal estimate, (4) subtract the seasonal estimate and smooth the deseasonalised series with LOESS of window nₜ to update the trend. The outer loop computes robustness weights based on residual magnitude (bisquare weights), reducing the influence of outliers in subsequent inner loop iterations.</p>
+<ol>
+<li>Outer loop initialises: trend = 0, seasonal = 0, robustness weights = 1.</li>
+<li>Inner loop (repeated n_inner times): update seasonal via LOESS on sub-series, apply low-pass filter, update trend via LOESS on deseasonalised data.</li>
+<li>Outer loop (if robust=True): compute residuals, assign bisquare robustness weights, repeat inner loop with weighted LOESS.</li>
+<li>Final decomposition: Tₜ (trend), Sₜ (seasonal), Rₜ = yₜ − Tₜ − Sₜ (remainder).</li>
+<li>The seasonal component sum over one period ≈ 0 but is not forced to be exactly zero — it can drift slowly.</li>
+</ol>
+<h2>Running STL with statsmodels</h2>
+<pre><code class="language-python">import numpy as np
+from statsmodels.tsa.seasonal import STL
+
+np.random.seed(0)
+n = 156  # 3 years of weekly data
+t = np.arange(n)
+
+# Construct series: trend + weekly season + noise
+trend_true = 100 + 0.5 * t
+season = 15 * np.sin(2 * np.pi * t / 52)
+y = trend_true + season + 3 * np.random.randn(n)
+
+# Fit STL with period=52 (weekly with yearly seasonality)
+stl = STL(y, period=52, seasonal=13, trend=None, robust=True)
+result = stl.fit()
+
+# Inspect components
+valid = ~np.isnan(result.trend)
+print(f&quot;Trend  range: [{result.trend[valid].min():.1f}, {result.trend[valid].max():.1f}]&quot;)
+print(f&quot;Seasonal range: [{result.seasonal.min():.2f}, {result.seasonal.max():.2f}]&quot;)
+print(f&quot;Resid  std:  {result.resid.std():.4f}&quot;)
+print(f&quot;Seasonal strength: {max(0, 1 - result.resid.var() / (result.seasonal + result.resid).var()):.4f}&quot;)
+print(f&quot;Trend strength:    {max(0, 1 - result.resid.var() / (result.trend + result.resid).var()):.4f}&quot;)
+</code></pre>
+<h2>Robust STL — Handling Outliers</h2>
+<p>In non-robust STL all residuals have equal weight. If the series contains outliers (data entry errors, strikes, natural disasters), they pull the LOESS smoother and contaminate the seasonal and trend estimates. Robust STL adds an outer loop that computes bisquare weights: wₜ = (1 − (|Rₜ|/(6·median(|R|)))²)² for |Rₜ| &lt; 6·median(|R|), and 0 otherwise. Observations with very large residuals receive near-zero weights and have negligible influence on subsequent LOESS fits.</p>
+<pre><code class="language-python">import numpy as np
+from statsmodels.tsa.seasonal import STL
+
+np.random.seed(5)
+n = 120
+t = np.arange(n)
+y_clean = 50 + 0.3*t + 10*np.sin(2*np.pi*t/12) + 2*np.random.randn(n)
+
+# Inject outliers at a few positions
+y_dirty = y_clean.copy()
+outlier_idx = [30, 60, 90]
+for idx in outlier_idx:
+    y_dirty[idx] += 60  # large positive spike
+
+print(f&quot;{'Method':20s}  {'Trend RMSE':12s}  {'Season RMSE':12s}  {'Resid std':10s}&quot;)
+print(&quot;-&quot; * 60)
+
+true_trend  = 50 + 0.3*t
+true_season = 10*np.sin(2*np.pi*t/12)
+
+for robust in [False, True]:
+    stl = STL(y_dirty, period=12, seasonal=7, robust=robust)
+    r = stl.fit()
+    trend_rmse  = np.sqrt(np.mean((r.trend  - true_trend)**2))
+    season_rmse = np.sqrt(np.mean((r.seasonal - true_season)**2))
+    label = &quot;Robust STL&quot; if robust else &quot;Standard STL&quot;
+    print(f&quot;{label:20s}  {trend_rmse:12.4f}  {season_rmse:12.4f}  {r.resid.std():10.4f}&quot;)
+</code></pre>
+<h2>MSTL for Multiple Seasonal Periods</h2>
+<p>Hourly electricity demand shows both a daily cycle (period 24) and a weekly cycle (period 168). MSTL (Multiple STL) handles this by iterating: starting with the longest seasonal period, applying STL and keeping its seasonal component, deseasonalising, then repeating for the next period. The final decomposition has one trend component and one seasonal component per specified period. This is available in the statsforecast library (Nixtla) and can also be approximated by sequential STL calls.</p>
+<pre><code class="language-python">import numpy as np
+from statsmodels.tsa.seasonal import STL
+
+np.random.seed(42)
+n = 336  # 2 weeks of hourly data
+t = np.arange(n)
+
+# Hourly data: daily (24h) + weekly (168h) seasonality
+season_daily  = 5.0 * np.sin(2 * np.pi * t / 24)
+season_weekly = 3.0 * np.sin(2 * np.pi * t / 168)
+trend_comp    = 20 + 0.02 * t
+y = trend_comp + season_daily + season_weekly + np.random.randn(n)
+
+# Sequential STL approximation: remove weekly first, then daily
+stl_weekly = STL(y, period=168, seasonal=13, robust=True)
+r_weekly = stl_weekly.fit()
+y_deweekly = y - r_weekly.seasonal
+
+stl_daily = STL(y_deweekly, period=24, seasonal=7, robust=True)
+r_daily = stl_daily.fit()
+
+resid_combined = y - r_weekly.seasonal - r_daily.seasonal - r_daily.trend
+print(f&quot;Weekly seasonal range: [{r_weekly.seasonal.min():.2f}, {r_weekly.seasonal.max():.2f}]&quot;)
+print(f&quot;Daily  seasonal range: [{r_daily.seasonal.min():.2f},  {r_daily.seasonal.max():.2f}]&quot;)
+print(f&quot;Combined residual std: {resid_combined.std():.4f}&quot;)
+print(f&quot;True noise std:        1.0000  (residual should be close to 1)&quot;)
+</code></pre>
+<h2>STL Parameters Reference</h2>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Description</th>
+<th>Effect of Increasing</th>
+<th>Typical Values</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>period</td>
+<td>Length of seasonal cycle (P)</td>
+<td>N/A — must match data frequency</td>
+<td>12 (monthly), 52 (weekly), 24 (hourly)</td>
+</tr>
+<tr>
+<td>seasonal (nₛ)</td>
+<td>LOESS window for seasonal sub-series</td>
+<td>Smoother seasonal — less year-to-year variation</td>
+<td>Odd, ≥ 7; try 7, 11, 13, 15</td>
+</tr>
+<tr>
+<td>trend (nₜ)</td>
+<td>LOESS window for trend smoother</td>
+<td>Smoother trend — slower adaptation</td>
+<td>Odd, ≥ P; rule of thumb: ceil(1.5·P/(1−1.5/nₛ))</td>
+</tr>
+<tr>
+<td>robust</td>
+<td>Boolean: use bisquare outer-loop weights</td>
+<td>N/A — boolean flag</td>
+<td>True when series has outliers or irregular shocks</td>
+</tr>
+<tr>
+<td>low_pass (nₗ)</td>
+<td>Low-pass filter window for seasonal step</td>
+<td>Smoother seasonal extraction</td>
+<td>Smallest odd integer &gt; P</td>
+</tr>
+</tbody>
+</table>
+<h2>Residual Analysis and Diagnostics</h2>
+<pre><code class="language-python">import numpy as np
+from statsmodels.tsa.seasonal import STL
+from statsmodels.tsa.stattools import acf
+from statsmodels.stats.diagnostic import acorr_ljungbox
+
+np.random.seed(9)
+n = 120
+t = np.arange(n)
+y = 60 + 0.4*t + 12*np.sin(2*np.pi*t/12) + 2.5*np.random.randn(n)
+
+stl = STL(y, period=12, seasonal=11, robust=True)
+result = stl.fit()
+resid = result.resid
+
+acf_r = acf(resid, nlags=24, alpha=0.05)
+print(&quot;Residual ACF at key lags (should be near zero):&quot;)
+for lag in [1, 6, 12, 24]:
+    print(f&quot;  lag {lag:2d}: ACF={acf_r[0][lag]:.4f}  95%CI=[{acf_r[1][lag][0]:.3f}, {acf_r[1][lag][1]:.3f}]&quot;)
+
+lb = acorr_ljungbox(resid, lags=[12, 24], return_df=True)
+print(&quot;\nLjung-Box test:&quot;)
+print(lb[['lb_stat', 'lb_pvalue']].to_string())
+
+strength_s = max(0, 1 - resid.var() / (result.seasonal + resid).var())
+strength_t = max(0, 1 - resid.var() / (result.trend   + resid).var())
+print(f&quot;\nSeasonal strength: {strength_s:.4f}  (&gt;0.6 = strong seasonality)&quot;)
+print(f&quot;Trend strength:    {strength_t:.4f}  (&gt;0.6 = strong trend)&quot;)
+</code></pre>
+<blockquote>
+<p><strong>Seasonal Strength Metric</strong>: The seasonal strength Fs = max(0, 1 − Var(Rₜ)/Var(Sₜ + Rₜ)) measures how much of the seasonal+residual variance is explained by the seasonal component. Values above 0.6 indicate strong, forecastable seasonality. The corresponding trend strength Ft = max(0, 1 − Var(Rₜ)/Var(Tₜ + Rₜ)) similarly quantifies the trend. Both metrics are used in the Theta method and M4/M5 competition feature engineering pipelines.</p>
+</blockquote>
+<h2>STL vs Classical Decomposition</h2>
+<ul>
+<li>STL works for any seasonal period P; classical requires P to divide evenly into the series length.</li>
+<li>STL allows the seasonal component to change slowly over time; classical uses fixed seasonal factors.</li>
+<li>Robust STL down-weights outliers; classical decomposition has no outlier protection.</li>
+<li>Classical decomposition loses P/2 observations at each end (border effect); STL uses LOESS which also struggles at boundaries but less severely.</li>
+<li>STL is additive only; apply log transform before STL for multiplicative series.</li>
+<li>STL is computationally more expensive than classical decomposition but still very fast in practice.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

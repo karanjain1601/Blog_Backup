@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>When Deep Learning Beats Gradient Boosting on Tabular Data | Notes Backup</title>
+  <meta name="description" content="Conditions where neural networks outperform gradient-boosted trees on tabular data: large datasets, multi-modal inputs, smooth functions, online learning, and multi-task scenarios." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>When Deep Learning Beats Gradient Boosting on Tabular Data</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Conditions where neural networks outperform gradient-boosted trees on tabular data: large datasets, multi-modal inputs, smooth functions, online learning, and multi-task scenarios.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>When Deep Learning Beats Gradient Boosting on Tabular Data</h1>
+<p>Gradient-boosted trees win on most tabular benchmarks — but not all. Neural networks have structural advantages in specific scenarios: very large datasets, multi-modal inputs, streaming data, multi-task learning, and smooth target functions. Knowing these conditions helps you choose the right tool rather than defaulting to XGBoost everywhere.</p>
+<h2>Conditions Favoring Deep Learning</h2>
+<p>Seven conditions where DL outperforms GBM on tabular data, each rooted in a structural advantage of neural networks over decision trees:</p>
+<ul>
+<li>Very large n (&gt;1M): tree inference is linear in n_estimators × tree depth; NN inference is O(1) in n</li>
+<li>Multi-modal inputs: NN handles tabular + images + text in one model; trees cannot process raw pixels or token sequences</li>
+<li>Smooth target functions: physical simulations, financial pricing models — NN implicit regularization fits smooth functions better</li>
+<li>Online/streaming learning: NN with SGD updates incrementally from new samples; trees need full rebuilds</li>
+<li>Multi-task learning: shared NN representations generalize across related tasks; separate trees per task don't share capacity</li>
+<li>Transfer learning: pre-trained tabular transformers (TabPFN, prior work) can be fine-tuned; no tree equivalent</li>
+<li>End-to-end systems: recommendation, ranking — NN integrates user embedding + item features + context jointly</li>
+</ul>
+<h2>DL vs GBM Across Dataset Sizes</h2>
+<p>The crossover between GBM and DL accuracy depends on dataset size. Trees dominate at small n; the gap narrows as n grows. This benchmark illustrates the trend across five orders of magnitude.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.datasets import make_classification
+from sklearn.model_selection import cross_val_score
+from sklearn.neural_network import MLPClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+import xgboost as xgb
+import time
+
+sizes = [100, 500, 1000, 5000, 10000, 50000]
+results = []
+
+for n in sizes:
+    X, y = make_classification(
+        n_samples=n, n_features=20, n_informative=10, random_state=42
+    )
+    gbm = xgb.XGBClassifier(n_estimators=200, max_depth=6, learning_rate=0.05,
+                             random_state=42, eval_metric='logloss')
+    mlp = Pipeline([
+        ('sc', StandardScaler()),
+        ('net', MLPClassifier(
+            hidden_layer_sizes=(256, 128, 64), max_iter=400,
+            early_stopping=True, random_state=42
+        ))
+    ])
+    cv = max(3, min(5, n // 500))
+    t0 = time.time()
+    gbm_score = cross_val_score(gbm, X, y, cv=cv).mean()
+    gbm_time  = time.time() - t0
+    t0 = time.time()
+    mlp_score = cross_val_score(mlp, X, y, cv=cv).mean()
+    mlp_time  = time.time() - t0
+    print(f'n={n:&gt;6}: GBM={gbm_score:.3f}({gbm_time:.1f}s)  MLP={mlp_score:.3f}({mlp_time:.1f}s)')
+</code></pre>
+<h2>Multi-Task Learning with Shared Representations</h2>
+<p>Neural networks learn shared feature representations across related tasks. A single backbone trained on multiple tabular targets simultaneously often outperforms per-task trees, especially when tasks share underlying structure.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+import numpy as np
+from sklearn.datasets import make_classification
+
+class MultiTaskTabular(nn.Module):
+    def __init__(self, n_features: int, hidden: int, n_tasks: int):
+        super().__init__()
+        # Shared encoder — learns representations useful across all tasks
+        self.backbone = nn.Sequential(
+            nn.Linear(n_features, hidden), nn.LayerNorm(hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden // 2), nn.LayerNorm(hidden // 2), nn.ReLU()
+        )
+        # Task-specific heads
+        self.heads = nn.ModuleList([
+            nn.Linear(hidden // 2, 1) for _ in range(n_tasks)
+        ])
+
+    def forward(self, x: torch.Tensor) -&gt; list:
+        shared = self.backbone(x)
+        return [head(shared).squeeze(-1) for head in self.heads]
+
+# Multi-task dataset: 3 correlated binary targets
+np.random.seed(42)
+X = np.random.randn(2000, 20).astype(np.float32)
+y1 = (X[:, 0] + X[:, 1] &gt; 0).astype(np.float32)
+y2 = (X[:, 0] - X[:, 2] &gt; 0).astype(np.float32)
+y3 = (X[:, 1] + X[:, 3] &gt; 0).astype(np.float32)
+
+model  = MultiTaskTabular(n_features=20, hidden=128, n_tasks=3)
+criterion = nn.BCEWithLogitsLoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+print(f'Shared backbone params: {sum(p.numel() for p in model.backbone.parameters()):,}')
+</code></pre>
+<h2>Online Learning: Incremental NN vs Rebuilding Trees</h2>
+<p>For streaming data, neural networks update naturally from each new batch via SGD. Tree models require full retraining when new data arrives, making them impractical for high-velocity streams.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+import torch.nn as nn
+from sklearn.linear_model import SGDClassifier
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score
+from sklearn.preprocessing import StandardScaler
+
+rng  = np.random.default_rng(42)
+n_total, n_init, batch_size = 5000, 1000, 100
+
+X_all = rng.standard_normal((n_total, 10)).astype(np.float32)
+y_all = (X_all[:, 0] + X_all[:, 1] &gt; 0).astype(int)
+
+sc = StandardScaler().fit(X_all[:n_init])
+X_all_sc = sc.transform(X_all)
+
+# Online learner: SGDClassifier supports partial_fit
+sgd = SGDClassifier(loss='log_loss', random_state=42)
+sgd.partial_fit(X_all_sc[:n_init], y_all[:n_init], classes=[0, 1])
+
+# Batch learner: RandomForest requires full refit
+rf = RandomForestClassifier(n_estimators=50, random_state=42)
+rf.fit(X_all_sc[:n_init], y_all[:n_init])
+
+# Stream new batches
+for start in range(n_init, n_total, batch_size):
+    end = start + batch_size
+    X_batch, y_batch = X_all_sc[start:end], y_all[start:end]
+    sgd.partial_fit(X_batch, y_batch)  # O(batch) update
+    # RF: would need rf.fit(X_all_sc[:end], y_all[:end]) — O(n) rebuild
+
+print(f'SGD online accuracy: {accuracy_score(y_all[n_init:], sgd.predict(X_all_sc[n_init:])):.4f}')
+</code></pre>
+<h2>Multi-Modal: Tabular + Text Feature Fusion</h2>
+<p>When tabular rows include a free-text column (product description, customer review), neural networks can fuse the text encoding with tabular features in a single model. Trees require a hand-crafted text-to-numeric pipeline.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from transformers import AutoTokenizer, AutoModel
+import numpy as np
+
+class MultiModalTabularText(nn.Module):
+    &quot;&quot;&quot;Fuse tabular numeric features with BERT text embeddings.&quot;&quot;&quot;
+    def __init__(self, n_tabular: int, text_dim: int, hidden: int, n_classes: int):
+        super().__init__()
+        self.text_encoder = AutoModel.from_pretrained('distilbert-base-uncased')
+        self.text_proj    = nn.Linear(text_dim, hidden)
+        self.tab_proj     = nn.Linear(n_tabular, hidden)
+        self.fusion = nn.Sequential(
+            nn.LayerNorm(hidden * 2),
+            nn.Linear(hidden * 2, hidden),
+            nn.GELU(),
+            nn.Dropout(0.2),
+            nn.Linear(hidden, n_classes)
+        )
+
+    def forward(self, x_tab: torch.Tensor, input_ids: torch.Tensor,
+                attention_mask: torch.Tensor) -&gt; torch.Tensor:
+        # Encode text with DistilBERT
+        text_out   = self.text_encoder(input_ids, attention_mask).last_hidden_state
+        text_cls   = text_out[:, 0]           # CLS token: (B, 768)
+        text_feat  = self.text_proj(text_cls)  # (B, hidden)
+        # Encode tabular features
+        tab_feat   = self.tab_proj(x_tab)      # (B, hidden)
+        # Fuse and classify
+        fused = torch.cat([text_feat, tab_feat], dim=1)
+        return self.fusion(fused)
+
+model = MultiModalTabularText(n_tabular=10, text_dim=768, hidden=128, n_classes=2)
+print(f'Total parameters: {sum(p.numel() for p in model.parameters()):,}')
+</code></pre>
+<hr />
+<h2>DL vs GBM Decision Framework</h2>
+<table>
+<thead>
+<tr>
+<th>Condition</th>
+<th>Dataset Size</th>
+<th>Winner</th>
+<th>Recommendation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Small tabular, n&lt;1k</td>
+<td>Small</td>
+<td>GBM / TabPFN</td>
+<td>Use TabPFN or XGBoost with HPO</td>
+</tr>
+<tr>
+<td>Medium tabular, n=1k-100k</td>
+<td>Medium</td>
+<td>GBM</td>
+<td>XGBoost/LightGBM with Optuna tuning</td>
+</tr>
+<tr>
+<td>Large tabular, n&gt;1M</td>
+<td>Large</td>
+<td>Competitive</td>
+<td>FT-Transformer or LightGBM; benchmark both</td>
+</tr>
+<tr>
+<td>Multi-modal (tabular+text/image)</td>
+<td>Any</td>
+<td>DL</td>
+<td>Neural fusion model required</td>
+</tr>
+<tr>
+<td>Streaming / online updates</td>
+<td>Any</td>
+<td>DL</td>
+<td>SGD-based NN; trees need full rebuild</td>
+</tr>
+<tr>
+<td>Multi-task (shared representation)</td>
+<td>Any</td>
+<td>DL</td>
+<td>Shared backbone NN with task-specific heads</td>
+</tr>
+<tr>
+<td>Smooth target function</td>
+<td>Any</td>
+<td>DL</td>
+<td>MLP or FT-Transformer; less regularization</td>
+</tr>
+<tr>
+<td>Need native interpretability</td>
+<td>Any</td>
+<td>Depends</td>
+<td>SHAP for GBM; attention maps for TabNet/SAINT</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>HPO Budget Matters</strong>: XGBoost with default hyperparameters sometimes loses to well-tuned deep learning. Always compare under equal HPO budgets: if you spend 100 Optuna trials on XGBoost and 100 on FT-Transformer, the DL gap often narrows significantly — especially on datasets with n &gt; 10k.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<ul>
+<li>DL wins on multi-modal inputs, online learning, multi-task learning, and very large datasets</li>
+<li>The n-threshold for DL competitiveness is roughly 10k-100k depending on feature complexity</li>
+<li>FT-Transformer and SAINT are the strongest tabular DL models at large n</li>
+<li>Multi-task shared backbones are a natural fit for related prediction problems that GBM cannot handle jointly</li>
+<li>Always benchmark under equal HPO effort — XGBoost default often loses to well-tuned DL on larger datasets</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

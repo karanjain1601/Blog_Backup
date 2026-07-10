@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tensor Parallelism for LLM Inference | Notes Backup</title>
+  <meta name="description" content="Splitting individual weight matrices across multiple GPUs along row or column dimensions to serve models too large for a single GPU while maintaining low latency." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Tensor Parallelism for LLM Inference</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Splitting individual weight matrices across multiple GPUs along row or column dimensions to serve models too large for a single GPU while maintaining low latency.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Tensor Parallelism for LLM Inference</h1>
+<p>Tensor parallelism (TP) shards individual weight matrices across multiple GPUs, allowing each GPU to hold only a fraction of the parameters while collectively computing the full forward pass. Unlike pipeline parallelism (which splits the model layer-by-layer across GPUs with sequential execution) or data parallelism (which replicates the model and splits the batch), tensor parallelism splits the computation within each layer and requires synchronization within every transformer block. Megatron-LM (Shoeybi et al., 2019) introduced the canonical column-then-row parallelism pattern for transformer feed-forward and attention layers that is now implemented by virtually every production LLM inference framework including vLLM, TGI, and TensorRT-LLM.</p>
+<h2>Overview</h2>
+<p>A 70B parameter LLM in float16 requires 140 GB of GPU memory — far exceeding a single A100 (80 GB) or H100 (80 GB). Tensor parallelism across N GPUs reduces per-GPU memory to roughly 140/N GB for model weights, plus the per-GPU KV cache and activation memory. With TP=2 across two H100s, the 70B model fits comfortably with room for long-context KV caches. The cost of TP is all-reduce communication: after each column-parallel or row-parallel layer, GPUs must synchronize partial results. On NVLink-connected GPUs (e.g., A100 NVLink with 600 GB/s bidirectional bandwidth), all-reduce for typical activation sizes takes under 0.1 ms and is negligible relative to compute time. On PCIe-connected GPUs (16 GB/s bidirectional), the same all-reduce can take 5–20 ms — potentially dominating the per-layer compute time at batch size 1.</p>
+<h2>Column and Row Parallelism</h2>
+<p>Megatron-LM's tensor parallelism uses two complementary partitioning strategies for linear layers Y = XW + b. In column parallelism, the weight matrix W ∈ ℝ^(in × out) is split along the output (column) dimension: W = [W_1 | W_2 | ... | W_N] where each W_i ∈ ℝ^(in × out/N) lives on GPU i. Each GPU computes Y_i = X W_i (a partial output), then an all-gather across GPUs assembles the full Y. In row parallelism, the input X is split along the feature dimension: each GPU i receives X_i (a fraction of the input) and computes partial Y_i = X_i W. An all-reduce sum combines the partial outputs into the final Y, which is identical on all GPUs after reduction. The key insight of Megatron's design is to chain column-parallel → activation → row-parallel without an intermediate all-gather: the column-parallel output Y_i feeds directly into row-parallel as the sharded input X_i, requiring only one all-reduce at the end of the two-layer block.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.distributed as dist
+import torch.nn.functional as F
+from typing import Optional
+
+class ColumnParallelLinear(nn.Module):
+    &quot;&quot;&quot;Split weight W along output dim; each GPU holds out/N columns; all-gather results.&quot;&quot;&quot;
+    def __init__(self, in_features: int, out_features: int, world_size: int, bias: bool = True):
+        super().__init__()
+        assert out_features % world_size == 0, &quot;out_features must be divisible by world_size&quot;
+        self.out_per_rank = out_features // world_size
+        self.world_size = world_size
+        # Each GPU stores a (out/N, in) weight slice
+        self.weight = nn.Parameter(torch.empty(self.out_per_rank, in_features))
+        self.bias = nn.Parameter(torch.zeros(self.out_per_rank)) if bias else None
+        nn.init.kaiming_uniform_(self.weight, a=5 ** 0.5)
+
+    def forward(self, x: torch.Tensor) -&gt; torch.Tensor:
+        # Local matmul: (batch, in) @ (in, out/N).T -&gt; (batch, out/N)
+        out = F.linear(x, self.weight, self.bias)
+        # All-gather: concatenate partial outputs from all ranks -&gt; (batch, out)
+        gathered = [torch.zeros_like(out) for _ in range(self.world_size)]
+        dist.all_gather(gathered, out)
+        return torch.cat(gathered, dim=-1)
+
+def verify_column_parallel(rank: int, world_size: int, in_f: int = 256, out_f: int = 512):
+    &quot;&quot;&quot;Verify ColumnParallelLinear matches single-GPU reference.&quot;&quot;&quot;
+    full_W = torch.randn(out_f, in_f).cuda()  # reference weight
+    x = torch.randn(4, in_f).cuda()           # shared input (identical on all GPUs)
+    ref = F.linear(x, full_W)                 # single-GPU reference
+    layer = ColumnParallelLinear(in_f, out_f, world_size, bias=False).cuda()
+    # Each rank gets its slice of the full weight
+    slice_size = out_f // world_size
+    layer.weight.data.copy_(full_W[rank * slice_size:(rank + 1) * slice_size])
+    out = layer(x)
+    print(f&quot;Rank {rank}: max_diff={((out - ref).abs().max()):.6f}&quot;)
+</code></pre>
+<h2>Megatron-LM Style Splitting</h2>
+<p>Megatron-LM's key contribution is identifying the exact placement of column-parallel and row-parallel layers in a transformer block that minimizes the number of all-reduce operations. For the MLP sub-block (two linear layers: W1 and W2), column parallelism is applied to W1 (splitting the output/hidden dimension) and row parallelism to W2 (splitting the input/hidden dimension). This means W1's partial outputs Y1_i = X W1_i are already split along the correct dimension to serve as the row-parallel input to W2, so no intermediate all-gather is needed between W1 and W2. Only one all-reduce is needed at the output of W2 per MLP block. For the attention sub-block, the Q, K, V projections are column-parallel (split along the head dimension, effectively sharding attention heads across GPUs), and the output projection is row-parallel. One all-reduce is needed per attention block. The total synchronization cost for a transformer layer is therefore 2 all-reduces: one after attention, one after MLP.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.distributed as dist
+import torch.nn.functional as F
+
+class RowParallelLinear(nn.Module):
+    &quot;&quot;&quot;Split input X along feature dim; each GPU computes partial XW; all-reduce sums.&quot;&quot;&quot;
+    def __init__(self, in_features: int, out_features: int, world_size: int, rank: int):
+        super().__init__()
+        assert in_features % world_size == 0
+        self.in_per_rank = in_features // world_size
+        self.rank = rank
+        self.world_size = world_size
+        # Each GPU stores a column slice of W: (out_features, in/N)
+        self.weight = nn.Parameter(torch.empty(out_features, self.in_per_rank))
+        nn.init.kaiming_uniform_(self.weight, a=5 ** 0.5)
+
+    def forward(self, x_local: torch.Tensor) -&gt; torch.Tensor:
+        &quot;&quot;&quot;x_local is already the rank-local shard: (batch, in/N).&quot;&quot;&quot;
+        partial = F.linear(x_local, self.weight)  # (batch, out_features)
+        dist.all_reduce(partial, op=dist.ReduceOp.SUM)  # sum across all GPUs
+        return partial  # result is identical on all ranks
+
+# Pattern guide: when to use column vs row parallel
+print(&quot;Megatron TP pattern for MLP block:&quot;)
+print(&quot;  Layer 1 (W1): ColumnParallel  — split output dim, no sync needed&quot;)
+print(&quot;  Activation:   Local GELU/SiLU — no communication&quot;)
+print(&quot;  Layer 2 (W2): RowParallel     — split input dim, 1 all-reduce at output&quot;)
+print(&quot;&quot;)
+print(&quot;Megatron TP pattern for Attention block:&quot;)
+print(&quot;  Q, K, V proj: ColumnParallel  — shard along head dimension&quot;)
+print(&quot;  Attention:    Local per-rank  — each rank handles its head slice&quot;)
+print(&quot;  Out proj:     RowParallel     — 1 all-reduce at output&quot;)
+print(&quot;&quot;)
+print(&quot;Total: 2 all-reduces per transformer layer regardless of TP degree.&quot;)
+</code></pre>
+<h2>Attention Head Sharding</h2>
+<p>For multi-head attention (MHA) with H heads and head dimension d_k, tensor parallelism over N GPUs assigns H/N heads to each GPU. Each GPU computes full self-attention for its subset of heads using the full input sequence — Q, K, V projections are column-parallel (each GPU generates Q_i, K_i, V_i for its heads), attention scores are computed locally, and the output projection is row-parallel. This head-level sharding requires that H is divisible by N: for a 32-head model with TP=4, each GPU handles 8 heads. For grouped-query attention (GQA) or multi-query attention (MQA), which have fewer KV heads than query heads, the KV heads must also be divisible by N. Models with very few KV heads (e.g., 8 KV heads in LLaMA-3-70B) limit practical TP degree to 8; going to TP=16 with fewer than 16 KV heads is not possible without replicating KV heads.</p>
+<h2>All-Reduce Communication</h2>
+<p>All-reduce is a collective operation that sums (or takes max/min of) tensors from all participating ranks and distributes the result to every rank. NCCL (NVIDIA Collective Communications Library) implements all-reduce using a ring algorithm: each GPU sends and receives data in a ring topology, requiring 2 * (N-1)/N data passes. For NVLink-connected GPUs (A100/H100 with 600 GB/s bidirectional NVLink bandwidth), a 1MB all-reduce completes in under 10 microseconds. For PCIe-connected GPUs (typically 16–32 GB/s PCIe 4.0 bandwidth), the same 1MB all-reduce takes 200–500 microseconds — slower by a factor of 20–50. Activation tensors in a 70B model forward pass are typically 0.5–4 MB per all-reduce call, making NVLink essentially free while PCIe all-reduces dominate inference latency at small batch sizes.</p>
+<pre><code class="language-python">import torch
+import time
+from vllm import LLM, SamplingParams
+
+def benchmark_tensor_parallel_vllm(
+    model_name: str = &quot;meta-llama/Llama-2-70b-hf&quot;,
+    tp_sizes: list = [2, 4]
+) -&gt; dict:
+    &quot;&quot;&quot;Measure vLLM throughput at different tensor-parallel degrees.&quot;&quot;&quot;
+    prompts = [&quot;Explain the theory of general relativity from first principles.&quot;] * 32
+    params = SamplingParams(temperature=0.0, max_tokens=256)
+    results = {}
+    for tp in tp_sizes:
+        if torch.cuda.device_count() &lt; tp:
+            print(f&quot;Skipping TP={tp}: only {torch.cuda.device_count()} GPU(s) available&quot;)
+            continue
+        llm = LLM(model=model_name, tensor_parallel_size=tp,
+                  dtype=&quot;float16&quot;, gpu_memory_utilization=0.85)
+        # Confirm memory distribution across GPUs
+        for i in range(tp):
+            mem_gb = torch.cuda.memory_allocated(i) / 1e9
+            print(f&quot;  TP={tp} | GPU {i}: {mem_gb:.1f} GB allocated&quot;)
+        t0 = time.perf_counter()
+        outputs = llm.generate(prompts, params)
+        elapsed = time.perf_counter() - t0
+        tokens_out = sum(len(o.outputs[0].token_ids) for o in outputs)
+        tput = tokens_out / elapsed
+        latency_ms = elapsed / len(prompts) * 1000
+        results[tp] = {&quot;throughput_tps&quot;: tput, &quot;latency_ms&quot;: latency_ms}
+        print(f&quot;TP={tp}: {tput:.0f} tok/s  {latency_ms:.0f} ms/req&quot;)
+        del llm
+    return results
+</code></pre>
+<h2>vLLM Tensor Parallelism</h2>
+<p>vLLM implements tensor parallelism using PyTorch's distributed backend (typically NCCL) and exposes it via a single configuration parameter: tensor_parallel_size. Internally, vLLM uses Megatron-style column-then-row splitting for MLP layers and head sharding for attention. The model weights are loaded once by rank 0 and broadcast to other ranks during initialization. vLLM's PagedAttention KV cache is also sharded: each GPU stores the KV cache only for the attention heads it owns. For a 70B model on 4 H100s, each GPU holds ~17.5B parameters worth of weights and 25% of the KV cache pages. This combined weight + KV sharding is what makes vLLM memory-efficient at high TP degrees. The async_engine mode (default for production) overlaps communication with computation using CUDA streams, further hiding all-reduce latency.</p>
+<pre><code class="language-python">import torch
+import torch.distributed as dist
+import time
+from typing import List, Dict
+
+def profile_allreduce_latency(
+    tensor_sizes_mb: List[float] = [1, 10, 50, 100, 500, 1000],
+    n_warmup: int = 5,
+    n_bench: int = 20
+) -&gt; Dict[float, dict]:
+    &quot;&quot;&quot;Benchmark NCCL all-reduce latency for tensors ranging 1MB to 1GB.&quot;&quot;&quot;
+    assert dist.is_initialized(), &quot;Call dist.init_process_group('nccl') first.&quot;
+    results = {}
+    for size_mb in tensor_sizes_mb:
+        n_elements = int(size_mb * 1e6 / 4)  # float32: 4 bytes/element
+        tensor = torch.rand(n_elements, device=&quot;cuda&quot;)
+        for _ in range(n_warmup):
+            dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+        torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        for _ in range(n_bench):
+            dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
+        torch.cuda.synchronize()
+        lat_ms = (time.perf_counter() - t0) / n_bench * 1000
+        # Effective bandwidth: ring all-reduce sends 2*(N-1)/N * data
+        world = dist.get_world_size()
+        effective_bytes = 2 * (world - 1) / world * size_mb * 1e6
+        bw_gbps = (effective_bytes / 1e9) / (lat_ms / 1000)
+        results[size_mb] = {&quot;latency_ms&quot;: lat_ms, &quot;bandwidth_gbps&quot;: bw_gbps}
+        print(f&quot;{size_mb:6.0f} MB  |  {lat_ms:.3f} ms  |  {bw_gbps:.1f} GB/s&quot;)
+    return results
+</code></pre>
+<h2>Scaling Efficiency</h2>
+<p>Tensor parallelism scaling efficiency — the fraction of ideal linear speedup achieved as TP degree increases — degrades as N grows because all-reduce overhead grows with N while per-GPU compute shrinks. For NVLink systems, efficiency remains above 90% through TP=8 for 70B models because all-reduce is fast relative to compute. Beyond TP=8, compute becomes too small per GPU and all-reduce overhead begins to dominate even on NVLink. For PCIe systems, efficiency degrades rapidly: TP=4 on PCIe may yield only 2.0–2.5x speedup instead of the theoretical 4x, with all-reduce consuming 30–50% of each forward pass time. This is why NVIDIA DGX systems pair high-bandwidth NVLink within a node with slower InfiniBand between nodes: tensor parallelism should stay within NVLink-connected GPUs, while pipeline or data parallelism spans nodes.</p>
+<table>
+<thead>
+<tr>
+<th>TP Degree</th>
+<th>Latency (ms/token)</th>
+<th>Throughput (tok/s)</th>
+<th>GPU Memory per GPU</th>
+<th>All-Reduce Cost (NVLink)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>TP=1 (single GPU)</td>
+<td>40–60 ms</td>
+<td>18–25 tok/s</td>
+<td>140 GB (OOM for 70B)</td>
+<td>N/A</td>
+</tr>
+<tr>
+<td>TP=2</td>
+<td>22–32 ms</td>
+<td>30–45 tok/s</td>
+<td>70 GB</td>
+<td>~0.05 ms (negligible)</td>
+</tr>
+<tr>
+<td>TP=4</td>
+<td>13–18 ms</td>
+<td>55–75 tok/s</td>
+<td>35 GB</td>
+<td>~0.08 ms (negligible)</td>
+</tr>
+<tr>
+<td>TP=8</td>
+<td>9–13 ms</td>
+<td>75–100 tok/s</td>
+<td>18 GB</td>
+<td>~0.12 ms (still small)</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>NVLink Required for TP &gt; 2</strong>: Tensor parallelism requires an all-reduce after every transformer layer — on PCIe-connected GPUs this becomes the bottleneck at batch size 1. PCIe bandwidth of 16–32 GB/s means a 500 MB activation all-reduce takes 15–30 ms, comparable to or exceeding the compute time. Use NVLink or avoid TP&gt;2 without high-bandwidth interconnects; prefer pipeline parallelism for PCIe multi-GPU inference.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<ul>
+<li>Tensor parallelism shards weight matrices within each layer across GPUs, enabling models larger than a single GPU's memory to be served while maintaining low latency.</li>
+<li>Megatron-LM's column-then-row pattern minimizes synchronization: only 2 all-reduces per transformer layer regardless of TP degree.</li>
+<li>For MHA layers, TP degree N must divide the number of KV heads — GQA models with 8 KV heads cannot exceed TP=8.</li>
+<li>NVLink bandwidth (600 GB/s on H100) makes all-reduce cost negligible through TP=8; PCIe bandwidth (32 GB/s) makes TP&gt;2 inefficient for latency-sensitive workloads.</li>
+<li>vLLM exposes TP via tensor_parallel_size; both weights and PagedAttention KV cache pages are sharded across GPUs automatically.</li>
+<li>For a 70B model on 4x H100 (NVLink), expect 3.0–3.5x throughput improvement vs 2x H100, and 6–8x vs single A100 (OOM).</li>
+<li>Prefer pipeline parallelism for PCIe multi-node setups and tensor parallelism for NVLink intra-node GPU clusters.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

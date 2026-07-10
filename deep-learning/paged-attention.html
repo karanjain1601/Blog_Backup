@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PagedAttention: Virtual Memory for KV Caches | Notes Backup</title>
+  <meta name="description" content="Managing KV cache memory with OS-style paging to eliminate fragmentation, enabling higher throughput and dynamic batch sizes in vLLM." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>PagedAttention: Virtual Memory for KV Caches</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Managing KV cache memory with OS-style paging to eliminate fragmentation, enabling higher throughput and dynamic batch sizes in vLLM.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>PagedAttention: Virtual Memory for KV Caches</h1>
+<p>PagedAttention (Kwon et al., 2023) applies the virtual memory and paging paradigm from operating systems to KV cache management in LLM serving. In conventional LLM serving frameworks, each request is assigned a contiguous block of GPU memory for its KV cache, pre-allocated to the maximum possible sequence length. This causes severe memory fragmentation: when requests complete at different actual lengths, the unused allocated memory cannot be reclaimed or reused for other requests. PagedAttention eliminates this fragmentation by storing KV cache in fixed-size non-contiguous physical blocks — analogous to virtual memory pages in an OS. Each request's logical KV cache maps to a set of physical blocks via a block table, allowing physical blocks to be allocated on demand and reused immediately after a request completes. This enables vLLM to achieve 90-95% GPU memory utilization versus 20-40% for naive approaches, translating directly into 2-4x higher throughput.</p>
+<h2>Overview</h2>
+<p>The key insight is that KV cache tokens within a request do not need to be stored in physically contiguous GPU memory — they only need to be logically contiguous from the attention kernel's perspective. PagedAttention uses a block table to translate logical token positions to physical memory locations at attention computation time. An attention kernel that supports non-contiguous memory (gathering K, V values from scattered physical blocks) can compute correct attention scores as long as it has access to the block table. This decouples logical sequence length (unbounded) from physical memory layout (fixed-size blocks), enabling dynamic allocation, deallocation, and sharing of physical KV cache memory. vLLM (Virtual Large Language Model, Kwon et al., 2023) is the first production serving system to implement PagedAttention and remains the reference implementation. The paged approach also naturally supports KV cache sharing across requests with shared prefixes (system prompts), and copy-on-write for beam search decoding.</p>
+<h2>Memory Fragmentation in Naive KV Caches</h2>
+<p>Naive KV cache allocation has three sources of fragmentation. Internal fragmentation: requests are assigned memory for the maximum sequence length (e.g., 8192 tokens), but may generate only 100-500 tokens in practice, wasting 90%+ of the allocated space. External fragmentation: after some requests complete and their memory is freed, the freed regions are scattered throughout GPU memory and cannot be combined into a large enough contiguous block for a new long-context request. Reserved fragmentation: memory must be reserved for potential future token generation even when current tokens are few, because pre-allocating maximum length is the only way to guarantee future contiguous extension. Together, these cause GPU memory utilization of 20-40% in practice for a mixed-length workload, meaning 60-80% of KV cache memory is wasted. The direct consequence is a much smaller maximum batch size, lower GPU utilization, and dramatically lower throughput than the hardware is capable of.</p>
+<pre><code class="language-python">import numpy as np
+from dataclasses import dataclass, field
+from typing import List, Dict, Optional
+
+@dataclass
+class Request:
+    req_id: int
+    max_len: int    # maximum sequence length allocated
+    cur_len: int = 0
+
+def naive_allocator_simulation(requests: List[Request], gpu_capacity: int):
+    &quot;&quot;&quot;
+    Naive static allocation: each request pre-allocates max_len contiguous slots.
+    Shows fragmentation when requests finish at different times.
+    &quot;&quot;&quot;
+    allocated = {}     # req_id -&gt; (start, end) in GPU memory
+    free_blocks = []   # list of (start, end) of freed but unusable fragmented gaps
+    next_free = 0
+    # Allocate max_len for every request upfront
+    for req in requests:
+        if next_free + req.max_len &gt; gpu_capacity:
+            print(f&quot;  [FAIL] Request {req.req_id} cannot allocate {req.max_len} slots (fragmented!)&quot;)
+            continue
+        allocated[req.req_id] = (next_free, next_free + req.max_len)
+        next_free += req.max_len
+    # Simulate requests finishing at different actual lengths
+    np.random.seed(42)
+    wasted = 0
+    for req in requests:
+        if req.req_id not in allocated:
+            continue
+        actual_len = int(req.max_len * np.random.uniform(0.2, 0.9))
+        freed_gap = req.max_len - actual_len
+        wasted += freed_gap
+        free_blocks.append(freed_gap)
+    total_slots = sum(r.max_len for r in requests if r.req_id in allocated)
+    print(f&quot;  Naive allocator: {total_slots} slots allocated, {wasted} wasted&quot;)
+    print(f&quot;  Fragmentation rate: {wasted/total_slots*100:.1f}%&quot;)
+    print(f&quot;  {len(free_blocks)} freed gaps -- each too small to reuse for new requests&quot;)
+
+requests = [Request(i, max_len=np.random.randint(200, 1000)) for i in range(8)]
+print(&quot;=== Naive Static Allocation ===&quot;)
+naive_allocator_simulation(requests, gpu_capacity=8192)
+</code></pre>
+<h2>Physical and Logical Blocks</h2>
+<p>PagedAttention divides the KV cache memory into fixed-size physical blocks, each holding BLOCK_SIZE consecutive tokens' K and V vectors across all layers and heads. Typical block sizes are 16 or 32 tokens. A physical block for BLOCK_SIZE=16 tokens in LLaMA-3-8B (32 layers, 8 KV heads, head_dim=128, bfloat16) stores: 16 × 2 × 32 × 8 × 128 × 2 = 2 MB per block. At BLOCK_SIZE=16, a 80 GB A100 with 70 GB available for KV cache can hold ~35,000 physical blocks. Each request maintains a block table: a list mapping logical block indices (0, 1, 2, ...) to physical block IDs. Logical block 0 holds tokens 0..BLOCK_SIZE-1; logical block 1 holds tokens BLOCK_SIZE..2*BLOCK_SIZE-1; and so on. The mapping is purely in the block table — physical blocks can be anywhere in GPU memory. When a request needs more KV cache (each new BLOCK_SIZE tokens), one physical block is popped from the free block pool and appended to the block table. When a request completes, all its physical blocks are returned to the pool immediately, making them available for other requests without waiting for garbage collection.</p>
+<h2>Block Tables and Block Manager</h2>
+<p>The block manager maintains the global pool of physical blocks and per-sequence block tables. It tracks reference counts for each physical block, enabling copy-on-write semantics for shared prefix caching and beam search. At each decode step, the scheduler calls the block manager to ensure the active sequences have enough physical blocks for the next token. If the free pool is exhausted, the scheduler must either preempt a running sequence (swap its KV cache to CPU) or reject new incoming requests. The block manager's allocate, free, and fork operations are O(1) per block — the overhead of block management is negligible compared to the GPU compute for attention. The attention kernel receives the block table as an input tensor and uses it to gather K, V values from non-contiguous physical memory addresses, computing attention scores identically to the contiguous case.</p>
+<pre><code class="language-python">import numpy as np
+from typing import List, Dict, Tuple, Optional
+
+BLOCK_SIZE = 16  # tokens per physical block
+
+class BlockManager:
+    &quot;&quot;&quot;
+    Simulates PagedAttention block management.
+    Physical blocks are fixed-size (BLOCK_SIZE tokens) units of KV cache memory.
+    Each sequence has a logical block table mapping logical-&gt;physical block ids.
+    &quot;&quot;&quot;
+
+    def __init__(self, total_physical_blocks: int):
+        self.total = total_physical_blocks
+        self.free_blocks = list(range(total_physical_blocks))  # pool of free block ids
+        self.ref_counts = [0] * total_physical_blocks          # for copy-on-write
+        self.block_tables: Dict[int, List[int]] = {}           # seq_id -&gt; [phys_block_ids]
+
+    def allocate_sequence(self, seq_id: int) -&gt; bool:
+        &quot;&quot;&quot;Allocate one physical block for a new sequence.&quot;&quot;&quot;
+        if not self.free_blocks:
+            return False
+        phys_id = self.free_blocks.pop()
+        self.ref_counts[phys_id] = 1
+        self.block_tables[seq_id] = [phys_id]
+        return True
+
+    def append_token(self, seq_id: int) -&gt; Optional[int]:
+        &quot;&quot;&quot;Add one token to a sequence; allocate new block if last block is full.&quot;&quot;&quot;
+        table = self.block_tables[seq_id]
+        # Check if last block has space (simplified: track fill per block externally)
+        # For simulation, allocate a new block every BLOCK_SIZE tokens
+        cur_tokens = sum(1 for _ in range(len(table)))  # mock token count
+        if len(table) * BLOCK_SIZE &lt;= cur_tokens:
+            if not self.free_blocks:
+                return None  # out of memory -- trigger preemption
+            phys_id = self.free_blocks.pop()
+            self.ref_counts[phys_id] = 1
+            table.append(phys_id)
+        return table[-1]  # return current physical block id
+
+    def free_sequence(self, seq_id: int):
+        &quot;&quot;&quot;Return all physical blocks for a completed sequence to the free pool.&quot;&quot;&quot;
+        for phys_id in self.block_tables.pop(seq_id, []):
+            self.ref_counts[phys_id] -= 1
+            if self.ref_counts[phys_id] == 0:
+                self.free_blocks.append(phys_id)
+
+    def utilization(self) -&gt; float:
+        return (self.total - len(self.free_blocks)) / self.total
+
+# Demo: allocate 10 sequences, free 5, check utilization
+mgr = BlockManager(total_physical_blocks=512)
+for seq_id in range(10):
+    mgr.allocate_sequence(seq_id)
+print(f&quot;After allocating 10 seqs: utilization={mgr.utilization()*100:.1f}%&quot;)
+for seq_id in range(5):
+    mgr.free_sequence(seq_id)
+print(f&quot;After freeing 5 seqs:     utilization={mgr.utilization()*100:.1f}%&quot;)
+print(f&quot;Free blocks available for new requests: {len(mgr.free_blocks)}&quot;)
+</code></pre>
+<h2>Copy-on-Write for Beam Search</h2>
+<p>Beam search generates multiple hypotheses simultaneously from a shared prefix. In naive implementations, each beam maintains a full copy of the KV cache for the prefix, consuming n_beams times the memory. PagedAttention enables zero-copy beam forking: when a sequence is forked into n beams, all beams share the same physical blocks for the prefix. The block manager increments the reference count of each shared block. When a beam needs to write a new token that would fall into a shared block, the block manager triggers copy-on-write: a new physical block is allocated, the shared block's content is copied into it, the reference count of the original block is decremented, and the beam's block table is updated to point to the new block. Beams that have diverged from the prefix write to their own private blocks (reference count 1), with no copy needed. This reduces peak KV cache memory for beam search from n_beams × prefix_len to prefix_len + n_beams × diverged_len, which is substantially less for long shared prefixes.</p>
+<pre><code class="language-python">import copy
+from typing import List, Dict
+
+BLOCK_SIZE = 16
+
+class CopyOnWriteBlockManager:
+    &quot;&quot;&quot;
+    Demonstrates copy-on-write semantics for beam search.
+    Multiple beam hypotheses share the same physical blocks for their common prefix.
+    When a beam needs to write a new token to a shared block, it triggers a block copy.
+    &quot;&quot;&quot;
+
+    def __init__(self, total_blocks: int):
+        self.total = total_blocks
+        self.free = list(range(total_blocks))
+        self.ref_count = [0] * total_blocks
+        self.block_tables: Dict[int, List[int]] = {}
+
+    def fork_sequence(self, parent_id: int, child_id: int):
+        &quot;&quot;&quot;Copy block table and increment ref counts -- zero memory copy.&quot;&quot;&quot;
+        parent_table = self.block_tables[parent_id]
+        self.block_tables[child_id] = list(parent_table)  # shallow copy of block ids
+        for blk in parent_table:
+            self.ref_count[blk] += 1  # shared -- ref count &gt; 1 triggers CoW on write
+        print(f&quot;  Forked seq {parent_id} -&gt; {child_id}: shared {len(parent_table)} blocks, no memory copied&quot;)
+
+    def cow_write(self, seq_id: int, logical_block_idx: int) -&gt; int:
+        &quot;&quot;&quot;Copy-on-write: if block is shared, allocate a new physical block.&quot;&quot;&quot;
+        phys_id = self.block_tables[seq_id][logical_block_idx]
+        if self.ref_count[phys_id] &gt; 1:
+            # Block is shared -- must copy before writing
+            new_phys = self.free.pop()
+            self.ref_count[phys_id] -= 1
+            self.ref_count[new_phys] = 1
+            self.block_tables[seq_id][logical_block_idx] = new_phys
+            print(f&quot;  CoW: seq {seq_id} block {logical_block_idx}: phys {phys_id} -&gt; {new_phys}&quot;)
+            return new_phys
+        return phys_id  # not shared; write in place
+
+# Simulate beam search with 3 beams sharing a common prefix
+mgr = CopyOnWriteBlockManager(total_blocks=32)
+mgr.block_tables[0] = [mgr.free.pop(), mgr.free.pop()]  # 2 shared prefix blocks
+mgr.ref_count[mgr.block_tables[0][0]] = 1
+mgr.ref_count[mgr.block_tables[0][1]] = 1
+print(&quot;=== Beam Search: Fork 3 beams from common prefix ===&quot;)
+for beam_id in [1, 2, 3]:
+    mgr.fork_sequence(0, beam_id)
+print(&quot;\n=== Beams write new tokens -- triggers CoW on shared blocks ===&quot;)
+mgr.cow_write(1, 1)  # beam 1 writes to last block -- triggers CoW
+mgr.cow_write(2, 1)  # beam 2 also triggers CoW
+</code></pre>
+<h2>Integration with vLLM</h2>
+<p>vLLM integrates PagedAttention into a complete LLM serving system with an asynchronous engine, scheduler, and block manager. The LLM engine accepts requests, manages their lifecycle (prefill → decode → complete), and continuously schedules batches at each iteration. Requests are scheduled as long as there are free physical blocks for their next decode step. When GPU memory is exhausted, the scheduler preempts the lowest-priority sequence(s): their KV cache blocks are swapped to CPU RAM (fast PCIe transfer) or discarded (re-computed on re-admission for recompute-based preemption). vLLM's architecture separates the LLM engine (managing blocks, batching, scheduling) from the model worker (GPU computation), communicating via shared memory. The engine supports both offline batch inference (LLM class) and online serving (AsyncLLMEngine with FastAPI), with identical underlying PagedAttention-based KV management.</p>
+<pre><code class="language-python">import asyncio
+from vllm import LLM, SamplingParams
+from vllm.engine.arg_utils import EngineArgs
+
+def vllm_paged_attention_demo():
+    &quot;&quot;&quot;
+    vLLM uses PagedAttention internally for all inference.
+    No special flags needed -- block allocation is automatic.
+    Compare throughput vs HuggingFace generate().
+    &quot;&quot;&quot;
+    # Initialize LLM engine with PagedAttention (default in vLLM)
+    llm = LLM(
+        model=&quot;meta-llama/Llama-3-8B-Instruct&quot;,
+        gpu_memory_utilization=0.92,   # allocate 92% of GPU memory for KV blocks
+        max_model_len=8192,            # max sequence length
+        max_num_seqs=64,               # max concurrent sequences in batch
+        block_size=16,                 # tokens per KV block (default 16)
+    )
+    sampling_params = SamplingParams(temperature=0.7, max_tokens=200)
+    # Mixed-length batch: PagedAttention allocates only what is needed per sequence
+    prompts = [
+        &quot;Explain the transformer attention mechanism in one paragraph.&quot;,
+        &quot;Write a Python function to sort a list.&quot;,
+        &quot;What is gradient descent? Provide a brief mathematical derivation.&quot;,
+        &quot;Summarize the history of deep learning in 3 sentences.&quot;,
+        &quot;Compare LSTM and GRU architectures.&quot;,
+    ]
+    import time
+    t0 = time.perf_counter()
+    outputs = llm.generate(prompts, sampling_params)
+    elapsed = time.perf_counter() - t0
+    total_tokens = sum(len(o.outputs[0].token_ids) for o in outputs)
+    print(f&quot;Generated {total_tokens} tokens in {elapsed:.2f}s&quot;)
+    print(f&quot;Throughput: {total_tokens/elapsed:.0f} tokens/sec&quot;)
+    # Inspect block allocation statistics
+    stats = llm.llm_engine.scheduler[0].block_manager
+    print(f&quot;Physical blocks used: {stats.num_used_gpu_blocks}&quot;)
+
+vllm_paged_attention_demo()
+</code></pre>
+<blockquote>
+<p><strong>PagedAttention Throughput Advantage</strong>: PagedAttention achieves 90-95% GPU memory utilization vs 20-40% for naive static allocation — this is the single biggest driver of vLLM's throughput advantage over HuggingFace generate(). Higher memory utilization directly enables larger batch sizes: a 4x memory efficiency improvement typically yields a 2-4x throughput improvement. The attention kernel overhead for non-contiguous memory access (block table lookup + gather) is less than 5% compared to contiguous attention on typical CUDA hardware.</p>
+</blockquote>
+<h2>Throughput Improvements</h2>
+<p>The throughput gains from PagedAttention compound with continuous batching (iteration-level scheduling). With naive static allocation, batch size is limited by the worst-case (maximum-length) request in the batch. PagedAttention allows serving a large batch of short requests while simultaneously serving a few long requests, because each request only occupies exactly the KV cache blocks it currently needs. Benchmark results (Kwon et al., 2023): vLLM achieves 2.2-3.5x higher request throughput than HuggingFace Text Generation Inference (TGI) on OPT-13B and OPT-175B across varying request lengths. At high request rates, the throughput advantage increases because vLLM's better memory utilization allows it to serve more concurrent requests before being memory-bound. Latency impact: PagedAttention does not significantly affect per-token latency for individual requests; the improvements are primarily in batch throughput and maximum batch size.</p>
+<table>
+<thead>
+<tr>
+<th>Memory Strategy</th>
+<th>GPU Utilization</th>
+<th>Fragmentation %</th>
+<th>Max Batch Size</th>
+<th>Throughput (OPT-13B, A10G)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Naive static allocation (max_len)</td>
+<td>20-40%</td>
+<td>60-80%</td>
+<td>4-8 seqs</td>
+<td>~200 tokens/s</td>
+</tr>
+<tr>
+<td>Dynamic naive (realloc on grow)</td>
+<td>40-60%</td>
+<td>30-50%</td>
+<td>8-16 seqs</td>
+<td>~350 tokens/s</td>
+</tr>
+<tr>
+<td>PagedAttention (block_size=32)</td>
+<td>85-90%</td>
+<td>5-10%</td>
+<td>32-64 seqs</td>
+<td>~700 tokens/s</td>
+</tr>
+<tr>
+<td>PagedAttention (block_size=16)</td>
+<td>90-95%</td>
+<td>2-5%</td>
+<td>64-128 seqs</td>
+<td>~850 tokens/s</td>
+</tr>
+</tbody>
+</table>
+<h2>Key Takeaways</h2>
+<ul>
+<li>PagedAttention maps virtual token positions to non-contiguous physical blocks via a block table, eliminating all three forms of KV cache fragmentation.</li>
+<li>Block size of 16 tokens gives 90-95% GPU memory utilization; smaller blocks reduce fragmentation but increase block management overhead.</li>
+<li>Zero-copy sequence forking via reference count sharing enables memory-efficient beam search and shared-prefix caching across requests.</li>
+<li>Copy-on-write triggers only when a beam writes to a shared block; for long shared prefixes, beam search memory is near-linear in prefix length, not n_beams * prefix_length.</li>
+<li>vLLM achieves 2-4x throughput over HuggingFace generate() primarily through PagedAttention's higher batch capacity, not faster per-token compute.</li>
+<li>Preemption (swap to CPU or recompute) handles GPU OOM during bursts; swap trades latency for throughput; recompute trades compute for memory.</li>
+<li>Prefix caching (PromptCache / RadixAttention in vLLM v0.5+) reuses physical blocks for identical prompt prefixes across requests, further reducing KV cache overhead for repeated system prompts.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

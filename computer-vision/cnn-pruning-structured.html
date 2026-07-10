@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Structured Pruning: Channel and Layer Removal for CNN Compression | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Structured Pruning: Channel and Layer Removal for CNN Compression</h1>
+      
+      <h1>Structured Pruning: Channel and Layer Removal for CNN Compression</h1>
+<p>Structured pruning removes entire filters, channels, or layers from a CNN, producing dense subnetworks that run efficiently on standard hardware without sparse-compute support. Unlike weight sparsification, channel removal directly reduces feature-map width and cuts FLOPs proportionally to the compression ratio.</p>
+<p>Modern CNNs such as ResNet-50 and EfficientNet contain millions of parameters, making edge deployment challenging. Structured pruning targets a 50–75% parameter reduction while retaining 95–98% of baseline accuracy, enabling real-time inference on CPUs, mobile NPUs, and microcontrollers without sparse-compute kernels.</p>
+<p>Unstructured pruning zeros individual weights anywhere in the tensor, achieving very high sparsity (90%+) with minimal accuracy loss but requiring specialised sparse-compute hardware to realise any speedup. Structured pruning removes coherent groups — entire filters, rows, or heads — producing a smaller dense network runnable on any hardware.</p>
+<blockquote>
+<p><strong>warning</strong>: Unstructured pruning (zeroing individual weights) achieves high sparsity but gives no real speedup without sparse-compute hardware. Structured pruning (removing entire filters/channels) reduces FLOPs on any hardware — prefer structured pruning for deployment.</p>
+</blockquote>
+<p>The gap between the two paradigms is bridged by group sparsity: penalise the L2 norm of entire filter groups during training so that whole channels converge to zero and can be cleanly removed. This combines the high-compression potential of unstructured methods with the hardware-friendliness of channel pruning.</p>
+<p>L1 filter pruning ranks convolutional filters by the L1 norm of their weight tensors. Filters with small norms contribute little to the output and are removed first. This heuristic is fast, requires no gradient information, and correlates well with actual importance for tasks where learned features share similar magnitudes.</p>
+<pre><code class="language-python">for layer in conv_layers:\n    norms = layer.weight.abs().sum(dim=(1,2,3))\n    prune_idx = norms.argsort()[:int(sparsity * n_filters)]\n    prune_filter(layer, prune_idx)
+</code></pre>
+<p>The sparsity ratio controls the fraction of filters removed per layer. Global pruning applies one threshold across all layers; layer-wise pruning sets per-layer targets. The first convolutional layer and final classifier are typically kept dense as they process raw input and produce task-critical class predictions.</p>
+<p>Taylor-series importance replaces the L1 heuristic with a first-order approximation of the loss change caused by removing a filter. Weighting each filter's activation by its gradient captures task-specific contribution rather than raw magnitude, leading to better accuracy at higher compression ratios on fine-grained datasets.</p>
+<pre><code class="language-python"># run one forward+backward pass on calibration data\ngrad = layer.weight.grad\nimportance = (layer.weight * grad).abs().mean(dim=(1,2,3))\n# rank and prune lowest-importance filters\nprune_idx = importance.argsort()[:int(sparsity * n_filters)]\nprune_filter(layer, prune_idx)
+</code></pre>
+<p>Compute importance scores over a small calibration set — 1 to 5 batches — rather than the full training set to keep overhead low. Accumulate gradients across multiple batches for stability before ranking. Filters in deeper layers tend to score higher, so global ranking naturally preserves more capacity in later blocks.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Sparsity %</th>
+<th>Top-1 drop</th>
+<th>Speedup</th>
+<th>Hardware friendly</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>L1 unstructured</td>
+<td>90%</td>
+<td>0.5%</td>
+<td>1.0×</td>
+<td>No</td>
+</tr>
+<tr>
+<td>L1 structured</td>
+<td>50%</td>
+<td>0.8%</td>
+<td>2.1×</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Taylor</td>
+<td>60%</td>
+<td>0.6%</td>
+<td>2.8×</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Lottery Ticket</td>
+<td>85%</td>
+<td>0.3%</td>
+<td>1.2×</td>
+<td>No</td>
+</tr>
+<tr>
+<td>Movement Pruning</td>
+<td>80%</td>
+<td>0.7%</td>
+<td>1.5×</td>
+<td>Partial</td>
+</tr>
+</tbody>
+</table>
+<p>One-shot pruning to high sparsity severely damages accuracy; iterative pruning applies small increments — 5 to 10% of remaining filters — followed by short fine-tuning phases. Each cycle lets the surviving weights redistribute, making subsequent pruning steps safer and keeping final accuracy loss predictable and bounded.</p>
+<pre><code class="language-python">for epoch in range(recovery_epochs):\n    for x, y in loader:\n        loss = CE(model(x), y)\n        loss.backward()\n        optimizer.step()\n# recovers 1-2% accuracy in 10% of original training budget
+</code></pre>
+<pre><code class="language-python">while count_params(model) &gt; target:\n    prune(model, step=0.05)\n    finetune(model, epochs=5)\n    print(f&quot;Params: {count_params(model)}, Acc: {eval(model)}&quot;)
+</code></pre>
+<p>Recovery fine-tuning should use a learning rate 10× smaller than the original training rate to avoid disrupting pruned-layer boundaries. Cosine-annealing warm restarts help the model escape local minima introduced by structural changes. Monitor validation accuracy after each iteration to set an early-stop criterion.</p>
+<p>Structured pruning is the preferred compression technique when targeting general-purpose CPUs and mobile hardware because removed channels translate directly to fewer multiply-accumulate operations. Pair structured pruning with knowledge distillation for the best accuracy–efficiency tradeoff beyond 60% parameter reduction.</p>
+<p>Use Taylor-series scoring over L1 norms whenever gradient computation is affordable. Apply pruning iteratively with 5-epoch recovery phases rather than in a single shot. Always profile latency on the target device after pruning, as theoretical FLOPs reduction often differs from measured wall-clock speedup.</p>
+    </article>
+  </main>
+</body>
+</html>

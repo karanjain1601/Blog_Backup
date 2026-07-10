@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mask R-CNN: Instance Segmentation | Notes Backup</title>
+  <meta name="description" content="Mask R-CNN extends Faster R-CNN with a parallel mask prediction head — RoI Align, FCN-based mask branch, multi-task training loss, and applications to COCO instance segmentation." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Mask R-CNN: Instance Segmentation</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Mask R-CNN extends Faster R-CNN with a parallel mask prediction head — RoI Align, FCN-based mask branch, multi-task training loss, and applications to COCO instance segmentation.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Mask R-CNN: Instance Segmentation</h1>
+<h2>Overview</h2>
+<p>Mask R-CNN extends Faster R-CNN by adding a third parallel branch that predicts a segmentation mask for each detected object. The model uses a ResNet-FPN backbone for multi-scale features, a Region Proposal Network for candidate boxes, and separate heads for class prediction, bounding box regression, and binary mask output. It achieves state-of-the-art instance segmentation on COCO with practical inference speed.</p>
+<blockquote>
+<p><strong>warning</strong>: Mask R-CNN predicts masks independently per class — it does NOT use the predicted class to pick the mask at training time. This avoids competition between classes in the mask head.</p>
+</blockquote>
+<h2>RoI Align for Precise Alignment</h2>
+<p>RoI Pooling quantizes region coordinates to integers, creating spatial misalignment that degrades mask accuracy. RoI Align removes quantization by sampling features at exact floating-point positions using bilinear interpolation. A fixed sampling grid per output cell is computed from the feature map without rounding, preserving spatial accuracy that is essential for the downstream 28x28 mask branch.</p>
+<pre><code class="language-python">import torch
+import torchvision.ops as ops
+
+def demo_roi_align(feature_map, boxes):
+    &quot;&quot;&quot;RoI Align: bilinear sampling at exact coords, no quantization error.&quot;&quot;&quot;
+    # feature_map: [B, C, H, W]; boxes: [N, 5] (batch_idx, x1, y1, x2, y2)
+    aligned = ops.roi_align(
+        feature_map,
+        boxes,
+        output_size=(14, 14),
+        spatial_scale=1.0 / 16.0,
+        sampling_ratio=2,
+        aligned=True
+    )
+    return aligned  # [N, C, 14, 14]
+</code></pre>
+<p>In practice, RoI Align divides each output cell into a 2x2 or 4x4 sub-grid and samples four bilinear interpolation points per sub-cell, then averages within each cell. The improvement over RoI Pooling is most pronounced for mask quality — Mask R-CNN's paper reports a 3-point mask AP gain from switching to RoI Align, especially for small or thin objects such as poles and wires.</p>
+<h2>Mask Head Architecture</h2>
+<p>The mask head is a small fully convolutional network applied independently to each RoI feature. It consists of four 3x3 convolutional layers with 256 channels and ReLU activations, followed by a transposed convolution to upsample from 14x14 to 28x28, and a 1x1 conv with sigmoid activation. One 28x28 binary mask is predicted per class without class competition in the head.</p>
+<pre><code class="language-python">import torch.nn as nn
+
+class MaskHead(nn.Module):
+    &quot;&quot;&quot;4x conv3x3 -&gt; deconv -&gt; 1x1; output: [N, num_classes, 28, 28].&quot;&quot;&quot;
+    def __init__(self, num_classes=80):
+        super().__init__()
+        self.convs = nn.Sequential(*[
+            nn.Sequential(nn.Conv2d(256, 256, 3, padding=1), nn.ReLU())
+            for _ in range(4)])
+        self.deconv = nn.ConvTranspose2d(256, 256, 2, stride=2)
+        self.out = nn.Conv2d(256, num_classes, 1)
+    def forward(self, x):
+        x = self.convs(x)
+        x = nn.functional.relu(self.deconv(x))
+        return self.out(x)
+</code></pre>
+<p>The 28x28 resolution balances spatial detail against compute cost. At inference, the top-scoring class selects which of the C predicted masks to use; the chosen mask is resized back to the bounding box dimensions using bilinear interpolation and pasted into the full image canvas. Mask prediction and classification remain fully decoupled throughout training and inference, preventing cross-class gradient interference.</p>
+<h2>Multi-task Training Loss</h2>
+<p>Mask R-CNN optimizes three losses jointly: cross-entropy classification loss, smooth-L1 bounding box regression loss, and binary cross-entropy mask loss. The total loss is their unweighted sum. Only positive RoIs — those matched to a ground-truth object by IoU threshold — contribute to the mask loss. Negative RoIs contribute only to classification and box regression losses.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def mask_loss(pred_masks, gt_masks, gt_labels, pos_idx):
+    &quot;&quot;&quot;BCE mask loss on GT class channel only, averaged over positive RoIs.&quot;&quot;&quot;
+    pos_pred = pred_masks[pos_idx]       # [P, C, 28, 28]
+    pos_gt   = gt_masks[pos_idx]         # [P, 28, 28] binary float
+    pos_cls  = gt_labels[pos_idx]        # [P] GT class indices
+    # Select predicted mask at the ground-truth class channel
+    sel = pos_cls.view(-1, 1, 1, 1).expand(-1, 1, 28, 28)
+    chosen = pos_pred.gather(1, sel).squeeze(1)  # [P, 28, 28]
+    return F.binary_cross_entropy_with_logits(chosen, pos_gt.float())
+</code></pre>
+<p>The binary cross-entropy mask loss is averaged over all pixels in the 28x28 prediction for each positive RoI. Crucially, the loss is computed only on the mask channel corresponding to the ground-truth class, not the predicted class. This design choice prevents gradient interference between class masks, allowing each channel to specialize without competing with others during backpropagation.</p>
+<h2>Running Mask R-CNN with torchvision</h2>
+<p>The torchvision library ships Mask R-CNN with a ResNet-50-FPN backbone pretrained on COCO, available via a single model factory call. The pretrained model achieves 37.9 box AP and 34.6 mask AP on COCO minival. For inference, images are passed as a list of tensors; the model returns boxes, labels, scores, and binary masks at 28x28 resolution already resized to each detected box.</p>
+<pre><code class="language-python">import torch
+from torchvision.models.detection import maskrcnn_resnet50_fpn, MaskRCNN_ResNet50_FPN_Weights
+import torchvision.transforms.functional as TF
+
+model = maskrcnn_resnet50_fpn(weights=MaskRCNN_ResNet50_FPN_Weights.DEFAULT)
+model.eval()
+
+img_tensor = TF.to_tensor(image_pil).unsqueeze(0)
+with torch.no_grad():
+    preds = model(img_tensor)[0]
+
+masks  = preds[&quot;masks&quot;][:, 0] &gt; 0.5
+scores = preds[&quot;scores&quot;]
+labels = preds[&quot;labels&quot;]
+print(f&quot;{(scores &gt; 0.9).sum()} high-confidence detections&quot;)
+</code></pre>
+<p>For custom dataset fine-tuning, replace the box predictor and mask predictor heads with new ones matching the number of target classes. Freeze backbone layers during initial training then unfreeze for fine-tuning. The default anchor generator and NMS thresholds work well for most datasets, but adjusting the minimum score threshold at inference significantly affects the number of returned instances.</p>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>AP (box)</th>
+<th>AP (mask)</th>
+<th>Backbone</th>
+<th>FPS</th>
+<th>Year</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Mask R-CNN</td>
+<td>38.2</td>
+<td>34.7</td>
+<td>ResNet-50-FPN</td>
+<td>8.8</td>
+<td>2017</td>
+</tr>
+<tr>
+<td>PANet</td>
+<td>42.0</td>
+<td>37.5</td>
+<td>ResNet-50-FPN</td>
+<td>4.7</td>
+<td>2018</td>
+</tr>
+<tr>
+<td>HTC</td>
+<td>44.9</td>
+<td>38.4</td>
+<td>ResNet-50-FPN</td>
+<td>2.3</td>
+<td>2019</td>
+</tr>
+<tr>
+<td>SOLOv2</td>
+<td>39.7</td>
+<td>35.5</td>
+<td>ResNet-50-FPN</td>
+<td>18.0</td>
+<td>2020</td>
+</tr>
+<tr>
+<td>QueryInst</td>
+<td>44.5</td>
+<td>39.7</td>
+<td>ResNet-50-FPN</td>
+<td>10.0</td>
+<td>2021</td>
+</tr>
+</tbody>
+</table>
+<h2>Key Takeaways</h2>
+<p>Mask R-CNN's key insight is that instance segmentation can be decomposed into detection and segmentation as parallel tasks sharing a backbone. The FPN backbone provides multi-scale features enabling detection across scales. This two-stage approach — first detect then segment — produces high-quality masks by focusing the mask head on already-localized regions rather than full images.</p>
+<p>RoI Align is a critical contribution — the shift from quantized RoI Pooling to bilinear-interpolated sampling may seem minor but yields significant mask quality improvements. Spatial misalignment of even one pixel at the feature level translates to visible artifacts in the upsampled 28x28 mask, especially for small or thin objects such as poles, wires, or pedestrian limbs.</p>
+<p>Multi-task training with a joint loss is crucial for performance. The mask head benefits from the object localization signal provided by the box head, and the box head improves from additional supervision. Jointly training all three tasks produces better shared representations than any single-task model, showing that complementary vision objectives regularize features effectively.</p>
+<p>Mask R-CNN remains a strong baseline for instance segmentation despite being published in 2017. Subsequent advances like PANet, HTC, SOLOv2, and QueryInst improve AP by 5 to 15 points but share its core design principles. Understanding Mask R-CNN is essential for reading modern instance segmentation literature and adapting models to domain-specific applications.</p>
+    </article>
+  </main>
+</body>
+</html>

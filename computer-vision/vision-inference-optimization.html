@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Vision Inference Optimization: Batching, Caching, and Memory Layout | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Vision Inference Optimization: Batching, Caching, and Memory Layout</h1>
+      
+      <h1>Vision Inference Optimization: Batching, Caching, and Memory Layout</h1>
+<h2>Overview</h2>
+<p>Inference optimization is a multi-layered problem: the same model can differ by 3-5x in latency depending on memory layout, kernel fusion, and pipeline structure. This note covers the four highest-leverage techniques for vision inference: channels-last memory format, torch.compile kernel fusion, CUDA graph replay, and async CPU-GPU preprocessing pipelines.</p>
+<p>Each technique targets a different bottleneck. Channels-last reduces cache misses in convolution kernels. torch.compile fuses elementwise ops and eliminates Python overhead. CUDA graphs remove kernel launch latency. Async pipelines overlap CPU preprocessing with GPU inference to maximize device utilization and eliminate data-starvation idle gaps.</p>
+<h2>Batching and Throughput vs Latency</h2>
+<p>Batching aggregates multiple samples into a single forward pass, amortizing fixed GPU kernel launch overhead across N samples. Larger batches increase arithmetic intensity and improve GPU utilization but increase latency for individual requests. The optimal batch size is the knee of the throughput-vs-latency curve for your specific model and GPU.</p>
+<p>For online serving, dynamic batching — collecting requests within a timeout window and forming a batch — balances latency SLAs with throughput. NVIDIA Triton Inference Server implements dynamic batching natively. For offline batch jobs, maximize batch size to fill GPU VRAM and sustain peak compute utilization without exceeding memory limits.</p>
+<h2>CUDA Memory Layout and Channels-Last</h2>
+<p>PyTorch stores tensors in NCHW layout by default. NVIDIA convolution kernels are optimized for NHWC (channels-last) layout, which packs spatial neighbors contiguously in memory and improves L1/L2 cache hit rates during sliding-window convolution. Converting a ResNet-50 to channels-last format takes one API call and requires no model architecture changes.</p>
+<pre><code class="language-python">import torch
+
+model = model.to(memory_format=torch.channels_last)
+model = model.cuda()
+
+sample = torch.randn(1, 3, 224, 224).cuda()
+input_cl = sample.to(memory_format=torch.channels_last)
+
+with torch.inference_mode():
+    out = model(input_cl)
+# ~10-20% speedup on NVIDIA Ampere for conv-heavy models
+</code></pre>
+<p>Channels-last propagates automatically through consecutive conv-bn-relu chains in PyTorch 2.x. Operations that do not support channels-last silently fall back to contiguous format, incurring a transpose penalty. Inspect tensor strides with tensor.is_contiguous(memory_format=torch.channels_last) to identify layers that break the format chain.</p>
+<h2>Graph Optimization and Fusion</h2>
+<p>torch.compile traces the model graph and applies backend-specific optimizations: operator fusion, dead code elimination, and memory layout rewrites. The max-autotune mode runs autotuning across candidate kernels and fused implementations, selecting the fastest for your specific input shape and GPU. Compilation happens once at the first forward pass.</p>
+<pre><code class="language-python">import torch
+
+model = model.cuda().eval()
+compiled = torch.compile(model, mode=&quot;max-autotune&quot;)
+
+with torch.inference_mode():
+    for batch in loader:
+        x = batch[&quot;image&quot;].cuda()
+        out = compiled(x)
+</code></pre>
+<p>CUDA graph capture records the sequence of GPU kernel launches for a fixed input shape into a replayable binary. Subsequent inference replays the graph with a single driver call, eliminating Python-level dispatch and per-kernel launch overhead. This is most effective for fixed-batch-size, latency-critical endpoints where input shape never varies.</p>
+<pre><code class="language-python">static_input = torch.randn(8, 3, 224, 224).cuda()
+s = torch.cuda.Stream()
+s.wait_stream(torch.cuda.current_stream())
+with torch.cuda.stream(s):
+    for _ in range(3):  # warmup
+        model(static_input)
+g = torch.cuda.CUDAGraph()
+with torch.cuda.graph(g):
+    static_output = model(static_input)
+# Replay the graph with minimal driver overhead
+g.replay()
+</code></pre>
+<p>CUDA graphs require fixed input shapes at capture time and no dynamic control flow between graph calls. Tensors must be allocated once and reused across replays — write new data into static_input before calling g.replay(). This is the standard pattern for serving variable content through a fixed computation graph without re-capturing the graph.</p>
+<h2>Async Inference Pipelines</h2>
+<p>GPU inference stalls whenever the data pipeline cannot deliver the next batch in time. Overlapping CPU preprocessing — image decoding, resizing, normalization — with GPU inference using a thread pool eliminates this idle gap. The ThreadPoolExecutor pattern submits preprocessing tasks ahead of time so tensors are ready when the GPU finishes the current batch.</p>
+<pre><code class="language-python">from concurrent.futures import ThreadPoolExecutor
+import torch
+
+def preprocess(img):
+    return transform(img).cuda()
+
+executor = ThreadPoolExecutor(max_workers=4)
+futures = [executor.submit(preprocess, img) for img in batch]
+inputs = torch.stack([f.result() for f in futures])
+
+with torch.inference_mode():
+    outputs = model(inputs)
+</code></pre>
+<p>For maximum overlap, use a double-buffering pattern: prepare batch N+1 while batch N is on the GPU. Pin host memory with pin_memory=True in the DataLoader and use non-blocking transfers — tensor.to(device, non_blocking=True) — to allow DMA transfers to proceed concurrently with GPU compute on separate CUDA streams.</p>
+<h2>Key Takeaways</h2>
+<blockquote>
+<p><strong>tip</strong>: For latency-sensitive serving (single image, &lt;10ms target), CUDA graphs eliminate kernel launch overhead by replaying a pre-captured graph. For throughput-sensitive batch processing, torch.compile with max-autotune fuses ops automatically — pick based on your serving pattern.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Optimization</th>
+<th>Effort</th>
+<th>Latency Gain</th>
+<th>Throughput Gain</th>
+<th>Compatible With</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Channels-last</td>
+<td>Low</td>
+<td>10-20%</td>
+<td>10-20%</td>
+<td>PyTorch, TorchScript</td>
+</tr>
+<tr>
+<td>torch.compile</td>
+<td>Low</td>
+<td>15-40%</td>
+<td>20-50%</td>
+<td>PyTorch 2.x</td>
+</tr>
+<tr>
+<td>CUDA graphs</td>
+<td>Medium</td>
+<td>20-40%</td>
+<td>5-15%</td>
+<td>Fixed-shape models</td>
+</tr>
+<tr>
+<td>TensorRT</td>
+<td>High</td>
+<td>40-80%</td>
+<td>50-200%</td>
+<td>ONNX-exportable models</td>
+</tr>
+<tr>
+<td>Operator fusion</td>
+<td>Medium</td>
+<td>10-30%</td>
+<td>10-30%</td>
+<td>TorchScript, TRT</td>
+</tr>
+</tbody>
+</table>
+<p>Apply optimizations incrementally and profile between each step. Channels-last is zero-risk and zero-effort — apply it first. torch.compile is similarly low-effort but adds a one-time compilation cost at startup, which matters for serverless deployments with cold starts. CUDA graphs and TensorRT require more investment but deliver the largest gains.</p>
+<p>Always validate accuracy after each optimization step — kernel fusion and precision lowering can introduce numerical differences. Maintain a regression benchmark that runs the full validation set on every model update, comparing accuracy and latency against a baseline stored in your experiment tracker.</p>
+    </article>
+  </main>
+</body>
+</html>

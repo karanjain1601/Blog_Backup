@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Grouped Query Attention (GQA) — Interpolating MHA and MQA | Notes Backup</title>
+  <meta name="description" content="Implement GQA from scratch, convert MHA checkpoints to GQA by mean-pooling K/V heads, build a GQA inference KV cache, and benchmark MHA vs GQA vs MQA on quality and memory." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Grouped Query Attention (GQA) — Interpolating MHA and MQA</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Implement GQA from scratch, convert MHA checkpoints to GQA by mean-pooling K/V heads, build a GQA inference KV cache, and benchmark MHA vs GQA vs MQA on quality and memory.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Grouped Query Attention (GQA) — Interpolating MHA and MQA</h1>
+<p>Grouped Query Attention (GQA), introduced by Ainslie et al. (2023), generalises both Multi-Head Attention (MHA) and Multi-Query Attention (MQA) by dividing the h query heads into G groups. Each group shares a single K and V projection, so the model keeps h query heads but only G KV heads. When G = h every head has its own K and V — identical to MHA. When G = 1 all heads share one K and V — identical to MQA. The KV cache at inference is proportional to G rather than h, giving an h/G× memory reduction while maintaining quality close to MHA.</p>
+<h2>Standard MHA and the KV Cache Bottleneck</h2>
+<p>At inference the transformer KV cache stores past keys and values for every layer to avoid recomputation. For MHA with h heads and head dimension d_head the cache per layer is 2 × h × d_head × L elements. For LLaMA 2 70B (h=64, d_head=128, L=4096, float16) this is ~64 MB per layer, ~5 GB across 80 layers — just for KV. MQA (G=1) reduces this h× but degrades output quality by 1–3% on long-document tasks. GQA with G=8 achieves a 4–8× KV reduction with negligible quality loss, making long-context inference practical on commodity GPU memory.</p>
+<h2>GQA: Grouping Query Heads and Sharing K, V</h2>
+<p>In GQA the h query heads are partitioned into G groups of size h/G. Each group uses one shared K projection and one shared V projection. W_Q remains (h × d_head) × d_model, but W_K and W_V shrink to (G × d_head) × d_model. During the forward pass K and V are expanded from G to h by repeating each group's representation h/G times — a cheap memory operation with no extra learnable parameters.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+
+class GroupedQueryAttention(nn.Module):
+    def __init__(self, d_model, num_heads, num_kv_groups):
+        super().__init__()
+        assert num_heads % num_kv_groups == 0
+        self.h = num_heads
+        self.G = num_kv_groups
+        self.qpg = num_heads // num_kv_groups  # queries per group
+        self.d_head = d_model // num_heads
+        self.W_q = nn.Linear(d_model, num_heads * self.d_head, bias=False)
+        self.W_k = nn.Linear(d_model, num_kv_groups * self.d_head, bias=False)
+        self.W_v = nn.Linear(d_model, num_kv_groups * self.d_head, bias=False)
+        self.W_o = nn.Linear(num_heads * self.d_head, d_model, bias=False)
+
+    def forward(self, x):
+        B, L, _ = x.shape
+        Q = self.W_q(x).view(B, L, self.h, self.d_head).transpose(1, 2)
+        K = self.W_k(x).view(B, L, self.G, self.d_head).transpose(1, 2)
+        V = self.W_v(x).view(B, L, self.G, self.d_head).transpose(1, 2)
+        K = K.repeat_interleave(self.qpg, dim=1)  # expand G -&gt; h
+        V = V.repeat_interleave(self.qpg, dim=1)
+        attn = F.softmax(Q @ K.transpose(-2, -1) / math.sqrt(self.d_head), dim=-1)
+        out = (attn @ V).transpose(1, 2).reshape(B, L, -1)
+        return self.W_o(out)
+
+for G in [1, 2, 4, 8]:  # G=1: MQA, G=8: MHA (h=8)
+    m = GroupedQueryAttention(d_model=256, num_heads=8, num_kv_groups=G)
+    x = torch.randn(2, 16, 256)
+    out = m(x)
+    kv = sum(p.numel() for n, p in m.named_parameters() if '_k' in n or '_v' in n)
+    print(f'G={G}: out={out.shape}, KV params={kv}, KV cache ratio={8//G}x vs MHA')
+</code></pre>
+<h2>Converting MHA to GQA by Mean-Pooling</h2>
+<p>LLaMA 2 34B and 70B were originally trained as MHA models and then converted to GQA before release. The conversion: reshape the K weight from (h × d_head, d_model) into (G, h/G, d_head, d_model), mean-pool across the h/G heads within each group, yielding (G, d_head, d_model). This minimum-distortion approximation is followed by a brief fine-tuning phase. Ainslie et al. showed that uptrained GQA matches scratch-trained GQA quality after sufficient fine-tuning steps.</p>
+<pre><code class="language-python">import torch
+
+def mha_to_gqa(W_k, W_v, num_heads, num_kv_groups, d_head):
+    &quot;&quot;&quot;Convert MHA K,V weight matrices to GQA by mean-pooling within groups.
+    W_k shape: (num_heads * d_head, d_model)
+    Returns:   (num_kv_groups * d_head, d_model)
+    &quot;&quot;&quot;
+    qpg = num_heads // num_kv_groups
+    d_model = W_k.shape[1]
+    Wk = W_k.view(num_kv_groups, qpg, d_head, d_model).mean(dim=1)
+    Wv = W_v.view(num_kv_groups, qpg, d_head, d_model).mean(dim=1)
+    return Wk.reshape(num_kv_groups * d_head, d_model), Wv.reshape(num_kv_groups * d_head, d_model)
+
+torch.manual_seed(0)
+h, G, d_head, d_model = 8, 2, 32, 256
+Wk_mha = torch.randn(h * d_head, d_model)
+Wv_mha = torch.randn(h * d_head, d_model)
+Wk_gqa, Wv_gqa = mha_to_gqa(Wk_mha, Wv_mha, h, G, d_head)
+print(f'MHA W_K: {Wk_mha.shape}  -&gt; GQA W_K: {Wk_gqa.shape}')
+print(f'MHA KV params: {Wk_mha.numel()*2}  -&gt; GQA: {Wk_gqa.numel()*2}  ({h//G}x reduction)')
+print(f'LLaMA 2 70B: h=64, G=8 -&gt; 8x KV reduction via this mean-pool + fine-tune.')
+print('Cosine sim of first group (original vs pooled):')
+orig_group0 = Wk_mha.view(G, h//G, d_head, d_model)[0].mean(0)  # expected pooled
+print(f'  {torch.nn.functional.cosine_similarity(orig_group0.flatten(), Wk_gqa[:d_head].flatten(), dim=0).item():.6f}')
+</code></pre>
+<h2>GQA KV Cache at Inference</h2>
+<p>The KV cache stores G × d_head × 2 values per token per layer (vs h × d_head × 2 for MHA). At each generation step: project Q to h heads, project K and V to G groups, append new K,V slices to the cache, expand the full cache from G to h via repeat_interleave, then compute attention over the cached sequence. The cache growth per token is G/h of MHA — for G=8, h=64, that is 8× less memory allocated per new token.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+import math
+
+class GQAKVCache:
+    def __init__(self, max_len, G, d_head):
+        self.G, self.d, self.t = G, d_head, 0
+        self.K = torch.zeros(1, G, max_len, d_head)
+        self.V = torch.zeros(1, G, max_len, d_head)
+
+    def step(self, q, k, v):
+        &quot;&quot;&quot;q: (1,h,1,d)  k/v: (1,G,1,d). Returns (1,h,1,d).&quot;&quot;&quot;
+        self.K[:, :, self.t:self.t+1] = k
+        self.V[:, :, self.t:self.t+1] = v
+        self.t += 1
+        Kc = self.K[:, :, :self.t]  # (1,G,t,d)
+        Vc = self.V[:, :, :self.t]
+        h = q.shape[1]
+        Kc = Kc.repeat_interleave(h // self.G, dim=1)
+        Vc = Vc.repeat_interleave(h // self.G, dim=1)
+        scores = q @ Kc.transpose(-2, -1) / math.sqrt(self.d)
+        return F.softmax(scores, dim=-1) @ Vc
+
+h, G, d, max_len = 8, 2, 32, 128
+cache = GQAKVCache(max_len, G, d)
+for _ in range(20):
+    out = cache.step(torch.randn(1,h,1,d), torch.randn(1,G,1,d), torch.randn(1,G,1,d))
+print(f'After {cache.t} steps: cache K = {cache.K[:,:,:cache.t].shape}')
+for g, label in [(h,'MHA'), (G,'GQA')]:
+    kb = g * d * max_len * 2 * 2 / 1024  # K+V, float16
+    print(f'{label} (G={g}): {kb:.1f} KB/layer  ratio={h//g}x')
+</code></pre>
+<h2>Benchmark: MHA vs GQA vs MQA</h2>
+<p>The throughput benefit of GQA at inference is dominated by KV cache size. When the cache fits in HBM rather than DRAM, generation can be 2–4× faster due to reduced memory bandwidth pressure. During training, smaller W_K and W_V matrices reduce the KV projection FLOPs by G/h, but this is usually a small fraction of total compute. The quality gap between MHA and GQA (G=8) is &lt;0.5 perplexity points on language modelling benchmarks; MQA (G=1) shows 1–3% degradation on long-document QA.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+import math
+import time
+
+def gqa_attn(Q, K, V, G):
+    &quot;&quot;&quot;Q: (B,h,L,d), K/V: (B,G,L,d). Returns (B,h,L,d).&quot;&quot;&quot;
+    h = Q.shape[1]
+    K = K.repeat_interleave(h // G, dim=1)
+    V = V.repeat_interleave(h // G, dim=1)
+    return F.softmax(Q @ K.transpose(-2,-1) / math.sqrt(Q.shape[-1]), dim=-1) @ V
+
+torch.manual_seed(0)
+B, L, h, d = 2, 256, 8, 64
+print(f&quot;{'Method':&gt;8} {'G':&gt;4} {'KV cache KB':&gt;13} {'ms/fwd':&gt;9} {'KV ratio':&gt;10}&quot;)
+for G in [h, 4, 2, 1]:
+    Q = torch.randn(B, h, L, d)
+    K = torch.randn(B, G, L, d)
+    V = torch.randn(B, G, L, d)
+    runs = 30
+    t0 = time.perf_counter()
+    for _ in range(runs):
+        _ = gqa_attn(Q, K, V, G)
+    ms = (time.perf_counter() - t0) / runs * 1000
+    kv_kb = G * d * L * 2 * 2 / 1024  # K+V, float16
+    label = 'MHA' if G == h else ('MQA' if G == 1 else f'GQA-{G}')
+    print(f'{label:&gt;8} {G:&gt;4} {kv_kb:&gt;13.1f} {ms:&gt;9.2f} {h//G:&gt;9}x')
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>G value</th>
+<th>KV heads</th>
+<th>Quality vs MHA</th>
+<th>KV cache ratio</th>
+<th>Used in LLMs</th>
+<th>MHA conversion</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MHA</td>
+<td>G = h</td>
+<td>h (all unique)</td>
+<td>Baseline (best)</td>
+<td>1× (largest)</td>
+<td>GPT-2, BERT, early LLaMA</td>
+<td>N/A</td>
+</tr>
+<tr>
+<td>MQA</td>
+<td>G = 1</td>
+<td>1 (all shared)</td>
+<td>−1–3% on long-doc QA</td>
+<td>h× smaller</td>
+<td>PaLM, Falcon-7B</td>
+<td>Mean-pool all h heads to 1</td>
+</tr>
+<tr>
+<td>GQA</td>
+<td>1 &lt; G &lt; h</td>
+<td>G (grouped)</td>
+<td>≈MHA with G ≥ 4</td>
+<td>h/G× smaller</td>
+<td>LLaMA 2/3, Mistral, Gemma, Qwen</td>
+<td>Mean-pool h/G heads per group</td>
+</tr>
+</tbody>
+</table>
+<h2>Quality and Efficiency Trade-offs</h2>
+<p>Ainslie et al. benchmarked GQA on T5-Large and T5-XXL. With G = h/8, GQA matches MHA perplexity on language modelling and stays within 0.5% on summarisation. The KV cache is h/G× smaller: for LLaMA 70B (h=64, G=8), that is an 8× reduction. Batch throughput at long-context inference increases 2–3× because the smaller cache lets more sequences fit in GPU memory simultaneously, raising batch size and GPU utilisation.</p>
+<blockquote>
+<p><strong>GQA Design Rule</strong>: Set G so that h/G is a power of 2 and G divides h evenly. LLaMA 2/3 use G=8 for large models (h=64 for 70B → 8 KV heads). Mistral 7B uses G=8 with h=32 → 4 KV heads. Smaller models may use G=4 or G=2. MQA (G=1) is only recommended when memory is severely constrained and quality degradation is acceptable.</p>
+</blockquote>
+<h2>Models and Configurations Using GQA</h2>
+<p>GQA has become the de facto standard for large transformer models since 2023. LLaMA 2 introduced it for 34B and 70B variants (7B and 13B retained MHA). LLaMA 3 uses GQA across all sizes including 8B. Mistral 7B, Mixtral MoE, Gemma, Gemma 2, and Qwen2 all adopt GQA. The consistent adoption demonstrates that G=8 is a well-validated configuration balancing quality and inference efficiency.</p>
+<ul>
+<li>LLaMA 2: h=32, G=8 for 34B; h=64, G=8 for 70B — converted from MHA via mean-pool + fine-tune.</li>
+<li>LLaMA 3: all sizes use GQA — 8B: h=32, G=8; 70B: h=64, G=8.</li>
+<li>Mistral 7B: h=32, G=8 → 4 KV heads; combined with sliding window attention.</li>
+<li>Gemma 2: G=1 (MQA) for 2B; G=4 for 9B and 27B variants.</li>
+<li>Qwen2: GQA across all sizes; 72B uses h=64, G=8.</li>
+<li>Falcon 40B+: uses MQA (G=1); earlier Falcon models used full MHA.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

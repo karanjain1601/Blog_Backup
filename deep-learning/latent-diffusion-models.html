@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Latent Diffusion Models — Compress Then Diffuse | Notes Backup</title>
+  <meta name="description" content="Understand why pixel-space diffusion is computationally expensive, implement a KL-regularized VAE for image compression, run the diffusion process in 64x64 latent space instead of 512x512 pixel space, build cross-attention conditioning for text, and compare compute costs across diffusion architectures." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Latent Diffusion Models — Compress Then Diffuse</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Understand why pixel-space diffusion is computationally expensive, implement a KL-regularized VAE for image compression, run the diffusion process in 64x64 latent space instead of 512x512 pixel space, build cross-attention conditioning for text, and compare compute costs across diffusion architectures.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Latent Diffusion Models — Compress Then Diffuse</h1>
+<p>Latent diffusion models (LDM, Rombach et al. 2022) solve the fundamental compute problem of pixel-space diffusion: at 512×512 resolution, each U-Net forward pass processes 786,432 values. By first compressing to a 64×64 latent (4× spatial downsampling), the diffusion process operates on 16,384 values — a 48× reduction in spatial elements. The self-attention cost drops by 48² = 2304×. The autoencoder compression is learned to be perceptual — preserving visual information, not just pixel values — so the latent space faithfully captures image content at a fraction of the compute cost.</p>
+<h2>Why Pixel-Space Diffusion is Expensive</h2>
+<p>U-Net self-attention has O(n²) cost in the number of spatial positions n. At 64×64 resolution, n=4096; at 512×512, n=262144. The attention cost ratio is (262144/4096)² = 4096× — four thousand times more expensive at full resolution. For a T=1000 step DDPM on 512×512 images, each training step requires a full U-Net forward and backward pass at this cost. Pixel-space models like DALL-E 1 and early DDPM worked at 256×256 or lower; generating at 512×512 or higher required architectural innovations — specifically, moving to latent space.</p>
+<h2>LDM Architecture — Encode, Diffuse, Decode</h2>
+<p>The LDM pipeline has three stages: (1) Encode: E(x) → z, mapping a 512×512 image to a 64×64×4 latent (4× spatial downsampling, 3→4 channels). (2) Diffuse: train a U-Net ε_θ(z_t, t, c) in the latent space z ∈ ℝ^{64×64×4}. (3) Decode: D(z_0) → x, mapping the denoised latent back to pixel space. The autoencoder (E, D) is trained once with perceptual loss + GAN discriminator; the diffusion U-Net is trained separately on encoded latents. At inference, only the diffusion U-Net and decoder are needed — the encoder is used only for editing or inversion workflows.</p>
+<h2>Autoencoder — VQ and KL Regularization</h2>
+<p>LDM uses two autoencoder variants. VQ-regularized (LDM-VQ): the latent is quantized to a discrete codebook (VQ-VAE style), producing a sequence of integers. This enables autoregressive modeling of the latent. KL-regularized (LDM-KL): the encoder outputs a Gaussian distribution q(z|x) = N(μ, σ²) with a KL penalty KL(q(z|x) || N(0,I)) — a standard VAE. The KL weight is kept very small (e.g. 1×10⁻⁶) to prioritize reconstruction quality over regularization. Stable Diffusion uses KL-regularization with f=8 downsampling (512→64) and 4 latent channels.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class LDMAutoencoder(nn.Module):
+    &quot;&quot;&quot;Simplified KL-regularized autoencoder for LDM.&quot;&quot;&quot;
+    def __init__(self, img_ch=3, latent_ch=4, base_ch=32):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Conv2d(img_ch, base_ch, 4, 2, 1), nn.SiLU(),  # 2x downsample
+            nn.Conv2d(base_ch, base_ch*2, 4, 2, 1), nn.SiLU(),  # 4x down
+            nn.Conv2d(base_ch*2, latent_ch*2, 3, 1, 1)  # mu and logvar
+        )
+        self.decoder = nn.Sequential(
+            nn.Conv2d(latent_ch, base_ch*2, 3, 1, 1), nn.SiLU(),
+            nn.ConvTranspose2d(base_ch*2, base_ch, 4, 2, 1), nn.SiLU(),  # 2x up
+            nn.ConvTranspose2d(base_ch, img_ch, 4, 2, 1), nn.Tanh()  # 4x up
+        )
+
+    def encode(self, x):
+        h = self.encoder(x)
+        mu, logvar = h.chunk(2, dim=1)
+        return mu, logvar
+
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        return mu + std * torch.randn_like(std)
+
+    def forward(self, x, kl_weight=1e-4):
+        mu, logvar = self.encode(x)
+        z = self.reparameterize(mu, logvar)
+        recon = self.decoder(z)
+        recon_loss = F.mse_loss(recon, x)
+        kl_loss = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp()).mean()
+        return recon, recon_loss + kl_weight * kl_loss
+
+torch.manual_seed(0)
+autoenc = LDMAutoencoder()
+x = torch.randn(2, 3, 32, 32)  # batch of 32x32 images
+recon, loss = autoenc(x)
+print(f'Input: {x.shape}, Latent: {autoenc.encode(x)[0].shape}, Recon: {recon.shape}')
+print(f'AE loss: {loss.item():.4f}')
+</code></pre>
+<h2>Diffusion in Latent Space</h2>
+<p>Once the autoencoder is trained, the latent space z = E(x) replaces the pixel space for the diffusion process. The latents are scaled to unit variance before diffusion training (z_scaled = z / std(z_train)), which ensures the noise schedule is meaningful. The U-Net ε_θ(z_t, t, c) processes 64×64×4 tensors instead of 512×512×3 — a 16× reduction in spatial area. The resulting model trains 4–16× faster per step and can run inference in seconds rather than minutes. Crucially, the perceptual compression by the autoencoder means 64×64 latents capture the same visual content as 512×512 pixels.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class LatentUNet(nn.Module):
+    &quot;&quot;&quot;Simplified U-Net for diffusion in latent space (no spatial attention shown).&quot;&quot;&quot;
+    def __init__(self, latent_ch=4, hidden=64, T=1000):
+        super().__init__()
+        self.time_embed = nn.Embedding(T, 32)
+        self.down1 = nn.Conv2d(latent_ch, hidden, 3, 1, 1)
+        self.down2 = nn.Conv2d(hidden, hidden*2, 4, 2, 1)  # 32x32
+        self.mid   = nn.Conv2d(hidden*2 + 32, hidden*2, 3, 1, 1)
+        self.up1   = nn.ConvTranspose2d(hidden*2, hidden, 4, 2, 1)
+        self.out   = nn.Conv2d(hidden + hidden, latent_ch, 3, 1, 1)
+        self.act   = nn.SiLU()
+
+    def forward(self, z_t, t):
+        B, C, H, W = z_t.shape
+        t_emb = self.time_embed(t)[:, :, None, None].expand(B, 32, H//2, W//2)
+        h1 = self.act(self.down1(z_t))             # (B, 64, H, W)
+        h2 = self.act(self.down2(h1))              # (B, 128, H/2, W/2)
+        h_mid = self.act(self.mid(torch.cat([h2, t_emb], dim=1)))
+        h_up = self.act(self.up1(h_mid))           # (B, 64, H, W)
+        return self.out(torch.cat([h_up, h1], dim=1))
+
+torch.manual_seed(0)
+alpha_bar = torch.cumprod(1 - torch.linspace(1e-4, 0.02, 1000), dim=0)
+unet = LatentUNet()
+z = torch.randn(2, 4, 16, 16)  # latent at 16x16 (toy scale)
+t = torch.randint(0, 1000, (2,))
+ab = alpha_bar[t][:, None, None, None]
+eps = torch.randn_like(z)
+z_t = torch.sqrt(ab) * z + torch.sqrt(1 - ab) * eps
+eps_pred = unet(z_t, t)
+loss = F.mse_loss(eps_pred, eps)
+print(f'Latent z: {z.shape}, Noisy z_t: {z_t.shape}')
+print(f'Diffusion loss in latent space: {loss.item():.4f}')
+</code></pre>
+<h2>Cross-Attention Conditioning</h2>
+<p>LDM conditions the U-Net on text, class labels, or other signals via cross-attention. At each U-Net resolution, image feature maps are flattened to queries Q = W_Q·φ(z_t), and the condition (e.g. CLIP text embedding) is projected to keys K = W_K·τ_θ(c) and values V = W_V·τ_θ(c). The attention output Attention(Q,K,V) = softmax(QK^T/√d)·V is added back to the image features. This cross-attention mechanism is spatial: each image patch attends to the full text sequence, producing spatially variable conditioning. The attention maps are interpretable — they show which image regions each text token influences.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class SpatialCrossAttention(nn.Module):
+    &quot;&quot;&quot;Cross-attention: image latents (Q) attend to text features (K, V).&quot;&quot;&quot;
+    def __init__(self, latent_dim=64, context_dim=32, n_heads=4):
+        super().__init__()
+        self.n_heads = n_heads
+        self.head_dim = latent_dim // n_heads
+        self.to_q = nn.Linear(latent_dim, latent_dim)
+        self.to_k = nn.Linear(context_dim, latent_dim)
+        self.to_v = nn.Linear(context_dim, latent_dim)
+        self.to_out = nn.Linear(latent_dim, latent_dim)
+
+    def forward(self, x, context):
+        B, S, D = x.shape
+        T_ctx = context.shape[1]
+        H = self.n_heads
+        def reshape(t): return t.view(B, -1, H, self.head_dim).transpose(1, 2)
+        Q = reshape(self.to_q(x))
+        K = reshape(self.to_k(context))
+        V = reshape(self.to_v(context))
+        attn = F.softmax(Q @ K.transpose(-2,-1) / self.head_dim**0.5, dim=-1)
+        out = (attn @ V).transpose(1,2).reshape(B, S, D)
+        return self.to_out(out), attn
+
+torch.manual_seed(0)
+B, S, T_ctx = 2, 64, 12  # 2 samples, 64 spatial tokens, 12 text tokens
+latent_tokens = torch.randn(B, S, 64)
+text_feats = torch.randn(B, T_ctx, 32)
+xattn = SpatialCrossAttention()
+out, attn_maps = xattn(latent_tokens, text_feats)
+print(f'Latent tokens: {latent_tokens.shape} -&gt; output: {out.shape}')
+print(f'Attention maps: {attn_maps.shape}  (B, heads, spatial, text_tokens)')
+print(f'Attention sum over text: {attn_maps[0, 0, :3, :].sum(dim=-1).tolist()}')
+</code></pre>
+<h2>Stable Diffusion as LDM Instance</h2>
+<p>Stable Diffusion (Rombach et al. 2022) is an LDM with: (1) CLIP ViT-L/14 text encoder (768-dim embeddings, up to 77 tokens); (2) KL-regularized autoencoder with f=8 downsampling (512×512 → 64×64×4 latents); (3) U-Net with cross-attention conditioning at 32×32, 16×16, and 8×8 resolutions; (4) CFG at inference (w≈7.5). Training used LAION-5B (5B image-text pairs). The latent space dimensionality reduction (64×64×4 vs 512×512×3) enables training on consumer GPUs (24GB VRAM for batch size 4) at a cost ~50× lower than pixel-space equivalents. SD v1.5 has 860M parameters in the U-Net; SDXL has 2.6B.</p>
+<h2>Pixel-Space vs Latent Diffusion</h2>
+<pre><code class="language-python">import torch
+import time
+import numpy as np
+
+def estimate_flops_and_time(resolution, latent_factor=1, batch=1, n_steps=50):
+    &quot;&quot;&quot;Rough estimate of diffusion inference cost at different resolutions.&quot;&quot;&quot;
+    spatial = (resolution // latent_factor) ** 2
+    # Self-attention cost O(spatial^2 * channels)
+    attn_cost = spatial ** 2 * 64  # proportional
+    # Conv cost O(spatial * channels^2 * kernel^2)
+    conv_cost = spatial * 64**2 * 9
+    step_cost = (attn_cost + conv_cost) / 1e9  # in GFLOPs (approx)
+    total_gflops = step_cost * n_steps * batch
+
+    mode = 'pixel-space' if latent_factor == 1 else f'latent (f={latent_factor})'
+    print(f'{mode:20s} | res={resolution//latent_factor:3d}x{resolution//latent_factor:3d} '
+          f'| attn cost: {attn_cost/1e6:7.1f}M | total GFLOPs: {total_gflops:.1f}')
+    return total_gflops
+
+print(f'{&quot;Mode&quot;:20s} | {&quot;Latent res&quot;:12s} | {&quot;Attn cost&quot;:13s} | {&quot;GFLOPs (50 steps)&quot;}' )
+print('-' * 72)
+for res, f in [(512, 1), (512, 4), (512, 8), (1024, 8)]:
+    estimate_flops_and_time(res, latent_factor=f)
+print()
+print('Latent f=8 reduces attention cost by 64^2 = 4096x vs pixel-space at 512x512')
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Latent type</th>
+<th>Resolution</th>
+<th>Latent size</th>
+<th>Condition type</th>
+<th>Training compute</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DDPM (Ho et al. 2020)</td>
+<td>None — pixel space</td>
+<td>256×256</td>
+<td>256×256×3 pixels</td>
+<td>Class label (embed)</td>
+<td>High — pixel U-Net</td>
+</tr>
+<tr>
+<td>LDM (Rombach et al. 2022)</td>
+<td>KL-VAE or VQ-VAE</td>
+<td>256–512×256–512</td>
+<td>32–64×32–64×4</td>
+<td>Text/class via cross-attn</td>
+<td>~4–16× cheaper than pixel</td>
+</tr>
+<tr>
+<td>Stable Diffusion 1.5</td>
+<td>KL-VAE f=8</td>
+<td>512×512</td>
+<td>64×64×4</td>
+<td>CLIP ViT-L/14 text</td>
+<td>~50× cheaper than pixel SD</td>
+</tr>
+<tr>
+<td>DALL-E 3 / SDXL</td>
+<td>KL-VAE f=8</td>
+<td>1024×1024</td>
+<td>128×128×4</td>
+<td>T5 / CLIP dual text encoder</td>
+<td>~200× cheaper than naive pixel</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Why Latent Space Works for Diffusion</strong>: A perceptually-trained autoencoder (using LPIPS loss + GAN discriminator) compresses images into latents that preserve semantic and structural information while discarding high-frequency pixel noise. Diffusion in this perceptual latent space is efficient because the latent space is semantically smooth — small latent changes correspond to semantically meaningful image changes, making the score field easier to learn.</p>
+</blockquote>
+<ul>
+<li>Pixel-space self-attention at 512×512 costs 4096× more than at 64×64 — the primary motivation for latent diffusion.</li>
+<li>KL-regularized autoencoder: small KL weight (1e-6) prioritizes reconstruction fidelity over posterior regularization.</li>
+<li>Latent scaling: divide latents by std of the training set before diffusion training to match the noise schedule assumptions.</li>
+<li>Cross-attention at multiple U-Net resolutions (32×32, 16×16, 8×8) enables spatially-grounded text conditioning.</li>
+<li>Stable Diffusion = LDM + CLIP text encoder + CFG — each component is independently replaceable.</li>
+<li>SDXL improves by using two CLIP encoders (ViT-L and ViT-G), increasing text capacity from 768 to 2048 dims.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

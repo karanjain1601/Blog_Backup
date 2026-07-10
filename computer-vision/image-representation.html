@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Image Representation in Deep Learning | Notes Backup</title>
+  <meta name="description" content="How digital images are stored as tensors — channels, dtypes, memory layout, PIL vs OpenCV conventions, and the NumPy/PyTorch array formats used in vision pipelines." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Image Representation in Deep Learning</h1>
+      <ul class='note-meta'><li><strong>description:</strong> How digital images are stored as tensors — channels, dtypes, memory layout, PIL vs OpenCV conventions, and the NumPy/PyTorch array formats used in vision pipelines.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Image Representation in Deep Learning</h1>
+<p>Digital images are multi-dimensional arrays of pixel values. In deep learning pipelines, images move through several representations: raw files on disk, PIL Image objects, NumPy arrays, and PyTorch tensors. Each format has different axis ordering, dtype, and value ranges. Understanding these conventions prevents subtle bugs in preprocessing and model inference pipelines.</p>
+<p>A grayscale image is a 2D array of shape (H, W). A color image adds a channel dimension giving shape (H, W, C) — height, width, channels. This HWC layout is used by PIL, NumPy, and OpenCV. PyTorch uses CHW layout where channels come first. Converting between these layouts is a common source of shape mismatch errors in vision code.</p>
+<pre><code class="language-python">from PIL import Image
+import numpy as np
+import torch
+
+img = Image.open('sample.jpg').convert('RGB')
+arr = np.array(img)          # HWC, uint8, [0, 255]
+print('NumPy HWC shape:', arr.shape)
+
+tensor = torch.from_numpy(arr).permute(2, 0, 1)  # CHW
+tensor = tensor.float() / 255.0                   # float32 [0, 1]
+print('Tensor CHW shape:', tensor.shape)
+</code></pre>
+<p>Standard RGB images have 3 channels. Grayscale has 1. RGBA images have 4 channels including alpha transparency. The channel dimension represents spectral information at each pixel location. Channel ordering — whether RGB or BGR — determines how color information is interpreted by the model. Always verify channel order when integrating multiple libraries in one pipeline.</p>
+<p>Images are stored in different numeric formats depending on the source. Raw pixel data from cameras is typically uint8 with values 0–255. Deep learning models expect float32 inputs normalized to [0, 1] or [-1, 1]. Converting between these ranges is a critical preprocessing step — failing to scale can cause NaN gradients or very slow convergence during training.</p>
+<pre><code class="language-python">import cv2
+import numpy as np
+
+img_bgr = cv2.imread('sample.jpg')              # HWC uint8 BGR
+img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)  # convert to RGB
+
+img_float = img_rgb.astype(np.float32) / 255.0  # uint8 → float32 [0, 1]
+print('float32 range:', img_float.min(), img_float.max())
+
+img_uint8 = (img_float * 255.0).clip(0, 255).astype(np.uint8)
+print('uint8 range:', img_uint8.min(), img_uint8.max())
+</code></pre>
+<p>Float16 is sometimes used in mixed-precision training to reduce GPU memory. Be careful when converting: dividing uint8 by 255.0 gives float64 in NumPy by default — explicitly cast to float32 to avoid doubling memory usage. PyTorch's tensor.float() converts to float32. Using .half() gives float16 for inference on supported hardware accelerators.</p>
+<p>PIL (Pillow) and OpenCV are the two dominant image I/O libraries in Python. PIL returns images in RGB order and uses the HWC NumPy convention. OpenCV loads images as NumPy arrays in BGR order — the blue and red channels are swapped. This difference is invisible to the eye but causes model predictions to degrade when channels are mismatched at inference time.</p>
+<blockquote>
+<p>****: OpenCV loads images as BGR by default — always convert to RGB before passing to PyTorch/TF models or your channel order will be wrong.</p>
+</blockquote>
+<p>When using torchvision or Keras, images must be in RGB format. Always verify your loading convention. A quick sanity check: display a known red object — if it appears blue, your channels are swapped. Fix with cv2.cvtColor(img, cv2.COLOR_BGR2RGB). PyTorch's ToTensor transform also normalizes uint8 to float32 in [0, 1] automatically when applied to a PIL image.</p>
+<p>During training, images are processed in mini-batches to leverage GPU parallelism. PyTorch collates individual tensors of shape (C, H, W) into a batch tensor of shape (B, C, H, W) where B is the batch size. All images in a batch must have the same spatial dimensions, which is why resizing is a standard preprocessing step before batching.</p>
+<pre><code class="language-python">import torch
+from PIL import Image
+import numpy as np
+
+def load_tensor(path):
+    img = Image.open(path).convert('RGB').resize((224, 224))
+    arr = np.array(img, dtype=np.float32) / 255.0
+    return torch.from_numpy(arr).permute(2, 0, 1)  # CHW
+
+tensors = [load_tensor(f'img_{i}.jpg') for i in range(4)]
+batch = torch.stack(tensors)   # [B, C, H, W]
+print('Batch shape:', batch.shape)  # torch.Size([4, 3, 224, 224])
+</code></pre>
+<p>TensorFlow and Keras use the NHWC convention by default — batch N, height, width, channels — while PyTorch uses NCHW. When porting models between frameworks, reshaping batch tensors is required. torch.Tensor.permute() reorders axes without copying data. numpy.transpose() does the same for NumPy arrays without allocating additional memory.</p>
+<pre><code class="language-python">import torch
+import matplotlib.pyplot as plt
+import numpy as np
+
+def show_tensor(tensor):
+    # tensor: CHW float32 [0, 1]
+    img = tensor.permute(1, 2, 0).numpy()  # CHW → HWC
+    img = np.clip(img, 0, 1)
+    plt.imshow(img)
+    plt.axis('off')
+    plt.show()
+
+show_tensor(batch[0])  # show first image in batch
+</code></pre>
+<p>When displaying tensors with matplotlib, reverse the preprocessing: move the channel axis back to HWC order and clamp to [0, 1]. matplotlib's imshow expects (H, W, 3) for RGB or (H, W) for grayscale. Forgetting to clamp float values to [0, 1] before display causes color artifacts and incorrect rendering, especially after normalization with negative values.</p>
+<table>
+<thead>
+<tr>
+<th>Format</th>
+<th>Library</th>
+<th>Shape</th>
+<th>Value Range</th>
+<th>Channel Order</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>PIL Image</td>
+<td>Pillow</td>
+<td>HWC</td>
+<td>0–255 (uint8)</td>
+<td>RGB</td>
+</tr>
+<tr>
+<td>OpenCV array</td>
+<td>cv2</td>
+<td>HWC</td>
+<td>0–255 (uint8)</td>
+<td>BGR</td>
+</tr>
+<tr>
+<td>NumPy array</td>
+<td>numpy</td>
+<td>HWC</td>
+<td>any dtype</td>
+<td>depends on source</td>
+</tr>
+<tr>
+<td>PyTorch tensor</td>
+<td>torch</td>
+<td>CHW</td>
+<td>0.0–1.0 (float32)</td>
+<td>RGB</td>
+</tr>
+<tr>
+<td>TensorFlow tensor</td>
+<td>tf/keras</td>
+<td>HWC</td>
+<td>0.0–1.0 (float32)</td>
+<td>RGB</td>
+</tr>
+</tbody>
+</table>
+<p>Always track your image format: shape, dtype, channel order, and value range. The most common bugs come from mixing PIL RGB with OpenCV BGR, or forgetting to convert to float32 before normalizing. Write a small helper function that prints these properties — it will save hours of debugging during dataset preprocessing and pipeline integration work.</p>
+<p>PyTorch expects CHW float32 tensors in [0, 1] or normalized with mean/std. PIL uses HWC uint8. OpenCV uses HWC uint8 in BGR. Keep a mental map of what format your data is in at each stage: loading → augmentation → normalization → batching → model input. Explicit shape assertions after each step are invaluable for catching errors early in the pipeline.</p>
+<p>Document format assumptions in your data loader and model code. When sharing models or datasets, include the expected input format in the README or model card. Many silent accuracy regressions in production are caused by a mismatch between training and inference preprocessing — validate end-to-end with a known sample before deploying any vision model.</p>
+    </article>
+  </main>
+</body>
+</html>

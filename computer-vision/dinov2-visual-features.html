@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DINOv2: Self-Distillation for Universal Visual Features | Notes Backup</title>
+  <meta name="description" content="How DINOv2 uses self-distillation with no labels to produce patch features that generalize to depth, segmentation, and dense matching out of the box." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>DINOv2: Self-Distillation for Universal Visual Features</h1>
+      <ul class='note-meta'><li><strong>description:</strong> How DINOv2 uses self-distillation with no labels to produce patch features that generalize to depth, segmentation, and dense matching out of the box.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>DINOv2: Self-Distillation for Universal Visual Features</h1>
+<h2>Overview</h2>
+<p>DINOv2 is a self-supervised vision foundation model trained via self-distillation with no labels. It produces patch-level features that generalize to depth estimation, segmentation, classification, and dense matching without task-specific fine-tuning. The key insight: a student ViT learns by matching the output distribution of a momentum-updated teacher ViT on augmented views of the same image.</p>
+<p>Unlike contrastive methods that push negatives apart, DINOv2 uses centering and sharpening of teacher logits to avoid collapse. The teacher is never trained directly — it is updated as an exponential moving average of student weights. This asymmetry drives representation quality far beyond supervised baselines on dense prediction benchmarks.</p>
+<blockquote>
+<p><strong>Info</strong>: DINOv2's patch tokens encode both semantic and geometric information — making them directly usable for depth estimation and segmentation without any task-specific fine-tuning.</p>
+</blockquote>
+<h2>Self-Distillation Training</h2>
+<p>Training uses multi-crop augmentation: two global views at 224px and several local views at 96px. The student sees all crops; the teacher sees only global crops. The loss is cross-entropy between student and teacher softmax outputs after centering. Centering subtracts a running mean of teacher outputs to prevent mode collapse without needing negative pairs.</p>
+<pre><code class="language-python"># Student/teacher ViT-B/16: centering, sharpening, EMA teacher update
+import torch, torch.nn as nn
+
+class DINOLoss(nn.Module):
+    def __init__(self, out_dim, teacher_temp=0.04, student_temp=0.1, cm=0.9):
+        super().__init__()
+        self.tt = teacher_temp
+        self.st = student_temp
+        self.cm = cm
+        self.register_buffer('center', torch.zeros(1, out_dim))
+
+    def forward(self, s_outs, t_outs):
+        t = [(p - self.center) / self.tt for p in t_outs]
+        s = [p / self.st for p in s_outs]
+        t_probs = [x.softmax(-1) for x in t]
+        loss = -sum(sum((q * nn.functional.log_softmax(sv, -1)).sum(-1).mean()
+                        for sv in s) for q in t_probs)
+        # EMA: teacher = cm*teacher + (1-cm)*student (done in training loop)
+        self.center = self.cm * self.center + (1 - self.cm) * torch.cat(t_outs).mean(0, keepdim=True)
+        return loss
+</code></pre>
+<p>Teacher temperature (0.04) is sharper than student temperature (0.1), creating a sharpening effect that drives confident teacher predictions while keeping student predictions soft enough to learn from. This asymmetry is critical — equalizing the two temperatures leads to collapsed representations within a few hundred training iterations.</p>
+<h2>Curated Data Pipeline</h2>
+<p>DINOv2 was trained on LVD-142M — a curated dataset of 142 million images. Rather than scraping uncurated web data, the authors used a retrieval-based curation pipeline: embed candidates with an earlier DINO model, retrieve nearest neighbors from a curated seed set (ImageNet-22k), then filter by deduplication and NSFW classifiers.</p>
+<p>This curation step is arguably as important as the self-distillation objective. Models trained on uncurated data of similar scale perform substantially worse on dense tasks. The pipeline ensures coverage of object-centric, scene-level, and texture-rich images while removing near-duplicate clusters that would bias feature geometry toward overrepresented visual concepts.</p>
+<p>Additional regularization includes stochastic depth, weight decay scheduling, and BF16 mixed precision. Training ViT-G/14 (1.1B parameters) required 2 days on 64 A100 GPUs. ViT-S and ViT-B variants are checkpointed at the same number of iterations, making scale comparisons controlled and fair across all model sizes in the DINOv2 family.</p>
+<h2>Dense Prediction Tasks</h2>
+<p>The most striking DINOv2 capability is dense matching: patch tokens from two images can be compared by cosine similarity to find correspondences with no fine-tuning. This works because DINOv2 patch tokens have consistent geometry across images — the token at spatial position (i,j) encodes local patch appearance relative to global scene context.</p>
+<pre><code class="language-python"># Load DINOv2 pretrained, extract patch tokens, PCA to 3 dims for RGB viz
+import torch, torchvision.transforms as T
+from PIL import Image
+from sklearn.decomposition import PCA
+
+model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
+model.eval()
+transform = T.Compose([T.Resize(518), T.CenterCrop(518), T.ToTensor(),
+    T.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])])
+
+img = transform(Image.open('img.jpg')).unsqueeze(0)
+with torch.no_grad():
+    feats = model.get_intermediate_layers(img, n=1)[0]  # (1, 1369, 768)
+patch_tokens = feats[0].cpu().numpy()  # (1369, 768)
+pca_feats = PCA(n_components=3).fit_transform(patch_tokens)  # (1369, 3)
+</code></pre>
+<pre><code class="language-python"># Dense matching: cosine similarity between patch tokens of two images
+import torch.nn.functional as F
+
+def dense_match(feats1, feats2, threshold=0.7):
+    # feats: (N, D) normalized patch token tensors
+    f1 = F.normalize(feats1, dim=-1)
+    f2 = F.normalize(feats2, dim=-1)
+    sim = f1 @ f2.T            # (N1, N2) cosine similarity matrix
+    matches = sim.argmax(dim=1)  # each patch in img1 -&gt; best patch in img2
+    confidence = sim.max(dim=1).values
+    valid = confidence &gt; threshold
+    print(f'{valid.sum()} confident matches out of {len(matches)}')
+    return matches[valid], confidence[valid]
+</code></pre>
+<p>For depth estimation, a linear layer on top of DINOv2 patch tokens reaches within 5% of supervised methods on NYU Depth v2. For ADE20K segmentation, a linear head on frozen DINOv2 ViT-G achieves 49.0 mIoU — competitive with many fine-tuned methods. These results demonstrate the richness of DINOv2 spatial representations without any task-specific head design.</p>
+<h2>Linear Probing vs Fine-Tuning</h2>
+<p>Linear probing — training only a classification head on frozen backbone features — is the cleanest measure of representation quality. DINOv2 ViT-G achieves 86.5% linear probe accuracy on ImageNet-1K, surpassing fully supervised ViT-L trained from scratch. This is the headline result demonstrating that self-supervised features can exceed supervised ones at sufficient scale.</p>
+<pre><code class="language-python"># Linear probe: freeze DINOv2 backbone, train single nn.Linear head on ImageNet
+import torch, torch.nn as nn
+from torch.optim import Adam
+
+backbone = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
+for p in backbone.parameters():
+    p.requires_grad_(False)
+
+probe = nn.Linear(768, 1000)  # 1000 ImageNet classes
+optimizer = Adam(probe.parameters(), lr=1e-3, weight_decay=1e-4)
+
+for imgs, labels in train_loader:
+    with torch.no_grad():
+        feats = backbone(imgs)       # CLS token: (B, 768)
+    logits = probe(feats)
+    loss = nn.functional.cross_entropy(logits, labels)
+    optimizer.zero_grad(); loss.backward(); optimizer.step()
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>ViT Variant</th>
+<th>Params (M)</th>
+<th>IN-1K Linear %</th>
+<th>ADE20K mIoU</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ViT-S/14</td>
+<td>21</td>
+<td>81.1</td>
+<td>39.3</td>
+</tr>
+<tr>
+<td>ViT-B/14</td>
+<td>86</td>
+<td>84.5</td>
+<td>45.5</td>
+</tr>
+<tr>
+<td>ViT-L/14</td>
+<td>307</td>
+<td>86.3</td>
+<td>48.1</td>
+</tr>
+<tr>
+<td>ViT-G/14</td>
+<td>1100</td>
+<td>86.5</td>
+<td>49.0</td>
+</tr>
+</tbody>
+</table>
+<p>Full fine-tuning consistently beats linear probing by 1–2% on classification, but the gap narrows on dense tasks. For downstream tasks with limited labeled data, linear probing often outperforms fine-tuning because fine-tuning risks destroying the frozen spatial structure. The recommendation: start with linear probing, fine-tune only when you have more than 10k labeled examples.</p>
+<h2>Key Takeaways</h2>
+<p>DINOv2 represents a convergence of three ingredients: a principled self-distillation objective, curated large-scale training data, and sufficient model scale. Remove any one ingredient and performance degrades substantially. The architecture itself (ViT) is entirely standard — the novelty is in the training recipe, not the model structure.</p>
+<p>For practitioners, DINOv2 features are the recommended starting point for any vision task where labeled data is limited. The frozen ViT-B/14 backbone at 86M parameters offers the best speed-quality tradeoff for most tasks. Use ViT-S for edge deployment and ViT-L or ViT-G only when you need maximum accuracy on dense prediction with the compute budget to match.</p>
+<p>The self-distillation framework is architecture-agnostic and has since been applied to CNN backbones and hybrid models. However, ViT's explicit patch tokenization is central to the dense matching capability: without spatial token positions you lose the geometry that makes DINOv2 features useful for correspondence and depth. The patch token design is a feature, not a constraint.</p>
+    </article>
+  </main>
+</body>
+</html>

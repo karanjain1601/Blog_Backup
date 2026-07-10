@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Residual / Skip Connections — Gradient Highway | Notes Backup</title>
+  <meta name="description" content="Understand the gradient highway identity behind ResNets, compare pre- vs post-activation variants, implement DenseNet dense blocks, measure gradient magnitude improvement empirically, and survey skip connections across modern architectures." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Residual / Skip Connections — Gradient Highway</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Understand the gradient highway identity behind ResNets, compare pre- vs post-activation variants, implement DenseNet dense blocks, measure gradient magnitude improvement empirically, and survey skip connections across modern architectures.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Residual / Skip Connections — Gradient Highway</h1>
+<p>The residual connection y = F(x,W) + x, introduced in ResNet (He et al. 2015), solved the degradation problem — the empirical observation that simply adding more layers to a plain network increases training error. The insight is that learning an identity mapping through stacked non-linear layers is difficult, but learning a zero residual F(x) ≡ 0 (so y = x) is trivial. This reframing makes very deep networks trainable and enabled 100+ layer architectures that dominate computer vision benchmarks.</p>
+<h2>Gradient Highway — Mathematical View</h2>
+<p>For a residual block y = F(x) + x, the gradient with respect to the input is ∂y/∂x = ∂F/∂x + I. Even if ∂F/∂x is small (vanishing regime), the identity term I ensures the gradient is at least 1. For a network of L residual blocks, the gradient of the loss with respect to input x_l contains additive identity terms that cannot all be zero simultaneously — this is the gradient highway.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class PostActResBlock(nn.Module):
+    def __init__(self, d):
+        super().__init__()
+        self.net = nn.Sequential(nn.Linear(d,d), nn.LayerNorm(d), nn.ReLU(),
+                                  nn.Linear(d,d), nn.LayerNorm(d))
+        self.relu = nn.ReLU()
+    def forward(self, x): return self.relu(self.net(x) + x)
+
+class PreActResBlock(nn.Module):
+    def __init__(self, d):
+        super().__init__()
+        self.net = nn.Sequential(nn.LayerNorm(d), nn.ReLU(), nn.Linear(d,d),
+                                  nn.LayerNorm(d), nn.ReLU(), nn.Linear(d,d))
+    def forward(self, x): return self.net(x) + x
+
+for name, Cls in [('Post-act', PostActResBlock), ('Pre-act', PreActResBlock)]:
+    torch.manual_seed(0)
+    net = nn.Sequential(*[Cls(64) for _ in range(20)])
+    net(torch.randn(16, 64)).mean().backward()
+    g = list(net[0].parameters())[0].grad.norm().item()
+    print(f'{name} (20 blocks): first-block grad = {g:.4e}')
+</code></pre>
+<h2>Plain vs Residual — Gradient Depth Comparison</h2>
+<p>The degradation problem is not overfitting — a deeper plain network has higher training error than a shallower one. Residuals fix this by allowing the network to learn near-identity mappings trivially. Empirically, plain networks lose gradient signal after ~15 layers while residual networks maintain it through 100+ layers.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def grad_norm_first(block_fn, n, d=64, seed=0):
+    torch.manual_seed(seed)
+    net = nn.Sequential(*[block_fn(d) for _ in range(n)])
+    net(torch.randn(16, d)).mean().backward()
+    return list(net[0].parameters())[0].grad.norm().item()
+
+def plain_block(d):
+    return nn.Sequential(nn.Linear(d,d), nn.ReLU(), nn.Linear(d,d), nn.ReLU())
+
+class ResBlock(nn.Module):
+    def __init__(self, d):
+        super().__init__()
+        self.net = nn.Sequential(nn.Linear(d,d), nn.ReLU(), nn.Linear(d,d))
+    def forward(self, x): return self.net(x) + x
+
+print(f'{&quot;Depth&quot;:&gt;6} | {&quot;Plain&quot;:&gt;12} | {&quot;Residual&quot;:&gt;12}')
+for n in [5, 10, 20, 40]:
+    pg = grad_norm_first(plain_block, n)
+    rg = grad_norm_first(ResBlock, n)
+    print(f'{n:&gt;6} | {pg:&gt;12.4e} | {rg:&gt;12.4e}')
+</code></pre>
+<h2>DenseNet — Extreme Skip Connections</h2>
+<p>DenseNet (Huang et al. 2017) connects each layer to all subsequent layers, concatenating feature maps: layer l receives inputs from layers 0, 1, ..., l−1. This creates L(L+1)/2 connections for a block of L layers. The gradient from any later layer flows directly to all earlier layers, nearly eliminating vanishing gradients. The downside is quadratic memory growth, mitigated by 1×1 bottleneck layers and compression at transition layers.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class DenseLayer(nn.Module):
+    def __init__(self, in_features, growth_rate=16):
+        super().__init__()
+        self.layer = nn.Sequential(nn.LayerNorm(in_features), nn.ReLU(), nn.Linear(in_features, growth_rate))
+    def forward(self, x):
+        return torch.cat([x, self.layer(x)], dim=-1)
+
+class DenseBlock(nn.Module):
+    def __init__(self, n_layers, in_features, growth_rate=16):
+        super().__init__()
+        self.layers = nn.ModuleList()
+        cur = in_features
+        for _ in range(n_layers):
+            self.layers.append(DenseLayer(cur, growth_rate))
+            cur += growth_rate
+        self.out_features = cur
+    def forward(self, x):
+        for l in self.layers: x = l(x)
+        return x
+
+torch.manual_seed(0)
+block = DenseBlock(n_layers=6, in_features=64, growth_rate=16)
+x = torch.randn(8, 64, requires_grad=True)
+out = block(x)
+out.mean().backward()
+print(f'DenseBlock: in={64}, out={block.out_features}')
+print(f'First layer weight grad: {list(block.layers[0].parameters())[0].grad.norm():.4e}')
+</code></pre>
+<h2>Skip Connections in Transformers and U-Net</h2>
+<p>Every Transformer block applies residual connections twice: x = x + Attention(LN(x)) and x = x + FFN(LN(x)). The pre-LN variant places LayerNorm inside the residual branch, ensuring a clean gradient path from output to every input token without LN interfering with the identity. In U-Net, encoder feature maps are concatenated with decoder feature maps at each resolution — skip connections carry precise spatial localization across the bottleneck that would otherwise be lost.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class PreLNTransformerBlock(nn.Module):
+    def __init__(self, d_model, n_heads, d_ff):
+        super().__init__()
+        self.ln1  = nn.LayerNorm(d_model)
+        self.attn = nn.MultiheadAttention(d_model, n_heads, batch_first=True)
+        self.ln2  = nn.LayerNorm(d_model)
+        self.ffn  = nn.Sequential(nn.Linear(d_model, d_ff), nn.GELU(), nn.Linear(d_ff, d_model))
+    def forward(self, x):
+        h, _ = self.attn(self.ln1(x), self.ln1(x), self.ln1(x))
+        x = x + h
+        return x + self.ffn(self.ln2(x))
+
+torch.manual_seed(0)
+blocks = nn.Sequential(*[PreLNTransformerBlock(128, 4, 512) for _ in range(12)])
+x = torch.randn(2, 32, 128)
+blocks(x).mean().backward()
+g = list(blocks[0].parameters())[0].grad.norm().item()
+print(f'Pre-LN Transformer (12 blocks): first-block grad = {g:.4e}')
+</code></pre>
+<h2>Residuals as Ensembles of Shallow Paths</h2>
+<p>Veit et al. (2016) showed that residual networks behave like ensembles of exponentially many shallow networks. A ResNet with L blocks has 2^L paths through the network (each skip can be taken or bypassed). In practice, shorter paths dominate gradient flow during training — paths of length 1 (direct skip) contribute the most. This explains why ResNets are robust to layer deletion: removing one block removes only O(2^{L-1}) paths of 2^L total, leaving most of the ensemble intact.</p>
+<p>This ensemble view also explains the depth efficiency of ResNets. Training a ResNet-50 is not equivalent to training a 50-layer network — it is more like training an ensemble of networks with depths ranging from 0 to 50. The effective depth is much shallower than the nominal depth, which is why 1000-layer ResNets remain trainable despite theoretical concerns about gradient flow at extreme depth.</p>
+<p>The ensemble interpretation has practical implications: stochastic depth (Huang et al. 2016) randomly drops entire residual blocks during training (replacing the block output with the identity), simulating training on subnetworks of varying length. This acts as data augmentation over the ensemble of paths, improving generalization and reducing training time by ~25% for ResNet-1001.</p>
+<h2>When to Use Projection Shortcuts</h2>
+<blockquote>
+<p><strong>Projection Shortcuts for Dimension Changes</strong>: When input and output dimensions differ (e.g., stride-2 downsampling doubles channels), the skip connection needs a 1×1 conv projection: x = F(x) + W_s·x. Use projection shortcuts only where dimensions change — for same-dimension blocks the identity shortcut (zero parameters, perfect gradient) is strictly better.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Architecture</th>
+<th>Skip type</th>
+<th>Gradient flow</th>
+<th>Max practical depth</th>
+<th>Memory overhead</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Plain network</td>
+<td>None</td>
+<td>Exponential decay</td>
+<td>~10–15 layers</td>
+<td>Lowest</td>
+</tr>
+<tr>
+<td>Highway network</td>
+<td>Gated: T·F(x)+(1−T)·x</td>
+<td>Controlled but can still vanish</td>
+<td>~50 layers</td>
+<td>Gate params</td>
+</tr>
+<tr>
+<td>ResNet (post-act)</td>
+<td>Identity +x after activation</td>
+<td>Strong — I term always present</td>
+<td>100–1000+ layers</td>
+<td>Negligible</td>
+</tr>
+<tr>
+<td>ResNet (pre-act)</td>
+<td>Clean identity — no ReLU on skip path</td>
+<td>Cleaner — preferred for very deep nets</td>
+<td>1000+ layers</td>
+<td>Negligible</td>
+</tr>
+<tr>
+<td>DenseNet</td>
+<td>Concat all previous feature maps</td>
+<td>Extremely strong — direct paths</td>
+<td>100–200 layers practical</td>
+<td>Quadratic in block depth</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>The identity shortcut costs zero parameters and negligible compute — use it by default for same-dimension layers.</li>
+<li>Pre-activation ResNet provides a cleaner gradient path and slightly better accuracy at very high depths.</li>
+<li>DenseNet has better gradient flow than ResNet but requires careful memory management past 100 layers.</li>
+<li>All Transformer architectures rely on residual connections — pre-LN is now preferred over post-LN for stability.</li>
+<li>Veit et al. showed ResNets behave as ensembles of 2^L paths — removing any single path barely affects output.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

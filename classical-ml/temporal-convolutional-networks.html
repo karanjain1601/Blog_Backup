@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Temporal Convolutional Networks (TCN) — Dilated Causal Convolutions | Notes Backup</title>
+  <meta name="description" content="Build TCN architectures using causal and dilated convolutions to achieve exponentially growing receptive fields without sequential computation, and compare training dynamics and accuracy against LSTM baselines." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Temporal Convolutional Networks (TCN) — Dilated Causal Convolutions</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Build TCN architectures using causal and dilated convolutions to achieve exponentially growing receptive fields without sequential computation, and compare training dynamics and accuracy against LSTM baselines.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Temporal Convolutional Networks (TCN) — Dilated Causal Convolutions</h1>
+<p>Temporal Convolutional Networks (TCN) achieve long-range temporal modelling through two key modifications to standard convolutions: causal padding (ensuring output at time t depends only on inputs at t, t-1, ...) and dilation (expanding the receptive field exponentially by skipping positions in the input). Combined with residual connections and weight normalisation, TCNs match or outperform LSTMs on many sequence modelling benchmarks while being fully parallelisable across time — a key training-efficiency advantage.</p>
+<p>The three design requirements for sequence models used in forecasting are: (1) causality — no information from future timesteps should influence the output at time t; (2) long receptive field — the model must be able to attend to patterns that happened many steps in the past, such as seasonal cycles; (3) stable gradient flow — very deep networks should not suffer from vanishing or exploding gradients that prevent convergence. TCN satisfies all three through causal padding, exponentially growing dilation, and residual shortcuts respectively.</p>
+<h2>Causal Convolutions</h2>
+<p>A standard 1D convolution with kernel size k and padding (k-1)/2 is not causal — it uses future inputs at position t+(k-1)/2. Causal convolution pads (k-1) zeros to the left of the input (past side) and zero to the right, so the output at position t uses only inputs at positions t, t-1, ..., t-(k-1). With stride 1, input and output length are equal. Causal convolutions are a prerequisite for autoregressive forecasting: the model cannot peek at the future during training or inference.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class CausalConv1d(nn.Module):
+    &quot;&quot;&quot;
+    Causal 1D convolution: pads (kernel_size-1)*dilation zeros on the left.
+    Output at position t depends only on inputs at t, t-1, ...
+    &quot;&quot;&quot;
+    def __init__(self, in_channels, out_channels, kernel_size, dilation=1):
+        super().__init__()
+        self.padding = (kernel_size - 1) * dilation
+        self.conv = nn.Conv1d(
+            in_channels, out_channels, kernel_size,
+            dilation=dilation, padding=self.padding
+        )
+
+    def forward(self, x):
+        # x: (batch, channels, time)
+        out = self.conv(x)
+        # Remove right padding to restore original time dimension
+        return out[:, :, :-self.padding] if self.padding &gt; 0 else out
+
+# Verify causality: output at t should not depend on future inputs
+batch, C, T = 2, 1, 20
+x = torch.randn(batch, C, T)
+causal = CausalConv1d(1, 1, kernel_size=3, dilation=2)
+out = causal(x)
+print(f'Input  shape: {x.shape}')
+print(f'Output shape: {out.shape}  (must match input time dim)')
+assert out.shape[2] == T, 'Causal conv must preserve sequence length'
+print('Causality check passed.')
+</code></pre>
+<h2>Dilated Convolutions and Receptive Field</h2>
+<p>Dilated convolution applies the kernel with a step of d (dilation rate) between kernel positions. A kernel of size k with dilation d has an effective receptive field of d·(k-1)+1 per layer. Stacking L layers with doubling dilations d=1,2,4,...,2^(L-1) and kernel size k gives total receptive field: (k-1)·(2^L - 1) + 1. With k=3, L=8, the receptive field is 511 time steps — enough for most practical series — using only 8·2=16 convolutional operations. This exponential growth is the key advantage over vanilla convolutions that need L layers for receptive field L·(k-1).</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def receptive_field(kernel_size, dilations):
+    &quot;&quot;&quot;Compute TCN receptive field for a stack of dilated causal convs.&quot;&quot;&quot;
+    rf = 1
+    for d in dilations:
+        rf += (kernel_size - 1) * d
+    return rf
+
+# Example: 3 blocks, each with dilations [1,2,4,8]
+kernel_size = 3
+dilations = [1, 2, 4, 8] * 3  # 3 repeated blocks
+rf = receptive_field(kernel_size, dilations)
+print(f'Kernel size: {kernel_size}')
+print(f'Dilations:   {dilations}')
+print(f'Receptive field: {rf} time steps')
+
+# Show RF growth per block
+for n_layers in [1, 2, 4, 8, 12]:
+    d_list = dilations[:n_layers]
+    print(f'  {n_layers:2d} layers → RF = {receptive_field(kernel_size, d_list):4d}')
+</code></pre>
+<h2>TCN Residual Block Architecture</h2>
+<p>Each TCN residual block consists of two causal dilated convolutions with weight normalisation and dropout, followed by a skip connection: output = activation(WeightNorm(CausalConv) → ReLU → Dropout → WeightNorm(CausalConv) → ReLU → Dropout) + skip. The skip connection uses a 1×1 convolution if the channel dimension changes, otherwise an identity map. Residual connections prevent vanishing gradients in deep networks (up to 30+ layers) and allow the network to learn small incremental refinements over each block. Multiple blocks with increasing dilation rates are stacked to achieve the desired receptive field.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class TCNBlock(nn.Module):
+    def __init__(self, in_ch, out_ch, kernel_size, dilation, dropout=0.1):
+        super().__init__()
+        pad = (kernel_size - 1) * dilation
+        self.conv1 = nn.utils.weight_norm(nn.Conv1d(
+            in_ch, out_ch, kernel_size, dilation=dilation, padding=pad))
+        self.conv2 = nn.utils.weight_norm(nn.Conv1d(
+            out_ch, out_ch, kernel_size, dilation=dilation, padding=pad))
+        self.relu    = nn.ReLU()
+        self.dropout = nn.Dropout(dropout)
+        self.skip    = nn.Conv1d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
+        self.pad     = pad
+
+    def _causal_trim(self, x):
+        return x[:, :, :-self.pad] if self.pad &gt; 0 else x
+
+    def forward(self, x):
+        out = self.dropout(self.relu(self._causal_trim(self.conv1(x))))
+        out = self.dropout(self.relu(self._causal_trim(self.conv2(out))))
+        return self.relu(out + self.skip(x))
+
+class TCN(nn.Module):
+    def __init__(self, in_ch, n_filters, kernel_size, n_blocks, dropout=0.1):
+        super().__init__()
+        layers = []
+        for i in range(n_blocks):
+            dilation = 2 ** i
+            c_in  = in_ch if i == 0 else n_filters
+            layers.append(TCNBlock(c_in, n_filters, kernel_size, dilation, dropout))
+        self.net    = nn.Sequential(*layers)
+        self.linear = nn.Linear(n_filters, 1)
+
+    def forward(self, x):
+        # x: (batch, features, time)
+        out = self.net(x)   # (batch, n_filters, time)
+        return self.linear(out.transpose(1, 2))  # (batch, time, 1)
+
+model = TCN(in_ch=1, n_filters=32, kernel_size=3, n_blocks=6)
+print(model)
+total_params = sum(p.numel() for p in model.parameters())
+print(f'Total parameters: {total_params:,}')
+</code></pre>
+<h2>Receptive Field Calculation</h2>
+<p>Before building a TCN, determine the minimum receptive field needed to capture the series' longest relevant dependency. For hourly data with weekly seasonality, the receptive field must cover 168 time steps (7 days × 24 hours). For daily data with annual seasonality, it must cover 365 steps. Choose the minimum number of blocks that achieves this RF with your chosen kernel size. Over-provisioning the RF wastes parameters and may require more data; under-provisioning prevents the model from capturing long-range seasonal patterns.</p>
+<pre><code class="language-python">import numpy as np
+import pandas as pd
+
+def tcn_receptive_field(kernel_size, n_blocks, n_layers_per_block=1):
+    &quot;&quot;&quot;Receptive field for TCN with doubling dilations over n_blocks.&quot;&quot;&quot;
+    dilations = [2**i for b in range(n_blocks) for i in range(n_layers_per_block)]
+    rf = 1 + sum((kernel_size - 1) * d for d in dilations)
+    return rf, dilations
+
+rows = []
+for k in [2, 3, 4]:
+    for nb in [4, 6, 8, 10]:
+        rf, _ = tcn_receptive_field(k, nb)
+        rows.append({'kernel': k, 'blocks': nb, 'RF': rf, 'RF_k': rf // 1000})
+
+df = pd.DataFrame(rows)
+print(df.pivot_table(values='RF', index='kernel', columns='blocks').to_string())
+
+# Practical recommendation
+target_rf = 168  # e.g., weekly hourly pattern
+for k in [2, 3]:
+    for nb in range(1, 15):
+        rf, _ = tcn_receptive_field(k, nb)
+        if rf &gt;= target_rf:
+            print(f'kernel={k}, blocks={nb} → RF={rf} &gt;= {target_rf}'); break
+</code></pre>
+<blockquote>
+<p><strong>TCN vs LSTM: When to Prefer Each</strong>: TCN is preferred when: (1) training data is large (parallel training over time is a significant speedup), (2) the required receptive field is known and fixed (dilations give explicit control), (3) gradient flow needs to be stable (no LSTM gating issues). LSTM is preferred when: (1) variable-length sequences without padding, (2) strong sequential inductive bias is desired, (3) the model must produce a hidden state for downstream tasks.</p>
+</blockquote>
+<p>Training a TCN on time-series data follows a sliding-window approach: create input-output pairs (xₜ₋L:t, yₜ₊₁:t₊H) where L = input window length ≥ receptive field and H = forecast horizon. For multi-step output, the TCN head maps the last time step's feature vector to H values (MIMO). Use Adam with learning rate 1e-3 and cosine annealing. Dropout rate 0.1–0.2 between the two convolutions per block. Weight normalisation is preferred over batch normalisation because it is compatible with variable sequence lengths and small batch sizes.</p>
+<h2>Architecture Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>TCN</th>
+<th>LSTM</th>
+<th>Transformer</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Parallelisable over time</td>
+<td>Yes — fully parallel</td>
+<td>No — sequential hidden state</td>
+<td>Yes — attention is parallel</td>
+</tr>
+<tr>
+<td>Receptive field</td>
+<td>Exponential in depth (explicit)</td>
+<td>Theoretically infinite (practical ~50-200)</td>
+<td>Full sequence (O(L²) memory)</td>
+</tr>
+<tr>
+<td>Gradient path length</td>
+<td>Short — residual shortcuts</td>
+<td>Gated — vanishing gradient mitigated</td>
+<td>Constant — attention shortcuts</td>
+</tr>
+<tr>
+<td>Memory per sequence</td>
+<td>O(L) — no hidden state</td>
+<td>O(L·d) — hidden states for all t</td>
+<td>O(L²) — attention matrix</td>
+</tr>
+<tr>
+<td>Positional information</td>
+<td>Implicit via causal padding order</td>
+<td>Implicit via recurrence</td>
+<td>Explicit positional encoding needed</td>
+</tr>
+<tr>
+<td>Parameter count (equal RF)</td>
+<td>Moderate — convolutional weights</td>
+<td>Moderate — gate weights</td>
+<td>High — Q,K,V projections per layer</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>Use dilation rates [1, 2, 4, 8, 16, 32] (doubling) for exponential receptive field growth with minimal layers.</li>
+<li>Weight normalisation (not batch normalisation) is standard for TCN because it is compatible with variable-length sequences.</li>
+<li>Dropout between the two convolutions in each block (not after residual addition) is the standard TCN regularisation.</li>
+<li>For multi-step forecasting with TCN, use a MIMO output head: linear layer mapping the last time step's features to H future values.</li>
+<li>TCN outperforms LSTM on tasks requiring very long context (hours of audio, months of hourly sensor data) due to explicit receptive field control.</li>
+</ul>
+<p>TCN has been successfully applied to load forecasting (electricity demand), anomaly detection in industrial sensor data, and financial volatility prediction. The Temporal Fusion Transformer (Lim et al., 2021) combines ideas from TCN (gating, skip connections) with attention mechanisms and variable selection networks for interpretable multi-horizon forecasting on tabular time series — a practical architecture that bridges TCN and Transformer paradigms.</p>
+<p>When porting an LSTM baseline to a TCN: (1) replace the LSTM cell with a stack of TCNBlocks; (2) set the receptive field to at least 4× the longest seasonal period; (3) replace the LSTM hidden state output with the TCN's last time-step feature vector for the prediction head; (4) tune dropout in [0.05, 0.2] and number of filters in [32, 128]. Usually, 6–8 blocks with doubling dilations and kernel size 3 or 4 are sufficient for daily or hourly series up to 1 year of context.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

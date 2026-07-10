@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Energy-Based Models — Boltzmann Distribution and MCMC | Notes Backup</title>
+  <meta name="description" content="Understand energy-based models for anomaly detection: the Boltzmann distribution p(x)=exp(−E_θ(x))/Z, contrastive divergence training, Langevin dynamics MCMC for the negative phase, and score matching as an MCMC-free alternative to avoid the intractable partition function." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Energy-Based Models — Boltzmann Distribution and MCMC</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Understand energy-based models for anomaly detection: the Boltzmann distribution p(x)=exp(−E_θ(x))/Z, contrastive divergence training, Langevin dynamics MCMC for the negative phase, and score matching as an MCMC-free alternative to avoid the intractable partition function.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Energy-Based Models — Boltzmann Distribution and MCMC</h1>
+<p>Energy-based models (EBMs) define a probability distribution via an energy function: p_θ(x) = exp(−E_θ(x)) / Z(θ) where Z(θ) = ∫ exp(−E_θ(x)) dx is the partition function. The energy E_θ is parameterised by a neural network and can take any value — no architectural constraints like invertibility are required. The key challenge is that Z is generally intractable, complicating both training and normalised-probability computation. For anomaly detection this is not a fundamental barrier: low energy ↔ normal, high energy ↔ anomaly.</p>
+<h2>Energy Functions and the Boltzmann Distribution</h2>
+<p>The Boltzmann distribution assigns high probability to regions of low energy and low probability to high-energy regions. During training we want the model to assign low energy to training data (positive phase) and high energy to other regions (negative phase). The log-likelihood gradient is: ∂/∂θ log p_θ(x) = −∂E_θ(x)/∂θ + E_{p_θ}[∂E_θ/∂θ]. The first term pushes down energy at observed data; the second term (the negative phase) pushes energy up at samples from the current model — requiring MCMC sampling.</p>
+<ul>
+<li>Unnormalised density: p_θ(x) ∝ exp(−E_θ(x)) — only the energy function needs to be learned.</li>
+<li>Partition function Z(θ) = ∫exp(−E_θ)dx — intractable in general; makes MLE gradient hard to compute.</li>
+<li>Negative phase: E_{p_θ}[∂E/∂θ] — expectation under the model; approximated by MCMC samples.</li>
+<li>Contrastive divergence: approximate negative phase using short MCMC chains initialised at training data.</li>
+<li>Score matching: sidestep Z by matching score functions ∇_x log p — avoids MCMC entirely.</li>
+</ul>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+class EnergyNet(nn.Module):
+    def __init__(self, d_in):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(d_in, 64), nn.SiLU(),
+            nn.Linear(64, 64), nn.SiLU(),
+            nn.Linear(64, 1))
+    def forward(self, x):
+        return self.net(x).squeeze(-1)  # scalar energy per sample
+
+def contrastive_divergence_step(ebm, x_pos, opt, n_steps=10, step_size=0.01):
+    '''One CD-k training step: positive phase minus negative phase.'''
+    ebm.train()
+    # Negative phase: run short Langevin chain from positive samples
+    x_neg = x_pos.detach().clone().requires_grad_(True)
+    for _ in range(n_steps):
+        e_neg = ebm(x_neg)
+        grad = torch.autograd.grad(e_neg.sum(), x_neg)[0]
+        x_neg = (x_neg - step_size * grad +
+                 (2 * step_size) ** 0.5 * torch.randn_like(x_neg)).detach()
+        x_neg.requires_grad_(True)
+    x_neg = x_neg.detach()
+    opt.zero_grad()
+    loss = ebm(x_pos).mean() - ebm(x_neg).mean()  # min E(pos), max E(neg)
+    loss.backward(); opt.step()
+    return loss.item()
+
+torch.manual_seed(0)
+X_tr = torch.tensor(np.random.randn(600, 4), dtype=torch.float32)
+ebm = EnergyNet(d_in=4)
+opt = torch.optim.Adam(ebm.parameters(), lr=1e-3)
+for ep in range(20):
+    loss_val = contrastive_divergence_step(ebm, X_tr, opt)
+    if (ep+1) % 5 == 0:
+        print(f'Epoch {ep+1:2d} | CD loss: {loss_val:.4f}')
+</code></pre>
+<h2>Training via Contrastive Divergence</h2>
+<p>Contrastive Divergence (CD-k) approximates the negative phase with k steps of MCMC starting from training data. CD-1 (a single step) is the most common — cheap but biased. Persistent CD (PCD) maintains a persistent chain of fantasy particles across batches, which converges to true model samples as training progresses but requires storing and updating the chain. CD-k gradient quality increases with k but so does computational cost. For anomaly detection, exact normalisation is not needed — relative energy values suffice for ranking.</p>
+<h2>Langevin Dynamics for MCMC Sampling</h2>
+<p>Langevin dynamics samples from p_θ(x) ∝ exp(−E_θ(x)) by simulating the SDE: xₜ₊₁ = xₜ − (η/2)∇_x E_θ(xₜ) + √η·ε where ε~N(0,I). The gradient term pulls particles toward low-energy regions; the noise term ensures exploration. With step size η→0 and enough steps, samples converge to p_θ. In practice, a finite η introduces a discretisation bias corrected by a Metropolis-Hastings accept/reject step (MALA). Langevin dynamics is the standard negative-phase sampler for deep EBMs.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+
+def langevin_sample(ebm, n_samples, d, n_steps=100, step_size=0.01, noise_scale=1.0):
+    '''Sample from EBM via Langevin MCMC.'''
+    ebm.eval()
+    x = torch.randn(n_samples, d) * noise_scale
+    x.requires_grad_(True)
+    for i in range(n_steps):
+        energy = ebm(x)
+        grad = torch.autograd.grad(energy.sum(), x)[0]
+        with torch.no_grad():
+            x = x - 0.5 * step_size * grad + (step_size ** 0.5) * torch.randn_like(x)
+        x = x.detach().requires_grad_(True)
+        if (i + 1) % 25 == 0:
+            e_mean = ebm(x.detach()).mean().item()
+            print(f'  Step {i+1:4d} | mean energy: {e_mean:.4f}')
+    return x.detach()
+
+print('Langevin sampling from trained EBM (4D):')
+samples = langevin_sample(ebm, n_samples=50, d=4, n_steps=100)
+print(f'Sample mean:  {samples.mean(dim=0).numpy().round(3)}')
+print(f'Sample std:   {samples.std(dim=0).numpy().round(3)}')
+print(f'Energy mean:  {ebm(samples).mean().item():.4f}')
+</code></pre>
+<h2>EBM Anomaly Detection</h2>
+<p>Because p_θ(x) ∝ exp(−E_θ(x)), the energy E_θ(x) is a direct (unnormalised) anomaly score: low energy = high probability = normal; high energy = low probability = anomaly. This avoids the need to compute Z. The threshold is set from the distribution of energies on normal training data. EBM anomaly detection is robust to the choice of architecture as long as E_θ is flexible enough to model the normal manifold — any neural network suffices.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+from sklearn.metrics import roc_auc_score
+
+np.random.seed(5)
+torch.manual_seed(5)
+X_train = torch.tensor(np.random.randn(500, 4), dtype=torch.float32)
+ebm2 = EnergyNet(d_in=4)
+opt2 = torch.optim.Adam(ebm2.parameters(), lr=5e-4)
+for _ in range(50):
+    contrastive_divergence_step(ebm2, X_train, opt2, n_steps=5)
+
+# Anomaly detection evaluation
+X_n_te = torch.tensor(np.random.randn(100, 4), dtype=torch.float32)
+X_a_te = torch.tensor(np.random.randn(25, 4)*0.2 + 3, dtype=torch.float32)
+X_all = torch.cat([X_n_te, X_a_te])
+y = np.array([0]*100 + [1]*25)
+
+ebm2.eval()
+with torch.no_grad():
+    energy_scores = ebm2(X_all).numpy()
+
+thr = np.percentile(energy_scores[:100], 95)
+detected = (energy_scores[100:] &gt; thr).sum()
+auroc = roc_auc_score(y, energy_scores)
+print(f'AUROC (energy score):   {auroc:.4f}')
+print(f'Threshold (95th pct):   {thr:.4f}')
+print(f'Anomalies detected:     {detected}/{len(X_a_te)}')
+print(f'Normal energy mean:     {energy_scores[:100].mean():.4f}')
+print(f'Anomaly energy mean:    {energy_scores[100:].mean():.4f}')
+</code></pre>
+<blockquote>
+<p><strong>EBM vs Normalizing Flows for Anomaly Detection</strong>: EBMs require only forward passes through E_θ at inference — fast and architecturally flexible. Flows require an invertible architecture and can compute exact log p(x). EBMs are harder to train (MCMC negative phase) but can use arbitrary architectures including residual networks with batch norm. For anomaly detection where only a ranking (not absolute probability) is needed, EBM energy scores are often sufficient.</p>
+</blockquote>
+<h2>Score Matching — Avoiding the Partition Function</h2>
+<p>Hyvärinen's score matching sidesteps Z entirely by matching the score function ∇<em x_ε="x,ε">x log p_θ(x) = −∇_x E_θ(x) to the data score. The objective is: J(θ) = E_data[‖∇_x log p_θ(x)‖² / 2 + tr(∇_x² log p_θ(x))]. The first term is small when model and data scores agree; the second term (trace of the Hessian) regularises. Denoising score matching (DSM) simplifies computation by matching scores of noisy data: J_DSM = E</em>[‖∇_x log p_θ(x+σε) + ε/σ‖²].</p>
+<pre><code class="language-python">import torch
+import numpy as np
+
+def denoising_score_matching_loss(ebm, x_clean, sigma=0.1):
+    '''DSM loss: match energy gradient to noise direction.'''
+    noise = torch.randn_like(x_clean) * sigma
+    x_noisy = x_clean + noise
+    x_noisy.requires_grad_(True)
+    energy = ebm(x_noisy)
+    score_model = -torch.autograd.grad(energy.sum(), x_noisy,
+                                        create_graph=True)[0]
+    target_score = -noise / (sigma ** 2)
+    loss = 0.5 * ((score_model - target_score) ** 2).sum(dim=-1).mean()
+    return loss
+
+torch.manual_seed(3)
+X_sm = torch.tensor(np.random.randn(400, 4), dtype=torch.float32)
+ebm_sm = EnergyNet(d_in=4)
+opt_sm = torch.optim.Adam(ebm_sm.parameters(), lr=1e-3)
+for ep in range(30):
+    loss = denoising_score_matching_loss(ebm_sm, X_sm, sigma=0.2)
+    opt_sm.zero_grad()
+    loss.backward(); opt_sm.step()
+    if (ep + 1) % 10 == 0:
+        print(f'Epoch {ep+1:2d} | DSM loss: {loss.item():.6f}')
+print('Score matching avoids MCMC — no negative phase sampling required.')
+</code></pre>
+<h2>EBM Training Methods Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Training Method</th>
+<th>MCMC Needed</th>
+<th>Gradient Quality</th>
+<th>Training Cost</th>
+<th>Partition Function</th>
+<th>Practical Use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Contrastive Divergence (CD-1)</td>
+<td>Yes (1 step)</td>
+<td>Biased but fast</td>
+<td>Low</td>
+<td>Ignored</td>
+<td>Most common baseline</td>
+</tr>
+<tr>
+<td>Persistent CD (PCD)</td>
+<td>Yes (persistent chain)</td>
+<td>Better — chain mixes</td>
+<td>Medium</td>
+<td>Ignored</td>
+<td>Better quality than CD</td>
+</tr>
+<tr>
+<td>Langevin MCMC (full)</td>
+<td>Yes (100+ steps)</td>
+<td>Good — near true model</td>
+<td>High</td>
+<td>Ignored</td>
+<td>Slow but accurate</td>
+</tr>
+<tr>
+<td>Score Matching</td>
+<td>No</td>
+<td>Unbiased (exact)</td>
+<td>Medium — Hessian trace</td>
+<td>Eliminated</td>
+<td>For smooth energies</td>
+</tr>
+<tr>
+<td>Noise Contrastive Estimation (NCE)</td>
+<td>No</td>
+<td>Unbiased</td>
+<td>Medium</td>
+<td>Estimated via noise</td>
+<td>When Z estimate needed</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>EBM inference is just one forward pass through E_θ — no partition function needed at test time.</li>
+<li>Use DSM when training data is clean and you want to avoid MCMC entirely; gradient computation is the only cost.</li>
+<li>Use PCD when generation quality also matters — persistent chains produce better samples than CD-1.</li>
+<li>Energy scores are unnormalised; for anomaly thresholding fit a Gaussian to training energies and flag points &gt; μ + 3σ.</li>
+<li>JEM (Grathwohl et al., 2020) combines classifier and EBM: logits define energy, enabling joint generation and classification.</li>
+</ul>
+<p>For anomaly detection, contrastive divergence or denoising score matching are the most practical training choices. DSM avoids MCMC entirely and often trains faster. PCD gives better energy landscapes when generation quality also matters. In all cases, the inference anomaly score is just the forward pass through E_θ — fast and simple.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

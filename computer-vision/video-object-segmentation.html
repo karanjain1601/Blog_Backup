@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Video Object Segmentation: Semi-Supervised and Unsupervised Tracking | Notes Backup</title>
+  <meta name="description" content="Video object segmentation tracks and segments objects across frames — using first-frame masks (semi-supervised) or motion cues (unsupervised) to maintain consistent per-object pixel assignments." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Video Object Segmentation: Semi-Supervised and Unsupervised Tracking</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Video object segmentation tracks and segments objects across frames — using first-frame masks (semi-supervised) or motion cues (unsupervised) to maintain consistent per-object pixel assignments.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Video Object Segmentation: Semi-Supervised and Unsupervised Tracking</h1>
+<p>Video object segmentation (VOS) assigns a unique pixel mask to each tracked object across every frame of a video. Unlike image segmentation, VOS must handle motion blur, occlusion, deformation, and scale change over time. The task is fundamental to video editing, autonomous driving, robotics, and augmented reality pipelines where per-frame bounding boxes are insufficient.</p>
+<p>Two main paradigms exist: semi-supervised VOS, where the model receives ground-truth masks for the first frame and propagates them forward; and unsupervised VOS, which discovers and segments salient or moving objects with no annotation at test time. Both share datasets like DAVIS-2017 and YouTube-VOS for benchmarking and leaderboard comparison.</p>
+<p>Semi-supervised VOS exploits a high-quality first-frame annotation to build an appearance model for each target object. The model matches stored embeddings against each subsequent frame to produce masks. Because object identity is given, methods focus on maintaining consistency rather than object discovery, enabling precise tracking even through partial occlusions and similar-looking distractors in the scene.</p>
+<p>Unsupervised VOS must autonomously decide which objects to segment — typically relying on motion cues such as optical flow, saliency priors, or self-supervised features. Without a reference mask the model cannot match identities across shots, so it groups pixels by shared motion or appearance into coherent regions. This is harder but requires no test-time annotation from the user.</p>
+<p>Space-Time Memory Networks (STM) introduced an external memory bank: past frames and their predicted masks are stored as key-value pairs. At each new frame a query key is computed, matched against all memory keys via dot-product attention, and retrieved values are decoded into the current mask. This non-parametric approach generalises to unseen objects without any per-sequence fine-tuning at test time.</p>
+<pre><code># STM memory read\nquery_key = encoder(current_frame)\nmem_keys, mem_vals = memory_bank\nsimilarity = softmax(query_key @ mem_keys.T)\nreadout = similarity @ mem_vals\nmask = decoder(readout)  # pixel-wise object mask
+</code></pre>
+<p>XMem extended STM with a three-tier memory architecture: a sensory memory holding recent frames cheaply, a working memory for mid-term context, and a long-term memory that compresses older entries via consolidation. This hierarchy lets XMem process videos thousands of frames long without exhausting GPU memory — a critical limitation of flat memory approaches like the original STM formulation.</p>
+<pre><code># XMem memory update\nif t % update_freq == 0:\n    long_term_mem.update(frame_key, mask_val)\nworking_mem.push(frame_key, mask_val)\nif len(working_mem) &gt; max_size:\n    working_mem.evict_oldest()
+</code></pre>
+<blockquote>
+<p><strong>tip</strong>: XMem's tiered memory (sensory → working → long-term) mirrors human working memory — recent frames in fast working memory, key frames in slow long-term store. This prevents the GPU memory explosion that kills naive approaches on long videos.</p>
+</blockquote>
+<p>Optical flow estimates per-pixel displacement between consecutive frames, making it a natural signal for unsupervised VOS. Pixels that move together likely belong to the same object. RAFT uses iterative refinement over correlation volumes to produce dense, sub-pixel-accurate flow fields. Warping a mask along the estimated flow propagates object boundaries forward in time without any manual annotation required.</p>
+<pre><code># RAFT optical flow for unsupervised VOS\nflow = raft_model(frame_t, frame_t1)\nwarped_mask = grid_sample(\n    mask_t,\n    grid_from_flow(flow),\n    mode='bilinear'\n)\npropagated = (warped_mask &gt; threshold).float()
+</code></pre>
+<p>Flow-based propagation struggles at object boundaries where motion is ambiguous, and during fast motion where displacement exceeds the model's receptive field. Hybrid approaches combine flow warping with appearance-based re-detection: if mask confidence drops below a threshold, a detector re-initialises the mask from current frame features, preventing cumulative error drift over long video sequences.</p>
+<p>DAVIS and YouTube-VOS use two complementary metrics: J (Jaccard / region similarity) measures mask overlap as intersection-over-union between predicted and ground-truth masks; F (F-measure / boundary accuracy) evaluates contour precision and recall. The primary metric J&amp;F is their mean. YouTube-VOS also reports G, a weighted average over seen and unseen object categories to test generalisation.</p>
+<pre><code># DAVIS evaluation metrics\nJ = intersection(pred_mask, gt_mask) / union(pred_mask, gt_mask)\nboundary_P = precision(pred_boundary, gt_boundary)\nboundary_R = recall(pred_boundary, gt_boundary)\nF = 2 * boundary_P * boundary_R / (boundary_P + boundary_R)\nJ_and_F = (J + F) / 2
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Supervision</th>
+<th>DAVIS-2017 J&amp;F %</th>
+<th>YouTube-VOS G %</th>
+<th>Speed (FPS)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>OSVOS</td>
+<td>Semi</td>
+<td>60.3</td>
+<td>—</td>
+<td>0.1</td>
+</tr>
+<tr>
+<td>STM</td>
+<td>Semi</td>
+<td>81.8</td>
+<td>79.4</td>
+<td>6.3</td>
+</tr>
+<tr>
+<td>XMem</td>
+<td>Semi</td>
+<td>87.7</td>
+<td>85.5</td>
+<td>22.6</td>
+</tr>
+<tr>
+<td>Cutie</td>
+<td>Semi</td>
+<td>89.1</td>
+<td>86.8</td>
+<td>37.0</td>
+</tr>
+<tr>
+<td>DEVA</td>
+<td>Unsupervised</td>
+<td>73.2</td>
+<td>71.6</td>
+<td>18.0</td>
+</tr>
+</tbody>
+</table>
+<p>OSVOS showed that fine-tuning a pretrained CNN on the first frame achieves reasonable segmentation but at extremely low speed. STM's memory-based design removed per-sequence fine-tuning, boosting throughput 60×. XMem and Cutie improved accuracy further via better memory management. DEVA demonstrates that unsupervised methods are narrowing the gap by leveraging large foundation vision models.</p>
+<p>Memory-based propagation has become the dominant paradigm for semi-supervised VOS. The central design choice is how to manage the memory bank: flat storage works on short clips but fails on long videos. Hierarchical memory as in XMem and Cutie resolves this by trading off recency against compression, keeping GPU memory bounded while retaining critical context from early frames of the sequence.</p>
+<p>Unsupervised VOS remains significantly harder than semi-supervised, but foundation models like SAM2 are blurring the boundary. SAM2 propagates masks from a single user click across long videos, combining the annotation efficiency of unsupervised inference with semi-supervised tracking accuracy — pointing toward a unified video segmentation paradigm that eliminates the traditional distinction entirely.</p>
+<p>Choosing between J, F, and J&amp;F matters for method selection: high J but low F produces coarse blob-like masks that cover the right region but miss fine contours — unacceptable for video compositing. Always inspect both metrics separately. For robotics, coarse masks at high FPS may dominate; for visual effects work, boundary precision consistently outweighs raw throughput considerations.</p>
+    </article>
+  </main>
+</body>
+</html>

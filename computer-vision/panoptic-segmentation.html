@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Panoptic Segmentation: Things and Stuff | Notes Backup</title>
+  <meta name="description" content="Unifying semantic and instance segmentation — panoptic quality metric, things vs stuff categories, Panoptic FPN architecture, and how to merge semantic and instance outputs." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Panoptic Segmentation: Things and Stuff</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Unifying semantic and instance segmentation — panoptic quality metric, things vs stuff categories, Panoptic FPN architecture, and how to merge semantic and instance outputs.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Panoptic Segmentation: Things and Stuff</h1>
+<h2>Overview</h2>
+<p>Panoptic segmentation combines semantic segmentation, which labels every pixel with a class, and instance segmentation, which identifies individual object instances. Introduced by Kirillov et al. in 2019, it produces a unified output where every pixel receives both a semantic label and an instance ID, enabling complete scene understanding for autonomous driving, robotics, and video analysis.</p>
+<blockquote>
+<p><strong>info</strong>: Panoptic segmentation is the most complete scene understanding task — it assigns every pixel a label AND differentiates between individual thing instances (people, cars) and amorphous stuff (sky, grass).</p>
+</blockquote>
+<h2>Things vs Stuff</h2>
+<p>In panoptic segmentation, categories are divided into things and stuff. Things are countable objects with well-defined instances — people, cars, animals — that instance segmentation handles. Stuff categories — sky, road, grass, water — are amorphous regions without discrete boundaries. Each thing pixel gets a unique instance ID, while all stuff pixels of the same class share a single label.</p>
+<p>The COCO Panoptic dataset contains 80 thing categories and 53 stuff categories, totalling 133 classes. Models must handle both paradigms simultaneously. Thing classes benefit from object detection priors, while stuff classes require semantic context over large spatial regions. Balancing these two complementary objectives is the core architectural challenge of panoptic models.</p>
+<h2>Panoptic Quality Metric</h2>
+<p>Panoptic Quality (PQ) is computed by matching predicted segments to ground truth using IoU greater than 0.5. PQ decomposes into Segmentation Quality (SQ), the average IoU of matched pairs, and Recognition Quality (RQ), the F1 score over matched and unmatched segments. PQ equals SQ times RQ, with SQ measuring mask accuracy and RQ measuring detection precision and recall simultaneously.</p>
+<pre><code class="language-python">import numpy as np
+
+def compute_pq(matched_ious, num_gt, num_pred):
+    &quot;&quot;&quot;Compute PQ = SQ x RQ for one category.&quot;&quot;&quot;
+    tp = len(matched_ious)
+    fp = num_pred - tp
+    fn = num_gt - tp
+    sq = np.mean(matched_ious) if tp &gt; 0 else 0.0
+    rq = tp / (tp + 0.5 * fp + 0.5 * fn) if (tp + fp + fn) &gt; 0 else 0.0
+    pq = sq * rq
+    return {&quot;PQ&quot;: pq, &quot;SQ&quot;: sq, &quot;RQ&quot;: rq}
+</code></pre>
+<p>PQ is computed per category and averaged across all classes. For things, a missed detection contributes a false negative to RQ. For stuff, typically one prediction per class is expected. SQ is always above 0.5 by construction since matched pairs require IoU greater than 0.5. State-of-the-art panoptic models achieve PQ of 55 to 65 on COCO val2017.</p>
+<h2>Panoptic FPN Architecture</h2>
+<p>Panoptic Feature Pyramid Network builds on a shared FPN backbone producing multi-scale feature maps at strides 4, 8, 16, and 32. A semantic head upsamples and merges all FPN levels to a full-resolution logit map. A Mask R-CNN instance head runs in parallel on the same features. Both heads share the backbone, reducing compute and enabling joint end-to-end training with a combined loss.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from torchvision.models.detection import maskrcnn_resnet50_fpn
+
+class PanopticFPN(nn.Module):
+    def __init__(self, num_thing, num_stuff):
+        super().__init__()
+        self.backbone = maskrcnn_resnet50_fpn(weights=&quot;DEFAULT&quot;).backbone
+        self.sem_head = SemanticHead(256, num_thing + num_stuff)
+        self.inst_head = InstanceHead(256, num_thing)
+    def forward(self, images):
+        features = self.backbone(images)
+        sem_logits = self.sem_head(features)
+        inst_out = self.inst_head(features, images)
+        return sem_logits, inst_out
+</code></pre>
+<p>The semantic head applies 3x3 convolutions and bilinear upsampling at each FPN level, sums all levels element-wise, then predicts per-pixel logits with a 1x1 convolution. The instance head uses standard Mask R-CNN with RoI Align — region proposals, box regression, classification, and 28x28 mask prediction per detected object. Both heads are optimized jointly with equal loss weighting.</p>
+<table>
+<thead>
+<tr>
+<th>Task</th>
+<th>Output per pixel</th>
+<th>Output per instance</th>
+<th>Metric</th>
+<th>Key model</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Semantic seg</td>
+<td>Class label</td>
+<td>No</td>
+<td>mIoU</td>
+<td>DeepLab, SegFormer</td>
+</tr>
+<tr>
+<td>Instance seg</td>
+<td>No</td>
+<td>Class + mask per object</td>
+<td>AP (mask)</td>
+<td>Mask R-CNN, SOLOv2</td>
+</tr>
+<tr>
+<td>Panoptic seg</td>
+<td>Class + instance ID</td>
+<td>Yes</td>
+<td>PQ</td>
+<td>Panoptic FPN, Mask2Former</td>
+</tr>
+</tbody>
+</table>
+<h2>Merging Semantic and Instance Outputs</h2>
+<p>Merging semantic and instance outputs requires resolving conflicts. For thing categories, instance predictions take priority over the semantic map. For stuff categories, semantic predictions fill pixels not claimed by any instance. Pixels with low confidence in both heads are assigned a void label. The final panoptic output is an HxW map of unique category and instance ID pairs.</p>
+<pre><code class="language-python">import numpy as np
+
+def merge_panoptic(sem_logits, inst_masks, inst_labels, stuff_ids, thing_ids):
+    &quot;&quot;&quot;Merge semantic and instance outputs into a panoptic map.&quot;&quot;&quot;
+    H, W = sem_logits.shape[-2:]
+    panoptic = np.zeros((H, W), dtype=np.int32)
+    sem_pred = sem_logits.argmax(0)
+    for cat_id in stuff_ids:
+        panoptic[sem_pred == cat_id] = cat_id * 1000
+    inst_id = 1
+    for mask, label in zip(inst_masks, inst_labels):
+        if label in thing_ids:
+            panoptic[mask &gt; 0.5] = label * 1000 + inst_id
+            inst_id += 1
+    return panoptic
+</code></pre>
+<p>After merging, each pixel has exactly one panoptic label. Instances are assigned IDs starting from 1 per thing category; stuff always gets ID 0. Overlapping instances from the Mask R-CNN head are resolved by NMS before mask merging. The panoptic map is stored as uint32 using the formula category_id times 1000 plus instance_id, following the COCO panoptic format convention.</p>
+<pre><code class="language-python">import json
+from panopticapi.evaluation import pq_compute
+
+def evaluate_panoptic(gt_json, pred_json, gt_folder, pred_folder):
+    &quot;&quot;&quot;Compute PQ, SQ, RQ using the panopticapi library.&quot;&quot;&quot;
+    with open(gt_json) as f:
+        gt_data = json.load(f)
+    with open(pred_json) as f:
+        pred_data = json.load(f)
+    results = pq_compute(
+        gt_data, pred_data,
+        gt_folder=gt_folder,
+        pred_folder=pred_folder
+    )
+    print(f&quot;PQ={results['All']['pq']:.3f} SQ={results['All']['sq']:.3f} RQ={results['All']['rq']:.3f}&quot;)
+</code></pre>
+<p>The panopticapi library from Facebook Research provides standard evaluation code. Results are reported as PQ, SQ, and RQ for all categories, things only, and stuff only. Models strong on things may be weak on stuff. Comprehensive panoptic models achieve competitive performance on both subsets, demonstrating genuine scene understanding rather than excelling at only one subtask.</p>
+<h2>Key Takeaways</h2>
+<p>Panoptic segmentation unifies two previously separate tasks by assigning every pixel both a semantic class and an instance identity. The Panoptic Quality metric decomposes accuracy into segmentation quality and recognition quality, making results interpretable and comparable across models with different architectural strategies including two-stage, single-stage, and transformer approaches.</p>
+<p>Panoptic FPN demonstrates that a shared FPN backbone can simultaneously serve semantic and instance heads with minimal overhead. Multi-scale feature sharing improves both tasks compared to independent training. This architecture pattern has influenced subsequent models including PanopticFCN, MaskFormer, and Mask2Former, which unify both tasks under a single query-based decoder.</p>
+<p>The thing/stuff distinction reflects fundamental ontological differences in scene categories. Modern transformer-based panoptic models such as Mask2Former treat all categories uniformly using masked attention, achieving state-of-the-art results without explicit thing/stuff separation. Understanding the original formulation helps interpret why newer architectures converge toward a unified query-based approach.</p>
+    </article>
+  </main>
+</body>
+</html>

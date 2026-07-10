@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DPO — Direct Preference Optimization Without the RL Loop | Notes Backup</title>
+  <meta name="description" content="Complete treatment of DPO: derivation from the KL-constrained RL objective, loss implementation, training loop with frozen reference, implicit reward interpretation, and comparison against PPO-RLHF." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>DPO — Direct Preference Optimization Without the RL Loop</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Complete treatment of DPO: derivation from the KL-constrained RL objective, loss implementation, training loop with frozen reference, implicit reward interpretation, and comparison against PPO-RLHF.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>DPO — Direct Preference Optimization Without the RL Loop</h1>
+<p>DPO (Direct Preference Optimization, Rafailov et al. 2023) eliminates the reward model and RL training loop entirely. By deriving a closed-form relationship between the optimal policy, the reference policy, and human preferences, DPO converts RLHF into a supervised classification problem over preference pairs — making alignment training substantially more stable and computationally efficient than PPO-RLHF.</p>
+<h2>DPO Derivation from Optimal Policy</h2>
+<p>DPO starts from the KL-constrained RL objective: max_pi E[r(x,y)] - beta * KL[pi || pi_ref]. The optimal policy satisfies pi<em>(y|x) proportional to pi_ref(y|x) * exp(r</em>(x,y)/beta). Rearranging: r<em>(x,y) = beta * log[pi</em>(y|x) / pi_ref(y|x)] + beta * log Z(x). Substituting into the Bradley-Terry preference model eliminates both r* and the partition function Z(x), yielding the DPO loss directly from paired preferences (x, y_w, y_l) without ever training a reward model.</p>
+<h2>DPO Loss Implementation</h2>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+from typing import Tuple
+
+def dpo_loss(
+    policy_chosen_logps: torch.Tensor,
+    policy_rejected_logps: torch.Tensor,
+    ref_chosen_logps: torch.Tensor,
+    ref_rejected_logps: torch.Tensor,
+    beta: float = 0.1,
+) -&gt; Tuple[torch.Tensor, dict]:
+    # DPO loss: -E[log sigma(beta * (log_ratio_chosen - log_ratio_rejected))]
+    # Log ratio: log[pi_theta(y|x) / pi_ref(y|x)]
+    chosen_log_ratio = policy_chosen_logps - ref_chosen_logps
+    rejected_log_ratio = policy_rejected_logps - ref_rejected_logps
+    logits = beta * (chosen_log_ratio - rejected_log_ratio)
+    loss = -F.logsigmoid(logits).mean()
+    # Implicit rewards for monitoring preference alignment
+    chosen_rewards = beta * chosen_log_ratio.detach()
+    rejected_rewards = beta * rejected_log_ratio.detach()
+    reward_margin = (chosen_rewards - rejected_rewards).mean().item()
+    accuracy = (logits &gt; 0).float().mean().item()
+    return loss, {
+        &quot;reward_margin&quot;: reward_margin,
+        &quot;dpo_accuracy&quot;: accuracy,
+        &quot;chosen_reward&quot;: chosen_rewards.mean().item(),
+        &quot;rejected_reward&quot;: rejected_rewards.mean().item(),
+    }
+</code></pre>
+<h2>DPO Training Loop</h2>
+<p>The DPO training setup requires only two models: the frozen reference pi_ref (the SFT checkpoint) and the trainable policy pi_theta. Both models forward-pass through each sequence to compute log-probabilities, but only the policy receives gradient updates. The reference model serves as a soft constraint preventing the policy from drifting too far from natural language distributions.</p>
+<pre><code class="language-python">import torch
+from transformers import AutoModelForCausalLM
+from torch.optim import AdamW
+from typing import Tuple
+
+def get_sequence_logps(model, input_ids, attention_mask, labels, device):
+    outputs = model(
+        input_ids=input_ids.to(device),
+        attention_mask=attention_mask.to(device),
+    )
+    logits = outputs.logits[:, :-1]  # shift for next-token prediction
+    log_probs = torch.log_softmax(logits, dim=-1)
+    token_logps = log_probs.gather(2, labels[:, 1:].to(device).unsqueeze(2)).squeeze(2)
+    label_mask = (labels[:, 1:].to(device) != -100).float()
+    return (token_logps * label_mask).sum(dim=1) / label_mask.sum(dim=1).clamp(min=1)
+
+def dpo_training_step(policy_model, ref_model, batch, optimizer, beta=0.1, device=&quot;cuda&quot;):
+    # Forward both chosen and rejected through policy and frozen reference
+    optimizer.zero_grad()
+    p_chosen = get_sequence_logps(
+        policy_model, batch[&quot;chosen_ids&quot;], batch[&quot;chosen_mask&quot;], batch[&quot;chosen_labels&quot;], device
+    )
+    p_rejected = get_sequence_logps(
+        policy_model, batch[&quot;rejected_ids&quot;], batch[&quot;rejected_mask&quot;], batch[&quot;rejected_labels&quot;], device
+    )
+    with torch.no_grad():
+        r_chosen = get_sequence_logps(
+            ref_model, batch[&quot;chosen_ids&quot;], batch[&quot;chosen_mask&quot;], batch[&quot;chosen_labels&quot;], device
+        )
+        r_rejected = get_sequence_logps(
+            ref_model, batch[&quot;rejected_ids&quot;], batch[&quot;rejected_mask&quot;], batch[&quot;rejected_labels&quot;], device
+        )
+    loss, metrics = dpo_loss(p_chosen, p_rejected, r_chosen, r_rejected, beta)
+    loss.backward()
+    optimizer.step()
+    return metrics
+</code></pre>
+<h2>Implicit Reward</h2>
+<p>DPO's implicit reward beta * log[pi_theta(y|x) / pi_ref(y|x)] emerges from the policy's log-probability ratio with the reference. This reward is not explicitly trained — it arises as a natural consequence of the policy learning to prefer chosen responses over rejected ones. Monitoring this implicit reward during training helps diagnose whether DPO is learning meaningful preferences or overfitting to surface artifacts.</p>
+<pre><code class="language-python">import torch
+
+def compute_dpo_implicit_reward(
+    policy_model,
+    ref_model,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    labels: torch.Tensor,
+    beta: float = 0.1,
+    device: str = &quot;cuda&quot;,
+) -&gt; torch.Tensor:
+    # DPO implicit reward: beta * log[pi_theta(y|x) / pi_ref(y|x)]
+    def sequence_logps(model, ids, mask, lbls):
+        with torch.no_grad():
+            out = model(
+                input_ids=ids.to(device), attention_mask=mask.to(device)
+            )
+            lp = torch.log_softmax(out.logits[:, :-1], dim=-1)
+            tok_lp = lp.gather(2, lbls[:, 1:].to(device).unsqueeze(2)).squeeze(2)
+            lbl_mask = (lbls[:, 1:].to(device) != -100).float()
+            return (tok_lp * lbl_mask).sum(1) / lbl_mask.sum(1).clamp(min=1)
+    policy_logps = sequence_logps(policy_model, input_ids, attention_mask, labels)
+    ref_logps = sequence_logps(ref_model, input_ids, attention_mask, labels)
+    # Positive value means policy assigns higher probability than reference
+    return beta * (policy_logps - ref_logps)  # [batch]
+</code></pre>
+<h2>Monitoring Chosen vs Rejected Log-Probabilities</h2>
+<p>During successful DPO training, the log-probability ratio for chosen responses should increase while the ratio for rejected responses decreases. The margin (chosen_ratio - rejected_ratio) is the most diagnostic signal — a stagnant or decreasing margin indicates the policy is not learning to distinguish preferences. Track both ratios at every step; if chosen_ratio decreases over any 5-step window, reduce the learning rate.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+
+def monitor_dpo_logprob_evolution(
+    policy_chosen_logps: torch.Tensor,
+    policy_rejected_logps: torch.Tensor,
+    ref_chosen_logps: torch.Tensor,
+    ref_rejected_logps: torch.Tensor,
+    step: int,
+    history: list,
+) -&gt; dict:
+    # Track log-prob ratios during DPO training to detect divergence
+    chosen_ratio = (policy_chosen_logps - ref_chosen_logps).mean().item()
+    rejected_ratio = (policy_rejected_logps - ref_rejected_logps).mean().item()
+    metrics = {
+        &quot;step&quot;: step,
+        &quot;chosen_logp_ratio&quot;: chosen_ratio,
+        &quot;rejected_logp_ratio&quot;: rejected_ratio,
+        &quot;margin&quot;: chosen_ratio - rejected_ratio,
+    }
+    history.append(metrics)
+    if len(history) &gt; 10:
+        recent = np.mean([h[&quot;chosen_logp_ratio&quot;] for h in history[-5:]])
+        earlier = np.mean([h[&quot;chosen_logp_ratio&quot;] for h in history[-10:-5]])
+        if recent &lt; earlier:
+            print(f&quot;[Step {step}] WARNING: Chosen log-prob ratio decreasing — check LR&quot;)
+    return metrics
+</code></pre>
+<h2>PPO-RLHF vs DPO Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Aspect</th>
+<th>PPO-RLHF</th>
+<th>DPO</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Models needed</td>
+<td>4 (policy, reference, reward model, value)</td>
+<td>2 (policy, frozen reference)</td>
+</tr>
+<tr>
+<td>Compute</td>
+<td>High — online rollouts and RM scoring each step</td>
+<td>Low — offline supervised training only</td>
+</tr>
+<tr>
+<td>Data requirement</td>
+<td>Preference labels plus prompts for rollouts</td>
+<td>Paired (chosen, rejected) completions</td>
+</tr>
+<tr>
+<td>Training stability</td>
+<td>Unstable (reward hacking, KL explosion possible)</td>
+<td>Stable (cross-entropy style loss)</td>
+</tr>
+<tr>
+<td>Reward generalization</td>
+<td>Better — explicit RM trained on varied prompts</td>
+<td>Weaker — implicit, offline, no online signal</td>
+</tr>
+<tr>
+<td>Performance</td>
+<td>Higher ceiling with compute and scale</td>
+<td>Competitive at moderate scale and data budget</td>
+</tr>
+</tbody>
+</table>
+<h2>DPO Variants and Limitations</h2>
+<p>Several DPO variants address its core limitations: reliance on paired preferences, no online learning capability, and weaker reward generalization compared to an explicit reward model. Each variant makes a different tradeoff between data requirements, compute, and alignment quality.</p>
+<ul>
+<li>IPO (Identity Preference Optimization): adds a regularization term to prevent overfitting to preference pairs when data is scarce</li>
+<li>ORPO (Odds Ratio Preference Optimization): replaces the reference model with an odds ratio, enabling single-model training</li>
+<li>SimPO (Simple Preference Optimization): length-normalized reward margin without requiring a separate reference model</li>
+<li>Online DPO: periodically regenerates preference pairs using the current policy to enable online learning and distribution shift</li>
+<li>KTO (Kahneman-Tversky Optimization): aligns from binary good/bad feedback without requiring paired comparisons</li>
+</ul>
+<blockquote>
+<p><strong>Tip</strong>: DPO's implicit reward beta * log[pi_theta(y|x) / pi_ref(y|x)] can be negative if the policy has been pushed away from some responses during SFT — always initialize DPO from the SFT checkpoint that generated the preference data to avoid distribution mismatch. Using a different SFT checkpoint from the one that produced the preference pairs causes reference log-probs to be miscalibrated and destabilizes training.</p>
+</blockquote>
+<hr />
+<p>DPO has become the preferred alignment method for academic and small-scale production settings due to its simplicity, stability, and competitive performance. Its main limitation — offline-only learning from fixed preference datasets — is addressed by online DPO variants that periodically regenerate preference pairs from the current policy, combining the stability of DPO with the online learning benefits of PPO-RLHF.</p>
+    </article>
+  </main>
+</body>
+</html>

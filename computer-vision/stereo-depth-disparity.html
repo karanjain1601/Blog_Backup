@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Stereo Depth Estimation: Disparity Maps and SGM | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Stereo Depth Estimation: Disparity Maps and SGM</h1>
+      
+      <h1>Stereo Depth Estimation: Disparity Maps and SGM</h1>
+<h2>Overview</h2>
+<p>Stereo depth estimation recovers per-pixel depth from a pair of calibrated cameras separated by a known baseline. By locating corresponding pixels between left and right images and measuring horizontal disparity, depth is computed via the stereo triangulation formula. It is widely used in autonomous driving, robotics, and AR/VR applications.</p>
+<p>Classical stereo methods like Semi-Global Matching (SGM) build explicit cost volumes and regularize them with dynamic programming. Deep learning approaches — from PSMNet to RAFT-Stereo — learn cost volume construction and disparity regression end-to-end, achieving sub-pixel accuracy on benchmarks like KITTI 2015 and SceneFlow.</p>
+<h2>Stereo Camera Geometry</h2>
+<p>A rectified stereo pair has both image planes coplanar with the baseline vector. After rectification, epipolar lines become horizontal scanlines, reducing the 2D correspondence search to a 1D problem along each row. Rectification requires intrinsic matrices and the relative rotation R and translation T obtained from stereo calibration.</p>
+<p>The fundamental matrix F encodes the epipolar constraint x'Fx = 0 for corresponding pixels x and x'. After rectification F simplifies to a horizontal shift operator. The essential matrix E = [t]_x R relates calibrated normalized coordinates, while F applies to pixel coordinates via F = K2^{-T} E K1^{-1}.</p>
+<h2>Disparity and Depth Relationship</h2>
+<p>Disparity d is the horizontal pixel shift between a matched point in the left image and its counterpart in the right image. For a rectified pair, d = x_left - x_right &gt;= 0 for points in front of the cameras. Depth Z is inversely proportional to disparity: Z = f*b/d, where f is focal length in pixels and b is the baseline in meters.</p>
+<pre><code>f = focal_length    # e.g., 721 px (KITTI)
+b = baseline        # e.g., 0.54 m  (KITTI)
+# Compute depth; guard against division by zero
+depth = np.where(disparity &gt; 0, f * b / disparity, 0.0)
+# Example: f=721, b=0.54, d=50 px
+# depth = 721 * 0.54 / 50 = 7.79 m
+</code></pre>
+<p>Depth uncertainty grows quadratically with distance: sigma_Z = (Z^2 / (f*b)) * sigma_d. For KITTI (f=721, b=0.54 m) a half-pixel disparity error at 10 m gives ~13 cm depth uncertainty, while at 50 m the same error yields ~3.2 m uncertainty. This is why stereo is typically reliable only up to roughly 50-100 m range.</p>
+<h2>Semi-Global Matching (SGM)</h2>
+<p>SGM builds a 3D cost volume C(p, d) measuring the matching cost at pixel p for disparity d, using Census transform or mutual information. It then runs dynamic programming along 4 or 8 directional paths and aggregates path costs to regularize the disparity map, penalizing large disparity changes at non-edge pixels.</p>
+<pre><code>cost = torch.zeros(B, max_disp, H, W)
+for d in range(max_disp):
+    shifted_right = torch.roll(right_feat, d, dims=-1)
+    cost[:, d, :, :] = (left_feat - shifted_right).abs().mean(1)
+# cost shape: (B, D, H, W)
+# Winner-Take-All: disparity = argmin over D dimension
+</code></pre>
+<pre><code># SGM path cost aggregation (one direction r):
+# L_r(p,d) = C(p,d) + min(
+#     L_r(p-r, d),
+#     L_r(p-r, d-1) + P1,
+#     L_r(p-r, d+1) + P1,
+#     min_k(L_r(p-r, k)) + P2
+# ) - min_k(L_r(p-r, k))
+# P1 penalizes +-1 disparity change; P2 penalizes larger jumps
+</code></pre>
+<p>P1 and P2 are the critical SGM hyperparameters. P1 penalizes small disparity changes (+-1) to encourage smooth surfaces. P2 penalizes larger jumps with an image-adaptive value P2 = P2_init / |delta_I(p)|, where delta_I is the local intensity gradient. This adaptive penalty preserves sharp depth discontinuities at object boundaries.</p>
+<blockquote>
+<p><strong>warning</strong>: Stereo depth fails at textureless regions (sky, white walls) because the cost volume has no discriminative signal to match. Add regularization (SGM's P2 penalty) or use depth completion with sparse LiDAR to fill these regions.</p>
+</blockquote>
+<h2>Deep Stereo Networks</h2>
+<p>PSMNet introduced Spatial Pyramid Pooling and 3D convolutions over the cost volume, capturing global context for improved accuracy. GANet replaced 3D convolutions with guided aggregation layers that mimic SGM directional paths but are learned end-to-end, reducing inference time while achieving better results on KITTI and SceneFlow benchmarks.</p>
+<pre><code>feat_left, feat_right = feature_encoder(left, right)
+corr_fn = CorrBlock(feat_left, feat_right, num_levels=4)
+disparity = torch.zeros(B, 1, H, W)
+for _ in range(n_iters):
+    corr = corr_fn(disparity)           # (B, levels*radius, H, W)
+    delta_d = update_block(corr, context, disparity)
+    disparity = disparity + delta_d     # iterative GRU refinement
+</code></pre>
+<p>RAFT-Stereo achieves competitive accuracy through iterative GRU-based updates that progressively refine coarse disparity estimates, analogous to optical flow. However, it is less robust when the stereo pair violates the rectification assumption or when large textureless regions and significant occlusions are present in the scene.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Type</th>
+<th>KITTI D1 %</th>
+<th>SceneFlow EPE</th>
+<th>Speed (ms)</th>
+<th>Max Disp</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SGM</td>
+<td>Classical</td>
+<td>4.5%</td>
+<td>N/A</td>
+<td>~150</td>
+<td>256</td>
+</tr>
+<tr>
+<td>PSMNet</td>
+<td>CNN 3D</td>
+<td>2.32%</td>
+<td>1.09 px</td>
+<td>~410</td>
+<td>192</td>
+</tr>
+<tr>
+<td>GANet</td>
+<td>CNN guided</td>
+<td>1.63%</td>
+<td>0.84 px</td>
+<td>~360</td>
+<td>192</td>
+</tr>
+<tr>
+<td>RAFT-Stereo</td>
+<td>Iterative</td>
+<td>1.58%</td>
+<td>0.73 px</td>
+<td>~380</td>
+<td>256</td>
+</tr>
+<tr>
+<td>CREStereo</td>
+<td>Iterative</td>
+<td>1.45%</td>
+<td>0.69 px</td>
+<td>~410</td>
+<td>256</td>
+</tr>
+</tbody>
+</table>
+<h2>Key Takeaways</h2>
+<p>Stereo depth provides dense, absolute depth from passive cameras without a dedicated depth sensor. The formula Z = f*b/d means depth resolution is governed by baseline length, focal length, and minimum measurable disparity. Longer baselines improve far-range accuracy but increase the near-camera occlusion zone.</p>
+<p>SGM remains a strong classical baseline because it is deterministic, interpretable, and efficient on specialized hardware such as FPGAs and ASICs. Deep learning stereo methods generalize better across scenes and lighting but require GPU inference and representative training data to avoid large accuracy drops in new domains.</p>
+<p>Depth completion combines sparse-but-accurate LiDAR depth with dense-but-noisy stereo or monocular estimates to produce dense, accurate depth maps. This hybrid strategy is common in production autonomous driving stacks where both sensor types are available and their complementary strengths can be exploited jointly.</p>
+    </article>
+  </main>
+</body>
+</html>

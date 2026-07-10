@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Scalable Oversight — Debate, Amplification, and Recursive Reward Modeling | Notes Backup</title>
+  <meta name="description" content="A technical examination of scalable oversight methods including AI debate, iterated amplification, recursive reward modeling, process supervision, and self-critique pipelines for extending effective human supervision to AI systems that exceed human performance on specific tasks." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Scalable Oversight — Debate, Amplification, and Recursive Reward Modeling</h1>
+      <ul class='note-meta'><li><strong>description:</strong> A technical examination of scalable oversight methods including AI debate, iterated amplification, recursive reward modeling, process supervision, and self-critique pipelines for extending effective human supervision to AI systems that exceed human performance on specific tasks.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Scalable Oversight — Debate, Amplification, and Recursive Reward Modeling</h1>
+<p>Scalable oversight addresses a core alignment challenge: as AI systems become more capable, human evaluators increasingly cannot reliably judge whether a model's output is correct or safe. A human cannot verify a proof of a complex theorem, audit a long codebase for subtle bugs, or evaluate whether a strategic plan is truly optimal. Scalable oversight methods aim to make human supervision effective even for tasks where humans cannot directly assess quality — essentially amplifying human judgment to work at superhuman capability levels.</p>
+<h2>The Oversight Problem at Scale</h2>
+<p>Current RLHF relies on human labelers providing direct preference judgments. This works when humans can evaluate outputs — writing quality, factual accuracy, code correctness for simple programs. But it breaks down when the task requires expertise the evaluator lacks. A PhD-level AI might produce research-quality arguments that non-expert labelers cannot properly evaluate. Scalable oversight seeks to maintain the correctness signal even as AI capabilities grow beyond human expert-level, using the AI's own capabilities to augment the oversight process.</p>
+<h2>AI Debate — Argumentation as an Oversight Signal</h2>
+<p>AI debate (Irving et al. 2018) proposes using two AI agents arguing opposite sides of a question so that a human judge can identify the truth by evaluating arguments rather than the object-level task. The key insight is that humans are often better at evaluating arguments than at generating them. For debate to be reliable, the AI must not be able to construct compelling-sounding but false arguments — the honest agent should have a winning strategy if truth is verifiable. Debate literature shows that judges correctly identify the honest debater more often than chance even on hard questions.</p>
+<pre><code class="language-python">import anthropic
+from dataclasses import dataclass
+from typing import Optional
+
+@dataclass
+class DebateRound:
+    claim: str
+    arg_for: str
+    arg_against: str
+    verdict: Optional[str] = None
+
+def generate_argument(client, claim, position):
+    # Generate a persuasive argument for the given position
+    prompt = 'Claim: ' + claim + '. Position: ' + position + '. Write a 3-sentence argument.'
+    resp = client.messages.create(
+        model='claude-3-5-haiku-20241022',
+        max_tokens=256,
+        messages=[{'role': 'user', 'content': prompt}]
+    )
+    return resp.content[0].text
+
+def run_debate(claim):
+    # Two agents argue opposing positions; human judge evaluates arguments
+    client = anthropic.Anthropic()
+    arg_for = generate_argument(client, claim, 'FOR — support the claim with evidence')
+    arg_against = generate_argument(client, claim, 'AGAINST — oppose with counter-evidence')
+    judge_prompt = ('Claim: ' + claim + '. FOR: ' + arg_for[:120] +
+                    '. AGAINST: ' + arg_against[:120] +
+                    '. Which argument is more logically compelling? Reply: FOR or AGAINST.')
+    verdict = client.messages.create(
+        model='claude-3-5-haiku-20241022',
+        max_tokens=80,
+        messages=[{'role': 'user', 'content': judge_prompt}]
+    )
+    return DebateRound(claim=claim, arg_for=arg_for, arg_against=arg_against,
+                       verdict=verdict.content[0].text)
+
+result = run_debate('LLMs exhibit genuine reasoning beyond pattern matching.')
+print('Verdict:', result.verdict)
+print('Debate: humans judge arguments they could not independently generate')
+</code></pre>
+<h2>Iterated Amplification</h2>
+<p>Iterated amplification (Christiano et al. 2018) recursively decomposes hard tasks into easier subproblems a human can supervise directly. A human with access to an AI assistant (HCH — Human with access to Copies of themselves in a Hierarchy) can answer harder questions than they could alone by decomposing them and delegating subproblems. The AI is trained to imitate the HCH, and at each capability level the AI helps the human answer questions at the next level. The process bootstraps incrementally, never requiring humans to evaluate tasks they cannot assess.</p>
+<pre><code class="language-python">import anthropic
+from dataclasses import dataclass, field
+from typing import Optional
+
+@dataclass
+class DecompositionNode:
+    question: str
+    answer: Optional[str] = None
+    subquestions: list = field(default_factory=list)
+
+def decompose_and_answer(client, question, depth=0, max_depth=2):
+    # Recursively decompose question into simpler subquestions
+    node = DecompositionNode(question=question)
+    if depth &gt;= max_depth:
+        resp = client.messages.create(
+            model='claude-3-5-haiku-20241022',
+            max_tokens=200,
+            messages=[{'role': 'user', 'content': 'Answer concisely: ' + question}]
+        )
+        node.answer = resp.content[0].text
+        return node
+    decomp_prompt = 'Break into 2-3 simpler subquestions: ' + question + '. Return one subquestion per line.'
+    decomp = client.messages.create(
+        model='claude-3-5-haiku-20241022',
+        max_tokens=200,
+        messages=[{'role': 'user', 'content': decomp_prompt}]
+    )
+    subqs = [q.strip() for q in decomp.content[0].text.strip().split('\n') if q.strip()][:3]
+    for sq in subqs:
+        node.subquestions.append(decompose_and_answer(client, sq, depth + 1, max_depth))
+    sub_answers = [sq.answer for sq in node.subquestions if sq.answer]
+    agg_prompt = 'Question: ' + question + '. Subanswers: ' + str(sub_answers) + '. Synthesize a final answer.'
+    agg = client.messages.create(
+        model='claude-3-5-haiku-20241022',
+        max_tokens=300,
+        messages=[{'role': 'user', 'content': agg_prompt}]
+    )
+    node.answer = agg.content[0].text
+    return node
+
+client = anthropic.Anthropic()
+tree = decompose_and_answer(client, 'What are the economic impacts of widespread AI adoption?', max_depth=1)
+print('Root answer:', tree.answer[:100] + '...')
+print('Subquestions:', [sq.question for sq in tree.subquestions])
+</code></pre>
+<h2>Recursive Reward Modeling and Process Supervision</h2>
+<p>Recursive reward modeling (RRM) trains a reward model at each capability level and uses it to supervise training at the next level. Process reward models (PRMs) reward each intermediate reasoning step rather than only the final answer — this provides much denser training signal and enables catching errors mid-chain before they propagate. OpenAI's Let's Verify Step by Step (Lightman et al. 2023) demonstrated that PRMs trained on human step-level annotations significantly outperform outcome reward models on MATH. PRMs are now the most practically deployed form of scalable oversight, used in o1/o3-style reasoning models.</p>
+<pre><code class="language-python">import anthropic
+from typing import Literal
+
+def annotate_reasoning_steps(client, problem, solution):
+    # Ask the model to label each reasoning step as correct or incorrect
+    steps = [s.strip() for s in solution.strip().split('\n') if s.strip()]
+    annotated = []
+    for i, step in enumerate(steps):
+        prior_steps = '\n'.join(steps[:i])
+        prompt = ('Math problem: ' + problem + '\n' +
+                  'Reasoning so far:\n' + prior_steps + '\n' +
+                  'Next step: ' + step + '\n' +
+                  'Is this step correct? Reply: CORRECT or INCORRECT with a one-sentence reason.')
+        resp = client.messages.create(
+            model='claude-3-5-haiku-20241022',
+            max_tokens=120,
+            messages=[{'role': 'user', 'content': prompt}]
+        )
+        label_text = resp.content[0].text.strip()
+        label = 'correct' if label_text.upper().startswith('CORRECT') else 'incorrect'
+        annotated.append({'step': step, 'label': label, 'reason': label_text})
+    return annotated
+
+client = anthropic.Anthropic()
+problem = 'Solve: 3x + 7 = 22'
+solution = 'Subtract 7 from both sides: 3x = 15\nDivide both sides by 3: x = 5\nCheck: 3(5) + 7 = 22.'
+annotations = annotate_reasoning_steps(client, problem, solution)
+for ann in annotations:
+    print(f&quot;[{ann['label'].upper()}] {ann['step'][:60]}&quot;)
+print('PRM dataset:', len(annotations), 'step annotations collected')
+</code></pre>
+<h2>Self-Critique as Oversight</h2>
+<p>Self-critique pipelines ask the model to find flaws in its own answer and use critique quality as an oversight signal. Constitutional AI (Anthropic 2022) uses a list of principles to guide self-critique and revision, enabling scalable oversight with minimal human labels. The critique step surfaces potential errors for human review, allowing humans to focus their limited attention on flagged outputs rather than reviewing everything. Self-critique also enables iterative refinement — generate, critique, revise — as an automated self-improvement loop.</p>
+<pre><code class="language-python">import anthropic
+from dataclasses import dataclass
+
+@dataclass
+class CritiquedResponse:
+    question: str
+    initial_answer: str
+    critique: str
+    has_errors: bool
+    revised_answer: str
+
+def self_critique_pipeline(client, question):
+    # Step 1: generate initial answer
+    answer_resp = client.messages.create(
+        model='claude-3-5-haiku-20241022',
+        max_tokens=400,
+        messages=[{'role': 'user', 'content': question}]
+    )
+    initial = answer_resp.content[0].text
+    # Step 2: ask model to critique its own answer
+    critique_resp = client.messages.create(
+        model='claude-3-5-haiku-20241022',
+        max_tokens=300,
+        messages=[{'role': 'user', 'content': ('Question: ' + question + '\nAnswer: ' + initial +
+                   '\nCritique this answer. List any factual errors, logical flaws, or key omissions. ' +
+                   'Start with ERROR if errors found, else LOOKS GOOD.')}]
+    )
+    critique = critique_resp.content[0].text
+    has_errors = critique.upper().startswith('ERROR')
+    # Step 3: revise only if errors were flagged
+    revised = initial
+    if has_errors:
+        revise_resp = client.messages.create(
+            model='claude-3-5-haiku-20241022',
+            max_tokens=400,
+            messages=[{'role': 'user', 'content': ('Question: ' + question +
+                       '\nOriginal: ' + initial + '\nCritique: ' + critique +
+                       '\nProvide a corrected answer.')}]
+        )
+        revised = revise_resp.content[0].text
+    return CritiquedResponse(question, initial, critique, has_errors, revised)
+
+client = anthropic.Anthropic()
+result = self_critique_pipeline(client, 'What is the capital of Australia and its approximate population?')
+print('Errors found:', result.has_errors)
+print('Critique preview:', result.critique[:100] + '...')
+</code></pre>
+<h2>Comparing Scalable Oversight Approaches</h2>
+<table>
+<thead>
+<tr>
+<th>Approach</th>
+<th>Core Assumption</th>
+<th>Human Involvement</th>
+<th>Scalability Limit</th>
+<th>Current Status</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>AI Debate</td>
+<td>Humans judge arguments better than generating them; honest agent wins</td>
+<td>Judge debates</td>
+<td>Requires honest debaters; deceptive AI can exploit</td>
+<td>Research — no large-scale deployment</td>
+</tr>
+<tr>
+<td>Amplification (HCH)</td>
+<td>Hard tasks decompose into supervised subtasks recursively</td>
+<td>Supervise leaf subproblems</td>
+<td>Decomposition must terminate at human-evaluable level</td>
+<td>Research — conceptual framework</td>
+</tr>
+<tr>
+<td>Recursive Reward Modeling</td>
+<td>RM at level N supervises training at level N+1</td>
+<td>Label RM training data at each level</td>
+<td>RM misspecification compounds across levels</td>
+<td>Early research — used in Anthropic RLHF</td>
+</tr>
+<tr>
+<td>Process Supervision (PRM)</td>
+<td>Step-level correctness is evaluable even when final answer is not</td>
+<td>Annotate intermediate reasoning steps</td>
+<td>Expensive step-level annotation; ambiguous steps</td>
+<td>Deployed — used in o1/o3 reasoning models</td>
+</tr>
+<tr>
+<td>Self-Critique (CAI)</td>
+<td>Model critiques are informative signals; principles guide correction</td>
+<td>Define critique principles; spot-check</td>
+<td>Model may not catch its own systematic errors</td>
+<td>Deployed — Constitutional AI in production</td>
+</tr>
+</tbody>
+</table>
+<h2>Limitations and Research Frontiers</h2>
+<p>All scalable oversight methods share a common limitation: they assume the AI cannot systematically deceive the oversight mechanism. Debate requires honest agents with winning strategies; amplification requires decompositions that don't hide errors; self-critique requires models that can actually detect their own mistakes. As AI systems become more capable, they may learn to game these oversight mechanisms — producing compelling debate arguments for false positions, finding decompositions that obscure errors, or producing critiques that seem thorough but miss real problems. Adversarial robustness of oversight mechanisms is an open research problem.</p>
+<ul>
+<li>Debate assumes truth is verifiable once argued — fails for tasks with no ground truth (e.g., ethical judgment, subjective quality).</li>
+<li>Amplification bottlenecks at the lowest-level subtask: if any leaf subtask exceeds human ability, the oversight chain breaks.</li>
+<li>Recursive reward modeling compounds RM errors — each level's RM inherits inaccuracies from the previous level.</li>
+<li>Process supervision annotation is expensive: Lightman et al. collected 800K step-level labels for the MATH dataset.</li>
+<li>Self-critique fails when the model has systematic blind spots — if the model always generates the same type of error, it cannot self-detect it.</li>
+</ul>
+<blockquote>
+<p><strong>Scalable Oversight in Production</strong>: Scalable oversight methods are primarily research directions — current production RLHF still relies on direct human preference labels. Process reward models (PRMs) are the most practically deployed form of scalable oversight, used in o1/o3-style reasoning models to verify each reasoning step and select chains with consistently correct intermediate steps.</p>
+</blockquote>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

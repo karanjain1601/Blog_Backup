@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Adapter Layers — Bottleneck Modules Between Transformer Layers | Notes Backup</title>
+  <meta name="description" content="Adapter layers (Houlsby et al., 2019) insert small bottleneck FFN modules between transformer sub-layers. Covers the bottleneck architecture, near-identity initialization, serial vs parallel variants, Compacter, AdapterHub, adapter stacking, adapter fusion, and training procedure." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Adapter Layers — Bottleneck Modules Between Transformer Layers</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Adapter layers (Houlsby et al., 2019) insert small bottleneck FFN modules between transformer sub-layers. Covers the bottleneck architecture, near-identity initialization, serial vs parallel variants, Compacter, AdapterHub, adapter stacking, adapter fusion, and training procedure.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Adapter Layers — Bottleneck Modules Between Transformer Layers</h1>
+<p>Adapter layers (Houlsby et al., 2019) are small bottleneck feed-forward modules inserted between sub-layers of a frozen pretrained transformer. Only the adapter parameters are trained; all original weights remain fixed. This allows a single large pretrained model to support many tasks simultaneously: different adapters are loaded per task while the backbone is shared. Adapters are the earliest and most widely studied PEFT method, predating LoRA, and their modular design has spawned an ecosystem of variants and tooling including AdapterHub, a public registry with 400+ pretrained adapters.</p>
+<h2>Bottleneck Architecture</h2>
+<p>Each adapter applies the function: adapter(h) = h + W_up(σ(W_down(LayerNorm(h)))) where W_down ∈ ℝ^(d×m) is the down-projection and W_up ∈ ℝ^(m×d) is the up-projection. The bottleneck dimension m controls the capacity and parameter count. Typical values: m ∈ {8, 16, 32, 64}. The residual connection (h +) ensures that when W_up is initialized near zero, the adapter output is approximately h. For the Houlsby design, two adapters are inserted per transformer layer: one after the self-attention sub-layer and one after the FFN sub-layer. For BERT-base (d=768, 12 layers, m=64): params per adapter = 2×768×64 + 2×64 biases = 98,432; two adapters per layer × 12 layers = 2.36M total — about 0.9% of BERT-base's 110M parameters.</p>
+<h2>Near-Identity Initialization</h2>
+<p>The near-identity initialization is not optional — it is the property that makes adapter insertion safe for a pretrained model. When W_up is initialized with values near zero (e.g., N(0, 0.001)), the adapter contribution W_up(σ(W_down(h))) ≈ 0, so the adapter output ≈ h. The pretrained model's predictions are preserved at the start of training. Without near-identity init, inserting adapters into a pretrained BERT and evaluating on any downstream task before training gives random outputs. This initialization also makes the adapter's optimization well-conditioned: the task loss starts at the pretrained model's loss, and the adapters gradually diverge toward a task-specific configuration.</p>
+<h2>Adapter Layer Implementation</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import math
+
+class AdapterLayer(nn.Module):
+    &quot;&quot;&quot;
+    Bottleneck adapter: LayerNorm -&gt; down-project -&gt; activate -&gt; up-project -&gt; residual.
+    Near-identity at init: W_up initialized near zero.
+    &quot;&quot;&quot;
+
+    def __init__(self, d_model: int, bottleneck_dim: int,
+                 activation: str = 'gelu', dropout: float = 0.0):
+        super().__init__()
+        self.layer_norm = nn.LayerNorm(d_model)
+        self.down_proj = nn.Linear(d_model, bottleneck_dim)
+        self.up_proj   = nn.Linear(bottleneck_dim, d_model)
+        self.dropout   = nn.Dropout(dropout)
+        self.act = nn.GELU() if activation == 'gelu' else nn.ReLU()
+        self._near_identity_init()
+
+    def _near_identity_init(self):
+        &quot;&quot;&quot;Initialize W_up near zero so adapter output ≈ input at start.&quot;&quot;&quot;
+        nn.init.kaiming_uniform_(self.down_proj.weight, a=math.sqrt(5))
+        nn.init.zeros_(self.down_proj.bias)
+        nn.init.normal_(self.up_proj.weight, mean=0.0, std=1e-3)
+        nn.init.zeros_(self.up_proj.bias)
+
+    def forward(self, hidden: torch.Tensor) -&gt; torch.Tensor:
+        residual = hidden
+        h = self.layer_norm(hidden)
+        h = self.down_proj(h)
+        h = self.act(h)
+        h = self.dropout(h)
+        h = self.up_proj(h)
+        return residual + h
+
+adapter = AdapterLayer(d_model=768, bottleneck_dim=64)
+x = torch.randn(2, 10, 768)
+out = adapter(x)
+max_diff = (out - x).abs().max().item()
+print(f'Max deviation from identity at init: {max_diff:.6f}')  # should be ~0
+print(f'Adapter trainable params: {sum(p.numel() for p in adapter.parameters()):,}')
+</code></pre>
+<h2>Injecting Adapters into a Transformer</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from transformers import BertModel, BertConfig
+
+class BertLayerWithAdapters(nn.Module):
+    &quot;&quot;&quot;Wrap a BERT layer to insert Houlsby-style adapters after attention and FFN.&quot;&quot;&quot;
+
+    def __init__(self, bert_layer, d_model: int = 768, bottleneck_dim: int = 64):
+        super().__init__()
+        self.bert_layer = bert_layer
+        for param in self.bert_layer.parameters():
+            param.requires_grad = False
+        self.adapter_attn = AdapterLayer(d_model, bottleneck_dim)
+        self.adapter_ffn  = AdapterLayer(d_model, bottleneck_dim)
+
+    def forward(self, hidden_states, attention_mask=None):
+        attn_out = self.bert_layer.attention(hidden_states, attention_mask)
+        hidden_states = self.adapter_attn(attn_out[0])
+        intermediate = self.bert_layer.intermediate(hidden_states)
+        ffn_out = self.bert_layer.output(intermediate, hidden_states)
+        hidden_states = self.adapter_ffn(ffn_out)
+        return (hidden_states,)
+
+def inject_adapters(model_name: str = 'bert-base-uncased',
+                    bottleneck_dim: int = 64):
+    config = BertConfig.from_pretrained(model_name)
+    bert = BertModel.from_pretrained(model_name)
+    for i, layer in enumerate(bert.encoder.layer):
+        bert.encoder.layer[i] = BertLayerWithAdapters(
+            layer, config.hidden_size, bottleneck_dim
+        )
+    trainable = sum(p.numel() for p in bert.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in bert.parameters())
+    print(f'Trainable: {trainable:,} / {total:,} ({100*trainable/total:.2f}%)')
+    return bert
+
+print('Houlsby design: 2 adapters per layer, freeze backbone, train adapters only.')
+</code></pre>
+<h2>AdapterHub Integration</h2>
+<pre><code class="language-python">import torch
+from transformers import AutoTokenizer
+from adapters import AutoAdapterModel
+
+def load_pretrained_adapter(task: str = 'sentiment'):
+    &quot;&quot;&quot;
+    Load a pretrained adapter from AdapterHub for a specific task.
+    AdapterHub hosts task-specific adapters for BERT, RoBERTa, T5, XLM-R.
+    &quot;&quot;&quot;
+    model = AutoAdapterModel.from_pretrained('bert-base-uncased')
+    tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
+    adapter_name = model.load_adapter(
+        'AdapterHub/bert-base-uncased-pf-sst2',
+        source='hf',
+        set_active=True
+    )
+    model.set_active_adapters(adapter_name)
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f'Active adapter: {adapter_name}')
+    print(f'Trainable params: {trainable:,}')
+    inputs = tokenizer('The film was a masterpiece.', return_tensors='pt')
+    with torch.no_grad():
+        logits = model(**inputs).logits
+    print(f'Logits shape: {logits.shape}')
+    return model
+
+print('AdapterHub: 400+ pretrained adapters; load in 2 lines of code.')
+</code></pre>
+<h2>Adapter Fusion</h2>
+<p>Adapter fusion (Pfeiffer et al., 2021) combines outputs from K independently trained task-specific adapters via learned attention weights at inference time. Each adapter was trained on a different source task (e.g., NLI, QA, sentiment). For a new target task, the adapter weights are frozen and only the fusion attention weights are trained. This allows the model to learn which source-task adapters are most relevant for the new task. Fusion is applied at each transformer layer: a learned query-key attention over adapter outputs produces a weighted sum.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class AdapterFusion(nn.Module):
+    &quot;&quot;&quot;
+    Combine K task-specific adapter outputs via learned attention weighting.
+    Adapter weights are frozen; only fusion attention weights are trained.
+    &quot;&quot;&quot;
+
+    def __init__(self, d_model: int, n_adapters: int):
+        super().__init__()
+        self.query = nn.Linear(d_model, d_model, bias=False)
+        self.keys = nn.Parameter(torch.randn(n_adapters, d_model) * 0.02)
+        self.scale = d_model ** -0.5
+
+    def forward(self, hidden: torch.Tensor,
+                adapter_outputs: list) -&gt; torch.Tensor:
+        q = self.query(hidden)                      # (bsz, seq, d)
+        scores = torch.einsum('bsd,nd-&gt;bsn', q, self.keys) * self.scale
+        weights = torch.softmax(scores, dim=-1)     # (bsz, seq, n_adapters)
+        stacked = torch.stack(adapter_outputs, dim=2)  # (bsz, seq, K, d)
+        fused = torch.einsum('bsn,bsnd-&gt;bsd', weights, stacked)
+        return hidden + fused
+
+bsz, seq, d, K = 2, 10, 768, 3
+fusion = AdapterFusion(d_model=d, n_adapters=K)
+hidden = torch.randn(bsz, seq, d)
+adapter_outs = [torch.randn(bsz, seq, d) for _ in range(K)]
+out = fusion(hidden, adapter_outs)
+print(f'Fusion output shape: {out.shape}')  # (2, 10, 768)
+fusion_trainable = sum(p.numel() for p in fusion.parameters())
+print(f'Fusion trainable params: {fusion_trainable:,}')
+</code></pre>
+<h2>Adapter Variants Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Variant</th>
+<th>Placement</th>
+<th>Params per Layer</th>
+<th>Quality vs Full FT</th>
+<th>Modular (Swap at Inference)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Houlsby (serial)</td>
+<td>After attention + after FFN (2 per layer)</td>
+<td>2 × 2dm</td>
+<td>~99%</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Pfeiffer (serial, single)</td>
+<td>After FFN only (1 per layer)</td>
+<td>2dm</td>
+<td>~98%</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Parallel adapter (PALs)</td>
+<td>Parallel to attention sub-layer</td>
+<td>2dm</td>
+<td>~98%</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Compacter</td>
+<td>After FFN, Kronecker product weights</td>
+<td>~4× smaller than Houlsby</td>
+<td>~97%</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>LoRA-as-adapter</td>
+<td>In Q, V weight matrices (additive)</td>
+<td>2dr per matrix</td>
+<td>~99%</td>
+<td>Yes (merge or swap)</td>
+</tr>
+</tbody>
+</table>
+<h2>Adapter Stacking and Composition</h2>
+<p>Multiple adapters can be stacked within a single layer: the output of one adapter feeds into the next. This is useful for composing a general-domain adapter (e.g., trained on Wikipedia) with a task-specific adapter. AdapterHub supports stacking via adapter composition primitives: Stack([domain_adapter, task_adapter]) applies them sequentially. A simpler alternative is adapter averaging: take the element-wise average of two adapters' weight matrices when the tasks are related. This has been shown to outperform either single adapter on cross-lingual transfer tasks without any additional training.</p>
+<h2>Training Procedure and Hyperparameters</h2>
+<p>Adapter training follows the same procedure as full fine-tuning but with two key differences: (1) the backbone optimizer group has learning rate 0 (frozen parameters do not receive gradient updates, but are included in the optimizer for compatibility with some schedulers), and (2) adapter parameters use a higher learning rate than full fine-tuning — typically 1e-4 to 5e-4 rather than 2e-5. Since adapters have far fewer parameters than the full model, they can afford more aggressive learning rates without instability. Training duration: adapter convergence typically requires 2–5 epochs, similar to full fine-tuning, as the loss landscape is smoother due to the near-identity initialization.</p>
+<blockquote>
+<p><strong>Prefer Pfeiffer Adapters</strong>: Pfeiffer adapters (single adapter after FFN only, skipping post-attention) achieve 98% of Houlsby adapter performance with half the parameters — prefer Pfeiffer adapter architecture unless task-specific ablations favor the dual-adapter design.</p>
+</blockquote>
+<ul>
+<li>Near-identity init is critical: W_up ≈ 0 at start prevents adapter from disrupting pretrained performance.</li>
+<li>Bottleneck dim m=64 is a good default; m=8–16 for extreme parameter efficiency with slight accuracy drop.</li>
+<li>Pfeiffer &gt; Houlsby in params/performance ratio; use Houlsby only if ablations show clear benefit.</li>
+<li>AdapterHub: 400+ pretrained adapters for BERT, RoBERTa, XLM-R across 30+ NLP tasks.</li>
+<li>Adapter fusion: train fusion weights on target task after loading task-specific adapters from AdapterHub.</li>
+<li>Parallel adapters are faster at inference (no sequential bottleneck) but require architecture changes.</li>
+<li>Adapter learning rate: 1e-4 to 5e-4 (10× higher than full fine-tuning LR) is standard.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

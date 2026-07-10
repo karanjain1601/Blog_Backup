@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Vector Databases for RAG | Notes Backup</title>
+  <meta name="description" content="Purpose-built databases for storing, indexing, and querying high-dimensional embedding vectors — covering HNSW and IVF indexing, ANN search, filtering, and comparison of Pinecone, Weaviate, Qdrant, and pgvector." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Vector Databases for RAG</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Purpose-built databases for storing, indexing, and querying high-dimensional embedding vectors — covering HNSW and IVF indexing, ANN search, filtering, and comparison of Pinecone, Weaviate, Qdrant, and pgvector.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Vector Databases for RAG</h1>
+<p>Vector databases are purpose-built storage and query engines for high-dimensional embedding vectors. In a RAG pipeline the retriever converts queries and documents into dense vectors (typically 768–1536 dimensions from text embedding models) and finds the most similar vectors by approximate nearest neighbour (ANN) search. Doing this at scale — millions of vectors, sub-100ms latency, with metadata filters — requires specialised indexing structures that no traditional database provides. This note covers the two dominant index families (HNSW and IVF-PQ), the problem of filtered ANN search, and a practical comparison of the leading vector databases: FAISS, Qdrant, Weaviate, Pinecone, Chroma, pgvector, and Milvus.</p>
+<h2>Overview</h2>
+<p>The core operation in a vector database is k-nearest-neighbour (k-NN) search: given a query vector q, find the k stored vectors with smallest cosine or L2 distance. Exact k-NN over 10M 1536-dim vectors requires computing 10M dot products per query — roughly 300ms on a single CPU core, far too slow for interactive RAG. Approximate nearest neighbour (ANN) algorithms trade a small recall penalty (missing 5–10% of true nearest neighbours) for 10–100x speedup. HNSW (Hierarchical Navigable Small World) is the dominant ANN index for in-memory use; IVF with Product Quantization (IVF-PQ) is the standard for memory-constrained and GPU-accelerated use. Vector databases add operational layers: persistence, live updates, distributed sharding, metadata filtering, and replication — capabilities that FAISS alone does not provide.</p>
+<h2>ANN vs Exact Search</h2>
+<p>Exact k-NN (brute force) computes the query vector's distance to every stored vector and returns the true top-k. It is always available as a baseline and requires no index — just a matrix multiply (or cosine similarity) over the embedding matrix. FAISS exposes this as IndexFlatL2 or IndexFlatIP. For small corpora (&lt; 100K vectors) on GPU, exact search is actually faster than ANN because the index traversal overhead of HNSW dominates at small scales. For corpora between 100K and 1M vectors on CPU, HNSW HNSW with ef_search=64 typically achieves 95%+ recall at 10–50x the QPS of brute force. Beyond 10M vectors, IVF-PQ with GPU acceleration is the only option that fits within memory and latency budgets. The right trade-off depends on corpus size, hardware, and acceptable recall.</p>
+<pre><code class="language-python">import faiss
+import numpy as np
+import time
+
+def benchmark_hnsw_vs_brute(n_vecs: int = 200_000, dim: int = 768,
+                             n_queries: int = 100, k: int = 10) -&gt; None:
+    &quot;&quot;&quot;Compare FAISS HNSWFlat (ANN) vs IndexFlatIP (exact) on recall and QPS.&quot;&quot;&quot;
+    rng     = np.random.default_rng(42)
+    corpus  = rng.standard_normal((n_vecs, dim)).astype(&quot;float32&quot;)
+    queries = rng.standard_normal((n_queries, dim)).astype(&quot;float32&quot;)
+    faiss.normalize_L2(corpus)
+    faiss.normalize_L2(queries)
+
+    # Brute-force exact search
+    idx_flat = faiss.IndexFlatIP(dim)
+    idx_flat.add(corpus)
+    t0 = time.perf_counter()
+    D_exact, I_exact = idx_flat.search(queries, k)
+    qps_exact = n_queries / (time.perf_counter() - t0)
+
+    # HNSW approximate search (M=32 connections, ef_construction=200)
+    idx_hnsw = faiss.IndexHNSWFlat(dim, 32)   # M=32
+    idx_hnsw.hnsw.efConstruction = 200
+    idx_hnsw.add(corpus)
+    idx_hnsw.hnsw.efSearch = 64
+    t0 = time.perf_counter()
+    D_hnsw, I_hnsw = idx_hnsw.search(queries, k)
+    qps_hnsw = n_queries / (time.perf_counter() - t0)
+
+    # Compute recall@k: fraction of exact top-k found by HNSW
+    recall = np.mean([len(set(I_hnsw[i]) &amp; set(I_exact[i])) / k for i in range(n_queries)])
+    print(f&quot;Brute force QPS : {qps_exact:&gt;8.1f}&quot;)
+    print(f&quot;HNSW QPS        : {qps_hnsw:&gt;8.1f}  ({qps_hnsw/qps_exact:.1f}x speedup)&quot;)
+    print(f&quot;HNSW recall@{k}  : {recall:.4f}&quot;)
+
+benchmark_hnsw_vs_brute()
+</code></pre>
+<h2>HNSW Index</h2>
+<p>HNSW (Malkov &amp; Yashunin, 2018) builds a multi-layer proximity graph over the vector space. Each vector is inserted into a random subset of layers; the top layer is sparse (long-range connections) and the bottom layer is dense (fine-grained connections). Search starts at the top layer, greedily navigating towards the query, then descends through layers to increasingly fine-grained neighbourhoods. The key parameters are M (number of connections per node per layer, typically 16–64), ef_construction (beam width during index build, higher = better recall, slower build), and ef_search (beam width during search, higher = better recall, slower query). HNSW is the preferred index for RAM-resident collections up to ~10M vectors. Its main limitation is memory: each vector stores M*4 bytes of graph edges plus the full-precision embedding, roughly 2–4x the raw embedding size.</p>
+<p>HNSW recall scales predictably with ef_search. At ef_search=16, recall@10 is typically 92–94%. At ef_search=64, recall@10 is 97–99%. At ef_search=200, recall@10 approaches 99.9% with a 3–4x query latency cost. For most RAG applications, ef_search=64 with recall@10 ≥ 0.97 is the right operating point. The index build time scales as O(n * M * log(n)) and is typically 10–30 minutes for 1M 768-dim vectors on 16 CPU cores. HNSW indexes are read-optimised: adding new vectors is O(M * log(n)) but rebuilding is required to delete vectors, making it less suited for corpora with frequent deletions.</p>
+<h2>IVF with PQ Compression</h2>
+<p>IVF (Inverted File Index) partitions the vector space into nlist Voronoi cells using k-means clustering. At query time, only nprobe cells are searched, reducing computation by approximately nlist/nprobe. IVF alone does not compress the vectors: each stored vector still occupies dim<em>4 bytes of float32. Product Quantization (PQ) compresses each vector from dim</em>4 bytes to m bytes by splitting the vector into m subvectors and quantizing each subvector to 8 bits (256 centroids). A 1536-dim float32 vector occupies 6144 bytes; with PQ m=96, it compresses to 96 bytes (64x compression). The combined IVF-PQ index fits 100M vectors in ~10GB RAM, versus ~600GB for flat float32 — enabling billion-scale search on a single node. The recall penalty for PQ compression is typically 3–8% versus full float32, partially recoverable by re-ranking top-PQ results against their original vectors.</p>
+<pre><code class="language-python">import psycopg2
+import numpy as np
+import time
+from pgvector.psycopg2 import register_vector
+
+CONN_STR = &quot;postgresql://user:password@localhost:5432/vectordb&quot;
+
+def setup_pgvector_table(conn, dim: int = 1536) -&gt; None:
+    &quot;&quot;&quot;Create a table with a pgvector column and both IVFFlat and exact indexes.&quot;&quot;&quot;
+    with conn.cursor() as cur:
+        cur.execute(&quot;CREATE EXTENSION IF NOT EXISTS vector;&quot;)
+        cur.execute(f&quot;&quot;&quot;
+            CREATE TABLE IF NOT EXISTS embeddings (
+                id      BIGSERIAL PRIMARY KEY,
+                source  TEXT,
+                content TEXT,
+                embedding VECTOR({dim})
+            );
+        &quot;&quot;&quot;)
+        conn.commit()
+
+def insert_embeddings(conn, records: list) -&gt; None:
+    &quot;&quot;&quot;Bulk insert (id, source, content, embedding) tuples.&quot;&quot;&quot;
+    with conn.cursor() as cur:
+        for rec in records:
+            cur.execute(
+                &quot;INSERT INTO embeddings (source, content, embedding) VALUES (%s, %s, %s)&quot;,
+                (rec[&quot;source&quot;], rec[&quot;content&quot;], rec[&quot;embedding&quot;].tolist())
+            )
+    conn.commit()
+
+def build_ivfflat_index(conn, lists: int = 100) -&gt; None:
+    &quot;&quot;&quot;Build IVFFlat index for approximate cosine search.&quot;&quot;&quot;
+    with conn.cursor() as cur:
+        cur.execute(f&quot;&quot;&quot;
+            CREATE INDEX IF NOT EXISTS emb_ivfflat
+            ON embeddings USING ivfflat (embedding vector_cosine_ops)
+            WITH (lists = {lists});
+        &quot;&quot;&quot;)
+    conn.commit()
+    print(f&quot;IVFFlat index built with {lists} lists&quot;)
+
+def query_top_k(conn, query_vec: np.ndarray, k: int = 10) -&gt; list:
+    &quot;&quot;&quot;Cosine ANN search: ORDER BY embedding &lt;=&gt; query LIMIT k.&quot;&quot;&quot;
+    with conn.cursor() as cur:
+        cur.execute(
+            &quot;SELECT id, source, content, 1 - (embedding &lt;=&gt; %s) AS score &quot;
+            &quot;FROM embeddings ORDER BY embedding &lt;=&gt; %s LIMIT %s&quot;,
+            (query_vec.tolist(), query_vec.tolist(), k)
+        )
+        return cur.fetchall()
+
+# Example usage
+if __name__ == &quot;__main__&quot;:
+    conn = psycopg2.connect(CONN_STR)
+    register_vector(conn)
+    setup_pgvector_table(conn, dim=1536)
+    build_ivfflat_index(conn, lists=100)
+    q = np.random.randn(1536).astype(np.float32)
+    q /= np.linalg.norm(q)
+    results = query_top_k(conn, q, k=10)
+    print(f&quot;Top-10 results: {len(results)} rows returned&quot;)
+</code></pre>
+<h2>Metadata Filtering</h2>
+<p>Production RAG systems almost always need filtered search: find the 10 most similar embeddings to query q among documents where metadata.source == 'arxiv' and metadata.year &gt;= 2023. Naively, the filter can be applied post-search (retrieve top-K ANN results then filter to those matching the predicate) or pre-filter (filter the corpus to matching documents then search within them). Post-filter is fast but misses results if the matching subset is a small fraction of the corpus. Pre-filter produces correct recall but is slow if the filter matches many documents (must search a large unindexed subset). Purpose-built vector databases (Qdrant, Weaviate, Pinecone) implement filtered HNSW: they maintain per-filter segment indexes or use payload-aware graph traversal to satisfy filters within ANN search without sacrificing recall. pgvector applies the WHERE clause before the ORDER BY vector_ops, which falls back to sequential scan on small filtered sets — fast for many filters, slow for unselective ones.</p>
+<pre><code class="language-python">import numpy as np
+import time
+from qdrant_client import QdrantClient
+from qdrant_client.models import (
+    Distance, VectorParams, PointStruct,
+    Filter, FieldCondition, MatchValue, Range
+)
+
+def setup_qdrant_collection(client: QdrantClient, name: str, dim: int = 1536) -&gt; None:
+    &quot;&quot;&quot;Create a Qdrant collection with cosine distance HNSW index.&quot;&quot;&quot;
+    client.recreate_collection(
+        collection_name=name,
+        vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
+    )
+    print(f&quot;Collection '{name}' created (dim={dim}, distance=COSINE)&quot;)
+
+def upsert_points(client: QdrantClient, name: str,
+                  embeddings: np.ndarray, metadata: list) -&gt; None:
+    &quot;&quot;&quot;Batch upsert embeddings with metadata payloads.&quot;&quot;&quot;
+    points = [
+        PointStruct(id=i, vector=emb.tolist(), payload=meta)
+        for i, (emb, meta) in enumerate(zip(embeddings, metadata))
+    ]
+    client.upsert(collection_name=name, points=points)
+    print(f&quot;Upserted {len(points)} points&quot;)
+
+def filtered_search(client: QdrantClient, name: str,
+                    query: np.ndarray, source: str, k: int = 10) -&gt; list:
+    &quot;&quot;&quot;ANN search filtered to documents from a specific source.&quot;&quot;&quot;
+    flt = Filter(must=[FieldCondition(key=&quot;source&quot;, match=MatchValue(value=source))])
+    t0  = time.perf_counter()
+    hits = client.search(collection_name=name, query_vector=query.tolist(),
+                         query_filter=flt, limit=k)
+    latency_ms = (time.perf_counter() - t0) * 1000
+    print(f&quot;Filtered search (source='{source}'): {len(hits)} results in {latency_ms:.1f}ms&quot;)
+    return hits
+
+# Demo: insert 10K arxiv + 10K wikipedia embeddings, search only arxiv
+if __name__ == &quot;__main__&quot;:
+    client = QdrantClient(&quot;:memory:&quot;)
+    setup_qdrant_collection(client, &quot;papers&quot;, dim=128)   # small dim for demo
+    n = 10_000
+    rng  = np.random.default_rng(0)
+    embs = rng.standard_normal((2 * n, 128)).astype(np.float32)
+    meta = [{&quot;source&quot;: &quot;arxiv&quot;}] * n + [{&quot;source&quot;: &quot;wikipedia&quot;}] * n
+    upsert_points(client, &quot;papers&quot;, embs, meta)
+    q = rng.standard_normal(128).astype(np.float32)
+    results = filtered_search(client, &quot;papers&quot;, q, source=&quot;arxiv&quot;, k=10)
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Database</th>
+<th>Index type</th>
+<th>QPS (100K vecs)</th>
+<th>Recall@10</th>
+<th>Filtering</th>
+<th>Managed?</th>
+<th>License</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FAISS</td>
+<td>HNSW / IVF-PQ (in-memory)</td>
+<td>50K–200K</td>
+<td>97–99%</td>
+<td>Post-filter only</td>
+<td>No</td>
+<td>MIT</td>
+</tr>
+<tr>
+<td>Qdrant</td>
+<td>HNSW with payload index</td>
+<td>20K–80K</td>
+<td>97–99%</td>
+<td>Native filtered HNSW</td>
+<td>Yes (Cloud)</td>
+<td>Apache 2.0</td>
+</tr>
+<tr>
+<td>Weaviate</td>
+<td>HNSW + BM25 hybrid</td>
+<td>15K–60K</td>
+<td>96–99%</td>
+<td>Native pre-filter</td>
+<td>Yes (Cloud)</td>
+<td>BSD-3</td>
+</tr>
+<tr>
+<td>Pinecone</td>
+<td>Proprietary (HNSW-like)</td>
+<td>10K–50K</td>
+<td>97–99%</td>
+<td>Native filtered search</td>
+<td>Fully managed</td>
+<td>Proprietary</td>
+</tr>
+<tr>
+<td>Chroma</td>
+<td>HNSW (hnswlib)</td>
+<td>5K–20K</td>
+<td>95–98%</td>
+<td>Metadata post-filter</td>
+<td>No (local)</td>
+<td>Apache 2.0</td>
+</tr>
+<tr>
+<td>pgvector</td>
+<td>IVFFlat / HNSW (Postgres)</td>
+<td>2K–15K</td>
+<td>92–98%</td>
+<td>SQL WHERE + vector ops</td>
+<td>Yes (RDS, Supabase)</td>
+<td>PostgreSQL</td>
+</tr>
+<tr>
+<td>Milvus</td>
+<td>IVF-PQ / HNSW / DiskANN</td>
+<td>30K–150K</td>
+<td>95–99%</td>
+<td>Native scalar + vector</td>
+<td>Yes (Zilliz)</td>
+<td>Apache 2.0</td>
+</tr>
+</tbody>
+</table>
+<h2>Vector Database Comparison</h2>
+<p>FAISS is the fastest ANN library for in-memory search but is not a database — it has no persistence, replication, live updates, or query language. It is ideal as a building block inside an application server. Qdrant is the leading open-source vector database for production RAG: it has excellent filtered HNSW, GRPC and REST APIs, payload indexing, and a Rust core that delivers high QPS. Weaviate adds native BM25 keyword search and hybrid (vector + BM25) ranking out-of-the-box, making it strong for RAG systems that need lexical fallback. Pinecone is the easiest to get started with (no infrastructure to manage) but is fully proprietary and expensive at scale. Chroma is the best choice for local development and prototyping — simple Python API, no server required. pgvector is compelling for teams already on Postgres who want to avoid a separate database dependency, though its QPS falls behind dedicated vector databases at &gt;1M vectors. Milvus handles billion-scale deployments and GPU-accelerated search, making it the right choice for very large corpora.</p>
+<blockquote>
+<p><strong>When to Use a Dedicated Vector Database</strong>: For fewer than 10M vectors on a single machine, FAISS HNSW with a metadata store (SQLite or Postgres) beats dedicated vector databases in raw performance and operational simplicity — only move to a dedicated vector database when you need distributed scale, live updates without full index rebuilds, built-in replication, or managed filtered search across payload fields. Start with Chroma locally, validate your embedding strategy, then migrate to Qdrant or pgvector for production.</p>
+</blockquote>
+<h2>Operational Considerations</h2>
+<p>Running a vector database in production requires planning for index persistence (HNSW indexes must be saved to disk and loaded on restart — Qdrant snapshots, FAISS write_index), index updates (HNSW insert is fast but deletion requires segment merges in Qdrant or a full rebuild in FAISS), memory capacity (a 1536-dim float32 HNSW index for 10M vectors consumes ~60GB RAM with M=32), and monitoring (track p99 query latency, recall sampled against brute-force ground truth, and index size growth). For multi-tenant RAG (many users with separate document collections), use namespaces (Pinecone) or collections (Qdrant/Chroma) rather than payload filters, as per-tenant isolation prevents data leakage and simplifies deletion. Always test filtered search recall specifically — filters that match &lt;5% of the corpus can degrade filtered ANN recall to &lt;70%, far below the 97% unfiltered recall benchmark.</p>
+<ul>
+<li>Persist HNSW indexes to disk (Qdrant snapshot, faiss.write_index) — in-memory indexes are lost on restart</li>
+<li>Monitor p99 query latency and sampled recall@10 against brute-force ground truth weekly</li>
+<li>For M=32 HNSW and 1536-dim float32, budget ~6KB per vector (3.2KB embedding + ~2.8KB graph edges)</li>
+<li>Test filtered search recall on your specific filter selectivity — narrow filters degrade ANN recall significantly</li>
+<li>Use separate collections or namespaces for multi-tenant isolation, not payload filters</li>
+<li>Prefer cosine similarity (normalised L2) for text embeddings from OpenAI/Cohere/sentence-transformers</li>
+</ul>
+<pre><code class="language-python">import numpy as np
+import time
+import faiss
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams, PointStruct
+import chromadb
+
+N_VECS   = 100_000
+DIM      = 1536
+N_QUERY  = 1_000
+K        = 10
+rng      = np.random.default_rng(99)
+corpus   = rng.standard_normal((N_VECS, DIM)).astype(&quot;float32&quot;)
+queries  = rng.standard_normal((N_QUERY, DIM)).astype(&quot;float32&quot;)
+faiss.normalize_L2(corpus)
+faiss.normalize_L2(queries)
+
+def bench_faiss_hnsw() -&gt; dict:
+    idx = faiss.IndexHNSWFlat(DIM, 32)
+    idx.hnsw.efConstruction = 200
+    t0 = time.perf_counter(); idx.add(corpus); build_s = time.perf_counter() - t0
+    idx.hnsw.efSearch = 64
+    t0 = time.perf_counter(); idx.search(queries, K); qps = N_QUERY / (time.perf_counter() - t0)
+    return {&quot;db&quot;: &quot;FAISS HNSW&quot;, &quot;build_s&quot;: round(build_s, 1), &quot;qps&quot;: round(qps), &quot;mem_mb&quot;: round(idx.ntotal * DIM * 4 / 1e6, 0)}
+
+def bench_qdrant() -&gt; dict:
+    client = QdrantClient(&quot;:memory:&quot;)
+    client.recreate_collection(&quot;bench&quot;, vectors_config=VectorParams(size=DIM, distance=Distance.COSINE))
+    pts = [PointStruct(id=i, vector=corpus[i].tolist(), payload={}) for i in range(N_VECS)]
+    t0 = time.perf_counter(); client.upsert(&quot;bench&quot;, points=pts); build_s = time.perf_counter() - t0
+    t0 = time.perf_counter()
+    for q in queries: client.search(&quot;bench&quot;, query_vector=q.tolist(), limit=K)
+    qps = N_QUERY / (time.perf_counter() - t0)
+    return {&quot;db&quot;: &quot;Qdrant&quot;, &quot;build_s&quot;: round(build_s, 1), &quot;qps&quot;: round(qps), &quot;mem_mb&quot;: &quot;N/A&quot;}
+
+results = [bench_faiss_hnsw(), bench_qdrant()]
+print(f&quot;{'Database':&lt;15} {'Build(s)':&gt;10} {'QPS':&gt;8} {'Mem(MB)':&gt;10}&quot;)
+for r in results:
+    print(f&quot;{r['db']:&lt;15} {r['build_s']:&gt;10} {r['qps']:&gt;8} {str(r['mem_mb']):&gt;10}&quot;)
+</code></pre>
+<h2>Key Takeaways</h2>
+<p>Vector databases power the retrieval stage of RAG by providing fast approximate nearest neighbour search over high-dimensional embeddings. HNSW is the dominant in-memory ANN index, delivering 97–99% recall@10 at 10–100x the QPS of brute force for corpora up to 10M vectors. IVF-PQ enables billion-scale search by compressing embeddings 64x with a 3–8% recall penalty. Metadata filtering is a critical production requirement — choose a database with native filtered HNSW (Qdrant, Weaviate, Pinecone) to maintain ANN recall over narrow filters. For small-to-medium scale (&lt; 10M vectors), FAISS HNSW plus a Postgres metadata store is the highest-performance option. For teams wanting a managed solution with strong filtering, Qdrant Cloud or Pinecone are the production-ready choices.</p>
+<ul>
+<li>HNSW with M=32, ef_construction=200, ef_search=64 delivers 97–99% recall@10 at near-optimal QPS</li>
+<li>IVF-PQ compresses float32 vectors 64x (1536-dim to 96 bytes) for billion-scale in-memory search</li>
+<li>Always benchmark filtered search recall on your specific filter selectivity — narrow filters can hurt recall severely</li>
+<li>Qdrant is the best open-source option for production RAG: native filtered HNSW, Rust core, managed cloud available</li>
+<li>pgvector is the right choice if you are already on Postgres and need fewer than 1M vectors</li>
+<li>Start with Chroma locally, validate embeddings, then migrate to a dedicated vector database for production</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

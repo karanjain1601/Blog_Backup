@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LLM Inference Cost Modeling | Notes Backup</title>
+  <meta name="description" content="Quantitative models for estimating GPU compute, memory bandwidth, and dollar costs for LLM inference, covering FLOP counts, memory-bound vs compute-bound regimes, and per-token pricing." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>LLM Inference Cost Modeling</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Quantitative models for estimating GPU compute, memory bandwidth, and dollar costs for LLM inference, covering FLOP counts, memory-bound vs compute-bound regimes, and per-token pricing.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>LLM Inference Cost Modeling</h1>
+<p>Understanding the cost of LLM inference requires reasoning across three distinct layers: compute (FLOPs), memory system (bandwidth and capacity), and dollars (GPU hours, amortized hardware). A model that appears cheap on FLOPs may be expensive in practice because decode is memory-bandwidth bound, not compute bound — most of the GPU's TFLOPS are idle while waiting for weights to stream from HBM. Conversely, a model that seems hardware-intensive may be surprisingly cheap when batched because bandwidth is amortized across batch elements. This note develops quantitative models for each layer, derives the roofline crossover batch size that separates the memory-bound and compute-bound regimes, and translates hardware utilisation into dollars per million tokens across cloud API, cloud self-hosted GPU, and on-premise deployment options.</p>
+<h2>Overview</h2>
+<p>LLM inference has two distinct phases with different cost profiles. Prefill (also called encoding or the prompt processing phase) processes all input tokens in parallel using matrix multiplications that are compute-bound: arithmetic intensity is high because each weight byte is reused across all input tokens simultaneously. Decode generates one new token per step using matrix-vector multiplications: each weight is read from memory to compute a single output, making decode memory-bandwidth bound. The ratio of compute FLOPs to memory bytes transferred per operation — the arithmetic intensity — determines which regime applies. For decode at batch size 1, arithmetic intensity is approximately 1 FLOP/byte, far below the ridge point of modern GPUs (typically 100–300 FLOPs/byte), meaning the GPU is almost always memory-bandwidth limited during decode.</p>
+<h2>FLOP Counting for Transformer Inference</h2>
+<p>For a transformer with L layers, d_model hidden dimension, d_ff FFN dimension, n_heads attention heads, and vocabulary size V, the dominant FLOP costs are the linear projections. Each linear layer of shape (d_in, d_out) costs 2<em>B</em>S<em>d_in</em>d_out FLOPs for batch size B and sequence length S (factor of 2 for multiply-accumulate). Attention scores add 2<em>B</em>n_heads<em>S^2</em>(d_model/n_heads) = 2<em>B</em>S^2<em>d_model FLOPs per layer during prefill. During decode, S_query=1 so attention over the KV cache costs 2</em>B<em>S_kv</em>d_model per layer — linear in context length rather than quadratic. The LM head projection (d_model → vocab_size) contributes 2<em>B</em>S<em>d_model</em>vocab_size FLOPs, which for large vocabularies (32K–128K tokens) is a material fraction of total cost.</p>
+<pre><code class="language-python">import math
+from dataclasses import dataclass
+from typing import Dict
+
+@dataclass
+class TransformerConfig:
+    n_layers: int
+    n_heads: int
+    d_model: int
+    d_ff: int
+    vocab_size: int
+    seq_len: int
+    batch_size: int = 1
+
+def count_transformer_flops(cfg: TransformerConfig) -&gt; Dict[str, float]:
+    &quot;&quot;&quot;Count FLOPs for one prefill pass and one decode step. Returns TFLOPs / GFLOPs.&quot;&quot;&quot;
+    B, S, L = cfg.batch_size, cfg.seq_len, cfg.n_layers
+    D, F, V = cfg.d_model, cfg.d_ff, cfg.vocab_size
+    H = cfg.n_heads
+    # Prefill attention per layer: QKV proj + attn scores + attn values + out proj
+    attn_qkv   = 3 * 2 * B * S * D * D         # 3 projections, each (B,S,D)@(D,D)
+    attn_score = 2 * B * H * S * S * (D // H)  # (B,H,S,d)@(B,H,d,S) = QK^T
+    attn_val   = 2 * B * H * S * S * (D // H)  # (B,H,S,S)@(B,H,S,d) = AV
+    attn_out   = 2 * B * S * D * D             # output projection
+    ffn_layer  = 2 * 2 * B * S * D * F         # two linear layers in FFN
+    prefill_flops = L * (attn_qkv + attn_score + attn_val + attn_out + ffn_layer)
+    prefill_flops += 2 * B * S * D * V         # LM head
+    # Decode (S_query=1, KV cache length = S for prior context)
+    dec_qkv   = 3 * 2 * B * 1 * D * D
+    dec_score = 2 * B * H * 1 * S * (D // H)  # attend over KV cache length
+    dec_val   = 2 * B * H * 1 * S * (D // H)
+    dec_out   = 2 * B * 1 * D * D
+    dec_ffn   = 2 * 2 * B * 1 * D * F
+    decode_flops = L * (dec_qkv + dec_score + dec_val + dec_out + dec_ffn)
+    decode_flops += 2 * B * 1 * D * V
+    return {&quot;prefill_TFLOPs&quot;: prefill_flops / 1e12,
+            &quot;decode_GFLOPs_per_token&quot;: decode_flops / 1e9}
+
+cfg = TransformerConfig(n_layers=32, n_heads=32, d_model=4096,
+                         d_ff=11008, vocab_size=32000, seq_len=2048)
+r = count_transformer_flops(cfg)
+print(f&quot;Llama-7B prefill {cfg.seq_len} tokens: {r['prefill_TFLOPs']:.2f} TFLOPs&quot;)
+print(f&quot;Llama-7B decode per token:       {r['decode_GFLOPs_per_token']:.2f} GFLOPs&quot;)
+</code></pre>
+<h2>Memory Bandwidth Bottleneck</h2>
+<p>During autoregressive decode at batch size 1, every forward pass must read all model weights from GPU HBM to compute a single output token. For a 7B parameter model in fp16, this is 14 GB of data per token. An A100 80GB GPU provides 2.0 TB/s of HBM bandwidth, so the minimum possible decode latency is 14 GB / 2000 GB/s = 7 ms per token, corresponding to a maximum of about 143 tokens/second. This is the bandwidth-bound ceiling — actual throughput is lower due to kernel launch overhead, attention over the KV cache, and other memory accesses. The KV cache adds 2 (keys + values) × n_layers × seq_len × n_heads × head_dim × 2 bytes (fp16) of additional memory read per decode step, which for long context lengths becomes significant.</p>
+<pre><code class="language-python">from dataclasses import dataclass
+from typing import Dict
+
+# Peak HBM bandwidth constants (TB/s)
+HW_BW_TBs: Dict[str, float] = {
+    &quot;A100-40GB&quot;:  1.555,
+    &quot;A100-80GB&quot;:  2.000,
+    &quot;H100-SXM&quot;:   3.350,
+    &quot;H100-PCIe&quot;:  2.000,
+    &quot;RTX-4090&quot;:   1.008,
+    &quot;RTX-3090&quot;:   0.936,
+}
+
+def decode_bandwidth_model(
+    n_params: int,
+    n_layers: int,
+    seq_len: int,
+    n_heads: int,
+    head_dim: int,
+    batch_size: int = 1,
+    hw: str = &quot;A100-80GB&quot;,
+    dtype_bytes: int = 2,   # fp16=2, fp32=4, int8=1
+) -&gt; dict:
+    &quot;&quot;&quot;Estimate bandwidth-bound decode latency and maximum throughput.&quot;&quot;&quot;
+    bw_B_per_s     = HW_BW_TBs[hw] * 1e12
+    weight_bytes   = n_params * dtype_bytes
+    kv_cache_bytes = 2 * n_layers * seq_len * n_heads * head_dim * dtype_bytes
+    total_bytes    = (weight_bytes + kv_cache_bytes) * batch_size
+    min_latency_ms = (total_bytes / bw_B_per_s) * 1e3
+    max_throughput = batch_size / (min_latency_ms / 1e3)
+    print(f&quot;[{hw}] Model: {n_params/1e9:.1f}B params | &quot;
+          f&quot;KV: {kv_cache_bytes/1e9:.2f} GB | bs={batch_size}&quot;)
+    print(f&quot;  Min decode latency (bw-bound): {min_latency_ms:.1f} ms/tok&quot;)
+    print(f&quot;  Max throughput:                {max_throughput:.0f} tok/s&quot;)
+    return {&quot;min_latency_ms&quot;: min_latency_ms, &quot;max_throughput&quot;: max_throughput}
+
+# Llama-7B at seq_len=2048, fp16
+decode_bandwidth_model(
+    n_params=7_000_000_000, n_layers=32, seq_len=2048,
+    n_heads=32, head_dim=128, batch_size=1, hw=&quot;A100-80GB&quot;
+)
+</code></pre>
+<h2>Arithmetic Intensity and Roofline</h2>
+<p>Arithmetic intensity (AI) is the ratio of FLOPs performed to bytes transferred from memory: AI = FLOPs / bytes. For a linear layer of shape (d_in, d_out) processing a batch of B tokens: FLOPs = 2<em>B</em>d_in<em>d_out, bytes = (d_in</em>d_out + B<em>d_in + B</em>d_out) * dtype_bytes ≈ d_in<em>d_out * dtype_bytes for small B. Thus AI ≈ 2</em>B / dtype_bytes, which for fp16 (dtype_bytes=2) gives AI = B FLOPs/byte. The roofline model predicts achievable throughput as min(peak_TFLOPS, AI * peak_bandwidth_TB/s). The ridge point — where compute and bandwidth bounds intersect — occurs at AI = peak_TFLOPS / peak_bandwidth_TB/s. For an A100 (312 TFLOPS bf16, 2 TB/s): ridge point = 312 / 2 = 156 FLOPs/byte, meaning decode is bandwidth-bound for batch sizes below 156 and compute-bound above.</p>
+<pre><code class="language-python">import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from typing import List, Optional
+
+def plot_roofline(
+    peak_flops_Ts: float = 312.0,    # A100 bf16: 312 TFLOPS
+    bw_TB_s: float = 2.0,            # A100 80GB bandwidth
+    batch_sizes: Optional[List[int]] = None,
+    n_params: float = 7e9,
+    save_path: str = &quot;roofline_llm.png&quot;,
+) -&gt; None:
+    &quot;&quot;&quot;Plot roofline model for LLM decode across batch sizes.&quot;&quot;&quot;
+    if batch_sizes is None:
+        batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256]
+    bytes_per_param = 2                        # fp16
+    flops_per_token = 2 * n_params             # ~2 FLOPs per parameter per token
+    bw_bytes_per_s  = bw_TB_s * 1e12
+    ridge_bs = peak_flops_Ts * 1e12 / (flops_per_token / (n_params * bytes_per_param))
+    tput = []
+    for bs in batch_sizes:
+        ai = (flops_per_token * bs) / (n_params * bytes_per_param)
+        achievable_flops_s = min(peak_flops_Ts * 1e12, ai * bw_bytes_per_s)
+        tput.append(achievable_flops_s * bs / flops_per_token)  # tokens/s
+    ridge_point_ai = peak_flops_Ts / bw_TB_s
+    print(f&quot;Ridge point AI: {ridge_point_ai:.0f} FLOPs/byte&quot;)
+    print(f&quot;Crossover batch size (approx): {ridge_point_ai:.0f}&quot;)
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.semilogx(batch_sizes, tput, 'b-o', label='Decode throughput (roofline)')
+    ax.axvline(ridge_point_ai, color='r', linestyle='--', label=f'Crossover bs={ridge_point_ai:.0f}')
+    ax.set_xlabel('Batch size'); ax.set_ylabel('Tokens / second')
+    ax.set_title('LLM Decode Roofline — A100 80GB (312 TFLOPS, 2 TB/s)')
+    ax.legend(); ax.grid(True, which='both')
+    plt.tight_layout(); plt.savefig(save_path, dpi=150)
+    print(f&quot;Saved {save_path}&quot;)
+
+plot_roofline()
+</code></pre>
+<h2>Cost per Token Formula</h2>
+<p>The cost per token for self-hosted inference is: cost_per_token = (GPU_hourly_rate + capex_per_hour) / (tokens_per_second * 3600). GPU hourly rate includes cloud instance cost or, for on-premise, the allocated electricity and operations cost per GPU-hour. Capex per hour amortises the GPU purchase price over its useful life (typically 2–3 years of continuous operation, ~17,500–26,000 hours). Tokens per second is the achieved decode throughput at the target batch size. For cloud APIs, pricing is quoted directly in dollars per million input or output tokens, so the formula simplifies to reading the vendor's published rate. The key insight is that tokens_per_second scales with batch size (until the compute-bound regime), so higher batch sizes dramatically reduce cost per token — but only if the workload can tolerate the queuing latency.</p>
+<blockquote>
+<p><strong>Batch Size as Cost Lever</strong>: For decode-bound workloads, batch size is the main lever: doubling batch size roughly halves cost-per-token until you hit the compute-bound regime — profile your target batch size before investing in hardware</p>
+</blockquote>
+<pre><code class="language-python">from dataclasses import dataclass, field
+from typing import Dict, Optional
+
+@dataclass
+class DeploymentOption:
+    name: str
+    hourly_usd: float           # cloud instance or electricity+ops cost per GPU-hour
+    tokens_per_sec: float       # achieved decode throughput
+    capex_usd: float = 0.0      # hardware purchase price (0 for cloud)
+    lifespan_hours: float = 17520.0  # 2 years continuous
+
+def cost_per_million_tokens(opt: DeploymentOption) -&gt; float:
+    &quot;&quot;&quot;Compute infrastructure cost per 1M output tokens including amortized capex.&quot;&quot;&quot;
+    capex_per_hour   = opt.capex_usd / opt.lifespan_hours
+    total_hourly     = opt.hourly_usd + capex_per_hour
+    tokens_per_hour  = opt.tokens_per_sec * 3600
+    return (total_hourly / tokens_per_hour) * 1_000_000
+
+API_RATES_USD_PER_1M = {&quot;GPT-4o API&quot;: 10.00, &quot;GPT-3.5 API&quot;: 0.50}
+
+options: Dict[str, DeploymentOption] = {
+    &quot;GPT-4o API&quot;:    DeploymentOption(&quot;GPT-4o API&quot;,    0.0,   50.0),
+    &quot;GPT-3.5 API&quot;:   DeploymentOption(&quot;GPT-3.5 API&quot;,   0.0,  200.0),
+    &quot;A100 cloud 1x&quot;: DeploymentOption(&quot;A100 1x cloud&quot;, 3.50, 1200.0),
+    &quot;A100 cloud 8x&quot;: DeploymentOption(&quot;A100 8x cloud&quot;,24.00, 9600.0),
+    &quot;H100 cloud 1x&quot;: DeploymentOption(&quot;H100 1x cloud&quot;, 5.00, 2800.0),
+    &quot;On-prem A100&quot;:  DeploymentOption(&quot;On-prem A100&quot;,  0.40, 1200.0, capex_usd=12_000.0),
+}
+
+print(f&quot;{'Option':&lt;22} {'Cost/1M tok':&gt;12}  {'Tok/s':&gt;8}&quot;)
+print(&quot;-&quot; * 48)
+for name, opt in options.items():
+    cost = API_RATES_USD_PER_1M.get(name, cost_per_million_tokens(opt))
+    print(f&quot;{name:&lt;22}  ${cost:&gt;10.2f}  {opt.tokens_per_sec:&gt;7.0f}&quot;)
+</code></pre>
+<h2>Cloud vs On-premise Cost Comparison</h2>
+<p>Cloud API pricing is convenient but expensive at scale: GPT-4o at $10/1M output tokens costs 50–100× more than self-hosting an equivalent open-weight model on a cloud A100 instance. However, cloud APIs eliminate operational overhead, provide managed reliability, and require no minimum committed spend — making them cost-effective for low-volume use cases below roughly 100M tokens per month. Above that threshold, self-hosting on cloud GPUs (A100 or H100 instances) typically reduces cost by 10–30× per token. On-premise deployment further reduces cost by 2–3× versus cloud GPU instances by eliminating the cloud margin, but requires capital expenditure, hardware operations capacity, and sufficient volume to keep GPUs highly utilised (target &gt;70% GPU utilisation to justify on-prem capex).</p>
+<table>
+<thead>
+<tr>
+<th>Deployment option</th>
+<th>Cost / 1M tokens</th>
+<th>Latency p50</th>
+<th>Max throughput</th>
+<th>Setup complexity</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GPT-4o API</td>
+<td>$10.00</td>
+<td>800–1500 ms (TTFT)</td>
+<td>Unlimited (managed)</td>
+<td>None — API key only</td>
+</tr>
+<tr>
+<td>GPT-3.5 API</td>
+<td>$0.50</td>
+<td>300–600 ms (TTFT)</td>
+<td>Unlimited (managed)</td>
+<td>None — API key only</td>
+</tr>
+<tr>
+<td>A100 cloud 1×</td>
+<td>$0.81</td>
+<td>50–120 ms</td>
+<td>1,200 tok/s (Llama-7B)</td>
+<td>Medium — infra + serving stack</td>
+</tr>
+<tr>
+<td>A100 cloud 8×</td>
+<td>$0.69</td>
+<td>30–80 ms</td>
+<td>9,600 tok/s (Llama-7B)</td>
+<td>High — multi-GPU serving</td>
+</tr>
+<tr>
+<td>H100 cloud 1×</td>
+<td>$0.50</td>
+<td>30–70 ms</td>
+<td>2,800 tok/s (Llama-7B)</td>
+<td>Medium — infra + serving stack</td>
+</tr>
+<tr>
+<td>On-prem A100</td>
+<td>$0.28</td>
+<td>50–120 ms</td>
+<td>1,200 tok/s (Llama-7B)</td>
+<td>High — hardware + ops team</td>
+</tr>
+</tbody>
+</table>
+<h2>Optimizing for Cost Efficiency</h2>
+<p>The highest-impact cost reduction levers, in rough order of impact, are: (1) Quantisation — moving from fp16 to int8 or int4 halves or quarters the weight bytes read per decode step, directly scaling memory-bandwidth-bound throughput by 2–4× at minimal quality loss for most models. (2) Batch size — as shown by the roofline model, increasing batch size amortises weight reads across more output tokens simultaneously. (3) Speculative decoding — Medusa or draft-model approaches achieve 2–3× throughput improvement with no additional GPU memory. (4) KV cache compression — reducing KV cache size via grouped-query attention (GQA), multi-query attention (MQA), or quantised KV cache frees memory for larger batch sizes. (5) Model selection — a smaller model at higher batch size often costs less per token than a larger model at low batch size while maintaining acceptable quality.</p>
+<ul>
+<li>Quantisation (int8/int4) is the single highest-leverage cost reduction: halving weight bytes doubles bandwidth-bound throughput at minimal quality cost.</li>
+<li>The roofline crossover batch size for an A100 (312 TFLOPS, 2 TB/s) is approximately 156 — below this, GPU is memory-bound; above, compute-bound.</li>
+<li>KV cache is a significant memory consumer: at seq_len=8K with Llama-7B in fp16, KV cache per request is 2 GB — larger than many smaller models entirely.</li>
+<li>GQA (grouped-query attention) reduces KV cache by n_heads/n_kv_heads factor; Llama-3 uses GQA with 8 KV heads vs 32 query heads — 4× KV memory reduction.</li>
+<li>Flash Attention reduces memory traffic for attention from O(S^2) to O(S) bytes, eliminating prefill bottlenecks for long contexts.</li>
+<li>Cost per token scales inversely with GPU utilisation — target &gt;70% utilisation; below 50% indicates over-provisioned or under-batched deployment.</li>
+<li>Continuous batching (iteration-level scheduling) increases effective GPU utilisation from 30–40% (static batching) to 60–80% in typical chat workloads.</li>
+</ul>
+<h2>Key Takeaways</h2>
+<p>LLM inference cost is dominated by the memory bandwidth bottleneck during autoregressive decode. At batch size 1, modern GPU compute units are utilised at less than 1% of their peak FLOPS because the bottleneck is streaming weights from HBM. The practical consequence is that optimisations targeting memory — quantisation, GQA, KV cache compression, speculative decoding — deliver larger cost reductions than optimisations targeting compute. For cost modelling, the three-layer framework (FLOPs → bandwidth → dollars) provides a principled methodology: count FLOPs to understand model complexity, apply the roofline to find the operating regime, then translate to dollars using observed throughput and GPU pricing. Always profile at your target batch size — roofline predictions can differ from measured throughput by 20–40% due to kernel overheads, memory fragmentation, and attention costs not captured in simplified models.</p>
+<ul>
+<li>Decode is almost always memory-bandwidth bound at batch size 1: arithmetic intensity ≈ 1 FLOP/byte versus ridge points of 100–300 FLOP/byte on modern GPUs.</li>
+<li>Prefill is compute-bound for long sequences: arithmetic intensity scales with sequence length S, reaching the ridge point around S=100–300 tokens.</li>
+<li>The cost crossover between cloud API and self-hosted A100 occurs at roughly 50–150M output tokens per month depending on model size.</li>
+<li>int8 quantisation reduces cost by ~2× with less than 1% quality degradation on most benchmarks; int4 reduces by ~4× with 2–5% degradation.</li>
+<li>GPU utilisation is the hidden efficiency multiplier: a 50%-utilised A100 costs 2× per token versus a fully utilised one.</li>
+<li>For latency-sensitive workloads, speculative decoding (Medusa) is the most practical 2–3× speedup with no additional infrastructure.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

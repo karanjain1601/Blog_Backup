@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dropout — Inverted Dropout, Variational, and Structured | Notes Backup</title>
+  <meta name="description" content="Implement inverted dropout from scratch, apply MC-Dropout for uncertainty estimation, implement DropBlock for CNNs, and use variational dropout for consistent RNN regularization." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Dropout — Inverted Dropout, Variational, and Structured</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Implement inverted dropout from scratch, apply MC-Dropout for uncertainty estimation, implement DropBlock for CNNs, and use variational dropout for consistent RNN regularization.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Dropout — Inverted Dropout, Variational, and Structured</h1>
+<p>Dropout (Srivastava et al. 2014) randomly sets activations to zero with probability p during training, preventing neurons from co-adapting and acting as an implicit ensemble of 2ⁿ sub-networks (where n is the number of units). Each forward pass samples a different binary mask, training a different thinned network. At test time, all neurons are used and outputs are scaled to match the expected value during training. This ensemble interpretation explains why dropout improves generalization: it prevents any single neuron from being essential for a prediction.</p>
+<h2>Standard Dropout and Inverted Dropout</h2>
+<p>Two equivalent formulations exist. Standard dropout: zero out with probability p, scale by 1/(1-p) at test time. Inverted dropout (the modern default in PyTorch and TensorFlow): scale kept activations by 1/(1-p) during training, no scaling at test time. Inverted dropout is preferred because the test-time network is a simple feed-forward pass with no modification — model.eval() automatically disables dropout without requiring any weight rescaling. PyTorch's nn.Dropout uses inverted dropout internally.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+import torch.nn as nn
+
+def inverted_dropout(x, p, training=True):
+    if not training or p == 0.0:
+        return x
+    # Sample binary mask: keep each unit with probability (1-p)
+    mask = (np.random.rand(*x.shape) &gt; p).astype(np.float32)
+    # Scale by 1/(1-p) so expected value matches x
+    return x * mask / (1.0 - p)
+
+np.random.seed(42)
+x = np.ones((4, 8))  # all-ones to see scaling clearly
+p = 0.5
+
+# Training mode: some units zeroed, survivors scaled up
+out_train = inverted_dropout(x, p, training=True)
+print(f'Train: mean={out_train.mean():.3f} (should ~1.0), zeros={( out_train==0).sum()}')
+
+# Eval mode: all units active, no scaling needed
+out_eval = inverted_dropout(x, p, training=False)
+print(f'Eval:  mean={out_eval.mean():.3f} (should 1.0), zeros={(out_eval==0).sum()}')
+
+# PyTorch equivalent
+torch_do = nn.Dropout(p=p)
+x_t = torch.ones(4, 8)
+torch_do.train()
+out_pt_train = torch_do(x_t)
+print(f'PyTorch train mean: {out_pt_train.mean():.3f}')
+torch_do.eval()
+out_pt_eval = torch_do(x_t)
+print(f'PyTorch eval  mean: {out_pt_eval.mean():.3f}')
+</code></pre>
+<h2>Dropout Placement Guidelines</h2>
+<p>Correct dropout placement matters significantly. Standard rules: (1) apply dropout after activation functions (ReLU, GELU), not before; (2) do not apply dropout immediately before the output layer — it creates too much noise in the final predictions; (3) do not apply dropout between a normalization layer and its next linear layer, as the dropped zeros corrupt the normalization statistics; (4) in Transformers, dropout is applied after attention weights, after the attention output projection, and after each FFN layer. Optimal p: 0.5 for fully-connected hidden layers, 0.1–0.2 for convolutional layers.</p>
+<h2>Variational Dropout for RNNs</h2>
+<p>Standard dropout applied to RNN inputs at each timestep uses a different mask per step, which does not effectively regularize temporal dependencies. Variational dropout (Gal &amp; Ghahramani 2016) samples one mask per sequence and applies it consistently across all timesteps — the same units are dropped at every step. This properly regularizes the recurrent weights and empirically reduces perplexity in language modeling tasks by 10–15% compared to standard per-step dropout.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class VariationalDropoutLSTM(nn.Module):
+    def __init__(self, input_size, hidden_size, dropout_p=0.5):
+        super().__init__()
+        self.lstm = nn.LSTM(input_size, hidden_size, batch_first=True)
+        self.dropout_p = dropout_p
+        self.hidden_size = hidden_size
+
+    def forward(self, x):
+        # x: (batch, seq_len, input_size)
+        batch, seq_len, _ = x.shape
+        # Sample ONE mask for the entire sequence (variational)
+        if self.training and self.dropout_p &gt; 0:
+            mask = x.new_ones(batch, 1, x.size(-1))
+            mask = torch.bernoulli(mask * (1 - self.dropout_p))
+            mask = mask / (1 - self.dropout_p)
+            x = x * mask.expand_as(x)  # same mask applied at every timestep
+        out, (h, c) = self.lstm(x)
+        return out, (h, c)
+
+torch.manual_seed(0)
+model = VariationalDropoutLSTM(32, 64, dropout_p=0.3)
+model.train()
+x = torch.randn(4, 20, 32)
+out, _ = model(x)
+print(f'Output shape: {out.shape}')
+print(f'Non-zero input fraction: {(x != 0).float().mean():.3f}')
+print('Same dropout mask applied across all 20 timesteps in variational mode.')
+</code></pre>
+<h2>DropBlock for Convolutional Networks</h2>
+<p>Standard dropout applied to convolutional feature maps drops individual pixels, but spatially adjacent activations are highly correlated — dropping one pixel barely affects nearby ones. DropBlock (Ghiasi et al. 2018) drops contiguous square regions (block_size × block_size) of the feature map, forcing the network to spread features across the spatial extent. DropBlock is more effective than standard dropout for CNN regularization and achieves +1–2% top-1 accuracy on ImageNet for ResNet architectures.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class DropBlock2D(nn.Module):
+    def __init__(self, drop_prob=0.1, block_size=7):
+        super().__init__()
+        self.drop_prob = drop_prob
+        self.block_size = block_size
+
+    def forward(self, x):
+        if not self.training or self.drop_prob == 0:
+            return x
+        B, C, H, W = x.shape
+        # Adjust drop probability for center seed points
+        gamma = self.drop_prob / (self.block_size ** 2)
+        gamma *= (H * W) / ((H - self.block_size + 1) * (W - self.block_size + 1))
+        # Sample seed mask then dilate to block size
+        mask_seed = torch.bernoulli(torch.ones(B, C, H, W, device=x.device) * gamma)
+        # Max-pool to expand seeds into blocks
+        mask = F.max_pool2d(
+            mask_seed,
+            kernel_size=(self.block_size, self.block_size),
+            stride=1,
+            padding=self.block_size // 2
+        )
+        mask = 1 - mask  # invert: 1=keep, 0=drop
+        # Rescale to maintain expected value
+        x = x * mask * mask.numel() / mask.sum().clamp(min=1)
+        return x
+
+B, C, H, W = 2, 16, 32, 32
+x = torch.randn(B, C, H, W)
+db = DropBlock2D(drop_prob=0.1, block_size=5)
+db.train()
+out = db(x)
+zero_frac = (out == 0).float().mean().item()
+print(f'DropBlock zero fraction: {zero_frac:.3f} (contiguous blocks zeroed)')
+</code></pre>
+<blockquote>
+<p><strong>MC-Dropout for Uncertainty Estimation</strong>: Gal &amp; Ghahramani (2016) showed that a neural network with dropout is equivalent to a deep Gaussian Process approximation. At inference, keeping dropout active and running multiple forward passes (MC-Dropout) produces a distribution of predictions. The mean gives the point estimate; the variance estimates epistemic uncertainty. This requires no architecture changes — just keep model.train() at inference time and sample N forward passes.</p>
+</blockquote>
+<h2>MC-Dropout for Uncertainty Estimation</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+class MCDropoutNet(nn.Module):
+    def __init__(self, input_dim, hidden_dim, output_dim, p=0.3):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(p),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(p),
+            nn.Linear(hidden_dim, output_dim)
+        )
+    def forward(self, x):
+        return self.net(x)
+
+model = MCDropoutNet(10, 64, 1, p=0.3)
+x_test = torch.randn(20, 10)
+# MC-Dropout: keep model in train mode, run N forward passes
+model.train()  # dropout stays active
+with torch.no_grad():
+    samples = torch.stack([model(x_test) for _ in range(100)], dim=0)
+
+pred_mean = samples.mean(dim=0)
+pred_std  = samples.std(dim=0)
+print(f'Prediction mean: {pred_mean.squeeze()[:5].tolist()}')
+print(f'Uncertainty std: {pred_std.squeeze()[:5].tolist()}')
+print('High std =&gt; high epistemic uncertainty for that input.')
+</code></pre>
+<h2>Optimal Dropout Rate by Architecture</h2>
+<p>Empirical guidelines for dropout probability p: Fully-connected layers in classifiers — p=0.5 (Srivastava et al. original recommendation). Convolutional layers — p=0.1 to 0.2 (spatial correlation makes standard dropout less effective; prefer DropBlock). Transformer attention dropout — p=0.1 (too much dropout hurts attention pattern formation). Transformer FFN dropout — p=0.1 to 0.3 depending on model size and dataset. Large pre-trained models (BERT, GPT) — p=0.1. Very small datasets — p=0.5 to 0.7 for aggressive regularization.</p>
+<ul>
+<li>Apply dropout after activation, not before: dropout after ReLU avoids zeroing units that are already inactive.</li>
+<li>Skip dropout on the output layer: directly applying dropout to logits adds instability to the final prediction.</li>
+<li>Increase p for larger models trained on smaller datasets: bigger models have higher variance and need more regularization.</li>
+<li>Disable dropout at eval time: always call model.eval() before inference — PyTorch handles this automatically.</li>
+<li>DropConnect: drop individual weights rather than activations — a generalization of dropout less commonly used in practice.</li>
+</ul>
+<h2>Dropout Variants Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Variant</th>
+<th>What is Dropped</th>
+<th>Mask Scope</th>
+<th>Inference Behavior</th>
+<th>Best For</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Standard Dropout</td>
+<td>Individual activations</td>
+<td>New mask per forward pass</td>
+<td>Disabled (scaling handled by inverted dropout)</td>
+<td>FC layers in classifiers</td>
+</tr>
+<tr>
+<td>Inverted Dropout</td>
+<td>Individual activations (scaled during train)</td>
+<td>New mask per forward pass</td>
+<td>No modification needed</td>
+<td>Default everywhere — same as standard in PyTorch</td>
+</tr>
+<tr>
+<td>Variational Dropout</td>
+<td>Individual activations</td>
+<td>Same mask across all timesteps</td>
+<td>Disabled</td>
+<td>RNNs, LSTMs — consistent temporal regularization</td>
+</tr>
+<tr>
+<td>DropBlock</td>
+<td>Contiguous spatial blocks in feature maps</td>
+<td>New block mask per forward pass</td>
+<td>Disabled</td>
+<td>CNN feature maps — better than per-pixel dropout</td>
+</tr>
+<tr>
+<td>MC-Dropout</td>
+<td>Individual activations (kept active at test)</td>
+<td>New mask per forward pass</td>
+<td>ACTIVE — N passes for uncertainty</td>
+<td>Bayesian uncertainty estimation</td>
+</tr>
+</tbody>
+</table>
+<p>Inverted dropout (PyTorch's nn.Dropout) is the default for most architectures. Switch to variational dropout for sequence models (RNNs, LSTMs) where temporal consistency matters. Use DropBlock for CNN backbones when dropout is not providing enough regularization. Apply MC-Dropout for any safety-critical application that requires calibrated uncertainty estimates without adding a separate uncertainty head.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

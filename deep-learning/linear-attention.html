@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Linear Attention — Kernel Approximation of Softmax Attention | Notes Backup</title>
+  <meta name="description" content="Derive the kernel trick that reduces attention from O(L²) to O(Ld²), implement Performer FAVOR+ random feature approximation, verify quality versus softmax on short and long sequences, and benchmark throughput at L=1K, 4K, and 16K." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Linear Attention — Kernel Approximation of Softmax Attention</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Derive the kernel trick that reduces attention from O(L²) to O(Ld²), implement Performer FAVOR+ random feature approximation, verify quality versus softmax on short and long sequences, and benchmark throughput at L=1K, 4K, and 16K.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Linear Attention — Kernel Approximation of Softmax Attention</h1>
+<p>Softmax attention computes O = softmax(QKᵀ/√d) · V where the intermediate QKᵀ matrix has shape (B, h, L, L) — quadratic in sequence length. Linear attention replaces the softmax with a kernel function φ that factorises over query and key: attn(Q, K, V) ≈ φ(Q)(φ(K)ᵀV). Because matrix multiplication is associative, computing φ(K)ᵀV first (shape d × d) costs O(Ld²); then multiplying φ(Q) by this (shape L × d) costs O(Ld²) — total O(Ld²) independent of L. This eliminates the L² bottleneck at the cost of approximation error in the attention distribution.</p>
+<h2>Softmax Attention is O(L²d)</h2>
+<p>The canonical derivation: softmax(QKᵀ/√d) is (L × L); multiplying by V is (L × L) × (L × d) = O(L²d) FLOPs and O(L²) memory. This cannot be factored without approximation because softmax is not a linear function: softmax(QKᵀ) ≠ Q · (Kᵀ · something). The key observation is that softmax(qᵢᵀkⱼ) can be viewed as a kernel function K(qᵢ, kⱼ) = exp(qᵢᵀkⱼ/√d) / Z — if K(q, k) = φ(q)ᵀφ(k) for some feature map φ, then the normalisation Z = Σⱼ φ(q)ᵀφ(kⱼ) = φ(q)ᵀ(Σⱼ φ(kⱼ)) can be computed in O(Ld) and the entire attention in O(Ld²).</p>
+<h2>Linear Attention via the Kernel Trick</h2>
+<p>Katharopoulos et al. (2020) propose using the feature map φ(x) = elu(x) + 1, which is always positive and approximates the exponential kernel. The linear attention formula is: O_i = φ(Q_i)ᵀ (Σⱼ φ(Kⱼ)Vⱼᵀ) / (φ(Q_i)ᵀ Σⱼ φ(Kⱼ)). The denominator (the normalisation) is φ(Q)ᵀ · (Σ φ(K)) — a dot product after summing the feature maps. Both the numerator (the output) and denominator are computed in O(Ld²) total by first accumulating Σⱼ φ(Kⱼ)Vⱼᵀ (shape d × d) and Σⱼ φ(Kⱼ) (shape d), then multiplying each query's φ(Q_i) against these accumulators.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+import math
+
+def elu_feature_map(x):
+    &quot;&quot;&quot;ELU+1 feature map: always positive, approximates exp kernel.&quot;&quot;&quot;
+    return F.elu(x) + 1
+
+def linear_attention(Q, K, V):
+    &quot;&quot;&quot;Linear attention O(Ld^2) via kernel trick with ELU+1 feature map.
+    Q, K, V: (B, h, L, d). Returns: (B, h, L, d).
+    &quot;&quot;&quot;
+    phi_Q = elu_feature_map(Q)  # (B, h, L, d)
+    phi_K = elu_feature_map(K)  # (B, h, L, d)
+    # Accumulate: KV = sum_j phi(K_j) V_j^T  -- shape (B, h, d, d)
+    KV = phi_K.transpose(-2, -1) @ V          # O(L * d^2)
+    # Accumulate: Ksum = sum_j phi(K_j)       -- shape (B, h, d)
+    Ksum = phi_K.sum(dim=-2)                  # O(L * d)
+    # Numerator: phi(Q) @ KV                  -- shape (B, h, L, d)
+    num = phi_Q @ KV                          # O(L * d^2)
+    # Denominator: phi(Q) . Ksum              -- shape (B, h, L, 1)
+    denom = (phi_Q * Ksum.unsqueeze(-2)).sum(dim=-1, keepdim=True)  # O(L*d)
+    return num / (denom + 1e-6)
+
+torch.manual_seed(42)
+B, h, L, d = 1, 2, 32, 16
+Q, K, V = torch.randn(B,h,L,d), torch.randn(B,h,L,d), torch.randn(B,h,L,d)
+out_linear = linear_attention(Q, K, V)
+out_softmax = F.scaled_dot_product_attention(Q, K, V)
+print(f'Linear attention output: {out_linear.shape}')
+print(f'Max absolute diff from softmax: {(out_linear - out_softmax).abs().max().item():.4f}')
+print(f'Linear attention FLOPs: O(L*d^2) = {L * d**2} | Softmax: O(L^2*d) = {L**2 * d}')
+</code></pre>
+<h2>Performer: FAVOR+ Random Feature Approximation</h2>
+<p>Performer (Choromanski et al. 2021) approximates the softmax kernel exp(qᵢᵀkⱼ/√d) using the FAVOR+ (Fast Attention Via positive Orthogonal Random features) method. The idea: by the Johnson-Lindenstrauss lemma, exp(qᵢᵀkⱼ/√d) ≈ (1/√m) Σ_r cos(ωᵣᵀqᵢ) cos(ωᵣᵀkⱼ) + sin(ωᵣᵀqᵢ) sin(ωᵣᵀkⱼ) where ωᵣ are Gaussian random vectors. Using m random features, the feature map φ_FAVOR(x) ∈ ℝ^{2m} provides an unbiased estimate of the kernel with variance decreasing as 1/m. The FAVOR+ variant uses orthogonal random features (samples from the Stiefel manifold) to reduce variance further.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+import math
+
+def favor_plus_features(x, omega):
+    &quot;&quot;&quot;FAVOR+ random feature map for softmax kernel approximation.
+    x: (B, h, L, d)   omega: (d, m) random projections
+    Returns: (B, h, L, 2m) -- exp-normalised trig features
+    &quot;&quot;&quot;
+    d, m = omega.shape
+    proj = x @ omega  # (B, h, L, m)
+    # Normalise by exp(||x||^2 / 2) for unbiased softmax approximation
+    x_norm_sq = (x ** 2).sum(dim=-1, keepdim=True) / 2  # (B, h, L, 1)
+    scale = math.sqrt(1.0 / m)
+    phi = scale * torch.exp(-x_norm_sq) * torch.cat([torch.cos(proj), torch.sin(proj)], dim=-1)
+    return phi  # (B, h, L, 2m)
+
+def performer_attention(Q, K, V, num_features=64):
+    &quot;&quot;&quot;Performer attention using FAVOR+ features. O(L * m * d).&quot;&quot;&quot;
+    d = Q.shape[-1]
+    omega = torch.randn(d, num_features) / math.sqrt(d)
+    phi_Q = favor_plus_features(Q, omega)  # (B,h,L,2m)
+    phi_K = favor_plus_features(K, omega)
+    # KV accumulator: (B, h, 2m, d)
+    KV   = phi_K.transpose(-2,-1) @ V
+    Ksum = phi_K.sum(dim=-2)              # (B, h, 2m)
+    num  = phi_Q @ KV
+    denom = (phi_Q * Ksum.unsqueeze(-2)).sum(dim=-1, keepdim=True)
+    return num / (denom + 1e-6)
+
+torch.manual_seed(0)
+B, h, d = 1, 1, 32
+for L, m in [(64, 32), (256, 64), (1024, 128)]:
+    Q, K, V = torch.randn(B,h,L,d), torch.randn(B,h,L,d), torch.randn(B,h,L,d)
+    out_p = performer_attention(Q, K, V, m)
+    out_s = F.scaled_dot_product_attention(Q, K, V)
+    diff = (out_p - out_s).abs().mean().item()
+    print(f'L={L:4d}, m={m:3d}: mean abs diff = {diff:.4f}')
+</code></pre>
+<h2>Quality: Linear vs Softmax</h2>
+<p>The quality gap between linear and softmax attention depends on sequence length and task. For short sequences (L &lt; 256), the ELU+1 kernel and FAVOR+ both approximate softmax closely — differences in perplexity are negligible. For long sequences (L &gt; 2048), approximation errors accumulate: the linear model may lose track of rare but important tokens that softmax would assign high attention weight. Perplexity gaps of 1–3 points are typical on language modelling benchmarks. Tasks requiring hard retrieval (find the one relevant sentence in a 16K document) show larger degradation; tasks with diffuse attention (summarisation) show less.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+import math
+
+def elu_feature_map(x):
+    return F.elu(x) + 1
+
+def linear_attention(Q, K, V):
+    phi_Q, phi_K = elu_feature_map(Q), elu_feature_map(K)
+    KV = phi_K.transpose(-2,-1) @ V
+    Ksum = phi_K.sum(-2)
+    return (phi_Q @ KV) / ((phi_Q * Ksum.unsqueeze(-2)).sum(-1, keepdim=True) + 1e-6)
+
+torch.manual_seed(7)
+B, h, d = 1, 1, 32
+print(f&quot;{'L':&gt;6} {'L-attn MSE':&gt;14} {'L-attn MaxErr':&gt;16} {'Quality verdict':&gt;18}&quot;)
+for L in [32, 128, 512, 2048, 8192]:
+    Q = torch.randn(B, h, L, d)
+    K = torch.randn(B, h, L, d)
+    V = torch.randn(B, h, L, d)
+    out_s = F.scaled_dot_product_attention(Q, K, V)
+    out_l = linear_attention(Q, K, V)
+    mse   = F.mse_loss(out_l, out_s).item()
+    maxe  = (out_l - out_s).abs().max().item()
+    verdict = 'Good' if mse &lt; 0.01 else ('Moderate' if mse &lt; 0.1 else 'Poor')
+    print(f'{L:&gt;6} {mse:&gt;14.6f} {maxe:&gt;16.4f} {verdict:&gt;18}')
+print('\nConclusion: linear attention quality degrades with L.')
+print('For L&gt;2K, quality gap is significant for retrieval-heavy tasks.')
+</code></pre>
+<h2>Throughput at Scale</h2>
+<p>Linear attention achieves its throughput advantage at large L where O(L²) memory causes softmax attention to OOM or thrash memory bandwidth. The crossover point — where linear attention becomes faster — depends on d and batch size. For d=64, the crossover is typically around L=1000–2000 on GPU. For d=256, the O(Ld²) cost of linear attention is higher and the crossover shifts to L≈4000. The Performer implementation avoids storing the L×L attention matrix entirely, making it memory-bounded by O(L×m) rather than O(L²).</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+import math
+import time
+
+def elu_feature_map(x):
+    return F.elu(x) + 1
+
+def linear_attention(Q, K, V):
+    phi_Q, phi_K = elu_feature_map(Q), elu_feature_map(K)
+    KV = phi_K.transpose(-2,-1) @ V
+    Ksum = phi_K.sum(-2)
+    return (phi_Q @ KV) / ((phi_Q * Ksum.unsqueeze(-2)).sum(-1, keepdim=True) + 1e-6)
+
+def bench(fn, *args, n=20):
+    for _ in range(3): fn(*args)  # warmup
+    t0 = time.perf_counter()
+    for _ in range(n): fn(*args)
+    return (time.perf_counter() - t0) / n * 1000
+
+B, h, d = 1, 4, 64
+print(f&quot;{'L':&gt;6} {'Softmax ms':&gt;12} {'Linear ms':&gt;12} {'Speedup':&gt;10} {'Softmax MB':&gt;12}&quot;)
+for L in [512, 1024, 2048, 4096, 8192]:
+    Q, K, V = [torch.randn(B, h, L, d) for _ in range(3)]
+    try:
+        t_s = bench(F.scaled_dot_product_attention, Q, K, V)
+        sm_mem = B * h * L * L * 2 / 1024**2
+    except RuntimeError:
+        t_s, sm_mem = float('inf'), -1
+    t_l = bench(linear_attention, Q, K, V)
+    speedup = t_s / t_l if t_s != float('inf') else float('inf')
+    print(f'{L:&gt;6} {t_s:&gt;12.2f} {t_l:&gt;12.2f} {speedup:&gt;10.2f} {sm_mem:&gt;12.1f}')
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Complexity</th>
+<th>Memory</th>
+<th>Quality</th>
+<th>Parallelizable</th>
+<th>Causal support</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Softmax attention</td>
+<td>O(L²d)</td>
+<td>O(L²)</td>
+<td>Exact — best</td>
+<td>Yes — batched matmul</td>
+<td>Yes — causal mask</td>
+<td>FlashAttention reduces memory to O(L)</td>
+</tr>
+<tr>
+<td>Performer (FAVOR+)</td>
+<td>O(Lmd)</td>
+<td>O(Lm)</td>
+<td>Good (m≥64), degrades at large L</td>
+<td>Yes</td>
+<td>Yes</td>
+<td>Unbiased estimator; variance ∝ 1/m</td>
+</tr>
+<tr>
+<td>Linear Transformer</td>
+<td>O(Ld²)</td>
+<td>O(Ld)</td>
+<td>Moderate — quality gap at large L</td>
+<td>Yes (non-causal); sequential (causal)</td>
+<td>Yes — recurrent form</td>
+<td>ELU+1 feature map; Katharopoulos 2020</td>
+</tr>
+<tr>
+<td>RetNet</td>
+<td>O(Ld²) train / O(d²) per step</td>
+<td>O(d²) at inference</td>
+<td>Competitive with Transformer</td>
+<td>Yes (parallel training)</td>
+<td>Yes — retention decay</td>
+<td>Recurrent inference like RNN</td>
+</tr>
+<tr>
+<td>RWKV</td>
+<td>O(Ld) train / O(d) per step</td>
+<td>O(d)</td>
+<td>Strong on NLP benchmarks</td>
+<td>Partially (WKV operator)</td>
+<td>Yes — time-mixing</td>
+<td>Hybrid RNN/Transformer design</td>
+</tr>
+</tbody>
+</table>
+<h2>Practical Tradeoffs and Alternatives</h2>
+<p>Linear attention is not a free lunch. The quality degradation at large L makes it unsuitable for tasks requiring precise attention over long contexts — retrieval-augmented generation, long-document QA, or code generation with large repos. The ELU+1 and FAVOR+ approximations are best suited to tasks with diffuse attention patterns where no single key dominates the distribution. Retentive Networks (RetNet) and RWKV take a different approach: they achieve linear complexity during inference (recurrent forward pass) while training in parallel — better practical quality than linear attention at the cost of a more complex architecture.</p>
+<blockquote>
+<p><strong>Linear Attention Quality Gap Is Real</strong>: Do not use linear attention as a drop-in replacement for softmax attention without empirical validation on your task. The quality gap is small for diffuse attention tasks (summarisation, classification) but significant for retrieval-heavy tasks (document QA, multi-hop reasoning). On long-context language modelling (L=8192+), linear attention perplexity is typically 1–3 points higher than FlashAttention. Always measure on your downstream task before committing to a linear attention architecture.</p>
+</blockquote>
+<h2>Sub-Quadratic Architectures Beyond Linear Attention</h2>
+<p>Several architectures achieve sub-quadratic complexity with better practical quality than kernel linear attention. Hyena (Nguyen et al. 2023) replaces attention with implicit long convolutions, achieving O(L log L) complexity with competitive language modelling quality. Mamba (Gu &amp; Dao 2023) uses a selective state space model with O(L) complexity and hardware-aware parallel scan for training. S4 (Gu et al. 2021) parametrises the state space with HiPPO matrices for efficient long-sequence modelling. These models represent an active research frontier where architecture choice depends on the specific task, sequence length regime, and hardware constraints.</p>
+<ul>
+<li>Linear Transformer (Katharopoulos 2020): ELU+1 feature map, exact linear complexity, quality gap at L&gt;2K.</li>
+<li>Performer (Choromanski 2021): FAVOR+ random features, unbiased softmax approximation, m controls quality-speed trade-off.</li>
+<li>RetNet (Sun et al. 2023): training-time parallel, inference-time recurrent O(d²/step), competitive NLP quality.</li>
+<li>RWKV (Peng et al. 2023): time-mixing replaces attention, O(d) inference, strong empirical results on NLP.</li>
+<li>Mamba (Gu &amp; Dao 2023): selective SSM with O(L) complexity and hardware-aware scan, state-of-the-art at time of publication.</li>
+<li>Hyena (Nguyen et al. 2023): implicit convolution, O(L log L), promising for DNA/audio with very long sequences.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Linear Discriminant Analysis (LDA) | Notes Backup</title>
+  <meta name="description" content="Derive LDA from Gaussian class-conditional distributions, understand Fisher&#x27;s discriminant as a projection maximising class separability, compare LDA vs QDA vs logistic regression, and use LDA for dimensionality reduction." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Linear Discriminant Analysis (LDA)</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Derive LDA from Gaussian class-conditional distributions, understand Fisher&#x27;s discriminant as a projection maximising class separability, compare LDA vs QDA vs logistic regression, and use LDA for dimensionality reduction.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Linear Discriminant Analysis (LDA)</h1>
+<p>Linear Discriminant Analysis (LDA) assumes that each class generates data from a multivariate Gaussian distribution with class-specific mean but a shared covariance matrix: p(x|y=k) = N(μₖ, Σ). Applying Bayes' theorem and taking log-ratios, the decision boundary becomes linear in x because the quadratic terms in xᵀΣ⁻¹x cancel (shared Σ). LDA is both a classifier and a dimensionality reduction method: it finds at most K-1 directions that maximally separate K classes while minimising within-class spread.</p>
+<h2>Discriminant Function Derivation</h2>
+<p>With class-conditional Gaussians and shared covariance, the log posterior is: log p(y=k|x) ∝ log πₖ - (1/2)(x-μₖ)ᵀΣ⁻¹(x-μₖ). Expanding: = log πₖ - (1/2)μₖᵀΣ⁻¹μₖ + xᵀΣ⁻¹μₖ - (1/2)xᵀΣ⁻¹x. The term -(1/2)xᵀΣ⁻¹x is the same for all classes and cancels in argmax. The linear discriminant function for class k is: δₖ(x) = xᵀΣ⁻¹μₖ - (1/2)μₖᵀΣ⁻¹μₖ + log πₖ. Classify x to argmax_k δₖ(x). The decision boundary between classes k and l is the set of x where δₖ(x) = δₗ(x), which is a hyperplane (linear in x) — hence 'Linear' Discriminant Analysis.</p>
+<h2>Within-Class and Between-Class Scatter Matrices</h2>
+<p>The shared covariance (pooled within-class scatter) is SW = Σₖ Σᵢ∈Cₖ (xᵢ-μₖ)(xᵢ-μₖ)ᵀ / (n-K). The between-class scatter is SB = Σₖ nₖ(μₖ-μ)(μₖ-μ)ᵀ where μ is the global mean. Fisher's criterion maximises J(w) = wᵀSBw / wᵀSWw — the ratio of between-class to within-class projected variance. The solution is the generalised eigenvalue problem SW⁻¹SBw = λw, whose eigenvectors are the LDA directions. Since SB has rank at most K-1, there are at most K-1 nonzero eigenvalues and therefore at most K-1 useful discriminant dimensions. For binary classification, the single direction is w = SW⁻¹(μ₁-μ₂) — the Mahalanobis direction between class means.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.datasets import load_iris
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+
+class LDAFromScratch:
+    def fit(self, X, y):
+        self.classes_ = np.unique(y)
+        n, p = X.shape
+        self.priors_, self.means_ = {}, {}
+        Sw = np.zeros((p, p))
+        for c in self.classes_:
+            Xc = X[y == c]
+            self.priors_[c] = len(Xc) / n
+            self.means_[c]  = Xc.mean(axis=0)
+            diff = Xc - self.means_[c]
+            Sw += diff.T @ diff
+        self.Sigma_ = Sw / (n - len(self.classes_))  # pooled covariance
+        self.Sigma_inv_ = np.linalg.pinv(self.Sigma_)
+        return self
+
+    def _discriminant(self, x, c):
+        mu = self.means_[c]
+        return (x @ self.Sigma_inv_ @ mu
+                - 0.5 * mu @ self.Sigma_inv_ @ mu
+                + np.log(self.priors_[c]))
+
+    def predict(self, X):
+        scores = np.array([[self._discriminant(x, c) for c in self.classes_]
+                           for x in X])
+        return self.classes_[np.argmax(scores, axis=1)]
+
+X, y = load_iris(return_X_y=True)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.3, random_state=42)
+lda_s = LDAFromScratch().fit(X_tr, y_tr)
+print(f'LDA scratch: {accuracy_score(y_te, lda_s.predict(X_te)):.4f}')
+</code></pre>
+<h2>Fisher's Discriminant and Dimensionality Reduction</h2>
+<p>LDA as dimensionality reduction projects K-class data onto K-1 discriminant dimensions that maximise class separability. For the Iris dataset (K=3 classes, p=4 features), LDA finds exactly 2 discriminant directions, compressing 4D data into 2D while preserving most of the class separation. This is far more useful for classification than PCA's 2D projection, which maximises total variance regardless of class labels. After projecting to LDA space, a simple classifier (linear, kNN) applied to the low-dimensional representation often achieves near-optimal accuracy.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from sklearn.datasets import load_iris
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+
+X, y = load_iris(return_X_y=True)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.3, random_state=42)
+
+lda = LinearDiscriminantAnalysis(solver='svd', store_covariance=True)
+lda.fit(X_tr, y_tr)
+print(f'LDA classifier accuracy: {accuracy_score(y_te, lda.predict(X_te)):.4f}')
+print(f'Explained variance ratio: {lda.explained_variance_ratio_}')
+
+# LDA for dimensionality reduction (K-1 = 2 dims for 3-class problem)
+X_lda_tr = lda.transform(X_tr)
+X_lda_te = lda.transform(X_te)
+print(f'Projected shape: {X_lda_tr.shape}  (from {X_tr.shape[1]} -&gt; {X_lda_tr.shape[1]} dims)')
+for c in np.unique(y_tr):
+    mean_proj = X_lda_tr[y_tr == c].mean(axis=0)
+    print(f'  Class {c} mean in LDA space: {mean_proj.round(3)}')
+</code></pre>
+<pre><code class="language-python">import numpy as np
+from sklearn.decomposition import PCA
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from sklearn.datasets import load_wine
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score
+
+X, y = load_wine(return_X_y=True)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.3, random_state=42)
+
+# PCA to 2D then classify
+pca = PCA(n_components=2)
+X_pca_tr = pca.fit_transform(X_tr)
+X_pca_te = pca.transform(X_te)
+lr_pca = LogisticRegression(max_iter=500).fit(X_pca_tr, y_tr)
+
+# LDA to K-1=2D then classify
+lda = LinearDiscriminantAnalysis(n_components=2)
+X_lda_tr = lda.fit_transform(X_tr, y_tr)
+X_lda_te = lda.transform(X_te)
+lr_lda = LogisticRegression(max_iter=500).fit(X_lda_tr, y_tr)
+
+# Full LDA classifier
+lda_full = LinearDiscriminantAnalysis().fit(X_tr, y_tr)
+
+print(f'LR on 2 PCA dims:      {accuracy_score(y_te, lr_pca.predict(X_pca_te)):.4f}')
+print(f'LR on 2 LDA dims:      {accuracy_score(y_te, lr_lda.predict(X_lda_te)):.4f}')
+print(f'Full LDA classifier:   {accuracy_score(y_te, lda_full.predict(X_te)):.4f}')
+</code></pre>
+<blockquote>
+<p><strong>LDA vs PCA — Same Goal, Different Criterion</strong>: PCA finds directions of maximum variance in X, ignoring class labels. LDA finds directions of maximum class separability — between-class variance relative to within-class variance. When classes are well-separated but not aligned with the highest-variance directions (common in real datasets), LDA projections are dramatically better for classification. Use PCA when the goal is compression or unsupervised structure; use LDA when you have class labels and want discriminative dimensionality reduction.</p>
+</blockquote>
+<pre><code class="language-python">import numpy as np
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis, QuadraticDiscriminantAnalysis
+from sklearn.linear_model import LogisticRegression
+from sklearn.model_selection import cross_val_score
+
+np.random.seed(42)
+# Case 1: same covariance — LDA assumption satisfied
+from sklearn.datasets import make_classification
+X1, y1 = make_classification(n_samples=500, n_features=10, n_informative=5, random_state=42)
+
+# Case 2: class-specific covariance — LDA assumption violated, QDA should win
+X2_0 = np.random.multivariate_normal([0]*6, np.eye(6)*0.5, 250)
+X2_1 = np.random.multivariate_normal([2]*6, np.diag([2, 3, 1, 0.5, 4, 1]), 250)
+X2, y2 = np.vstack([X2_0, X2_1]), np.array([0]*250 + [1]*250)
+
+for dname, Xd, yd in [('Equal covariance', X1, y1), ('Different covariance', X2, y2)]:
+    print(f'\n{dname}:')
+    for name, clf in [('LDA', LinearDiscriminantAnalysis()),
+                       ('QDA', QuadraticDiscriminantAnalysis()),
+                       ('LR',  LogisticRegression(max_iter=500))]:
+        score = cross_val_score(clf, Xd, yd, cv=5, scoring='accuracy').mean()
+        print(f'  {name}: {score:.4f}')
+</code></pre>
+<h2>Regularised LDA for Small Sample Sizes</h2>
+<p>When n &lt; p (more features than samples), the pooled within-class scatter matrix SW is singular and cannot be inverted. Regularised LDA replaces SW with (1-γ)SW + γ·(trace(SW)/p)·I for γ ∈ [0,1]. When γ=1, the result is a scaled identity — equivalent to assuming all features are uncorrelated with equal variance (identical to Gaussian Naive Bayes). sklearn's LinearDiscriminantAnalysis with solver='lsqr' and shrinkage='auto' uses the analytically optimal Ledoit-Wolf shrinkage estimator, which chooses γ to minimise the Frobenius norm of the estimation error.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Assumption</th>
+<th>Decision Boundary</th>
+<th>Small n?</th>
+<th>Best Use Case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>LDA</td>
+<td>Shared Gaussian covariance Σ</td>
+<td>Linear hyperplane</td>
+<td>Yes — use regularised LDA</td>
+<td>Well-separated classes, p moderate</td>
+</tr>
+<tr>
+<td>QDA</td>
+<td>Class-specific Gaussian covariance Σₖ</td>
+<td>Quadratic surface</td>
+<td>No — needs n &gt;&gt; p·K</td>
+<td>Classes with different spread/orientation</td>
+</tr>
+<tr>
+<td>Logistic Regression</td>
+<td>None — discriminative</td>
+<td>Linear hyperplane</td>
+<td>Yes with L2 regularisation</td>
+<td>General binary/multiclass, no distributional assumption</td>
+</tr>
+<tr>
+<td>Gaussian Naive Bayes</td>
+<td>Diagonal covariance (independence)</td>
+<td>Quadratic or linear</td>
+<td>Yes — fewest parameters</td>
+<td>High-d, small n, streaming, online</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>LDA requires n &gt; p for a full-rank pooled covariance matrix; use shrinkage='auto' for high-d data.</li>
+<li>For K classes, LDA produces at most K-1 discriminant directions — use for dimensionality reduction first.</li>
+<li>When class covariances differ substantially, QDA produces better boundaries but needs more data.</li>
+<li>LDA is equivalent to Gaussian Naive Bayes with equal, non-diagonal covariance across classes.</li>
+<li>Check LDA assumptions: plot class-conditional distributions and test for normality with Shapiro-Wilk.</li>
+<li>For imbalanced classes, adjust priors_=class_frequencies to avoid majority-class bias.</li>
+</ul>
+<p>LDA remains a powerful baseline for multi-class classification when Gaussian assumptions hold approximately. Its closed-form solution, lack of hyperparameters (beyond regularisation strength), and natural dimensionality reduction capability make it a valuable first step in any classification pipeline. When LDA performs well, it suggests the data is approximately Gaussian with shared covariance — a result worth knowing before reaching for more complex models.</p>
+<blockquote>
+<p><strong>LDA Normality Assumption in Practice</strong>: LDA assumes class-conditional Gaussian distributions. Common violations: skewed features (apply log transform), heavy tails (trim outliers), multimodal within-class distributions (consider mixture models). However, like Naive Bayes, LDA is often robust to mild normality violations in classification tasks because the argmax of the discriminant function can still be correct. For severely non-Gaussian data, logistic regression (discriminative, no distributional assumption) is the safer choice.</p>
+</blockquote>
+<p>Multi-class LDA with K classes finds at most K-1 discriminant directions because the between-class scatter matrix SB has rank at most K-1. For K=2 the single direction is w = SW^{-1}(mu_1 - mu_2). For K=10 (digit recognition), LDA provides a 9D subspace capturing all class-discriminative information. Projecting to this subspace and applying a nearest-centroid classifier is a competitive baseline for moderate-dimensional multi-class problems and is used in face recognition (Fisherfaces).</p>
+<p>LDA has a deep connection to logistic regression: both produce linear decision boundaries but via different estimation principles. LDA estimates the joint distribution p(x,y) and derives the boundary analytically (generative); logistic regression maximises the conditional likelihood p(y|x) directly (discriminative). When the Gaussian assumption holds, LDA is more statistically efficient. When it does not hold, logistic regression is more robust. Always try both as baselines before reaching for more complex models.</p>
+<p>Shrinkage LDA (using the Ledoit-Wolf optimal estimator for the covariance matrix) is essential in high-dimensional settings where p &gt;&gt; n. With LinearDiscriminantAnalysis(solver='lsqr', shrinkage='auto'), the optimal shrinkage parameter gamma is computed analytically from the data — no cross-validation needed. This makes regularised LDA a practical default for genomics, neuroimaging, and text where the standard pooled covariance would be singular. The result interpolates between the full pooled covariance (gamma=0) and a scaled identity (gamma=1, equivalent to Gaussian Naive Bayes).</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

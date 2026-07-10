@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DeepSeek-R1: Reinforcement Learning for Reasoning | Notes Backup</title>
+  <meta name="description" content="How DeepSeek-R1 trains long chain-of-thought reasoning via RL — covering GRPO, cold-start SFT, the RL training pipeline, and distillation to smaller models." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>DeepSeek-R1: Reinforcement Learning for Reasoning</h1>
+      <ul class='note-meta'><li><strong>description:</strong> How DeepSeek-R1 trains long chain-of-thought reasoning via RL — covering GRPO, cold-start SFT, the RL training pipeline, and distillation to smaller models.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>DeepSeek-R1: Reinforcement Learning for Reasoning</h1>
+<p>DeepSeek-R1 achieves o1-level performance on math and coding benchmarks using reinforcement learning with GRPO, without relying on human-labeled chain-of-thought data. R1-Zero demonstrates that complex reasoning behaviors — including self-verification and reflection — can emerge purely from reward signals, challenging the assumption that supervised CoT data is necessary.</p>
+<p>GRPO: Group Relative Policy Optimization</p>
+<p>GRPO replaces the actor-critic setup used in PPO with a group-based advantage estimation. For each prompt, K responses are sampled from the current policy; each receives a scalar reward. The advantage for each response is computed by subtracting the group mean and dividing by the group standard deviation — eliminating the need for a separate critic or value model.</p>
+<pre><code class="language-python">import torch
+
+def grpo_loss(policy, ref_policy, prompts, K=8, beta=0.04, eps=0.2):
+    losses = []
+    for prompt in prompts:
+        completions = policy.sample(prompt, n=K, temperature=0.8)
+        r = torch.tensor([reward_fn(prompt, c) for c in completions])
+        adv = (r - r.mean()) / (r.std() + 1e-8)
+        logp = policy.log_prob(completions)
+        ref_logp = ref_policy.log_prob(completions)
+        ratio = (logp - ref_logp).exp()
+        clipped = torch.clamp(ratio, 1 - eps, 1 + eps)
+        pg = -torch.min(ratio * adv, clipped * adv).mean()
+        losses.append(pg + beta * (logp - ref_logp).mean())
+    return torch.stack(losses).mean()
+</code></pre>
+<p>Reward Functions</p>
+<p>DeepSeek-R1 uses two rule-based rewards: a correctness reward that checks the final answer against a ground-truth (using SymPy for symbolic math equality and unit tests for code), and a format reward that enforces the model produces <think>...</think> and <answer>...</answer> tags. No learned reward model is needed, keeping the signal clean and verifiable.</p>
+<pre><code class="language-python">import re
+from sympy import simplify, sympify, SympifyError
+
+def reward_fn(prompt, completion, expected):
+    has_think = bool(re.search(r'&lt;think&gt;.+&lt;/think&gt;', completion, re.S))
+    fmt_bonus = 0.1 if has_think else 0.0
+    m = re.search(r'&lt;answer&gt;(.*?)&lt;/answer&gt;', completion, re.S)
+    if m is None:
+        return fmt_bonus * 0.5
+    predicted = m.group(1).strip()
+    try:
+        if simplify(sympify(predicted) - sympify(expected)) == 0:
+            return 1.0 + fmt_bonus
+    except SympifyError:
+        pass
+    return fmt_bonus if predicted != str(expected) else 1.0 + fmt_bonus
+</code></pre>
+<p>Cold-Start Problem and SFT Initialization</p>
+<p>R1-Zero (pure RL from base) produces emergent reasoning but suffers from language mixing and inconsistent output formatting. DeepSeek-R1 addresses this with a cold-start phase: a small set of human-curated long-CoT examples in the desired format are used to fine-tune the base model before RL begins, giving the policy a well-structured starting point.</p>
+<pre><code class="language-python">from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments
+
+def cold_start_sft(model_name, sft_dataset_path, output_dir):
+    model = AutoModelForCausalLM.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    dataset = load_cot_dataset(sft_dataset_path)  # &lt;think&gt;...&lt;/think&gt;&lt;answer&gt;...&lt;/answer&gt;
+    args = TrainingArguments(
+        output_dir=output_dir, num_train_epochs=1,
+        per_device_train_batch_size=4, learning_rate=1e-5,
+        lr_scheduler_type=&quot;cosine&quot;, warmup_ratio=0.03,
+    )
+    trainer = Trainer(model=model, args=args,
+                      train_dataset=dataset, tokenizer=tokenizer)
+    trainer.train()
+</code></pre>
+<p>RL Training Pipeline</p>
+<p>The RL loop repeatedly samples completions from the current policy, scores them with the reward function, computes GRPO advantages, and updates policy weights. Training runs for thousands of steps with a KL-divergence penalty against a frozen reference policy to prevent the model from drifting too far from the pre-trained distribution.</p>
+<p>After RL convergence, a second SFT pass is applied using rejection-sampled solutions from the RL model plus supervised data for general tasks. This round restores helpfulness on non-reasoning tasks, reduces repetition artifacts from RL training, and chat-aligns the final model while preserving the strong reasoning capability gained through GRPO.</p>
+<p>Distillation to Smaller Models</p>
+<p>Rather than running expensive RL on smaller models, DeepSeek distills reasoning by generating large quantities of long-CoT solution traces from the R1-671B teacher, then fine-tuning a smaller student (7B or 32B) on those traces using standard supervised learning. This is far cheaper than RL while achieving surprisingly strong benchmark results on reasoning tasks.</p>
+<pre><code class="language-python">from transformers import AutoModelForCausalLM, Trainer, TrainingArguments
+from datasets import load_dataset
+
+def distill_from_r1(student_name, traces_path, output_dir, eval_dataset):
+    student = AutoModelForCausalLM.from_pretrained(student_name)
+    dataset = load_dataset(&quot;json&quot;, data_files=traces_path)[&quot;train&quot;]
+    # Mask loss to answer tokens; CoT tokens are still fed as context
+    dataset = dataset.map(lambda x: mask_cot_tokens(x, answer_tag=&quot;&lt;answer&gt;&quot;))
+    args = TrainingArguments(
+        output_dir=output_dir, num_train_epochs=3,
+        per_device_train_batch_size=2, learning_rate=2e-5,
+        gradient_accumulation_steps=8,
+    )
+    trainer = Trainer(model=student, args=args, train_dataset=dataset)
+    trainer.train()
+    return evaluate_aime(student, eval_dataset)
+</code></pre>
+<p>Distillation works because the student learns to reproduce the structure of long reasoning chains — including backtracking, self-correction, and verification steps — by imitating the teacher. Remarkably, a 7B model distilled from R1 outperforms much larger models trained without chain-of-thought distillation, achieving 55.5% on AIME 2024 and 92.8% on MATH-500.</p>
+<blockquote>
+<p>****: DeepSeek-R1-Zero trained purely via RL with no SFT spontaneously developed chain-of-thought reasoning, self-verification, and reflection behaviors — demonstrating that reasoning can emerge from reward signals alone without any human-labeled reasoning traces.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>AIME 2024 (%)</th>
+<th>MATH-500 (%)</th>
+<th>Codeforces (%ile)</th>
+<th>Params</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>R1-Zero</td>
+<td>71.0</td>
+<td>90.0</td>
+<td>58.0</td>
+<td>671B</td>
+</tr>
+<tr>
+<td>R1</td>
+<td>79.8</td>
+<td>97.3</td>
+<td>96.3</td>
+<td>671B</td>
+</tr>
+<tr>
+<td>R1-Distill-7B</td>
+<td>55.5</td>
+<td>92.8</td>
+<td>37.6</td>
+<td>7B</td>
+</tr>
+<tr>
+<td>R1-Distill-32B</td>
+<td>72.6</td>
+<td>94.3</td>
+<td>72.6</td>
+<td>32B</td>
+</tr>
+<tr>
+<td>GPT-4o</td>
+<td>9.3</td>
+<td>76.6</td>
+<td>43.4</td>
+<td>-</td>
+</tr>
+</tbody>
+</table>
+<p>The benchmark numbers highlight a key insight: distillation transfers reasoning capability efficiently. R1-Distill-32B at 32B parameters vastly exceeds GPT-4o on AIME 2024 (72.6% vs 9.3%), and even R1-Distill-7B substantially outperforms GPT-4o. The gap between R1-Zero and R1 also shows the concrete value of cold-start SFT and the second alignment pass.</p>
+<hr />
+<p>Key Takeaways</p>
+<ul>
+<li>GRPO eliminates the critic/value model by estimating advantages within a group of K sampled responses — reducing training complexity and GPU memory vs PPO.</li>
+<li>R1-Zero proves reasoning can emerge from RL with rule-based rewards alone, with no SFT on CoT data — though output quality is inconsistent without cold-start initialization.</li>
+<li>Cold-start SFT on a small set of human-curated CoT examples stabilizes formatting and language consistency before RL training begins.</li>
+<li>Distillation via imitation of R1-671B traces gives 7B and 32B models strong reasoning at a fraction of the RL training cost — no RL required on the student model.</li>
+<li>R1-Distill-32B scores 72.6% on AIME 2024, vastly exceeding GPT-4o (9.3%) — showing that distilled reasoning dramatically outperforms scale-only approaches.</li>
+<li>Use distilled models (7B/32B) for production serving; use full R1-671B for generating high-quality reasoning traces for future distillation rounds.</li>
+</ul>
+<p>DeepSeek-R1's key contribution is a practical training recipe: grow strong reasoning with GRPO using rule-based rewards, then distill that capability into deployable smaller models via supervised imitation. The approach bypasses expensive human annotation of reasoning chains and demonstrates that outcome supervision at scale is sufficient to produce state-of-the-art reasoning.</p>
+    </article>
+  </main>
+</body>
+</html>

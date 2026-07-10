@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hierarchical Clustering — Linkage Methods and Dendrograms | Notes Backup</title>
+  <meta name="description" content="Master agglomerative hierarchical clustering: single, complete, average, and Ward linkage criteria, reading and cutting dendrograms, cophenetic correlation coefficient for evaluating linkage quality, and comparison with k-means on compact and chained data." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Hierarchical Clustering — Linkage Methods and Dendrograms</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Master agglomerative hierarchical clustering: single, complete, average, and Ward linkage criteria, reading and cutting dendrograms, cophenetic correlation coefficient for evaluating linkage quality, and comparison with k-means on compact and chained data.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Hierarchical Clustering — Linkage Methods and Dendrograms</h1>
+<p>Hierarchical clustering builds a tree of nested partitions without requiring k to be specified in advance. The dendrogram records the entire merge history — you choose the number of clusters post-hoc by cutting the tree at any height. Agglomerative (bottom-up) hierarchical clustering starts with each point as its own cluster and greedily merges the two closest clusters at each step. The choice of linkage criterion — how inter-cluster distance is measured — has a major effect on cluster shape and quality.</p>
+<h2>Agglomerative Algorithm</h2>
+<p>Starting with n singleton clusters, at each step find the pair of clusters (Cᵢ, Cⱼ) with the smallest inter-cluster distance d(Cᵢ,Cⱼ) (determined by the linkage criterion), merge them into one cluster, update the distance matrix, and repeat until one cluster remains. The merge history is recorded as a dendrogram: each internal node represents a merge, its height is the distance at which the merge occurred, and cutting the tree horizontally at height h yields the flat clustering at that resolution. The naive implementation is O(n³) but the priority-queue version is O(n² log n) for most linkages.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.datasets import make_blobs
+
+def single_linkage_agglomerative(X):
+    &quot;&quot;&quot;Single linkage hierarchical clustering from scratch.&quot;&quot;&quot;
+    n = X.shape[0]
+    # Distance matrix
+    dists = np.sqrt(((X[:, None, :] - X[None, :, :]) ** 2).sum(axis=2))
+    np.fill_diagonal(dists, np.inf)
+    # Track cluster membership
+    clusters = [{i} for i in range(n)]
+    active = list(range(n))
+    merge_history = []  # (cluster_a_idx, cluster_b_idx, distance)
+    for step in range(n - 1):
+        # Find minimum inter-cluster distance using active cluster representatives
+        best_d, best_i, best_j = np.inf, -1, -1
+        for idx_a in range(len(active)):
+            for idx_b in range(idx_a + 1, len(active)):
+                a_pts = list(clusters[active[idx_a]])
+                b_pts = list(clusters[active[idx_b]])
+                # Single linkage: minimum pairwise distance
+                d = dists[np.ix_(a_pts, b_pts)].min()
+                if d &lt; best_d:
+                    best_d, best_i, best_j = d, idx_a, idx_b
+        ci, cj = active[best_i], active[best_j]
+        merge_history.append((ci, cj, best_d))
+        clusters[ci] = clusters[ci] | clusters[cj]
+        active.pop(best_j)
+    return merge_history
+
+X, y = make_blobs(n_samples=12, centers=3, random_state=0)
+history = single_linkage_agglomerative(X)
+print(&quot;Merge history (cluster_a, cluster_b, distance):&quot;)
+for a, b, d in history[:6]:
+    print(f&quot;  clusters {a} + {b} at distance {d:.4f}&quot;)
+</code></pre>
+<h2>Linkage Criteria</h2>
+<p>The linkage criterion defines how the distance between two clusters is computed from pairwise point distances. Single linkage d(A,B) = min_{a∈A,b∈B} dist(a,b) tends to produce elongated, chained clusters ('chaining effect'). Complete linkage d(A,B) = max_{a∈A,b∈B} dist(a,b) forces compact clusters but splits large diffuse clusters. Average linkage (UPGMA) d(A,B) = (1/|A||B|) Σ dist(a,b) is a balanced compromise. Ward linkage minimizes the increase in total within-cluster variance at each merge: Δ(A,B) = |A||B|/(|A|+|B|) × ‖μ_A − μ_B‖² — equivalent to k-means objective, typically producing the most compact clusters.</p>
+<table>
+<thead>
+<tr>
+<th>Linkage</th>
+<th>Distance Formula</th>
+<th>Chain Effect</th>
+<th>Outlier Sensitive</th>
+<th>Typical Use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Single</td>
+<td>min pairwise distance</td>
+<td>Yes — prone to chaining</td>
+<td>Yes — one bridge merges clusters</td>
+<td>Non-convex chains, dendrogram analysis</td>
+</tr>
+<tr>
+<td>Complete</td>
+<td>max pairwise distance</td>
+<td>No — compact clusters</td>
+<td>Yes — outliers delay merges</td>
+<td>Compact, similarly-sized clusters</td>
+</tr>
+<tr>
+<td>Average (UPGMA)</td>
+<td>mean pairwise distance</td>
+<td>Mild</td>
+<td>Moderate</td>
+<td>General purpose, balanced clusters</td>
+</tr>
+<tr>
+<td>Ward</td>
+<td>min variance increase</td>
+<td>No — most compact</td>
+<td>No — uses cluster means</td>
+<td>Default choice for compact clusters</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-python">import numpy as np
+from scipy.cluster.hierarchy import dendrogram, linkage, fcluster
+from scipy.spatial.distance import pdist
+from sklearn.datasets import make_blobs
+from sklearn.preprocessing import StandardScaler
+
+X, y_true = make_blobs(n_samples=150, centers=4, cluster_std=0.8, random_state=42)
+X = StandardScaler().fit_transform(X)
+
+print(f&quot;{'Linkage':10s} {'ARI':&gt;8} {'Silhouette':&gt;12}&quot;)
+from sklearn.metrics import adjusted_rand_score, silhouette_score
+for method in ['single', 'complete', 'average', 'ward']:
+    Z = linkage(X, method=method)
+    labels = fcluster(Z, t=4, criterion='maxclust') - 1
+    ari = adjusted_rand_score(y_true, labels)
+    sil = silhouette_score(X, labels)
+    print(f&quot;{method:10s} {ari:&gt;8.4f} {sil:&gt;12.4f}&quot;)
+
+# Show Ward dendrogram info
+Z_ward = linkage(X, method='ward')
+print(f&quot;\nWard: last 5 merge heights: {Z_ward[-5:, 2].round(3)}&quot;)
+print(&quot;Large gap between height[-2] and height[-1] indicates natural cluster count.&quot;)
+</code></pre>
+<h2>Ward Linkage vs K-Means</h2>
+<p>Ward linkage minimizes the same criterion as k-means — total within-cluster variance — but produces a hierarchical result rather than a flat partition. Ward clustering tends to produce similarly-sized compact clusters and often gives results very similar to k-means. The advantage of Ward over k-means is the dendrogram: you can explore different numbers of clusters without rerunning the algorithm. The disadvantage is quadratic memory O(n²) for the distance matrix, limiting Ward to n &lt; 50,000 in practice.</p>
+<pre><code class="language-python">import numpy as np
+from scipy.cluster.hierarchy import linkage, fcluster
+from sklearn.cluster import KMeans
+from sklearn.datasets import make_blobs
+from sklearn.metrics import adjusted_rand_score, silhouette_score
+from sklearn.preprocessing import StandardScaler
+
+rng = np.random.default_rng(42)
+X, y_true = make_blobs(n_samples=400, centers=5, cluster_std=0.9, random_state=42)
+X = StandardScaler().fit_transform(X)
+
+Z_ward = linkage(X, method='ward')
+print(f&quot;{'k':&gt;4} {'Ward ARI':&gt;10} {'KMeans ARI':&gt;12} {'Ward Sil':&gt;10} {'KMeans Sil':&gt;12}&quot;)
+for k in [3, 4, 5, 6, 7]:
+    ward_labels = fcluster(Z_ward, t=k, criterion='maxclust') - 1
+    km_labels = KMeans(n_clusters=k, n_init=10, random_state=42).fit_predict(X)
+    ward_ari = adjusted_rand_score(y_true, ward_labels)
+    km_ari = adjusted_rand_score(y_true, km_labels)
+    ward_sil = silhouette_score(X, ward_labels)
+    km_sil = silhouette_score(X, km_labels)
+    print(f&quot;{k:&gt;4} {ward_ari:&gt;10.4f} {km_ari:&gt;12.4f} {ward_sil:&gt;10.4f} {km_sil:&gt;12.4f}&quot;)
+</code></pre>
+<h2>Cophenetic Correlation Coefficient</h2>
+<p>The cophenetic distance between two points is the height in the dendrogram at which they first merge. The cophenetic correlation coefficient (CCC) is the Pearson correlation between the original pairwise distances and the cophenetic distances. A high CCC (&gt; 0.8) indicates that the dendrogram faithfully represents the true distances — the hierarchical structure is a good summary of the data geometry. CCC can be used to compare linkage methods: the linkage with the highest CCC preserves pairwise distance information best.</p>
+<pre><code class="language-python">import numpy as np
+from scipy.cluster.hierarchy import linkage, cophenet
+from scipy.spatial.distance import pdist
+from sklearn.datasets import make_blobs
+from sklearn.preprocessing import StandardScaler
+
+X, _ = make_blobs(n_samples=200, centers=4, cluster_std=0.8, random_state=0)
+X = StandardScaler().fit_transform(X)
+dist_orig = pdist(X)
+
+print(f&quot;{'Linkage':10s} {'Cophenetic Corr':&gt;18} {'Interpretation'}&quot;)
+for method in ['single', 'complete', 'average', 'ward']:
+    Z = linkage(X, method=method)
+    ccc, _ = cophenet(Z, dist_orig)
+    interpretation = (
+        'Excellent' if ccc &gt; 0.8 else
+        'Good' if ccc &gt; 0.7 else
+        'Fair' if ccc &gt; 0.6 else 'Poor'
+    )
+    print(f&quot;{method:10s} {ccc:&gt;18.4f} {interpretation}&quot;)
+
+print(&quot;\nAverage linkage typically achieves the highest cophenetic correlation.&quot;)
+print(&quot;Ward has lower CCC but often gives the most practically useful clusters.&quot;)
+</code></pre>
+<blockquote>
+<p><strong>Dendrogram Reading Guide</strong>: Cut the dendrogram horizontally: the number of vertical lines intersected equals the number of clusters. The height of a merge indicates how dissimilar the merging clusters were — a large jump in height between consecutive merges signals a natural cluster boundary. For Ward linkage, look for the largest gap between consecutive merge heights in the top portion of the tree to identify the natural number of clusters.</p>
+</blockquote>
+<h2>Connectivity Constraints — Structured Clustering</h2>
+<p>sklearn's AgglomerativeClustering accepts a connectivity matrix that restricts merges to adjacent nodes in a graph (e.g., spatial neighbors or k-NN graph). This dramatically reduces the set of candidate merges at each step, lowering complexity from O(n²) to O(n) for sparse graphs and enabling clustering of images, meshes, or time-series where only neighboring points should merge. The connectivity constraint effectively enforces spatially coherent clusters.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.cluster import AgglomerativeClustering
+from sklearn.neighbors import kneighbors_graph
+from sklearn.datasets import make_blobs
+from sklearn.metrics import adjusted_rand_score
+from sklearn.preprocessing import StandardScaler
+
+X, y_true = make_blobs(n_samples=500, centers=5, cluster_std=0.9, random_state=42)
+X = StandardScaler().fit_transform(X)
+
+# Without connectivity: standard agglomerative
+agg_no_conn = AgglomerativeClustering(n_clusters=5, linkage='ward')
+labels_no_conn = agg_no_conn.fit_predict(X)
+
+# With k-NN connectivity: restricts to local merges
+conn = kneighbors_graph(X, n_neighbors=15, include_self=False)
+agg_conn = AgglomerativeClustering(n_clusters=5, linkage='ward', connectivity=conn)
+labels_conn = agg_conn.fit_predict(X)
+
+ari_no = adjusted_rand_score(y_true, labels_no_conn)
+ari_co = adjusted_rand_score(y_true, labels_conn)
+print(f&quot;Ward (no connectivity):  ARI={ari_no:.4f}&quot;)
+print(f&quot;Ward (k-NN conn, k=15): ARI={ari_co:.4f}&quot;)
+print(&quot;Connectivity can improve results on spatially structured data&quot;)
+</code></pre>
+<h2>Divisive vs Agglomerative Clustering</h2>
+<p>Divisive (top-down) hierarchical clustering starts with all points in one cluster and recursively splits. The optimal split at each level is NP-hard, so divisive methods typically use a fast heuristic (e.g., k-means with k=2). Diana (Divisive Analysis) is the standard divisive algorithm. Divisive clustering tends to identify the top-level structure better (fewer large clusters) while agglomerative better captures fine-grained structure. In practice agglomerative Ward linkage dominates because it optimizes the same variance criterion as k-means while providing the full hierarchy.</p>
+<h2>Complexity and Scalability</h2>
+<ul>
+<li>Naive hierarchical clustering: O(n³) time, O(n²) space for the distance matrix.</li>
+<li>Ward and average linkage with priority queue (scipy implementation): O(n² log n) time, O(n²) space.</li>
+<li>Single linkage only: O(n² log n) via Prim's MST algorithm — can handle n ≈ 500K.</li>
+<li>Practical limit for Ward/complete/average: n ≈ 10,000–50,000 depending on available RAM.</li>
+<li>For larger n: use k-means or mini-batch k-means, then hierarchically cluster the k centroids (divisive approach).</li>
+<li>sklearn AgglomerativeClustering with connectivity constraints can scale to larger n by restricting merges to a sparse graph.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

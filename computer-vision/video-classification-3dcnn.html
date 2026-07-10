@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Video Classification with 3D CNNs: C3D, I3D, and SlowFast | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Video Classification with 3D CNNs: C3D, I3D, and SlowFast</h1>
+      
+      <h1>Video Classification with 3D CNNs: C3D, I3D, and SlowFast</h1>
+<h2>Overview</h2>
+<p>Video classification assigns a semantic label — walking, cooking, playing basketball — to an untrimmed or trimmed video clip. Unlike image classification, the model must aggregate evidence across time: a single frame rarely disambiguates between similar-looking activities. Temporal modeling is therefore the central architectural challenge, and different designs encode fundamentally different inductive biases about motion.</p>
+<p>Early approaches applied 2D CNNs frame-by-frame and pooled predictions, discarding temporal structure entirely. More principled methods model time explicitly: two-stream networks separate RGB and optical flow pathways; 3D CNNs treat video as a spatiotemporal volume; transformer-based methods attend across frame tokens. Dataset scale — Kinetics (400K clips) — proved as important as architecture choice.</p>
+<h2>Temporal Modeling Approaches</h2>
+<p>The simplest temporal baseline is late fusion: run a ResNet on each sampled frame, pool logits over time, and classify. Despite its simplicity, late fusion with a strong 2D backbone is competitive on many benchmarks. Single-frame accuracy on Kinetics-400 can reach around 73%, surprisingly close to early 3D models, suggesting 2D models capture contextual scene cues beyond pure temporal motion.</p>
+<p>3D convolutions extend the 2D kernel with a temporal dimension: a 3×3×3 kernel processes a T×H×W spatiotemporal volume jointly. This captures motion patterns directly without explicit optical flow. The cost is cubic in kernel size: a temporal kernel of 3 triples parameter count. Factorized designs like (2+1)D — separate spatial then temporal convolutions — partially address this computational overhead.</p>
+<h2>C3D and 3D Convolutions</h2>
+<p>C3D (Tran et al., 2015) was among the first large-scale 3D CNN models, trained on Sports-1M with 3×3×3 convolutions throughout 8 layers. It extracted fc6 activations as 4096-dimensional video descriptors. Despite its 78M parameters and lower accuracy compared to later models, C3D demonstrated that 3D convolutions can learn generic spatiotemporal features transferable across recognition tasks.</p>
+<pre><code>import torch.nn as nn
+
+# 3D conv block: processes T x H x W volumes jointly
+# kernel_size=(3,3,3) has 3x more params than 2D of same spatial size
+conv3d = nn.Conv3d(C_in, C_out,
+                   kernel_size=(3, 3, 3),
+                   stride=(1, 1, 1),
+                   padding=(1, 1, 1),
+                   bias=False)
+
+# Factorized (2+1)D alternative — same accuracy, fewer FLOPs:
+conv_s = nn.Conv3d(C_in,  C_out, (1, 3, 3), padding=(0, 1, 1))
+conv_t = nn.Conv3d(C_out, C_out, (3, 1, 1), padding=(1, 0, 0))
+</code></pre>
+<p>C3D's limitations are significant: 78M parameters, 38 GFLOPs per clip, and fixed 16-frame 112×112 input. It was pretrained on noisily labelled Sports-1M. Later work found depth and width with smaller 3D kernels generalize better than C3D's design. The shift to Kinetics as the standard benchmark also exposed C3D's limited spatial resolution and its sensitivity to input clip length.</p>
+<h2>Two-Stream and I3D</h2>
+<p>Two-stream networks (Simonyan &amp; Zisserman, 2014) compute optical flow offline and train two separate CNNs: a spatial stream on RGB frames and a temporal stream on stacked optical flow fields (10 horizontal + 10 vertical channels). Streams are fused at prediction time by averaging softmax scores. The temporal stream's flow input encodes motion explicitly, complementing the RGB appearance stream.</p>
+<pre><code>def inflate_conv2d_to_3d(conv2d, T=1):
+    &quot;&quot;&quot;Inflate 2D weights to 3D by repeating along the time axis.&quot;&quot;&quot;
+    w2d = conv2d.weight.data           # (C_out, C_in, kH, kW)
+    w3d = w2d.unsqueeze(2)             # (C_out, C_in, 1, kH, kW)
+    w3d = w3d.repeat(1, 1, T, 1, 1)   # (C_out, C_in, T, kH, kW)
+    w3d = w3d / T                      # preserve activation scale
+    kH, kW = conv2d.kernel_size
+    pH, pW = conv2d.padding
+    conv3d = nn.Conv3d(
+        conv2d.in_channels, conv2d.out_channels,
+        (T, kH, kW), padding=(T//2, pH, pW), bias=False
+    )
+    conv3d.weight.data.copy_(w3d)
+    return conv3d
+</code></pre>
+<pre><code>def two_stream_inference(spatial_net, temporal_net,
+                         frames, flows, alpha=1.0):
+    # frames: (B, 3, H, W) — single RGB frame or mean-pooled
+    # flows:  (B, 20, H, W) — 10 horizontal + 10 vertical channels
+    rgb_logits  = spatial_net(frames.mean(2))   # mean pool over T
+    flow_logits = temporal_net(flows)
+    rgb_prob    = torch.softmax(rgb_logits,  dim=1)
+    flow_prob   = torch.softmax(flow_logits, dim=1)
+    fused = rgb_prob + alpha * flow_prob          # late fusion
+    return fused.argmax(dim=1)
+</code></pre>
+<p>I3D training follows three stages: inflate ImageNet-pretrained weights into 3D, pretrain on Kinetics-400 or 600, then fine-tune on the target dataset. The inflated initialization dramatically accelerates convergence versus random initialization. Two-stream I3D achieves 75.7% on Kinetics-400, a major milestone that set the standard for subsequent video classification models through 2018 and 2019.</p>
+<h2>SlowFast Network</h2>
+<p>SlowFast (Feichtenbofer et al., 2019) uses two pathways: a Slow pathway at 8 fps with full channel width, and a Fast pathway at 32 fps with only 1/8 the channels. The Fast pathway captures fine-grained temporal motion cheaply; the Slow pathway focuses on rich semantic features. Lateral connections at each stage fuse temporal information from Fast into Slow, enriching semantic representations with motion cues.</p>
+<pre><code>def slowfast_forward(frames, slow_rate=8, fast_rate=2):
+    # frames: (B, 3, T_full, H, W) — dense temporal sampling
+    slow_frames = frames[:, :, ::slow_rate]   # (B, 3,  8, H, W)
+    fast_frames = frames[:, :, ::fast_rate]   # (B, 3, 32, H, W)
+    slow_feats, laterals = slow_pathway(slow_frames)
+    fast_feats           = fast_pathway(fast_frames)
+    # Lateral connections: fuse motion info from fast into slow
+    for i in range(len(slow_feats)):
+        slow_feats[i] = slow_feats[i] + lateral_conv[i](fast_feats[i])
+    pooled = torch.cat([slow_feats[-1], fast_feats[-1]], dim=1)
+    return classifier_head(pooled)
+</code></pre>
+<p>SlowFast avoids optical flow entirely: the Fast pathway learns motion-sensitive features directly from dense RGB frames. At inference, both pathways run simultaneously and their global average-pooled features are concatenated before the classifier head. SlowFast with a ResNet-101 backbone reaches 79% on Kinetics-400, surpassing I3D by over 3% without any optical flow computation at inference time.</p>
+<blockquote>
+<p><strong>tip</strong>: SlowFast's insight: humans process video at two timescales — slow (semantic understanding) and fast (motion). The slow pathway uses 8 frames at full resolution; the fast pathway uses 32 frames at low channel count. Lateral connections let slow receive motion cues from fast.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Input</th>
+<th>Kinetics-400 Top-1 %</th>
+<th>Params (M)</th>
+<th>FLOPs (G)</th>
+<th>Pretrain</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>C3D</td>
+<td>16×112²</td>
+<td>67.2</td>
+<td>78</td>
+<td>38</td>
+<td>Sports-1M</td>
+</tr>
+<tr>
+<td>I3D</td>
+<td>64×224²</td>
+<td>72.1</td>
+<td>12</td>
+<td>108</td>
+<td>ImageNet</td>
+</tr>
+<tr>
+<td>Two-Stream I3D</td>
+<td>RGB+Flow</td>
+<td>75.7</td>
+<td>25</td>
+<td>216</td>
+<td>ImageNet</td>
+</tr>
+<tr>
+<td>SlowFast R50</td>
+<td>8+32×224²</td>
+<td>77.0</td>
+<td>34</td>
+<td>65</td>
+<td>None</td>
+</tr>
+<tr>
+<td>SlowFast R101</td>
+<td>8+32×224²</td>
+<td>79.0</td>
+<td>53</td>
+<td>213</td>
+<td>None</td>
+</tr>
+</tbody>
+</table>
+<h2>Key Takeaways</h2>
+<p>3D convolutions are powerful but expensive: 3D ResNets require careful factorization to stay tractable. The (2+1)D decomposition — first a 2D spatial conv then a 1D temporal conv — matches full 3D accuracy while using fewer FLOPs. SlowFast goes further, factorizing temporal sampling rather than kernel shape by operating at two different frame rates in parallel within a shared architecture.</p>
+<p>Optical flow as explicit input has largely been superseded by architectures that learn motion implicitly: SlowFast, TimeSformer, and Video Swin all operate on raw RGB only. Implicit motion learning avoids the overhead of flow estimation — which can cost more than the classifier itself — and lets the model learn task-relevant motion features rather than general-purpose flow displacement fields.</p>
+<p>Dataset scale and label quality matter as much as architecture: Kinetics-400 enabled the ImageNet moment for video understanding. Models pretrained on larger sets — Kinetics-600, Kinetics-700, or JFT — gain 1 to 4% on downstream tasks. Self-supervised pretraining on unlabeled video using masked autoencoding now matches supervised Kinetics pretraining for many fine-grained video recognition benchmarks.</p>
+    </article>
+  </main>
+</body>
+</html>

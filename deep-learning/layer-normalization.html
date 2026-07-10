@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Layer Normalization — Sequence Models and Pre/Post-Norm | Notes Backup</title>
+  <meta name="description" content="Derive LN from first principles, contrast pre-norm vs post-norm Transformer architectures, compare BN vs LN vs RMSNorm vs GroupNorm, and analyze gradient flow across normalization methods." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Layer Normalization — Sequence Models and Pre/Post-Norm</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Derive LN from first principles, contrast pre-norm vs post-norm Transformer architectures, compare BN vs LN vs RMSNorm vs GroupNorm, and analyze gradient flow across normalization methods.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Layer Normalization — Sequence Models and Pre/Post-Norm</h1>
+<p>Layer Normalization (Ba et al. 2016) normalizes activations across the feature dimension of each individual sample, making it batch-size independent and consistent between training and inference. Unlike Batch Normalization which normalizes across the batch dimension, LN operates on each token's feature vector in isolation — a property that makes it the standard normalization choice for Transformers, RNNs, and any architecture processing variable-length sequences.</p>
+<h2>Layer Normalization Formula</h2>
+<p>For an input vector x ∈ ℝᵈ, Layer Normalization computes: μ = (1/d) Σᵢ xᵢ (mean over feature dim), σ² = (1/d) Σᵢ (xᵢ − μ)² (variance over feature dim), x̂ᵢ = (xᵢ − μ) / √(σ² + ε) (normalize), yᵢ = γᵢ x̂ᵢ + βᵢ (scale and shift). The learned parameters γ (scale) and β (shift) have the same dimension as the feature vector, giving the model freedom to undo the normalization if beneficial. ε is a small constant (typically 1e-5) for numerical stability.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+import torch.nn as nn
+
+def layer_norm_numpy(x, gamma, beta, eps=1e-5):
+    # x: (..., features) — normalize over last dimension
+    mean = x.mean(axis=-1, keepdims=True)
+    var = x.var(axis=-1, keepdims=True, ddof=0)
+    x_hat = (x - mean) / np.sqrt(var + eps)
+    return gamma * x_hat + beta
+
+np.random.seed(42)
+batch, seq, features = 2, 10, 64
+x_np = np.random.randn(batch, seq, features).astype(np.float32)
+gamma_np = np.ones(features, dtype=np.float32)
+beta_np = np.zeros(features, dtype=np.float32)
+out_scratch = layer_norm_numpy(x_np, gamma_np, beta_np)
+
+x_torch = torch.tensor(x_np)
+ln = nn.LayerNorm(features)
+with torch.no_grad():
+    ln.weight.fill_(1.0)
+    ln.bias.fill_(0.0)
+out_torch = ln(x_torch).detach().numpy()
+
+print(f'Max diff scratch vs PyTorch: {np.abs(out_scratch - out_torch).max():.2e}')
+print(f'Per-token mean after LN (should ~0): {out_scratch.mean(axis=-1).mean():.6f}')
+print(f'Per-token std  after LN (should ~1): {out_scratch.std(axis=-1).mean():.6f}')
+</code></pre>
+<h2>Batch Normalization vs Layer Normalization</h2>
+<p>Batch Normalization normalizes across the batch dimension: for each feature j, BN computes the mean and variance over all samples in the batch. This creates three problems in sequence modeling: (1) statistics depend on batch size — noisy at small batches; (2) different computation at train (batch stats) vs eval (running stats) causing a train/eval gap; (3) variable-length sequences cannot be batched cleanly since padding tokens corrupt batch statistics. LN computes statistics per-sample over the feature dimension, eliminating all three problems.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def compare_norms(batch_size, seq_len=10, features=32):
+    x = torch.randn(batch_size, seq_len, features)
+
+    ln = nn.LayerNorm(features)
+    out_ln = ln(x)
+    ln_info = f'mean={out_ln.mean():.3f}, std={out_ln.std():.3f}'
+
+    bn = nn.BatchNorm1d(features)
+    x_flat = x.reshape(batch_size * seq_len, features)
+    try:
+        out_bn = bn(x_flat)
+        bn_info = f'mean={out_bn.mean():.3f}, std={out_bn.std():.3f}'
+    except RuntimeError as e:
+        bn_info = f'ERROR: {str(e)[:60]}'
+
+    print(f'  batch_size={batch_size}:')
+    print(f'    LayerNorm  : {ln_info}')
+    print(f'    BatchNorm1d: {bn_info}')
+
+print('=== Normalization at different batch sizes ===')
+for bs in [8, 4, 2, 1]:
+    compare_norms(bs)
+print('\nLN is batch-size independent. BN degrades sharply at batch_size=1.')
+</code></pre>
+<h2>Pre-Norm and Post-Norm Transformer Architectures</h2>
+<p>The original Transformer (Vaswani et al. 2017) used Post-LN: y = LN(x + Sublayer(x)). Normalization is applied after the residual addition. Pre-LN (GPT-2, LLaMA, PaLM): y = x + Sublayer(LN(x)). Normalization is applied before each sublayer; the residual stream grows without being bounded by normalization, giving more stable gradient flow. Pre-LN typically requires no learning rate warmup and trains more reliably at depth ≥ 24 layers. Post-LN can achieve marginally better final perplexity but requires careful tuning.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class PreNormBlock(nn.Module):
+    def __init__(self, d_model, nhead, dim_ff):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(d_model, nhead, batch_first=True)
+        self.ff = nn.Sequential(
+            nn.Linear(d_model, dim_ff), nn.GELU(), nn.Linear(dim_ff, d_model))
+        self.ln1 = nn.LayerNorm(d_model)
+        self.ln2 = nn.LayerNorm(d_model)
+    def forward(self, x):
+        n = self.ln1(x)
+        x = x + self.attn(n, n, n)[0]
+        x = x + self.ff(self.ln2(x))
+        return x
+
+class PostNormBlock(nn.Module):
+    def __init__(self, d_model, nhead, dim_ff):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(d_model, nhead, batch_first=True)
+        self.ff = nn.Sequential(
+            nn.Linear(d_model, dim_ff), nn.GELU(), nn.Linear(dim_ff, d_model))
+        self.ln1 = nn.LayerNorm(d_model)
+        self.ln2 = nn.LayerNorm(d_model)
+    def forward(self, x):
+        x = self.ln1(x + self.attn(x, x, x)[0])
+        x = self.ln2(x + self.ff(x))
+        return x
+
+d_model, nhead, dim_ff = 64, 4, 128
+x = torch.randn(2, 16, d_model)
+pre = PreNormBlock(d_model, nhead, dim_ff)
+post = PostNormBlock(d_model, nhead, dim_ff)
+print(f'PreNorm  output norm: {pre(x).norm().item():.4f}')
+print(f'PostNorm output norm: {post(x).norm().item():.4f}')
+print('PreNorm residual grows freely; PostNorm bounded by LN at each sublayer output.')
+</code></pre>
+<blockquote>
+<p><strong>Pre-Norm is the Modern Default</strong>: All major LLMs — GPT-2, GPT-3, LLaMA 1/2/3, PaLM, Falcon, Mistral — use Pre-LN. Post-LN (original Transformer) can achieve slightly better final perplexity but requires careful warmup schedules and often diverges in models deeper than 24 layers. For new architectures, start with Pre-LN.</p>
+</blockquote>
+<h2>Why Layer Norm Replaced Batch Norm in Sequence Models</h2>
+<p>Three properties make LN uniquely suited to sequence modeling: Batch independence — LN statistics are computed per-sample, so normalization is identical at batch_size=1 and batch_size=512. Variable-length compatibility — each token is normalized using only its own feature vector, so sequences of different lengths can be processed without any special handling. Train/eval consistency — LN uses the same formula at training and inference with no running-mean accumulation and no behavioral shift between model.train() and model.eval(). BN violates all three properties.</p>
+<ul>
+<li>Batch independence: LN computes mean/var over the feature dim of each sample — no batch coupling.</li>
+<li>Variable sequences: padding tokens would corrupt BN batch statistics; LN processes each position independently.</li>
+<li>No train/eval gap: BN uses batch stats at train and running stats at eval; LN behavior is identical in both modes.</li>
+<li>Consistent gradient: LN gradient depends only on the local sample — no cross-batch gradient coupling in backward pass.</li>
+</ul>
+<h2>Gradient Flow Through Layer Norm</h2>
+<p>The gradient of the LN output with respect to the input has a centering component: ∂L/∂x ∝ [∂L/∂x̂ − mean(∂L/∂x̂) − x̂ · mean(∂L/∂x̂ · x̂)] / σ. The mean subtraction terms prevent constant gradient components from flowing back, acting as an implicit gradient regularizer. For BN, gradients are coupled across the batch — each sample's gradient depends on all others, which can cause instability when batch size changes between training and inference.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+def measure_grad_flow(norm_class, input_shape, **kwargs):
+    x = torch.randn(*input_shape, requires_grad=True)
+    layer = norm_class(**kwargs)
+    out = layer(x)
+    loss = out.pow(2).mean()
+    loss.backward()
+    return x.grad.abs().mean().item(), x.grad.std().item()
+
+B, T, C = 4, 20, 64
+ln_mean, ln_std = measure_grad_flow(nn.LayerNorm, (B, T, C), normalized_shape=C)
+
+class BNSeq(nn.Module):
+    def __init__(self, num_features):
+        super().__init__()
+        self.bn = nn.BatchNorm1d(num_features)
+    def forward(self, x):
+        B, T, C = x.shape
+        return self.bn(x.reshape(B * T, C)).reshape(B, T, C)
+
+bn_mean, bn_std = measure_grad_flow(BNSeq, (B, T, C), num_features=C)
+
+print(f'LayerNorm grad: mean={ln_mean:.6f}, std={ln_std:.6f}')
+print(f'BatchNorm grad: mean={bn_mean:.6f}, std={bn_std:.6f}')
+print('LN gradient is per-sample — no cross-batch coupling in the backward pass.')
+</code></pre>
+<h2>Embedding Layer Normalization</h2>
+<p>Modern LLMs apply LN to the embedding outputs before feeding them into the first transformer block. This bounds the scale of the initial residual stream and prevents early layers from spending capacity on normalization. BERT and RoBERTa apply LN after summing token and positional embeddings. GPT-NeoX uses a separate embedding normalization before and after the embedding lookup. The LN parameters at the embedding layer are learned independently from the LN inside each transformer block.</p>
+<h2>Normalization Methods Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Normalizes Over</th>
+<th>Batch Dependent</th>
+<th>Train/Eval Gap</th>
+<th>Learnable Params</th>
+<th>Standard Use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>BatchNorm</td>
+<td>Batch dim per channel</td>
+<td>Yes</td>
+<td>Yes — running stats at eval</td>
+<td>γ, β per channel</td>
+<td>Image classification (large batch)</td>
+</tr>
+<tr>
+<td>LayerNorm</td>
+<td>Feature dim per sample</td>
+<td>No</td>
+<td>No</td>
+<td>γ, β per feature</td>
+<td>Transformers, RNNs, NLP</td>
+</tr>
+<tr>
+<td>RMSNorm</td>
+<td>Feature dim per sample (no mean)</td>
+<td>No</td>
+<td>No</td>
+<td>γ per feature only</td>
+<td>LLaMA, Gemma, Mistral, Falcon</td>
+</tr>
+<tr>
+<td>GroupNorm</td>
+<td>Within each channel group per sample</td>
+<td>No</td>
+<td>No</td>
+<td>γ, β per channel</td>
+<td>Object detection, segmentation</td>
+</tr>
+<tr>
+<td>InstanceNorm</td>
+<td>Spatial dims per sample per channel</td>
+<td>No</td>
+<td>No</td>
+<td>γ, β per channel (optional)</td>
+<td>Style transfer, CycleGAN</td>
+</tr>
+</tbody>
+</table>
+<p>Choose LayerNorm for any Transformer-based architecture. Use RMSNorm when training efficiency matters and mean-centering is not critical. Use GroupNorm when batch sizes are small (≤4) and spatial structure exists. Use InstanceNorm specifically for style transfer where removing per-channel statistics normalizes style information.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

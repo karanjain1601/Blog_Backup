@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Image Preprocessing Pipeline for Vision Models | Notes Backup</title>
+  <meta name="description" content="End-to-end preprocessing — decoding, resizing, padding, normalization, and batching — covering torchvision transforms, aspect-ratio-preserving resize, letterbox padding, and variable-size batching." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Image Preprocessing Pipeline for Vision Models</h1>
+      <ul class='note-meta'><li><strong>description:</strong> End-to-end preprocessing — decoding, resizing, padding, normalization, and batching — covering torchvision transforms, aspect-ratio-preserving resize, letterbox padding, and variable-size batching.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Image Preprocessing Pipeline for Vision Models</h1>
+<h2>Overview</h2>
+<p>Image preprocessing transforms raw pixel data into normalized tensors that vision models expect. A typical pipeline covers four stages: decoding compressed images from disk, resizing to a target spatial resolution, padding to ensure uniform dimensions, and normalizing pixel values to match training statistics. Each stage has tradeoffs that directly affect model accuracy and inference speed.</p>
+<p>The same preprocessing applied at training must be replicated at inference. Differences in resize interpolation, crop position, or normalization constants introduce systematic bias. In practice, mismatches are a leading cause of the gap between offline benchmark accuracy and production metrics — often larger than the gap between competing model architectures.</p>
+<h2>Decode and Resize</h2>
+<p>JPEG and PNG files must be decoded into pixel arrays before any tensor operation. Pillow decodes to an RGB numpy array; torchvision.io.read_image returns a uint8 tensor directly. After decoding, images are resized to the spatial resolution the model was trained on. torchvision.transforms.v2 is the modern, composable API that handles both PIL images and tensors uniformly.</p>
+<pre><code>import torchvision.transforms.v2 as T
+from PIL import Image
+import torch
+
+transform = T.Compose([
+    T.Resize(256),
+    T.CenterCrop(224),
+    T.ToImage(),
+    T.ToDtype(torch.float32, scale=True),
+    T.Normalize(mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225]),
+])
+
+img = Image.open(&quot;photo.jpg&quot;).convert(&quot;RGB&quot;)
+tensor = transform(img)   # shape: [3, 224, 224]
+</code></pre>
+<p>T.Resize(256) scales the shorter side to 256 pixels while preserving aspect ratio. T.CenterCrop(224) then crops the central 224x224 patch. T.ToDtype with scale=True converts uint8 [0,255] to float32 [0.0,1.0]. The ImageNet mean and std in T.Normalize are standard baselines — replace them with your dataset statistics when fine-tuning on a new domain.</p>
+<h2>Aspect-Ratio-Preserving Resize</h2>
+<p>Squash resizing (forcing both dimensions to a fixed size) distorts object geometry, hurting models sensitive to shape — most classifiers and all detectors. Resizing the shorter side to the target while scaling the longer side proportionally keeps geometry intact. The resulting image is not square, which complicates batching but preserves the information the network needs.</p>
+<pre><code>from PIL import Image
+
+def resize_shorter_side(img: Image.Image, size: int) -&gt; Image.Image:
+    W, H = img.size
+    scale = size / min(H, W)
+    new_W = round(W * scale)
+    new_H = round(H * scale)
+    return img.resize((new_W, new_H), Image.BILINEAR)
+
+# Example: 1920x1080 -&gt; shorter side becomes 224
+resized = resize_shorter_side(img, 224)
+# resized.size == (398, 224)
+</code></pre>
+<p>This strategy is the default for classification backbones (ResNet, ViT) where a subsequent center crop brings the image to the required square. For detection and segmentation, skipping the crop is preferable — the model needs context outside the central region. The longer dimension will then vary per image, requiring a padding step before batching.</p>
+<table>
+<thead>
+<tr>
+<th>Resize Strategy</th>
+<th>Aspect Ratio Preserved</th>
+<th>Padding</th>
+<th>Bbox Correction</th>
+<th>Use Case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Squash</td>
+<td>No</td>
+<td>No</td>
+<td>No</td>
+<td>Fast prototyping</td>
+</tr>
+<tr>
+<td>Center Crop</td>
+<td>Partial</td>
+<td>No</td>
+<td>No</td>
+<td>Classification</td>
+</tr>
+<tr>
+<td>Resize Shortest</td>
+<td>Yes</td>
+<td>No</td>
+<td>No</td>
+<td>Single-image inference</td>
+</tr>
+<tr>
+<td>Letterbox</td>
+<td>Yes</td>
+<td>Yes</td>
+<td>Yes</td>
+<td>Detection / segmentation</td>
+</tr>
+<tr>
+<td>Sliding Window</td>
+<td>Yes</td>
+<td>Varies</td>
+<td>Yes</td>
+<td>High-res segmentation</td>
+</tr>
+</tbody>
+</table>
+<h2>Letterbox Padding</h2>
+<p>Letterbox padding resizes an image so its longer side matches the target size, then fills the remaining pixels on the shorter axis with a neutral color (typically mid-gray, value 114). This produces a square tensor with no distortion. The padding offsets — pixels added to each side — must be recorded so that predicted bounding box coordinates can be shifted back to the original image space.</p>
+<pre><code>from PIL import Image
+
+def letterbox(img: Image.Image, size: int = 640, fill: int = 114):
+    W, H = img.size
+    scale = size / max(H, W)
+    new_W, new_H = round(W * scale), round(H * scale)
+    img = img.resize((new_W, new_H), Image.BILINEAR)
+    pad_top  = (size - new_H) // 2
+    pad_left = (size - new_W) // 2
+    canvas = Image.new(&quot;RGB&quot;, (size, size), (fill, fill, fill))
+    canvas.paste(img, (pad_left, pad_top))
+    return canvas, (pad_left, pad_top, scale)
+</code></pre>
+<blockquote>
+<p><strong>warning</strong>: Apply the same preprocessing at inference as at training — a mismatch (e.g. center crop at train vs full image at inference) commonly causes 1–3% accuracy drop in production.</p>
+</blockquote>
+<p>To map a predicted box (x1, y1, x2, y2) in letterboxed coordinates back to the original image, subtract the padding offset and divide by the scale factor: x_orig = (x_lb - pad_left) / scale. This inverse transform must be applied before computing IoU against ground-truth boxes or before drawing results on the source image. Failing to do so silently shifts all boxes.</p>
+<h2>Batching Variable-Size Images</h2>
+<p>torch.stack requires all tensors in a batch to share the same shape. When images have been resized to preserve aspect ratio but not padded to a uniform square, you must pad within the batch itself. A custom collate_fn passed to DataLoader handles this: find the maximum height and width in the mini-batch, allocate a zero tensor of that shape, and copy each image into the top-left corner.</p>
+<pre><code>import torch
+
+def collate_variable(batch):
+    imgs, labels = zip(*batch)
+    max_H = max(im.shape[1] for im in imgs)
+    max_W = max(im.shape[2] for im in imgs)
+    padded = torch.zeros(len(imgs), 3, max_H, max_W)
+    mask   = torch.zeros(len(imgs), max_H, max_W, dtype=torch.bool)
+    for i, im in enumerate(imgs):
+        h, w = im.shape[1], im.shape[2]
+        padded[i, :, :h, :w] = im
+        mask[i, :h, :w] = True
+    return padded, torch.tensor(labels), mask
+</code></pre>
+<p>The mask tensor marks valid pixel regions so the model can ignore padding during attention or pooling. ViT-style models benefit most: masking padded patches prevents attending to meaningless zero regions. For CNNs, batch-level padding adds little overhead unless images vary widely in size — sorting by aspect ratio before batching reduces wasted padding significantly.</p>
+<p>Prefetch preprocessing to CPU workers by setting num_workers &gt; 0 in DataLoader. Pin memory with pin_memory=True to accelerate host-to-device transfers. For detection workloads with large images (e.g. 1280x1280), reduce batch size and increase gradient accumulation steps. Profile the full pipeline with torch.profiler to locate the bottleneck before optimizing.</p>
+<h2>Key Takeaways</h2>
+<p>Preprocessing is part of the model contract: the architecture expects a specific resolution, channel order, and normalization range. Documenting these constants — target size, mean, std, interpolation mode — alongside model weights prevents silent regressions when re-deploying. Consider encoding the transform as a TorchScript module and saving it with the checkpoint.</p>
+<p>Letterbox is the gold standard for detection and segmentation because it preserves all image content. Center crop is sufficient for classification where global context outside the crop rarely matters. Variable-size batching with masks unlocks flexible training but requires model architectures that accept masked inputs — verify support before adopting this strategy.</p>
+<p>GPU-side preprocessing — using torchvision's functional API on CUDA tensors or NVIDIA DALI — moves the bottleneck off the CPU. This matters when num_workers is already maxed and the GPU is starved for data. DALI handles JPEG decoding, resizing, and normalization entirely on the GPU, cutting end-to-end training time by up to 20% on image-heavy workloads.</p>
+    </article>
+  </main>
+</body>
+</html>

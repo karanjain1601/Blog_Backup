@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DINO — Self-Distillation Without Labels | Notes Backup</title>
+  <meta name="description" content="How DINO (Caron et al. 2021) uses a student-teacher self-distillation framework with EMA weight updates, multi-crop training, centering and sharpening for collapse prevention, and emergent attention-based segmentation." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>DINO — Self-Distillation Without Labels</h1>
+      <ul class='note-meta'><li><strong>description:</strong> How DINO (Caron et al. 2021) uses a student-teacher self-distillation framework with EMA weight updates, multi-crop training, centering and sharpening for collapse prevention, and emergent attention-based segmentation.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>DINO — Self-Distillation Without Labels</h1>
+<p>DINO (Self-DIstillation with NO labels) by Caron et al. (2021) showed that self-supervised ViT features trained with knowledge distillation between a student and an EMA teacher develop emergent properties absent in supervised models — most strikingly, attention maps that align precisely with semantic object boundaries without ever seeing a segmentation label.</p>
+<h2>Self-Distillation Concept</h2>
+<p>DINO uses a student-teacher framework where both networks share the same ViT architecture. The teacher is an exponential moving average (EMA) of the student's weights — it never receives gradients directly. The student is trained to predict the teacher's output distribution for different augmented views of the same image. Because the teacher is a smoothed version of the student, this is called self-distillation.</p>
+<h2>Teacher EMA Update</h2>
+<p>The teacher's parameters are updated via EMA with a momentum coefficient m that is annealed from 0.996 toward 1.0 during training using a cosine schedule. Higher momentum (m → 1.0) means the teacher changes more slowly — providing a stable training target. The student is updated via standard gradient descent; the teacher receives no gradient signal.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+import copy
+
+class DINOTeacherUpdater:
+    def __init__(self, student, teacher, base_momentum=0.996):
+        self.student       = student
+        self.teacher       = teacher
+        self.base_momentum = base_momentum
+        # Initialize teacher from student weights; disable gradients
+        self.teacher.load_state_dict(student.state_dict())
+        for p in self.teacher.parameters():
+            p.requires_grad_(False)
+
+    def update(self, epoch, max_epochs):
+        # Momentum increases from base_momentum to 1.0 via cosine schedule
+        m = 1.0 - (1.0 - self.base_momentum) * (
+            np.cos(np.pi * epoch / max_epochs) + 1.0
+        ) / 2.0
+
+        with torch.no_grad():
+            for s_p, t_p in zip(
+                self.student.parameters(), self.teacher.parameters()
+            ):
+                t_p.data.mul_(m).add_((1.0 - m) * s_p.data)
+
+    @torch.no_grad()
+    def hard_copy(self):
+        # Copy student weights directly to teacher (used at initialization)
+        for s_p, t_p in zip(
+            self.student.parameters(), self.teacher.parameters()
+        ):
+            t_p.data.copy_(s_p.data)
+
+# Example: update teacher after each optimizer step
+# updater = DINOTeacherUpdater(student, teacher)
+# for epoch in range(max_epochs):
+#     ... train student ...
+#     updater.update(epoch, max_epochs)
+</code></pre>
+<h2>Centering and Sharpening</h2>
+<p>Without any collapse prevention, self-distillation quickly collapses to a trivial solution where both student and teacher output a constant distribution. DINO uses two complementary mechanisms: centering (subtract a running mean from teacher logits to prevent one dimension from dominating) and sharpening (low temperature on the teacher to produce peaked distributions that carry a meaningful training signal).</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class DINOHead(nn.Module):
+    def __init__(self, in_dim, out_dim=65536, center_momentum=0.9):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(in_dim, 2048), nn.GELU(),
+            nn.Linear(2048, 2048), nn.GELU(),
+            nn.Linear(2048, out_dim, bias=False)
+        )
+        self.register_buffer('center', torch.zeros(1, out_dim))
+        self.center_momentum = center_momentum
+
+    @torch.no_grad()
+    def update_center(self, teacher_output):
+        # EMA update: subtract running mean to prevent mode collapse
+        batch_center = teacher_output.mean(dim=0, keepdim=True)
+        self.center = (
+            self.center * self.center_momentum
+            + batch_center * (1 - self.center_momentum)
+        )
+
+    def teacher_softmax(self, x, temp=0.04):
+        # Subtract center, apply low temperature -&gt; sharp peaked distribution
+        return F.softmax((x - self.center) / temp, dim=-1)
+
+    def student_log_softmax(self, x, temp=0.1):
+        # Higher temperature for student -&gt; softer distribution
+        return F.log_softmax(x / temp, dim=-1)
+
+    def dino_loss(self, student_out, teacher_out):
+        # Cross-entropy H(teacher_sharp, student): student predicts teacher
+        t_probs  = self.teacher_softmax(teacher_out)
+        s_logp   = self.student_log_softmax(student_out)
+        return -(t_probs * s_logp).sum(dim=-1).mean()
+</code></pre>
+<blockquote>
+<p><strong>Collapse Prevention is Critical</strong>: Without centering + sharpening, DINO collapses within the first few thousand iterations: the teacher outputs a uniform distribution (all images map to the same representation). Centering prevents any single dimension from dominating. Sharpening (low teacher temperature τ_t = 0.04) ensures the teacher outputs peaked distributions, giving the student a meaningful target to match. Both are required — centering alone still allows collapse to a uniform distribution.</p>
+</blockquote>
+<h2>Multi-Crop Training Strategy</h2>
+<p>DINO uses a multi-crop augmentation strategy: generate 2 global crops (&gt;50% of image area) and 6–8 local crops (&lt;50% area). The teacher sees only the 2 global crops; the student sees all crops. The loss is computed as the cross-entropy from each student output to each teacher output (local→global matching). This teaches the student to predict global context from local views, forcing semantic feature learning.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torchvision.transforms as T
+
+class MultiCropWrapper(nn.Module):
+    def __init__(self, backbone, head):
+        super().__init__()
+        self.backbone = backbone
+        self.head     = head
+
+    def forward(self, crops):
+        # Batch all crops together for a single efficient forward pass
+        all_crops = torch.cat(crops, dim=0)           # [sum(B), C, H, W]
+        features  = self.backbone(all_crops)          # [sum(B), D]
+        output    = self.head.mlp(features)           # [sum(B), out_dim]
+        # Split back into per-crop chunks
+        return output.split([c.shape[0] for c in crops], dim=0)
+
+def dino_train_step(student_net, teacher_net, head, optimizer,
+                     global_crops, local_crops):
+    # Teacher forward on global crops only (no gradients)
+    with torch.no_grad():
+        t_outs = [teacher_net(gc) for gc in global_crops]
+
+    # Student forward on ALL crops (global + local)
+    all_crops = global_crops + local_crops
+    s_outs    = [student_net(c) for c in all_crops]
+
+    # Loss: each student crop predicts each teacher crop's distribution
+    loss   = torch.tensor(0.0)
+    n_pairs = 0
+    for s_out in s_outs:
+        for t_out in t_outs:
+            loss = loss + head.dino_loss(s_out, t_out)
+            n_pairs += 1
+    loss = loss / n_pairs
+
+    optimizer.zero_grad()
+    loss.backward()
+    nn.utils.clip_grad_norm_(student_net.parameters(), 3.0)
+    optimizer.step()
+    head.update_center(torch.cat(t_outs).detach())
+    return loss.item()
+</code></pre>
+<h2>DINO Attention Maps</h2>
+<p>The most striking emergent property of DINO-pretrained ViTs is that the self-attention maps in the last transformer block align closely with semantic object masks — despite no segmentation supervision. Each attention head attends to different object parts. By thresholding the CLS-to-patch attention, one obtains near-ground-truth object masks from a model trained only with image-level self-supervision.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+import numpy as np
+import matplotlib.pyplot as plt
+
+def extract_dino_attention(model, img, patch_size=8, threshold_pct=60):
+    # Extract CLS-&gt;patch self-attention from the last ViT block
+    model.eval()
+    attn_store = {}
+
+    def hook_fn(module, inp, out):
+        # MultiheadAttention returns (output, attn_weights) when need_weights=True
+        attn_store['attn'] = out[1]
+
+    handle = model.blocks[-1].attn.register_forward_hook(hook_fn)
+
+    with torch.no_grad():
+        _ = model(img.unsqueeze(0))
+    handle.remove()
+
+    # attn: [1, num_heads, N+1, N+1] -&gt; CLS row -&gt; [num_heads, N]
+    attn = attn_store['attn'][0, :, 0, 1:]  # remove cls-to-cls
+    h = w = int(attn.shape[-1] ** 0.5)
+    attn = attn.reshape(-1, 1, h, w)        # [num_heads, 1, h, w]
+
+    # Upsample to original image resolution
+    img_h, img_w = img.shape[-2], img.shape[-1]
+    attn_up = F.interpolate(attn, size=(img_h, img_w), mode='bilinear', align_corners=False)
+    attn_up = attn_up.squeeze(1).cpu().numpy()  # [num_heads, H, W]
+
+    # Threshold each head to get binary foreground masks
+    masks = np.stack([
+        a &gt; np.percentile(a, threshold_pct) for a in attn_up
+    ])
+    return attn_up, masks   # (raw attention, binary masks)
+</code></pre>
+<h2>Evaluation — k-NN Classification</h2>
+<p>DINO features are remarkably good for k-nearest-neighbor (k-NN) classification — no linear layer or fine-tuning required. Features are extracted from the frozen backbone, L2-normalized, and the label of the k=20 nearest training neighbors is used for prediction. DINO ViT-S/8 achieves 74.5% top-1 k-NN accuracy on ImageNet entirely without labels, rivaling supervised models from a few years prior.</p>
+<ul>
+<li>DINO ViT-S/8: 74.5% k-NN top-1 on ImageNet (no labels, no linear layer)</li>
+<li>DINO ViT-B/8: 77.3% k-NN top-1 — strong enough for many retrieval applications</li>
+<li>k-NN probe is a direct measure of feature quality: no learned classifier can compensate for bad features</li>
+<li>Features are L2-normalized before k-NN search; cosine similarity used as the distance metric</li>
+<li>DINOv2 (2023) scales this to 86.1% k-NN top-1 with curated data and larger models</li>
+</ul>
+<h2>DINO vs Contrastive Methods</h2>
+<p>DINO belongs to the self-distillation family (along with BYOL and EMA-based methods) rather than contrastive learning (SimCLR, MoCo). Contrastive methods require explicit negative pairs to prevent collapse; distillation-based methods rely on architectural asymmetry and center/sharpen mechanisms instead. The table compares DINO with two strong contrastive baselines.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Backbone</th>
+<th>Multi-crop</th>
+<th>Teacher EMA</th>
+<th>k-NN Top-1</th>
+<th>Attention Map Quality</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DINO</td>
+<td>ViT-S/8</td>
+<td>Yes (2G + 6L)</td>
+<td>Yes (m=0.996→1.0)</td>
+<td>74.5%</td>
+<td>Excellent (semantic segmentation)</td>
+</tr>
+<tr>
+<td>MoCo v3</td>
+<td>ViT-B/16</td>
+<td>No (2 views)</td>
+<td>No (momentum encoder separate)</td>
+<td>73.2%</td>
+<td>Moderate (class-level)</td>
+</tr>
+<tr>
+<td>SimCLR v2</td>
+<td>ResNet-152</td>
+<td>No (2 views)</td>
+<td>No</td>
+<td>63.0%</td>
+<td>Poor (texture-biased)</td>
+</tr>
+</tbody>
+</table>
+<h2>From DINO to DINOv2</h2>
+<p>DINOv2 (Oquab et al. 2023) scales DINO by curating a large 142M-image dataset (LVD-142M) from the internet, combining DINO's self-distillation loss with a patch-level masked image modeling loss (similar to iBOT), and training larger models (ViT-g/14). The result is a universal visual feature extractor: DINOv2 ViT-g achieves 86.5% linear probing on ImageNet and 86.1% k-NN, matching many supervised models on dense prediction tasks without any fine-tuning.</p>
+<p>The DINO lineage — DINO → DINOv2 — demonstrates that self-supervised visual pre-training can produce general-purpose features that transfer effectively across depth estimation, semantic segmentation, and image retrieval without task-specific fine-tuning, representing a significant step toward foundation models for vision.</p>
+    </article>
+  </main>
+</body>
+</html>

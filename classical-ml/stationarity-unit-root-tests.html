@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Stationarity — Unit Root Tests (ADF, KPSS) | Notes Backup</title>
+  <meta name="description" content="Derive strict and weak stationarity from first principles, understand the unit root as a random walk, and apply ADF, KPSS, and PP tests to diagnose and correct non-stationarity via differencing and log transforms." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Stationarity — Unit Root Tests (ADF, KPSS)</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Derive strict and weak stationarity from first principles, understand the unit root as a random walk, and apply ADF, KPSS, and PP tests to diagnose and correct non-stationarity via differencing and log transforms.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Stationarity — Unit Root Tests (ADF, KPSS)</h1>
+<p>Stationarity is the cornerstone assumption of classical time-series modelling. A stationary process has statistical properties that do not change over time, allowing models to exploit past patterns to forecast the future. Non-stationary series — those with trends, unit roots, or time-varying variance — violate the assumptions behind ARIMA, autocorrelation estimation, and most hypothesis tests. Before fitting any model, diagnosing and correcting non-stationarity is mandatory.</p>
+<h2>Strict and Weak Stationarity</h2>
+<p>Strict (strong) stationarity requires that the entire joint distribution of (yₜ₁, yₜ₂, …, yₜₖ) is identical to (yₜ₁₊τ, yₜ₂₊τ, …, yₜₖ₊τ) for all lags τ and all k. This is a very strong condition that is rarely verifiable empirically. Weak (covariance) stationarity requires only two conditions: a constant mean E[yₜ] = μ for all t, and an autocovariance Cov(yₜ, yₜ₊ₖ) = γ(k) that depends only on lag k, not on time t.</p>
+<p>Weak stationarity implies that the variance Var(yₜ) = γ(0) is also constant. Strict stationarity with finite second moments implies weak stationarity, but not vice versa — a t-distribution process can be weakly stationary without being strictly stationary. For practical forecasting, weak stationarity is sufficient and is what ARIMA models require after d differences.</p>
+<h2>Why Stationarity Matters for Forecasting</h2>
+<p>ARIMA forecasting relies on autocovariances that are stable across time. If γ(k) changes with t, the autocorrelation function estimated from historical data does not apply to the future. Spurious regression is another danger: regressing two independent random walks on each other yields R² close to 1 and significant t-statistics purely by chance, because both share a common stochastic trend.</p>
+<ul>
+<li>ARIMA models require stationarity after d differences — the d parameter is the number of unit roots.</li>
+<li>Autocorrelation estimates γ̂(k) are inconsistent for non-stationary series — they do not converge to true values.</li>
+<li>Spurious regression: two independent random walks may appear correlated (t-stat significant, R²≈1) with no real relationship.</li>
+<li>Granger causality tests and VAR models require all variables to be stationary or co-integrated.</li>
+<li>Prediction intervals grow correctly only when the differenced series is stationary.</li>
+</ul>
+<h2>Unit Root — The Random Walk</h2>
+<p>The simplest non-stationary process is the random walk yₜ = yₜ₋₁ + εₜ, which is an AR(1) with coefficient ρ = 1. The characteristic root equals 1 (the unit circle root). Variance grows linearly: Var(yₜ) = t·σ², so the process drifts without bound. More generally, yₜ = ρyₜ₋₁ + εₜ is stationary when |ρ| &lt; 1 (roots of 1 − ρB = 0 lie outside the unit circle) and non-stationary when ρ = 1.</p>
+<pre><code class="language-python">import numpy as np
+from statsmodels.tsa.stattools import adfuller
+
+np.random.seed(42)
+n = 300
+
+# Stationary AR(1) with |phi| &lt; 1
+phi = 0.7
+eps = np.random.randn(n)
+y_ar = np.zeros(n)
+for t in range(1, n):
+    y_ar[t] = phi * y_ar[t-1] + eps[t]
+
+# Non-stationary: unit-root random walk (phi = 1)
+y_rw = np.cumsum(np.random.randn(n))
+
+# Compare variance growth
+for half in [75, 150, 225, 300]:
+    std_ar = y_ar[:half].std()
+    std_rw = y_rw[:half].std()
+    print(f&quot;n={half:3d}  AR(1) std={std_ar:.3f}  RW std={std_rw:.3f}&quot;)
+
+adf_ar = adfuller(y_ar, autolag='AIC')[1]
+adf_rw = adfuller(y_rw, autolag='AIC')[1]
+print(f&quot;\nADF p: AR(1)={adf_ar:.4f} (stationary)  RW={adf_rw:.4f} (non-stationary)&quot;)
+print(&quot;AR(1) std stays bounded; RW std grows — key diagnostic difference&quot;)
+</code></pre>
+<h2>Augmented Dickey-Fuller (ADF) Test</h2>
+<p>The ADF test regresses Δyₜ on yₜ₋₁ and lagged differences Δyₜ₋₁, …, Δyₜ₋ₖ to remove serial correlation from residuals. The t-statistic on the yₜ₋₁ coefficient tests H₀: ρ = 1 (unit root, non-stationary) against H₁: ρ &lt; 1 (stationary). Critical values are non-standard (more negative than normal t-distribution) because the test statistic is not asymptotically normal under H₀. Rejecting H₀ at the 5% level means the series is stationary.</p>
+<pre><code class="language-python">import numpy as np
+from statsmodels.tsa.stattools import adfuller
+
+np.random.seed(0)
+n = 250
+
+y_stat = np.zeros(n)
+for t in range(1, n):
+    y_stat[t] = 0.6 * y_stat[t-1] + np.random.randn()
+
+y_rw = np.cumsum(np.random.randn(n))
+
+def adf_report(series, label, regression='c'):
+    stat, p, lags, nobs, crit, _ = adfuller(series, autolag='AIC', regression=regression)
+    decision = &quot;STATIONARY&quot; if p &lt; 0.05 else &quot;NON-STATIONARY&quot;
+    print(f&quot;\n{label}&quot;)
+    print(f&quot;  ADF statistic = {stat:.4f}&quot;)
+    print(f&quot;  p-value       = {p:.4f}  =&gt; {decision}&quot;)
+    print(f&quot;  Lags used     = {lags}&quot;)
+    print(f&quot;  Critical vals: 1%={crit['1%']:.3f}  5%={crit['5%']:.3f}  10%={crit['10%']:.3f}&quot;)
+
+adf_report(y_stat, &quot;AR(1) phi=0.6  [expect: STATIONARY]&quot;)
+adf_report(y_rw,   &quot;Random Walk    [expect: NON-STATIONARY]&quot;)
+adf_report(y_rw,   &quot;Random Walk (with trend regression)&quot;, regression='ct')
+</code></pre>
+<h2>KPSS Test and Reconciling with ADF</h2>
+<p>The KPSS (Kwiatkowski-Phillips-Schmidt-Shin) test has the opposite null hypothesis: H₀: the series is stationary (level or trend-stationary). Rejecting H₀ means the series has a unit root. Using ADF and KPSS together resolves ambiguity: if ADF rejects H₀ (stationary) and KPSS does not reject (stationary), both tests agree the series is stationary. If both tests reject their respective nulls, the evidence points to non-stationarity. Disagreement suggests possible trend-stationarity or near-unit-root behaviour.</p>
+<pre><code class="language-python">import numpy as np
+from statsmodels.tsa.stattools import adfuller, kpss
+import warnings
+
+np.random.seed(7)
+n = 300
+
+ar1 = np.zeros(n)
+for t in range(1, n):
+    ar1[t] = 0.5 * ar1[t-1] + np.random.randn()
+
+rw = np.cumsum(np.random.randn(n))
+trend_stat = np.linspace(0, 6, n) + 0.5 * np.random.randn(n)
+
+print(f&quot;{'Series':22s} {'ADF-p':7s} {'ADF verdict':12s} {'KPSS-p':8s} {'KPSS verdict':14s}&quot;)
+print(&quot;-&quot; * 68)
+
+for label, y in [(&quot;AR(1) phi=0.5&quot;, ar1), (&quot;Random Walk&quot;, rw), (&quot;Trend-stationary&quot;, trend_stat)]:
+    adf_p = adfuller(y, autolag='AIC')[1]
+    with warnings.catch_warnings():
+        warnings.simplefilter(&quot;ignore&quot;)
+        kpss_p = kpss(y, regression='c', nlags='auto')[1]
+    adf_v  = &quot;stationary&quot;     if adf_p  &lt; 0.05 else &quot;non-stationary&quot;
+    kpss_v = &quot;stationary&quot;     if kpss_p &gt; 0.05 else &quot;non-stationary&quot;
+    print(f&quot;{label:22s} {adf_p:7.3f} {adf_v:12s} {kpss_p:8.3f} {kpss_v:14s}&quot;)
+</code></pre>
+<h2>Differencing and Log Transformation</h2>
+<p>First differencing Δyₜ = yₜ − yₜ₋₁ removes a single stochastic trend (unit root). The d parameter in ARIMA(p,d,q) counts how many differences are needed for stationarity — typically d = 0, 1, or 2. Over-differencing introduces unnecessary MA structure (over-differenced series has ACF spike at lag 1). For series with multiplicative seasonality or exponential growth, the log transformation converts multiplicative structure to additive, and the differenced log is the continuously compounded return.</p>
+<pre><code class="language-python">import numpy as np
+from statsmodels.tsa.stattools import adfuller
+import warnings
+
+np.random.seed(42)
+n = 200
+
+# Stochastic trend: random walk
+rw = np.cumsum(np.random.randn(n))
+diff1 = np.diff(rw)
+
+# Multiplicative series: exponential trend + seasonal pattern
+t = np.arange(n)
+y_mult = 10.0 * np.exp(0.015 * t + 0.3 * np.sin(2 * np.pi * t / 12) + 0.1 * np.random.randn(n))
+log_y    = np.log(y_mult)
+log_diff = np.diff(log_y)
+
+def adf_p(x):
+    with warnings.catch_warnings():
+        warnings.simplefilter(&quot;ignore&quot;)
+        return adfuller(x, autolag='AIC')[1]
+
+results = [
+    (&quot;Random walk&quot;,              rw),
+    (&quot;First-differenced RW&quot;,     diff1),
+    (&quot;Multiplicative series&quot;,    y_mult),
+    (&quot;log(y)&quot;,                   log_y),
+    (&quot;diff(log(y))&quot;,             log_diff),
+]
+print(f&quot;{'Series':26s}  {'ADF p':8s}  {'Decision'}&quot;)
+print(&quot;-&quot; * 55)
+for label, y in results:
+    p = adf_p(y)
+    dec = &quot;stationary&quot; if p &lt; 0.05 else &quot;NON-STATIONARY&quot;
+    print(f&quot;{label:26s}  {p:.4f}    {dec}&quot;)
+</code></pre>
+<blockquote>
+<p><strong>Choosing the Number of Differences</strong>: Apply the ADF test after each difference. Stop differencing when the series is stationary (ADF p &lt; 0.05). Over-differencing (d too large) introduces an invertible MA unit root, inflates forecast variance, and is detectable by a large negative ACF spike at lag 1. If ADF barely rejects at p ≈ 0.04, check KPSS for confirmation before assuming d is sufficient.</p>
+</blockquote>
+<h2>Seasonal Unit Roots and the HEGY Test</h2>
+<p>Monthly or quarterly data may have seasonal unit roots at frequencies other than zero. The HEGY (Hylleberg-Engle-Granger-Yoo) test decomposes the seasonal differencing operator (1 − Bˢ) into unit roots at each seasonal frequency. For monthly data (S = 12), there are unit roots at frequencies 0, π/6, π/3, π/2, 2π/3, 5π/6, and π. Seasonal differencing Δₛyₜ = yₜ − yₜ₋ₛ removes all seasonal unit roots simultaneously, but this may over-difference if only some seasonal frequencies are non-stationary.</p>
+<h2>Unit Root Test Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Test</th>
+<th>Null Hypothesis</th>
+<th>Alternative</th>
+<th>When to Use</th>
+<th>Key Limitation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ADF (Augmented Dickey-Fuller)</td>
+<td>Unit root (non-stationary)</td>
+<td>Stationary (</td>
+<td>ρ</td>
+<td>&lt;1)</td>
+</tr>
+<tr>
+<td>KPSS</td>
+<td>Level/trend stationary</td>
+<td>Unit root</td>
+<td>Complement to ADF; confirms stationarity</td>
+<td>Sensitive to lag truncation; can over-reject for persistent series</td>
+</tr>
+<tr>
+<td>PP (Phillips-Perron)</td>
+<td>Unit root</td>
+<td>Stationary</td>
+<td>Non-parametric correction for serial correlation; no lags needed</td>
+<td>Poor small-sample properties; size distortions with heteroscedastic errors</td>
+</tr>
+<tr>
+<td>HEGY</td>
+<td>Seasonal unit root at each frequency</td>
+<td>Stationary at that frequency</td>
+<td>Testing specific seasonal frequencies separately</td>
+<td>Requires specifying seasonal period S; complicated for high-frequency data</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>Always test ADF + KPSS together — agreement between the two is much stronger evidence than either alone.</li>
+<li>Check residual plots and ACF of the differenced series to confirm white noise before proceeding.</li>
+<li>For long series (n &gt; 500) ADF has high power; for short series (n &lt; 100) consider PP or confirm visually.</li>
+<li>The regression type (constant, constant+trend, none) in ADF must match the true data-generating process.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

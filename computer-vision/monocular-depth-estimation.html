@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Monocular Depth Estimation: Self-Supervised and Learned Approaches | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Monocular Depth Estimation: Self-Supervised and Learned Approaches</h1>
+      
+      <h1>Monocular Depth Estimation: Self-Supervised and Learned Approaches</h1>
+<h2>Overview</h2>
+<p>Monocular depth estimation infers per-pixel distance from a single RGB image. Unlike stereo or LiDAR, no explicit geometry sensor is needed, making it attractive for autonomous driving, robotics, and AR/VR. Modern approaches fall into two camps: self-supervised methods that exploit video consistency losses, and supervised methods trained on LiDAR or stereo data.</p>
+<p>Deep learning treats depth as a dense pixel-wise regression problem. Early CNNs (Eigen et al., 2014) used multi-scale encoder-decoder networks. Vision Transformers later showed that global self-attention captures long-range depth cues — flat roads, overhanging branches, and distant buildings benefit from global context that local convolutions systematically miss.</p>
+<h2>Scale Ambiguity Problem</h2>
+<p>Without a reference scale, a monocular camera cannot distinguish a small nearby object from a large distant one — both project identically onto the image plane. Methods predicting relative depth (disparity or normalised inverse depth) sidestep this ambiguity but produce outputs that cannot feed motion planners or 3D reconstruction pipelines needing metric distance.</p>
+<blockquote>
+<p>****: Monocular depth is inherently scale-ambiguous — a small nearby object and a large distant one project identically. Self-supervised methods resolve this via camera pose estimation; metric methods use sparse LiDAR or stereo supervision to fix the scale.</p>
+</blockquote>
+<p>Metric depth methods fix scale via explicit supervision: sparse LiDAR projections in KITTI, or pseudo-GT from multi-view stereo reconstruction. ZoeDepth and Depth Anything V2 learn both relative geometry and a metric head conditioned on camera intrinsics, achieving sub-metre accuracy on indoor benchmarks while generalising to outdoor driving scenes with competitive AbsRel.</p>
+<h2>Self-Supervised Depth via View Synthesis</h2>
+<p>Self-supervised depth learning repurposes image reconstruction as a proxy training task. A depth network and a pose network jointly predict per-pixel depth D and relative camera pose T. The target frame is warped into the source view using D and T via differentiable bilinear sampling; photometric consistency between warped and source images supervises both networks without any depth labels.</p>
+<pre><code class="language-python"># Self-supervised photometric loss for monocular depth
+warped = grid_sample(target_frame, flow_from_depth_and_pose)
+photometric = F.l1_loss(warped, source_frame)
+ssim_loss = 1 - ssim(warped, source_frame)
+reprojection = 0.85 * ssim_loss + 0.15 * photometric
+# Edge-aware smoothness regularisation
+edge_aware_smooth = smooth_loss(depth, source_frame)
+total_loss = reprojection + 0.001 * edge_aware_smooth
+</code></pre>
+<p>The edge-aware smoothness term penalises depth discontinuities not aligned with image edges, preventing over-smoothing in textureless regions like roads and sky. The Monodepth2 auto-mask discards pixels where photometric loss is lower before warping — removing the training signal from static background and moving objects that violate the rigid-scene assumption.</p>
+<h2>DPT and Transformer Depth</h2>
+<p>Dense Prediction Transformer (DPT) uses a Vision Transformer backbone to extract patch-level features at multiple network depths. Unlike CNNs, ViT produces spatially consistent feature tokens at every layer. DPT reassembles tokens from layers 3, 6, 9, and 12 into 2D feature maps, fuses them with progressive upsampling blocks, and decodes to a full-resolution depth output.</p>
+<pre><code class="language-python"># DPT (Dense Prediction Transformer) depth head
+features = vit_backbone(image)          # ViT patch tokens
+hooks = [features[3], features[6],
+         features[9], features[12]]
+# Reassemble + fusion blocks upsample to full res
+depth = dpt_head(hooks)                 # fused multi-scale
+depth = F.relu(depth)                  # non-negative depth
+</code></pre>
+<p>DPT-Hybrid replaces full ViT with ResNet50 for early layers, cutting FLOPs while retaining long-range attention. MiDaS v3 uses DPT-Hybrid trained on 10+ mixed datasets with scale-and-shift-invariant loss, producing robust relative depth predictions. Fine-tuning this relative encoder on metric supervision (KITTI, NYUv2) then converts outputs to absolute depth efficiently.</p>
+<h2>Metric vs Relative Depth</h2>
+<p>Relative depth models output disparity or normalised inverse depth, invariant to global scale and shift. These generalise across camera types but cannot support motion planning. Metric depth models output depth in metres and require metric supervision — sparse LiDAR, or the learned scale anchoring used by ZoeDepth, which attaches a small metric head per dataset domain to the encoder.</p>
+<pre><code class="language-python"># Affine alignment of relative depth to sparse metric GT
+def align_depth(pred, sparse_gt):
+    mask = sparse_gt &gt; 0
+    p, g = pred[mask], sparse_gt[mask]
+    scale, shift = np.polyfit(p, g, 1)
+    aligned = pred * scale + shift
+    ratio = np.maximum(aligned[mask]/g, g/aligned[mask])
+    delta1 = (ratio &lt; 1.25).mean()
+    abs_rel = np.abs(aligned[mask] - g).mean() / g.mean()
+    return aligned, abs_rel, delta1
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Supervision</th>
+<th>AbsRel (KITTI)</th>
+<th>δ1 %</th>
+<th>Metric?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Monodepth2</td>
+<td>Self-supervised</td>
+<td>0.115</td>
+<td>87.9</td>
+<td>No</td>
+</tr>
+<tr>
+<td>MiDaS</td>
+<td>Multi-dataset (aligned)</td>
+<td>0.099*</td>
+<td>90.1*</td>
+<td>No</td>
+</tr>
+<tr>
+<td>DPT-Hybrid</td>
+<td>Multi-dataset (aligned)</td>
+<td>0.096*</td>
+<td>90.4*</td>
+<td>No</td>
+</tr>
+<tr>
+<td>ZoeDepth</td>
+<td>LiDAR + multi-dataset</td>
+<td>0.075</td>
+<td>93.0</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Depth Anything</td>
+<td>Large-scale pseudo-GT</td>
+<td>0.076</td>
+<td>92.8</td>
+<td>No</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-python">import torch
+from PIL import Image
+
+model = torch.hub.load(&quot;isl-org/ZoeDepth&quot;, &quot;ZoeD_NK&quot;,
+                        pretrained=True).eval().cuda()
+pil_image = Image.open(&quot;scene.jpg&quot;)
+depth_map = model.infer_pil(pil_image)  # metres, HxW tensor
+gt = load_gt_depth(&quot;scene_gt.npy&quot;)
+abs_rel = (abs(depth_map - gt) / gt).mean().item()
+print(f&quot;AbsRel: {abs_rel:.4f}&quot;)
+</code></pre>
+<p>AbsRel = mean(|pred−gt|/gt) should be low; δ1 = fraction of pixels where max(pred/gt, gt/pred) &lt; 1.25 should be high. MiDaS and DPT figures marked * are post-affine-alignment, making direct comparison with metric methods misleading. ZoeDepth is evaluated at predicted scale, placing it on a genuinely harder and more practically relevant evaluation footing.</p>
+<h2>Key Takeaways</h2>
+<p>Self-supervised methods like Monodepth2 match supervised performance on KITTI without depth labels by learning from temporal video consistency. Their weakness is scale ambiguity and poor generalisation to scenes with slow camera motion or moving objects dominating the frame — the photometric loss breaks where Lambertian appearance assumptions do not hold.</p>
+<p>DPT-based methods set the quality bar for relative depth estimation. Training on large, diverse datasets with scale-and-shift-invariant loss gives strong zero-shot transfer, making MiDaS v3 and Depth Anything excellent off-the-shelf depth priors for tasks including 3D inpainting, video editing, and NeRF initialisation from sparse input views.</p>
+<p>Metric depth is an active frontier. ZoeDepth, Depth Pro (Apple), and UniDepth show that combining large relative-depth encoders with a metric head trained on diverse data achieves generalised metric depth without dense LiDAR. The open challenge is indoor-outdoor domain shift: depth value distributions differ by two to three orders of magnitude across scene types.</p>
+    </article>
+  </main>
+</body>
+</html>

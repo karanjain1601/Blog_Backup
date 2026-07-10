@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Inference-Time Scaling Laws | Notes Backup</title>
+  <meta name="description" content="How increasing compute at inference (more tokens, more samples, search over solutions) improves model accuracy — the empirical scaling laws governing test-time compute and their implications for o1-style models." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Inference-Time Scaling Laws</h1>
+      <ul class='note-meta'><li><strong>description:</strong> How increasing compute at inference (more tokens, more samples, search over solutions) improves model accuracy — the empirical scaling laws governing test-time compute and their implications for o1-style models.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Inference-Time Scaling Laws</h1>
+<h2>Overview</h2>
+<p>Inference-time scaling laws describe how model accuracy improves as additional computation is invested during inference rather than training. The central empirical finding — established across mathematics, coding, and logical reasoning benchmarks — is that accuracy increases predictably, often log-linearly, with the amount of inference compute deployed. This scaling operates through three distinct mechanisms: (1) generating longer output sequences so the model can perform more reasoning steps before producing a final answer; (2) sampling multiple independent solutions and selecting among them using a scoring function or majority vote; and (3) conducting structured search over partial solutions, guided by a learned reward model that scores intermediate reasoning steps. These mechanisms are not mutually exclusive — state-of-the-art systems such as o1, o3, and DeepSeek-R1 combine all three, generating long chain-of-thought traces, sampling many candidates, and using verifiers to select final answers. The o1/o3 series demonstrated that the inference compute axis follows scaling laws qualitatively similar to those governing training compute, enabling principled prediction of achievable accuracy at a given inference budget.</p>
+<h2>The Test-Time Compute Paradigm</h2>
+<p>The traditional scaling paradigm for language models focused exclusively on training compute: larger models trained on more data with more GPU-hours achieve lower perplexity and higher benchmark scores. Test-time compute scaling offers a complementary axis — for a fixed trained model, how much accuracy can be recovered by spending more compute at inference time? The answer depends heavily on the task structure. For problems with verifiable correct answers — competition mathematics, formal theorem proving, code with executable test suites — test-time scaling is highly effective because an external verifier can distinguish correct from incorrect outputs without human judgment. For open-ended tasks such as creative writing or summarisation, the absence of a ground-truth verifier limits the utility of sampling multiple outputs. The o1 series demonstrated that for hard reasoning tasks, a small model with a large inference budget can match or exceed a much larger model with a standard inference budget, fundamentally changing the economics of deploying capable AI systems. This paradigm shift has practical consequences: accuracy is now a tunable dial that operators can adjust at serving time by controlling token budgets, sample counts, and search parameters, independently of the underlying trained model.</p>
+<ul>
+<li>Token budget scaling: generating more reasoning tokens per response before the final answer</li>
+<li>Sample count scaling: generating N independent solutions and selecting the best via a reward model</li>
+<li>Guided search: using a process reward model to score and prune partial solutions at each step</li>
+<li>Self-consistency: majority voting over sampled answers without a separate reward model</li>
+<li>Verifier-in-loop: iteratively generating and checking solutions until one passes all checks</li>
+</ul>
+<h2>Scaling with More Tokens</h2>
+<p>The simplest form of inference-time scaling is to allow the model to generate more tokens before producing a final answer. On mathematical reasoning benchmarks such as MATH and GSM8K, accuracy increases substantially as the maximum token budget grows from 64 to 4096 tokens, with diminishing returns beyond that threshold. The relationship is approximately log-linear: each doubling of the token budget produces a roughly constant absolute improvement in accuracy, but the magnitude of those improvements shrinks as the budget grows large. This diminishing-returns behaviour reflects the structure of hard problems: the easiest gains come from giving the model space to write out intermediate steps it would otherwise skip, while the hardest problems require qualitatively different reasoning strategies that more tokens alone cannot provide. Models trained with reinforcement learning to use thinking tokens — such as DeepSeek-R1 and o1 — achieve substantially better accuracy-per-token efficiency than base models with simple chain-of-thought prompting, because RL training teaches the model to allocate reasoning effort productively across different token budget levels rather than padding output with redundant text. Empirically, RL-trained thinking models achieve the same accuracy as base models at roughly 4–8× fewer tokens, reducing the marginal cost of inference-time scaling.</p>
+<pre><code class="language-python">import anthropic
+import matplotlib.pyplot as plt
+from typing import List, Dict
+
+client = anthropic.Anthropic()
+
+def token_budget_sweep(problems: List[Dict], model: str = &quot;claude-opus-4-5&quot;) -&gt; None:
+    # Sweep max_tokens budgets and measure accuracy vs tokens generated.
+    budgets = [64, 256, 1024, 4096, 8192]
+    accs, avg_toks = [], []
+    for budget in budgets:
+        correct, total_tok = 0, 0
+        for prob in problems:
+            msg = client.messages.create(
+                model=model, max_tokens=budget,
+                messages=[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: prob[&quot;question&quot;]}],
+            )
+            total_tok += msg.usage.output_tokens
+            if prob[&quot;answer&quot;].strip() in msg.content[0].text:
+                correct += 1
+        acc = correct / len(problems)
+        accs.append(acc); avg_toks.append(total_tok / len(problems))
+        print(f&quot;budget={budget:5d}  avg_tokens={total_tok/len(problems):7.1f}  acc={acc:.3f}&quot;)
+    plt.plot(avg_toks, accs, &quot;o-&quot;); plt.xlabel(&quot;Avg Tokens Generated&quot;)
+    plt.ylabel(&quot;Accuracy&quot;); plt.title(&quot;Accuracy vs Token Budget&quot;); plt.grid(True); plt.show()
+</code></pre>
+<h2>Scaling with More Samples</h2>
+<p>Sampling multiple independent solutions from the same model and selecting the best is the most widely studied form of test-time scaling. The best-of-N strategy generates N solutions using temperature sampling (typically T=0.8–1.0) and returns the candidate with the highest score according to an outcome reward model. The accuracy of best-of-N scales as a power law with N: doubling N typically yields a constant fraction of the remaining error gap to perfect accuracy. This power-law scaling is approximated by acc(N) = 1 − (1 − p)^N where p is the per-sample success probability, though this formula underestimates accuracy when samples are correlated through shared failure modes. Self-consistency — selecting the answer that appears most frequently across N samples — achieves 70–80% of the gain of ORM-based selection with zero reward model cost, making it the preferred approach when accuracy matters more than compute cost and no labelled data is available to train a reward model. The key hyperparameter is sampling temperature: too low produces correlated samples with little diversity, while too high produces incoherent solutions. The optimal temperature for best-of-N on MATH is approximately 0.7–0.9, and should be tuned per model and task domain. On AIME 2024, o1-mini with N=64 samples approaches o1 accuracy at roughly 4× lower per-sample cost.</p>
+<pre><code class="language-python">import anthropic
+import numpy as np
+from collections import Counter
+from typing import List, Dict
+
+client = anthropic.Anthropic()
+
+def sample_and_vote(problem: Dict, sample_ns: List[int] = [1, 4, 8, 16, 32, 64]) -&gt; None:
+    # Generate up to max(sample_ns) samples, then evaluate majority vote at each N.
+    cached: List[str] = []
+    for n in sample_ns:
+        while len(cached) &lt; n:
+            r = client.messages.create(
+                model=&quot;claude-haiku-4-5&quot;, max_tokens=512, temperature=0.8,
+                messages=[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: problem[&quot;question&quot;]}],
+            )
+            cached.append(r.content[0].text.strip())
+        subset = cached[:n]
+        vote = Counter(subset).most_common(1)[0][0]
+        correct = (vote == problem[&quot;answer&quot;])
+        pass_at_n = np.mean([a == problem[&quot;answer&quot;] for a in subset])
+        print(f&quot;N={n:3d}  majority_vote_correct={correct}  pass@N={pass_at_n:.2f}&quot;)
+</code></pre>
+<h2>Search and Verification</h2>
+<p>Structured search over reasoning paths combines token budget scaling with sample count scaling by guiding generation toward high-quality partial solutions rather than completing each sample independently. Beam search with a process reward model (PRM) maintains a set of B active reasoning paths (the beam), expands each by generating K candidate next steps, scores all B×K candidates with the PRM, and retains the top B for the next step. This algorithm explores the space of solutions more efficiently than random sampling because it focuses compute on the most promising partial solutions early, avoiding wasting tokens on paths the PRM predicts will fail. The quality of search guidance depends critically on PRM calibration: a well-calibrated PRM assigns high scores to steps that lead to correct final answers and low scores to steps that lead to incorrect ones. Monte Carlo Tree Search (MCTS) extends beam search with backpropagation of outcome signals, enabling the search algorithm to revise step scores based on downstream outcomes, but at the cost of higher engineering complexity and inference overhead. In practice, simple beam search with a well-trained PRM achieves 80–90% of MCTS accuracy at a fraction of the implementation complexity, and is the recommended starting point for production systems. Combining beam search with outcome verification — where each completed beam is checked by an executable verifier — further pushes accuracy toward ceiling on tasks with objective correctness criteria such as code generation and formal proofs.</p>
+<pre><code class="language-python">import anthropic
+import re
+from typing import List, Dict
+
+client = anthropic.Anthropic()
+
+def score_step(step: str, context: str) -&gt; float:
+    # Approximate PRM: ask the model to rate the reasoning step.
+    prompt = &quot;Rate this reasoning step 0.0 to 1.0. Context: &quot; + context[:300] + &quot; Step: &quot; + step
+    r = client.messages.create(model=&quot;claude-haiku-4-5&quot;, max_tokens=8,
+                               messages=[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: prompt + &quot; Score:&quot;}])
+    m = re.search(r&quot;[01]\.\d+&quot;, r.content[0].text)
+    return float(m.group()) if m else 0.5
+
+def prm_beam_search(problem: str, beam_w: int = 3, n_steps: int = 5) -&gt; str:
+    beams: List[Dict] = [{&quot;steps&quot;: [], &quot;score&quot;: 1.0}]
+    for _ in range(n_steps):
+        cands: List[Dict] = []
+        for beam in beams:
+            ctx = problem + &quot; | &quot; + &quot; | &quot;.join(beam[&quot;steps&quot;])
+            for _ in range(beam_w):
+                r = client.messages.create(model=&quot;claude-haiku-4-5&quot;, max_tokens=150,
+                                           messages=[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: ctx + &quot; Next step:&quot;}])
+                step = r.content[0].text.strip()
+                cands.append({&quot;steps&quot;: beam[&quot;steps&quot;] + [step], &quot;score&quot;: score_step(step, ctx)})
+        beams = sorted(cands, key=lambda b: b[&quot;score&quot;], reverse=True)[:beam_w]
+        print(f&quot;step_done  best_score={beams[0]['score']:.3f}&quot;)
+    return &quot; | &quot;.join(beams[0][&quot;steps&quot;])
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Scaling axis</th>
+<th>What increases</th>
+<th>Accuracy gain</th>
+<th>Compute cost</th>
+<th>Best for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Larger model</td>
+<td>Parameter count</td>
+<td>Large (strong baseline)</td>
+<td>Very high (training)</td>
+<td>All tasks, general use</td>
+</tr>
+<tr>
+<td>More training data</td>
+<td>Dataset size</td>
+<td>Moderate (diminishing)</td>
+<td>High (training)</td>
+<td>Low-resource domains</td>
+</tr>
+<tr>
+<td>Longer output</td>
+<td>Token budget per call</td>
+<td>Moderate (log-linear)</td>
+<td>Low to moderate</td>
+<td>Reasoning, math, code</td>
+</tr>
+<tr>
+<td>More samples (best-of-N)</td>
+<td>N candidates sampled</td>
+<td>Strong (power law in N)</td>
+<td>N× inference cost</td>
+<td>Verifiable answer tasks</td>
+</tr>
+<tr>
+<td>Guided search (beam+PRM)</td>
+<td>Beam width × steps</td>
+<td>Very strong</td>
+<td>High (PRM + beam overhead)</td>
+<td>Multi-step reasoning</td>
+</tr>
+<tr>
+<td>Verifier-in-loop</td>
+<td>Iterations until pass</td>
+<td>Near ceiling on code/proof</td>
+<td>Variable (avg iterations)</td>
+<td>Formal proofs, unit-tested code</td>
+</tr>
+</tbody>
+</table>
+<h2>Inference vs Training Compute Tradeoffs</h2>
+<p>A key question for practitioners is whether to invest compute budget in training a larger model or in deploying a smaller model with a higher inference compute budget. The answer depends on task structure, deployment volume, and acceptable latency. For high-volume, latency-sensitive serving such as autocomplete or interactive chat, training a larger model amortises the training cost over many inference calls, each of which must be fast. For low-volume, high-stakes problems such as medical diagnosis assistance, competitive mathematics, or legal reasoning, allocating significant inference compute to a smaller model can achieve better accuracy per dollar. The cross-over point — where a smaller model with N-sample inference matches a larger model with single-sample inference — is empirically around N=16–64 for models two to four times different in parameter count on MATH-level reasoning tasks. Beyond this range, test-time compute cannot fully compensate for parameter scale on tasks that require broad world knowledge distributed across many parameters. A critical practical consideration: inference compute scales with N per query, but training compute is a one-time fixed cost. For a problem solved one million times per day, even a modest per-inference overhead accumulates rapidly, and the break-even point between investing in training vs. inference shifts substantially toward training for high-volume deployments. Organisations should profile the accuracy-compute Pareto frontier for their specific workload before committing to an architecture choice.</p>
+<pre><code class="language-python">import anthropic
+import math
+import matplotlib.pyplot as plt
+from dataclasses import dataclass
+from typing import List
+@dataclass
+class Config:
+    label: str; params_b: float; tokens: int; samples: int; accuracy: float
+def flops(c: Config) -&gt; float:
+    return 2.0 * c.params_b * 1e9 * c.tokens * c.samples
+configs: List[Config] = [
+    Config(&quot;70B x 1&quot;,    70, 512,  1,  0.72),
+    Config(&quot;8B x 4&quot;,      8, 512,  4,  0.68),
+    Config(&quot;8B x 16&quot;,     8, 512,  16, 0.74),
+    Config(&quot;8B x 64&quot;,     8, 1024, 64, 0.79),
+    Config(&quot;8B+PRM x4&quot;,   8, 2048, 4,  0.77),
+    Config(&quot;8B+PRM x16&quot;,  8, 2048, 16, 0.81),
+]
+xs = [math.log10(flops(c)) for c in configs]
+ys = [c.accuracy for c in configs]
+plt.figure(figsize=(9, 5)); plt.scatter(xs, ys, s=90)
+for c, x, y in zip(configs, xs, ys):
+    plt.annotate(c.label, (x, y), xytext=(5, 3), textcoords=&quot;offset points&quot;)
+plt.xlabel(&quot;log10(FLOPs)&quot;); plt.ylabel(&quot;Accuracy on MATH&quot;)
+plt.title(&quot;Pareto Frontier: Parameter Scale vs Test-Time Compute&quot;); plt.grid(True); plt.show()
+</code></pre>
+<h2>Practical Implications</h2>
+<p>The inference-time scaling findings have several concrete implications for AI system design and deployment. First, accuracy on hard reasoning tasks is no longer a fixed property of a trained model — it can be controlled at serving time by adjusting the inference compute budget, enabling operators to trade latency and cost against quality on a per-request basis. Second, the existence of a smooth accuracy-compute Pareto frontier means that operators can choose the operating point that best matches their cost and latency constraints, rather than committing to a single fixed model size. Third, training models to use inference compute well — via RL on thinking tokens or via distillation from larger thinking models — is now a first-class training objective, because a model that efficiently distributes its reasoning across a given token budget achieves far better performance than one that simply generates more tokens without structured self-improvement. Fourth, evaluating model quality with single-sample greedy decoding systematically underestimates the achievable performance of models that support extended reasoning, making best-of-N evaluation with appropriate sample counts a necessary complement to standard benchmarking. Fifth, retrieval-augmented generation (RAG) and tool use compose naturally with test-time scaling: models that can call tools or search databases within their reasoning trace effectively have access to external compute, extending the scaling curve further. Organisations deploying capable reasoning models should profile all three scaling axes for their task domain and design serving infrastructure that can flexibly adjust compute allocation based on query difficulty.</p>
+<blockquote>
+<p><strong>Key Empirical Finding</strong>: The o1/o3 findings show that inference-time compute scales predictably with accuracy — for hard reasoning tasks, a small model with many thinking tokens can match a large model at less total compute. On AIME 2024, o1 with a 32K token thinking budget matched GPT-4o performance at roughly 8x lower parameter count, demonstrating that the accuracy-compute curve for inference compute can intersect the training-compute Pareto frontier at practically relevant operating points for competition mathematics.</p>
+</blockquote>
+<ol>
+<li>Profile the accuracy-compute curve for your specific task class before committing to a scaling strategy</li>
+<li>Use majority vote (self-consistency) for medium-difficulty tasks before investing in reward model training</li>
+<li>Train a lightweight outcome reward model on domain-specific data for best-of-N selection in high-stakes settings</li>
+<li>Set token budgets dynamically based on detected problem difficulty rather than a fixed maximum</li>
+<li>Monitor for diminishing returns: for most tasks, N &gt; 64 samples or tokens &gt; 8192 shows minimal marginal gains</li>
+</ol>
+<h2>Key Takeaways</h2>
+<ul>
+<li>Inference-time compute scales predictably with accuracy via three mechanisms: longer outputs, more samples, and guided search</li>
+<li>Best-of-N with an outcome reward model is the most effective and easiest-to-implement test-time scaling strategy</li>
+<li>Self-consistency (majority vote) captures 70-80% of reward-model gain at zero additional model cost</li>
+<li>The accuracy-compute Pareto frontier favours test-time scaling for low-volume, high-stakes tasks and training-compute scaling for high-volume, latency-sensitive deployments</li>
+<li>Models trained with RLVR on thinking tokens use inference compute far more efficiently than base models with naive chain-of-thought prompting</li>
+<li>Evaluating capable reasoning models with single-sample greedy decoding systematically underestimates their true performance ceiling — always complement with best-of-N benchmarking</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

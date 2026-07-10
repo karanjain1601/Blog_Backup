@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>The Kernel Trick — Mercer&#x27;s Theorem and Feature Maps | Notes Backup</title>
+  <meta name="description" content="Understand kernels as implicit inner products in feature space, apply Mercer&#x27;s theorem to validate kernels, compare RBF/polynomial/linear kernels, and use kernelised SVM, kernel PCA, and the representer theorem." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>The Kernel Trick — Mercer&#x27;s Theorem and Feature Maps</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Understand kernels as implicit inner products in feature space, apply Mercer&#x27;s theorem to validate kernels, compare RBF/polynomial/linear kernels, and use kernelised SVM, kernel PCA, and the representer theorem.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>The Kernel Trick — Mercer's Theorem and Feature Maps</h1>
+<p>The kernel trick allows learning algorithms that depend only on inner products between data points to operate in very high (or infinite) dimensional feature spaces without explicitly computing the feature map φ. A kernel function k(x,z) = φ(x)·φ(z) computes the inner product implicitly. This powers kernelised SVMs, Gaussian processes, kernel PCA, and kernel ridge regression — enabling nonlinear models while retaining convex optimisation guarantees.</p>
+<h2>Feature Maps and the Kernel Function</h2>
+<p>The feature map φ: ℝᵈ → ℋ embeds data into a (possibly infinite-dimensional) Hilbert space ℋ. A kernel k: ℝᵈ × ℝᵈ → ℝ satisfies k(x,z) = ⟨φ(x), φ(z)⟩_ℋ. The power: we can compute k(x,z) directly in O(d) time even when dim(ℋ) = ∞. Example: RBF kernel k(x,z) = exp(−γ‖x−z‖²) corresponds to an infinite-dimensional φ (a Gaussian function basis). Polynomial kernel k(x,z) = (xᵀz + c)^d corresponds to all monomials up to degree d, giving O(d^D) features computed in O(d) time.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.metrics.pairwise import rbf_kernel, polynomial_kernel, linear_kernel
+
+np.random.seed(42)
+X = np.random.randn(5, 3)   # 5 points in R^3
+Z = np.random.randn(4, 3)   # 4 query points
+
+# RBF kernel: k(x,z) = exp(-gamma * ||x-z||^2)
+gamma = 0.5
+K_rbf  = rbf_kernel(X, Z, gamma=gamma)
+
+# Polynomial kernel: k(x,z) = (x^T z + 1)^3
+K_poly = polynomial_kernel(X, Z, degree=3, coef0=1.0)
+
+# Linear kernel: k(x,z) = x^T z
+K_lin  = linear_kernel(X, Z)
+
+print(f'RBF kernel matrix shape:        {K_rbf.shape}')
+print(f'Polynomial kernel matrix shape: {K_poly.shape}')
+print(f'Linear kernel matrix shape:     {K_lin.shape}')
+
+# Verify RBF manually
+i, j = 0, 0
+rbf_manual = np.exp(-gamma * np.sum((X[i] - Z[j])**2))
+print(f'\nRBF K[0,0] sklearn:  {K_rbf[0,0]:.6f}')
+print(f'RBF K[0,0] manual:   {rbf_manual:.6f}')
+</code></pre>
+<h2>Mercer's Theorem</h2>
+<p>A function k(x,z) is a valid kernel (i.e., there exists a feature map φ such that k(x,z) = ⟨φ(x),φ(z)⟩) if and only if the Gram matrix K ∈ ℝⁿˣⁿ with Kᵢⱼ = k(xᵢ,xⱼ) is positive semi-definite (PSD) for every finite set of points {x₁,...,xₙ}. Equivalently, k must be a symmetric function with all eigenvalues of K non-negative. Mercer's theorem provides the constructive direction: the eigenfunctions of the integral operator give the feature map. PSD-ness can be verified by checking that all eigenvalues of K are ≥ 0.</p>
+<blockquote>
+<p><strong>Kernel Validity and the PSD Condition</strong>: Not every symmetric similarity function is a valid kernel. Heuristic 'kernels' like k(x,z) = exp(−‖x−z‖) (not squared) are conditionally negative definite and can cause indefinite Gram matrices, breaking the SVM QP convexity. Always verify PSD-ness before using a custom kernel. A practical check: compute K on a sample and verify all eigenvalues ≥ −ε for small machine-precision ε.</p>
+</blockquote>
+<h2>Common Kernels and Their Properties</h2>
+<p>The three most widely used kernels are: RBF (Gaussian) k(x,z) = exp(−γ‖x−z‖²) — universal approximator, infinite-dimensional φ, localized (depends only on distance); Polynomial k(x,z) = (xᵀz+c)^d — captures interaction terms, not universal, can have numerical issues for large d; Linear k(x,z) = xᵀz — equivalent to a linear model, no φ transformation. Matérn kernels generalise RBF with a smoothness parameter ν. Kernel composition rules: sums, products, and positive scalar multiples of valid kernels are valid kernels.</p>
+<table>
+<thead>
+<tr>
+<th>Kernel</th>
+<th>Formula</th>
+<th>Dim(φ)</th>
+<th>Hyperparams</th>
+<th>When to Use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Linear</td>
+<td>xᵀz</td>
+<td>d (same as input)</td>
+<td>None</td>
+<td>Linearly separable, large n</td>
+</tr>
+<tr>
+<td>Polynomial</td>
+<td>(xᵀz + c)^d</td>
+<td>O(d^d)</td>
+<td>degree d, coef0 c</td>
+<td>Interaction features, NLP n-grams</td>
+</tr>
+<tr>
+<td>RBF (Gaussian)</td>
+<td>exp(−γ‖x−z‖²)</td>
+<td>∞</td>
+<td>γ (bandwidth)</td>
+<td>General purpose nonlinear default</td>
+</tr>
+<tr>
+<td>Matérn ν=3/2</td>
+<td>(1+√3‖x−z‖/l)exp(−√3‖x−z‖/l)</td>
+<td>∞</td>
+<td>length-scale l</td>
+<td>GPs, smoother than RBF</td>
+</tr>
+<tr>
+<td>Sigmoid</td>
+<td>tanh(αxᵀz + c)</td>
+<td>—</td>
+<td>α, c</td>
+<td>Not always PSD — use with care</td>
+</tr>
+</tbody>
+</table>
+<h2>Kernelised SVM</h2>
+<p>Replacing xᵢᵀxⱼ with k(xᵢ,xⱼ) in the SVM dual is all that is needed to kernelise: maximise Σαᵢ − ½ΣᵢΣⱼ αᵢαⱼyᵢyⱼk(xᵢ,xⱼ). The decision function becomes f(x) = sign(Σᵢ αᵢyᵢk(xᵢ,x) + b). The weight vector w exists in the feature space ℋ but may be infinite-dimensional — it is never computed explicitly. This is the kernel trick. The RBF SVM can form any decision boundary, making it a universal classifier for compact feature spaces.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.svm import SVC
+from sklearn.datasets import make_circles, make_moons
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import cross_val_score
+
+np.random.seed(42)
+X, y = make_moons(n_samples=300, noise=0.2, random_state=42)
+X_s = StandardScaler().fit_transform(X)
+
+kernels = [
+    ('linear',    SVC(kernel='linear',              C=1.0)),
+    ('poly d=3',  SVC(kernel='poly', degree=3,      C=1.0, coef0=1)),
+    ('RBF g=1',   SVC(kernel='rbf',  gamma=1.0,     C=1.0)),
+    ('RBF g=0.1', SVC(kernel='rbf',  gamma=0.1,     C=1.0)),
+]
+
+print(f'{&quot;Kernel&quot;:&gt;14} {&quot;Mean CV Acc&quot;:&gt;12} {&quot;Std&quot;:&gt;6}')
+for name, clf in kernels:
+    scores = cross_val_score(clf, X_s, y, cv=5, scoring='accuracy')
+    print(f'{name:&gt;14} {scores.mean():&gt;12.4f} {scores.std():&gt;6.4f}')
+</code></pre>
+<h2>Kernel PCA</h2>
+<p>Standard PCA finds linear subspaces of maximum variance. Kernel PCA first maps data to ℋ via φ, then performs PCA in ℋ — finding nonlinear low-dimensional structure. Because only inner products ⟨φ(xᵢ),φ(xⱼ)⟩ = k(xᵢ,xⱼ) are needed, the full computation requires only the n×n kernel matrix. The projected coordinates in ℋ are the eigenvectors of the centred kernel matrix. This can separate classes that are not linearly separable in the original space.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.decomposition import KernelPCA, PCA
+from sklearn.datasets import make_circles
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import cross_val_score
+
+np.random.seed(0)
+X, y = make_circles(n_samples=400, noise=0.1, factor=0.3, random_state=0)
+X_s = StandardScaler().fit_transform(X)
+
+# Linear PCA: cannot separate concentric circles
+pca_acc = cross_val_score(
+    Pipeline([('pca', PCA(n_components=1)), ('lr', LogisticRegression())]),
+    X_s, y, cv=5
+).mean()
+
+# Kernel PCA with RBF: maps to space where classes are linearly separable
+kpca_acc = cross_val_score(
+    Pipeline([('kpca', KernelPCA(n_components=2, kernel='rbf', gamma=5.0)),
+               ('lr',   LogisticRegression())]),
+    X_s, y, cv=5
+).mean()
+
+print(f'PCA  + LR accuracy:        {pca_acc:.4f}')
+print(f'KPCA + LR accuracy:        {kpca_acc:.4f}')
+print(f'Concentric circles need nonlinear embedding — KPCA succeeds where PCA fails.')
+</code></pre>
+<h2>Kernel Ridge Regression and the Representer Theorem</h2>
+<p>The Representer Theorem (Kimeldorf &amp; Wahba, 1971) states that the optimal solution to any regularised empirical risk minimisation problem in an RKHS lies in the span of kernel functions at the training points: f*(x) = Σᵢ αᵢk(xᵢ,x). Kernel ridge regression (KRR) minimises ‖y − f‖² + λ‖f‖²_ℋ and has the closed-form dual solution α = (K + λI)⁻¹y, where K is the kernel matrix. KRR is equivalent to Gaussian process regression with a squared-exponential covariance.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.kernel_ridge import KernelRidge
+from sklearn.linear_model import Ridge
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_squared_error
+
+np.random.seed(42)
+n = 150
+X = np.sort(np.random.uniform(-4, 4, n)).reshape(-1, 1)
+y = np.sin(X).ravel() + 0.3 * np.random.randn(n)
+X_s = StandardScaler().fit_transform(X)
+
+# Standard Ridge (linear)
+ridge = Ridge(alpha=1.0).fit(X_s, y)
+
+# Kernel Ridge with RBF (nonlinear)
+krr = KernelRidge(alpha=0.1, kernel='rbf', gamma=1.0).fit(X_s, y)
+
+X_test = np.linspace(-4, 4, 200).reshape(-1, 1)
+X_test_s = StandardScaler().fit(X).transform(X_test)
+
+ridge_mse = mean_squared_error(np.sin(X_test), ridge.predict(X_test_s))
+krr_mse   = mean_squared_error(np.sin(X_test), krr.predict(X_test_s))
+
+print(f'Ridge (linear) test MSE: {ridge_mse:.4f}')
+print(f'Kernel Ridge (RBF) MSE:  {krr_mse:.4f}')
+print(f'KRR alpha shape: {krr.dual_coef_.shape}  (one alpha per training point)')
+</code></pre>
+<h2>Kernel Composition Rules</h2>
+<p>New kernels can be built from existing valid kernels using these closure properties. If k₁ and k₂ are valid kernels and c &gt; 0, then the following are also valid kernels: k₁ + k₂ (sum), k₁ · k₂ (product), c · k₁ (scalar multiple), exp(k₁) (matrix exponential), f(x)·k₁(x,z)·f(z) for any function f, and k(φ(x), φ(z)) for any function φ. These rules let practitioners build domain-specific kernels for strings, graphs, time series, or images by combining simpler kernels.</p>
+<ul>
+<li>Sum: k₁(x,z) + k₂(x,z) — combines features from two spaces additively.</li>
+<li>Product: k₁(x,z) · k₂(x,z) — models all pairwise interactions between the two feature sets.</li>
+<li>Scalar multiple: c · k(x,z) — scales the feature space; c must be positive.</li>
+<li>Exponentiation: exp(k(x,z)) — always a valid kernel when k is any valid kernel.</li>
+<li>Function scaling: f(x) · k(x,z) · f(z) — re-weights the feature space by function f.</li>
+<li>Composition: k(φ(x), φ(z)) — applies a preprocessing map φ before computing the kernel.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

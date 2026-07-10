@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Semantic Segmentation: FCN and Dilated Convolutions | Notes Backup</title>
+  <meta name="description" content="Pixel-wise classification for semantic segmentation — fully convolutional networks, dilated convolutions for dense prediction, encoder-decoder architectures, and key benchmarks." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Semantic Segmentation: FCN and Dilated Convolutions</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Pixel-wise classification for semantic segmentation — fully convolutional networks, dilated convolutions for dense prediction, encoder-decoder architectures, and key benchmarks.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Semantic Segmentation: FCN and Dilated Convolutions</h1>
+<h2>Overview</h2>
+<p>Semantic segmentation assigns a class label to every pixel in an image. Unlike object detection, which draws bounding boxes, segmentation produces dense per-pixel predictions. Applications include autonomous driving (road vs pedestrian vs vehicle), medical imaging (organ delineation), and satellite analysis. Modern approaches build on fully convolutional networks trained end-to-end with cross-entropy loss.</p>
+<p>Key challenges include maintaining spatial resolution through the network, capturing multi-scale context, and handling class imbalance. The field has evolved from hand-crafted features and CRF post-processing to pure deep learning pipelines. Metrics like mean Intersection-over-Union (mIoU) across classes on Pascal VOC and ADE20K are standard evaluation benchmarks.</p>
+<h2>Fully Convolutional Networks</h2>
+<p>FCNs (Long et al., 2015) repurpose ImageNet classifiers by replacing fully connected layers with 1×1 convolutions, enabling the network to produce spatial output maps. The final feature map is bilinearly upsampled back to the input resolution. FCN-32s uses a single 32× upsample; FCN-8s fuses predictions from earlier layers for finer boundaries and higher mIoU.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from torchvision.models import resnet50
+
+def build_fcn(num_classes=21):
+    backbone = resnet50(pretrained=True)
+    # Remove FC layers, keep spatial feature maps
+    encoder = nn.Sequential(*list(backbone.children())[:-2])
+    # 1x1 conv maps 2048 channels -&gt; num_classes
+    classifier = nn.Conv2d(2048, num_classes, kernel_size=1)
+    upsample = nn.Upsample(scale_factor=32, mode='bilinear', align_corners=False)
+    return nn.Sequential(encoder, classifier, upsample)
+</code></pre>
+<p>FCN demonstrated that classification networks can be directly adapted for dense prediction. The skip connections in FCN-8s (combining pool3, pool4, and conv7 predictions) recover spatial detail lost during strided pooling. This design pattern — coarse predictions refined by higher-resolution features — became foundational for all subsequent segmentation architectures.</p>
+<h2>Dilated Convolutions</h2>
+<p>Dilated (atrous) convolutions insert gaps between kernel weights, expanding the receptive field without increasing parameters or reducing spatial resolution. A 3×3 kernel with dilation=2 covers a 5×5 area; with dilation=4, it covers 9×9. This lets segmentation networks maintain high-resolution feature maps while still capturing long-range context — critical for accurate boundary localization.</p>
+<pre><code class="language-python">import torch.nn as nn
+
+# Standard 3x3 conv: receptive field 3x3
+conv_standard = nn.Conv2d(256, 256, kernel_size=3, padding=1)
+
+# Dilated conv dilation=2: receptive field 5x5, same output size
+conv_d2 = nn.Conv2d(256, 256, kernel_size=3, padding=2, dilation=2)
+
+# Dilated conv dilation=4: receptive field 9x9
+conv_d4 = nn.Conv2d(256, 256, kernel_size=3, padding=4, dilation=4)
+
+# Replace stride in backbone to maintain spatial resolution
+# layer3: stride=1, dilation=2 instead of stride=2, dilation=1
+</code></pre>
+<p>The DeepLab series popularised dilated convolutions for segmentation. By removing strides from later ResNet layers and substituting dilation, the output stride (ratio of input to output resolution) can be set to 8 or 16 instead of 32. Smaller output stride preserves finer spatial detail at the cost of higher memory and compute for subsequent layers.</p>
+<h2>Encoder-Decoder for Segmentation</h2>
+<p>Encoder-decoder architectures compress the input to a bottleneck then progressively recover resolution. The encoder extracts semantic features through strided convolutions or pooling; the decoder upsamples using transposed convolutions or bilinear interpolation. Skip connections from encoder to decoder pass high-frequency spatial detail that would otherwise be lost, improving boundary sharpness in the final prediction.</p>
+<p>SegNet uses the pooling indices from max-pool layers to guide unpooling in the decoder, achieving good boundary quality without skip concatenation. U-Net concatenates full feature maps at each level, which is more expensive but preserves richer detail. PSPNet and DeepLab use global context pooling rather than a symmetric decoder, achieving strong results on COCO and Cityscapes.</p>
+<h2>Training Pixel Classifiers</h2>
+<p>Segmentation models are trained with per-pixel cross-entropy loss. Datasets like Pascal VOC mark ambiguous regions with label 255, which should be excluded from loss computation. Data augmentation — random crop, horizontal flip, colour jitter, and random scale — is essential to prevent overfitting on relatively small segmentation datasets compared to ImageNet classification.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+# Cross-entropy loss ignoring unlabeled pixels (index 255)
+criterion = nn.CrossEntropyLoss(ignore_index=255)
+
+def train_step(model, images, labels, optimizer):
+    optimizer.zero_grad()
+    logits = model(images)  # (B, C, H, W)
+    loss = criterion(logits, labels)  # labels: (B, H, W) long
+    loss.backward()
+    optimizer.step()
+    return loss.item()
+
+# Poly LR schedule: lr * (1 - iter/max_iter)^0.9
+def poly_lr(base_lr, cur_iter, max_iter, power=0.9):
+    return base_lr * (1 - cur_iter / max_iter) ** power
+</code></pre>
+<pre><code class="language-python">import torch
+from torchvision.models.segmentation import deeplabv3_resnet50
+from torchvision import transforms
+from PIL import Image
+import numpy as np
+
+model = deeplabv3_resnet50(pretrained=True).eval()
+preprocess = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])
+])
+img = Image.open('image.jpg').convert('RGB')
+tensor = preprocess(img).unsqueeze(0)
+with torch.no_grad():
+    pred = model(tensor)['out'].argmax(1).squeeze().numpy()
+print('Unique classes found:', np.unique(pred))
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Backbone</th>
+<th>mIoU (VOC12)</th>
+<th>mIoU (ADE20K)</th>
+<th>Speed (FPS)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FCN-32s</td>
+<td>VGG-16</td>
+<td>59.4</td>
+<td>—</td>
+<td>~10</td>
+</tr>
+<tr>
+<td>FCN-8s</td>
+<td>VGG-16</td>
+<td>62.2</td>
+<td>—</td>
+<td>~8</td>
+</tr>
+<tr>
+<td>SegNet</td>
+<td>VGG-16</td>
+<td>59.9</td>
+<td>—</td>
+<td>~16</td>
+</tr>
+<tr>
+<td>PSPNet</td>
+<td>ResNet-101</td>
+<td>85.4</td>
+<td>43.3</td>
+<td>~4</td>
+</tr>
+<tr>
+<td>DeepLabV3+</td>
+<td>Xception-65</td>
+<td>89.0</td>
+<td>45.7</td>
+<td>~3</td>
+</tr>
+<tr>
+<td>SegFormer-B5</td>
+<td>MiT-B5</td>
+<td>84.0</td>
+<td>51.8</td>
+<td>~12</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>****: Dilated convolutions maintain spatial resolution while growing the receptive field — this is key for dense prediction tasks where downsampling would lose positional precision.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<p>Semantic segmentation has progressed from FCN's simple fully-convolutional adaptation of classifiers to sophisticated multi-scale architectures. Dilated convolutions are the core enabling technology for maintaining spatial resolution; skip connections recover fine-grained boundary detail. Transformer-based models like SegFormer now outperform CNN approaches on ADE20K while remaining competitive on Pascal VOC benchmarks.</p>
+<p>For practical applications, start with a pretrained DeepLabV3+ or SegFormer from torchvision or HuggingFace's transformers library. Fine-tune with poly learning rate decay, augmentation, and ignore_index=255 in your loss function. For datasets with severe class imbalance, consider weighted cross-entropy or a combination of cross-entropy and Dice loss to boost performance on rare classes.</p>
+    </article>
+  </main>
+</body>
+</html>

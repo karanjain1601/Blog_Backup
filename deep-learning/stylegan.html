@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>StyleGAN — Style-Based Generator and Adaptive Instance Norm | Notes Backup</title>
+  <meta name="description" content="StyleGAN (Karras 2019) introduces a mapping network that disentangles the latent space, style injection via AdaIN at each resolution block, and per-pixel stochastic noise, enabling unprecedented control over coarse pose/shape and fine texture/colour attributes in high-resolution face synthesis." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>StyleGAN — Style-Based Generator and Adaptive Instance Norm</h1>
+      <ul class='note-meta'><li><strong>description:</strong> StyleGAN (Karras 2019) introduces a mapping network that disentangles the latent space, style injection via AdaIN at each resolution block, and per-pixel stochastic noise, enabling unprecedented control over coarse pose/shape and fine texture/colour attributes in high-resolution face synthesis.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>StyleGAN — Style-Based Generator and Adaptive Instance Norm</h1>
+<p>StyleGAN (Karras et al. 2019, NVIDIA) fundamentally rethinks the generator architecture of GANs. Rather than feeding a latent vector z directly into a convolutional stack, StyleGAN separates two concerns: a mapping network transforms z into an intermediate latent w, and w is then injected into every layer of a synthesis network via Adaptive Instance Normalisation (AdaIN). This separation disentangles the latent space — in W space, individual dimensions control semantically coherent attributes (pose, age, hair colour) without the entangled correlations seen in Z space. The result is a generator that supports intuitive style mixing, stochastic fine-detail control, and state-of-the-art image quality at 1024x1024 resolution.</p>
+<h2>Mapping Network: Z Space to W Space</h2>
+<p>The mapping network f: Z → W is an 8-layer fully-connected MLP with LeakyReLU activations. The input z ~ N(0, I) is first pixel-normalised, then transformed into w ∈ R^512. The key insight is that Z is constrained to follow a standard Gaussian prior, which forces the generator to warp and entangle attributes to fit this fixed distribution. W has no such fixed prior — it is learned and can take whatever shape best represents the data manifold. This is why W is more disentangled: directions in W correspond more cleanly to individual semantic attributes. The disentanglement is measured by the Perceptual Path Length (PPL) metric — shorter, smoother paths through W space indicate better disentanglement.</p>
+<ul>
+<li>Z space entanglement: changing one dimension of z affects multiple attributes simultaneously because the prior is fixed Gaussian.</li>
+<li>W space disentanglement: W is learned, so its geometry can match the true data manifold — one direction ≈ one attribute.</li>
+<li>Truncation trick: sample w from a truncated distribution (||w - w_avg|| &lt; psi) to trade diversity for quality; psi=0.7 is typical.</li>
+<li>Style transfer: given two images, invert to w1 and w2, then use w1 for coarse layers and w2 for fine layers to transfer fine-grained texture.</li>
+<li>PPL measures the average perceptual change per unit step in W — lower PPL means W is more linearly organised with respect to perception.</li>
+</ul>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class MappingNetwork(nn.Module):
+    &quot;&quot;&quot;StyleGAN mapping network: z -&gt; w via 8-layer MLP with LeakyReLU.
+
+    Input z is pixel-normalised before mapping.
+    Output w is the disentangled intermediate latent used for style injection.
+    &quot;&quot;&quot;
+    def __init__(self, z_dim=512, w_dim=512, n_layers=8, lr_mul=0.01):
+        super().__init__()
+        layers = []
+        for i in range(n_layers):
+            in_dim  = z_dim if i == 0 else w_dim
+            linear  = nn.Linear(in_dim, w_dim)
+            # Learning rate multiplier: scale weights down, scale gradients up
+            nn.init.normal_(linear.weight, std=1.0 / lr_mul)
+            nn.init.zeros_(linear.bias)
+            layers += [linear, nn.LeakyReLU(0.2)]
+        self.net = nn.Sequential(*layers)
+        self.lr_mul = lr_mul
+
+    def pixel_norm(self, z):
+        return z / (z.pow(2).mean(dim=1, keepdim=True).sqrt() + 1e-8)
+
+    def forward(self, z):
+        z = self.pixel_norm(z)
+        w = self.net(z) * self.lr_mul
+        return w
+
+torch.manual_seed(0)
+mapping = MappingNetwork(z_dim=512, w_dim=512, n_layers=8)
+z = torch.randn(4, 512)
+w = mapping(z)
+print(f'z shape: {z.shape} -&gt; w shape: {w.shape}')  # (4, 512) -&gt; (4, 512)
+print(f'w mean: {w.mean():.4f}  std: {w.std():.4f}')
+</code></pre>
+<h2>Adaptive Instance Normalisation</h2>
+<p>Style injection in StyleGAN uses Adaptive Instance Normalisation (AdaIN). At each convolutional layer in the synthesis network, the feature map x is first instance-normalised (zero mean, unit variance per spatial map per channel), then rescaled and shifted by style parameters derived from w: AdaIN(x, y) = y_s · (x - μ(x)) / σ(x) + y_b, where (y_s, y_b) = A(w) is an affine transform of the w vector (a learned linear layer). Each resolution block uses its own affine layer, so the style parameters differ at every level. This is fundamentally different from conditioning via concatenation — AdaIN injects style by controlling the statistical moments of each feature map, a much more expressive form of conditioning.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class AdaIN(nn.Module):
+    &quot;&quot;&quot;Adaptive Instance Normalisation: normalise x, then scale+shift from w.
+
+    AdaIN(x, w) = y_s * (x - mean(x)) / std(x) + y_b
+    where (y_s, y_b) = affine(w), each with shape (B, C).
+    Instance norm is per-sample per-channel over spatial dims.
+    &quot;&quot;&quot;
+    def __init__(self, n_channels, w_dim=512):
+        super().__init__()
+        self.instance_norm = nn.InstanceNorm2d(n_channels, affine=False)
+        # Affine projection: w -&gt; (scale, bias) per channel
+        self.affine = nn.Linear(w_dim, n_channels * 2)
+        nn.init.ones_(self.affine.weight[:n_channels])   # init scale to 1
+        nn.init.zeros_(self.affine.weight[n_channels:])  # init bias to 0
+        nn.init.zeros_(self.affine.bias)
+
+    def forward(self, x, w):
+        # x: (B, C, H, W), w: (B, w_dim)
+        style = self.affine(w)                     # (B, 2*C)
+        y_s, y_b = style.chunk(2, dim=1)           # each (B, C)
+        y_s = y_s.unsqueeze(-1).unsqueeze(-1)      # (B, C, 1, 1)
+        y_b = y_b.unsqueeze(-1).unsqueeze(-1)      # (B, C, 1, 1)
+        x_norm = self.instance_norm(x)             # zero mean, unit var per (B, C, H, W)
+        return y_s * x_norm + y_b                  # style-conditioned features
+
+torch.manual_seed(0)
+adain = AdaIN(n_channels=256, w_dim=512)
+x = torch.randn(2, 256, 16, 16)  # feature map at 16x16 resolution
+w = torch.randn(2, 512)           # w vector from mapping network
+out = adain(x, w)
+print(f'AdaIN input:  mean={x.mean():.4f}  std={x.std():.4f}')
+print(f'AdaIN output: mean={out.mean():.4f}  std={out.std():.4f}')
+print(f'Output shape: {out.shape}')  # (2, 256, 16, 16)
+</code></pre>
+<h2>Stochastic Noise Injection</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class NoiseInjection(nn.Module):
+    &quot;&quot;&quot;Per-pixel Gaussian noise with learnable per-channel amplitude B.
+
+    x_out = x + B * noise  where noise ~ N(0, I) sampled fresh each forward pass.
+    B is a learnable scalar per channel, initialised to zero (no noise at start).
+    Captures stochastic variation: hair strand placement, freckles, pore detail.
+    This variation is NOT encoded in w — it is independent per image generation.
+    &quot;&quot;&quot;
+    def __init__(self, n_channels):
+        super().__init__()
+        self.B = nn.Parameter(torch.zeros(1, n_channels, 1, 1))
+
+    def forward(self, x, noise=None):
+        B_val, C, H, W = x.shape
+        if noise is None:
+            noise = torch.randn(B_val, 1, H, W, device=x.device)
+        return x + self.B * noise
+
+class StyleConvBlock(nn.Module):
+    &quot;&quot;&quot;One StyleGAN synthesis block: Conv -&gt; NoiseInjection -&gt; AdaIN -&gt; Activation.&quot;&quot;&quot;
+    def __init__(self, in_ch, out_ch, w_dim=512):
+        super().__init__()
+        self.conv  = nn.Conv2d(in_ch, out_ch, 3, padding=1)
+        self.noise = NoiseInjection(out_ch)
+        self.adain = AdaIN(out_ch, w_dim)
+        self.act   = nn.LeakyReLU(0.2)
+
+    def forward(self, x, w, noise=None):
+        x = self.conv(x)
+        x = self.noise(x, noise)
+        x = self.adain(x, w)
+        return self.act(x)
+
+torch.manual_seed(0)
+block = StyleConvBlock(in_ch=256, out_ch=256, w_dim=512)
+x = torch.randn(2, 256, 16, 16)
+w = torch.randn(2, 512)
+out1 = block(x, w)
+out2 = block(x, w)  # different noise each call
+print(f'Output shape: {out1.shape}')
+print(f'Max diff between two runs (different noise): {(out1 - out2).abs().max():.4f}')
+</code></pre>
+<h2>Style Mixing and Coarse vs Fine Control</h2>
+<p>StyleGAN's synthesis network maps resolution to semantic content: coarse layers (4-16px) control high-level attributes like pose, face shape, and hair style; fine layers (64-1024px) control colour palette, skin texture, and microstructure details. Style mixing exploits this by sampling two independent w vectors and using w₁ for coarse layers and w₂ for fine layers. The result is an image that has the pose and shape of w₁ but the colour and texture of w₂. This is also used as a regularisation technique during training: with probability 0.9, a random mixing point is chosen so the generator cannot use feature correlations across layers to cheat the Lipschitz constraint.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from typing import List
+
+class StyleGANSynthesisNetwork(nn.Module):
+    &quot;&quot;&quot;Simplified StyleGAN synthesis network with style-mixing support.
+
+    Coarse resolutions (4-16px):  pose, face shape, hair style.
+    Fine   resolutions (32-1024px): colour palette, microstructure, textures.
+    Style mixing: use w1 for coarse layers, w2 for fine layers.
+    &quot;&quot;&quot;
+    RESOLUTIONS = [4, 8, 16, 32, 64]
+
+    def __init__(self, w_dim=512, channels=None):
+        super().__init__()
+        if channels is None:
+            channels = {4: 512, 8: 512, 16: 256, 32: 128, 64: 64}
+        self.const = nn.Parameter(torch.randn(1, channels[4], 4, 4))
+        self.blocks = nn.ModuleDict()
+        prev_ch = channels[4]
+        for res in self.RESOLUTIONS:
+            ch = channels[res]
+            self.blocks[f'conv_{res}a'] = StyleConvBlock(prev_ch, ch, w_dim)
+            self.blocks[f'conv_{res}b'] = StyleConvBlock(ch, ch, w_dim)
+            prev_ch = ch
+        self.to_rgb = nn.Conv2d(channels[64], 3, 1)
+
+    def forward(self, ws: List[torch.Tensor], mixing_cutoff: int = None):
+        &quot;&quot;&quot;ws: list of w vectors. If mixing_cutoff set, ws[0] for coarse, ws[1] for fine.&quot;&quot;&quot;
+        B = ws[0].size(0)
+        x = self.const.expand(B, -1, -1, -1)
+        layer_idx = 0
+        for i, res in enumerate(self.RESOLUTIONS):
+            w = ws[0] if (mixing_cutoff is None or layer_idx &lt; mixing_cutoff) else ws[1]
+            if res &gt; 4:
+                x = nn.functional.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
+            x = self.blocks[f'conv_{res}a'](x, w)
+            x = self.blocks[f'conv_{res}b'](x, w)
+            layer_idx += 2
+        return self.to_rgb(x)
+
+torch.manual_seed(0)
+net = StyleGANSynthesisNetwork()
+w1 = torch.randn(2, 512)  # coarse style: controls pose, shape
+w2 = torch.randn(2, 512)  # fine style:   controls colour, texture
+img_w1  = net([w1])
+print(f'Single style output: {img_w1.shape}')  # (2, 3, 64, 64)
+img_mix = net([w1, w2], mixing_cutoff=4)
+print(f'Mixed style output:  {img_mix.shape}')
+</code></pre>
+<h2>StyleGAN2 Improvements</h2>
+<p>StyleGAN2 (Karras et al. 2020) addressed two main artifacts from StyleGAN1. First, 'water droplet' artifacts appearing at fixed pixel positions were traced to AdaIN: instance normalisation allows the generator to hide information in feature map statistics rather than spatial content. StyleGAN2 replaces AdaIN with weight demodulation — instead of normalising the feature map, it normalises the convolution weights based on the expected unit-standard-deviation input, eliminating the artifact while preserving style injection. Second, progressive growing introduced phase artifacts at resolution boundaries. StyleGAN2 trains at full resolution from the start using skip connections to a series of RGB outputs that are summed during training.</p>
+<ul>
+<li>Weight demodulation: scale conv weights by w-derived style (modulation), then divide each output by the expected std (demodulation) — avoids operating on feature statistics.</li>
+<li>No progressive growing: StyleGAN2 trains at full resolution with MSG-style skip connections — simpler and avoids phase-transition artifacts.</li>
+<li>Path length regularisation (lazy, every 16 steps): encourage ||J^T a|| to be constant for random a ~ N(0,I), smoothing the W-space geometry.</li>
+<li>R1 gradient penalty replaces WGAN-GP: simpler, compatible with BatchNorm in generator, standard for all GAN stabilisation.</li>
+<li>FID improvement: FFHQ 1024px FID drops from 4.40 (StyleGAN) to 2.84 (StyleGAN2) with the same training data.</li>
+</ul>
+<blockquote>
+<p><strong>W+ Space for GAN Inversion</strong>: StyleGAN's W space has a single w vector broadcast to all layers. W+ space extends this to a separate w_i per layer (18 vectors for StyleGAN at 1024px), giving more degrees of freedom for GAN inversion — encoding a real photo back into a latent. W+ is used by e4e and PTI encoders. Edits in W space generalise better (same direction for all layers); edits in W+ allow layer-specific adjustments but are less semantically coherent. For attribute editing (age, smile), work in W; for faithful reconstruction of specific identities, use W+.</p>
+</blockquote>
+<h2>Progressive Growing and Training Stability</h2>
+<p>Both StyleGAN and its predecessor ProgressiveGAN (Karras et al. 2018) grow the generator and discriminator resolution incrementally — starting at 4x4 and doubling every few hundred kimg until reaching the target resolution. New layers are faded in with a linear alpha blending schedule to avoid sudden capacity jumps. This technique dramatically reduces training time for high-resolution synthesis (1024x1024) because most training iterations are spent at lower resolutions where compute is cheap. StyleGAN1 inherited progressive growing directly; StyleGAN2 abandoned it in favour of skip-connection architectures that train at full resolution from the start, trading simplicity for the elimination of phase artifacts.</p>
+<h2>Architecture Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Key Innovation</th>
+<th>FID at 1024px</th>
+<th>Artifacts</th>
+<th>Training Cost</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DCGAN</td>
+<td>Deep conv generator/discriminator, BN, no FC layers</td>
+<td>~35 (256px)</td>
+<td>Checkerboard (transpose conv), mode collapse</td>
+<td>Low — hours on 1 GPU</td>
+</tr>
+<tr>
+<td>ProgressiveGAN</td>
+<td>Grow resolution 4-&gt;1024 progressively, fade-in layers</td>
+<td>8.04</td>
+<td>Phase transition artifacts at resolution boundaries</td>
+<td>High — days on 8 GPUs</td>
+</tr>
+<tr>
+<td>StyleGAN</td>
+<td>Mapping net + AdaIN style injection + noise + prog grow</td>
+<td>4.40</td>
+<td>Water droplet artifacts (AdaIN statistics), phase artifacts</td>
+<td>Very high — weeks on 8 GPUs</td>
+</tr>
+<tr>
+<td>StyleGAN2</td>
+<td>Weight demodulation, no progressive grow, path length reg, R1</td>
+<td>2.84</td>
+<td>Significantly reduced — no droplets, no phase artifacts</td>
+<td>Very high — weeks on 8 GPUs</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>The mapping network uses lr_mul=0.01 — the learning rate multiplier scales weights down at init and gradients up during optimisation, stabilising the MLP training.</li>
+<li>Each resolution block in the synthesis network has its own affine layer A(w), giving 18 independent style vectors at 1024px resolution (2 per resolution from 4px to 1024px).</li>
+<li>Stochastic noise amplitude B is initialised to zero, so noise has no effect at training start — it is learned gradually as the generator refines fine details.</li>
+<li>Style mixing regularisation: during training, some samples use two different w vectors (coarse/fine split at a random layer) to prevent cross-layer dependencies.</li>
+<li>StyleGAN2 weight demodulation is implemented as a fused layer that combines modulation, convolution, and demodulation in a single efficient CUDA kernel.</li>
+<li>PPL (Perceptual Path Length) measures W-space disentanglement: lower PPL means traversals between w vectors produce smoother, more predictable image changes.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

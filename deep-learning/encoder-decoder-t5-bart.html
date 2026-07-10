@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Encoder-Decoder Transformers — T5, BART, and Seq2Seq | Notes Backup</title>
+  <meta name="description" content="Encoder-decoder architecture for seq2seq tasks: bidirectional encoder, autoregressive decoder with cross-attention, T5 text-to-text framing, BART denoising pretraining, and comparison with decoder-only models." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Encoder-Decoder Transformers — T5, BART, and Seq2Seq</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Encoder-decoder architecture for seq2seq tasks: bidirectional encoder, autoregressive decoder with cross-attention, T5 text-to-text framing, BART denoising pretraining, and comparison with decoder-only models.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Encoder-Decoder Transformers — T5, BART, and Seq2Seq</h1>
+<p>Encoder-decoder transformers process input sequences with a bidirectional encoder — every position can attend to every other position — and generate output sequences with a causal decoder that additionally attends to the encoder's output via cross-attention. This architecture is natural for tasks where the input and output sequences have different lengths and structures: translation, summarization, and question answering. T5 and BART are the canonical encoder-decoder pretrained language models and remain strong baselines for many structured generation tasks.</p>
+<h2>Encoder-Decoder Architecture</h2>
+<p>The encoder receives the source sequence, applies L_enc layers of bidirectional self-attention and FFN, and outputs a sequence of context vectors H_enc ∈ ℝ^{S×d}. The decoder receives the target prefix, applies L_dec layers of causal self-attention followed by cross-attention over H_enc, then FFN. Cross-attention computes Q from the decoder hidden state, K and V from H_enc: CrossAttn(x_dec, H_enc) = softmax(QK^T/√d)V. This allows the decoder to selectively focus on different parts of the source at each generation step.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class CrossAttention(nn.Module):
+    def __init__(self, d_model=512, n_heads=8):
+        super().__init__()
+        self.n_heads, self.d_head = n_heads, d_model // n_heads
+        self.q_proj = nn.Linear(d_model, d_model, bias=False)
+        self.kv_proj = nn.Linear(d_model, 2 * d_model, bias=False)
+        self.out_proj = nn.Linear(d_model, d_model, bias=False)
+
+    def forward(self, x_dec, enc_out):
+        B, T_dec, C = x_dec.shape
+        T_enc = enc_out.shape[1]
+        q = self.q_proj(x_dec).view(B, T_dec, self.n_heads, self.d_head).transpose(1, 2)
+        k, v = self.kv_proj(enc_out).split(C, dim=-1)
+        k = k.view(B, T_enc, self.n_heads, self.d_head).transpose(1, 2)
+        v = v.view(B, T_enc, self.n_heads, self.d_head).transpose(1, 2)
+        att = F.softmax((q @ k.transpose(-2, -1)) * self.d_head ** -0.5, dim=-1)
+        out = (att @ v).transpose(1, 2).contiguous().view(B, T_dec, C)
+        return self.out_proj(out)
+
+# Simulate encoder output and decoder query
+enc_out = torch.randn(2, 20, 512)   # source: 20 tokens
+dec_query = torch.randn(2, 5, 512)  # target prefix: 5 tokens
+cross_attn = CrossAttention()
+out = cross_attn(dec_query, enc_out)
+print(f'Cross-attention output: {out.shape}')  # (2, 5, 512)
+print(f'Each decoder position attends to all {enc_out.shape[1]} encoder positions')
+</code></pre>
+<h2>T5: Text-to-Text Transfer Transformer</h2>
+<p>T5 (Raffel et al. 2020) unifies all NLP tasks by framing them as text-to-text: the input is a task-prefixed string (e.g., 'summarize: ...', 'translate English to French: ...') and the output is always a string. This single architecture handles classification (output is a class label string), regression (output is a number string), and generation tasks uniformly. T5 replaces absolute position embeddings with learned relative position biases added to attention logits: attn_logit(i,j) += b(i−j), where b is a scalar bias indexed by relative distance.</p>
+<pre><code class="language-python">from transformers import T5ForConditionalGeneration, T5Tokenizer
+import torch
+
+# T5 text-to-text fine-tuning example (illustrative)
+tokenizer = T5Tokenizer.from_pretrained('t5-small')
+model = T5ForConditionalGeneration.from_pretrained('t5-small')
+model.train()
+optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
+
+# Simulate a summarization batch
+input_texts = [
+    'summarize: The quick brown fox jumps over the lazy dog. '
+    'Foxes are known for their agility and speed.',
+    'summarize: Neural networks learn representations from data. '
+    'Deep networks stack multiple layers of nonlinear transformations.'
+]
+target_texts = ['Fox jumps over dog.', 'Neural nets learn from data.']
+
+inputs = tokenizer(input_texts, return_tensors='pt', padding=True, truncation=True, max_length=128)
+labels = tokenizer(target_texts, return_tensors='pt', padding=True).input_ids
+labels[labels == tokenizer.pad_token_id] = -100  # ignore padding in loss
+
+outputs = model(**inputs, labels=labels)
+print(f'Loss: {outputs.loss.item():.4f}')
+outputs.loss.backward()
+optimizer.step(); optimizer.zero_grad()
+print(f'T5-small params: {sum(p.numel() for p in model.parameters()):,}')
+</code></pre>
+<h2>BART: Denoising Autoencoder</h2>
+<p>BART (Lewis et al. 2020) pretrained an encoder-decoder by corrupting input text and training the model to reconstruct the original. The encoder is bidirectional BERT-style; the decoder is GPT-style autoregressive. Corruption strategies include: token masking (like BERT), token deletion, text infilling (replace a span with one MASK token), sentence permutation, and document rotation. BART's pretraining objective makes its decoder particularly well-suited for generation tasks — it already knows how to produce fluent text conditioned on a noisy input.</p>
+<blockquote>
+<p><strong>BART vs T5 Task Strengths</strong>: BART excels at generation tasks (summarization, dialogue, translation) because its pretraining directly trains the decoder to generate fluent text. T5's text-to-text framing makes it stronger on classification-style tasks framed as generation (e.g., NLI, sentiment) because any label can be a token string. For ROUGE scores on CNN/DailyMail summarization, BART-large typically outperforms T5-large by 1-2 ROUGE points.</p>
+</blockquote>
+<pre><code class="language-python">from transformers import BartForConditionalGeneration, BartTokenizer
+import torch
+
+tokenizer = BartTokenizer.from_pretrained('facebook/bart-base')
+model = BartForConditionalGeneration.from_pretrained('facebook/bart-base')
+model.eval()
+
+article = (
+    'Transformer models have revolutionized natural language processing. '
+    'Originally proposed for machine translation, they now dominate tasks ranging '
+    'from text classification to open-ended generation. The key innovation is the '
+    'attention mechanism, which allows every token to attend to every other token.'
+)
+
+inputs = tokenizer(article, return_tensors='pt', max_length=512, truncation=True)
+with torch.no_grad():
+    summary_ids = model.generate(
+        inputs['input_ids'],
+        num_beams=4,
+        max_length=60,
+        min_length=10,
+        length_penalty=2.0,
+        early_stopping=True
+    )
+summary = tokenizer.decode(summary_ids[0], skip_special_tokens=True)
+print(f'Article length: {len(article.split())} words')
+print(f'Summary: {summary}')
+print(f'BART-base params: {sum(p.numel() for p in model.parameters()):,}')
+</code></pre>
+<h2>Comparing BART vs T5 vs GPT-2 on Summarization</h2>
+<pre><code class="language-python"># Simulated ROUGE comparison (representative published numbers)
+import numpy as np
+
+models = ['GPT-2 (117M)', 'T5-base (250M)', 'T5-large (770M)', 'BART-base (140M)', 'BART-large (400M)']
+# CNN/DailyMail ROUGE-1, ROUGE-2, ROUGE-L (approximate published values)
+results = [
+    [29.3, 8.6, 26.2],   # GPT-2 (fine-tuned)
+    [42.5, 20.9, 39.8],  # T5-base fine-tuned
+    [43.1, 21.6, 40.3],  # T5-large fine-tuned
+    [44.2, 21.3, 40.9],  # BART-base fine-tuned
+    [44.2, 21.3, 40.9],  # BART-large fine-tuned
+]
+
+print(f'{'Model':&lt;25} {'R-1':&gt;6} {'R-2':&gt;6} {'R-L':&gt;6}')
+print('-' * 45)
+for name, (r1, r2, rl) in zip(models, results):
+    print(f'{name:&lt;25} {r1:&gt;6.1f} {r2:&gt;6.1f} {rl:&gt;6.1f}')
+
+best_r1_idx = np.argmax([r[0] for r in results])
+print(f'\nBest ROUGE-1: {models[best_r1_idx]} with {results[best_r1_idx][0]}')
+print('BART-large and T5-large are both competitive; BART stronger on gen tasks.')
+print('GPT-2 lags significantly — decoder-only without enc context is disadvantaged for summarization.')
+</code></pre>
+<h2>Architecture Comparison: Encoder Types</h2>
+<table>
+<thead>
+<tr>
+<th>Attribute</th>
+<th>Encoder-Only (BERT)</th>
+<th>Decoder-Only (GPT)</th>
+<th>Encoder-Decoder (T5/BART)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Attention type</td>
+<td>Bidirectional self-attention</td>
+<td>Causal self-attention</td>
+<td>Bidir encoder + causal decoder + cross-attn</td>
+</tr>
+<tr>
+<td>Pretraining objective</td>
+<td>MLM / NSP</td>
+<td>Causal LM (NLL)</td>
+<td>Text-to-text LM / denoising</td>
+</tr>
+<tr>
+<td>Autoregressive generation</td>
+<td>No</td>
+<td>Yes</td>
+<td>Yes (decoder side)</td>
+</tr>
+<tr>
+<td>Input representation</td>
+<td>Full context, best for understanding</td>
+<td>Left-context only</td>
+<td>Full source, autoregressive target</td>
+</tr>
+<tr>
+<td>Inference cost</td>
+<td>O(n) — single forward pass</td>
+<td>O(n) per step; KV cache helps</td>
+<td>O(n_src) encoder + O(n_tgt) per step decoder</td>
+</tr>
+<tr>
+<td>Best tasks</td>
+<td>Classification, NER, QA extractive</td>
+<td>Open generation, chat, code</td>
+<td>Translation, summarization, QA abstractive</td>
+</tr>
+<tr>
+<td>Examples</td>
+<td>BERT, RoBERTa, DeBERTa</td>
+<td>GPT-2/3/4, LLaMA, Mistral</td>
+<td>T5, BART, mT5, PEGASUS</td>
+</tr>
+</tbody>
+</table>
+<h2>T5-Specific Design Choices</h2>
+<p>T5 eliminates all bias terms from linear projections (no bias in Q, K, V, FFN, or output layers), which reduces parameters slightly and was found not to hurt performance. Instead of absolute position embeddings, T5 uses learned relative position biases: scalar offsets b(i−j) added to attention logits, indexed by relative distance and clipped to a maximum offset. These biases are shared across attention heads and across layers, making them extremely parameter-efficient. Relative position biases generalize better to sequence lengths longer than those seen during training — a key advantage over learned absolute positions.</p>
+<h2>Cross-Attention Complexity and Inference Cost</h2>
+<p>Cross-attention has complexity O(S × T) where S is source length and T is target length. For long documents (S=8192) with long summaries (T=512), this is 4M attention computations per layer per head — not cheap. Decoder-only models avoid cross-attention entirely, which simplifies the architecture and reduces memory bandwidth. However, decoder-only models must fit the entire source into their context window as prefix text, which also has O(n²) attention cost. For very long source + short target tasks, encoder-decoder is competitive because the encoder processes source once.</p>
+<ul>
+<li>T5 relative position bias: bias b(i-j) added to attention logits; shared across heads; generalizes to unseen lengths.</li>
+<li>BART positional embeddings: learned absolute positions (like GPT-2), max 1024 by default.</li>
+<li>T5 uses no bias terms in any linear projection — a design choice that reduces parameters slightly.</li>
+<li>BART encoder uses BERT-style architecture with pre-trained weights; decoder uses GPT-style causal masking.</li>
+<li>Beam search is standard for encoder-decoder generation; decoder-only typically uses sampling instead.</li>
+</ul>
+<p>Encoder-decoder architectures remain the preferred choice for structured generation tasks with long inputs and short outputs — particularly document summarization, controlled translation, and data-to-text generation — where the bidirectional encoder produces richer source representations than a decoder-only prefix. As context windows for decoder-only models have grown to 128K+ tokens, the architectural advantage of encoder-decoder has narrowed, and many practical systems now simply prepend the source as context for a decoder-only model.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

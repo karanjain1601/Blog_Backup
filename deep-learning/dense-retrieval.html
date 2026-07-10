@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Dense Retrieval for RAG | Notes Backup</title>
+  <meta name="description" content="Using bi-encoder models (DPR, E5, BGE) to embed queries and documents into a shared vector space for semantic similarity search, enabling retrieval beyond keyword matching." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Dense Retrieval for RAG</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Using bi-encoder models (DPR, E5, BGE) to embed queries and documents into a shared vector space for semantic similarity search, enabling retrieval beyond keyword matching.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Dense Retrieval for RAG</h1>
+<p>Dense retrieval addresses a fundamental limitation of lexical search: documents and queries must share exact vocabulary for a match to occur. A user searching 'heart disease medication' will miss documents about 'cardiac drug therapy' unless both phrases happen to appear together. Dense retrieval solves this by encoding both queries and documents into a shared high-dimensional vector space, where semantic similarity is captured by geometric proximity. Introduced at scale by Facebook's DPR (Dense Passage Retrieval) in 2020, dense retrieval now forms the foundation of production RAG systems at Google, Microsoft, Anthropic, and most major AI deployments. Unlike keyword search, dense retrieval can match 'What causes inflation?' to passages about 'factors driving price increases' without any overlapping words.</p>
+<h2>Overview</h2>
+<p>Dense retrieval consists of two components: a query encoder and a passage encoder. At index time, all documents in the corpus are encoded once and stored as dense vectors (typically 768 or 1024 dimensions). At query time, the user's question is encoded into a vector, and the system retrieves the top-k passages by computing dot-product or cosine similarity against all stored passage vectors. The key insight is that the encoder is trained to place semantically similar texts close together in vector space, regardless of surface-level vocabulary overlap. Modern bi-encoder models such as E5-large-v2 and BGE-large-en achieve BEIR benchmark averages of 52-54%, compared to BM25's 43-45%. The trade-off is that all documents must be pre-encoded — for 1 million documents this takes 2-4 hours on a single A100 GPU — but queries then run in under 10 ms with FAISS approximate nearest-neighbour search.</p>
+<h2>Bi-Encoder Architecture</h2>
+<p>A bi-encoder consists of two independently-parameterised Transformer encoders: a query encoder Q and a passage encoder P. Given query q and passage p, they independently compute embeddings e_q = Q(q) and e_p = P(p), and relevance is their dot product or cosine similarity. The independence of the two encoders is critical: it means passage embeddings can be pre-computed offline, enabling sub-millisecond retrieval at inference time. Early DPR models used separate BERT-base encoders for queries and passages, but modern approaches such as E5 and BGE share weights between the two encoders with different prefix tokens, reducing memory by half and often improving performance through better gradient flow. Embedding dimension is typically 768 for base models and 1024 for large models; the output is always L2-normalised before storage so that inner-product search equals cosine similarity. The bi-encoder architecture trades a quality ceiling (it cannot model fine-grained query-passage interactions at retrieval time) for the ability to precompute passage representations — this trade-off is fundamental to the dense retrieval paradigm.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+from transformers import DPRQuestionEncoder, DPRContextEncoder
+from transformers import DPRQuestionEncoderTokenizer, DPRContextEncoderTokenizer
+from typing import List, Tuple
+
+def load_dpr_encoders(device: str = 'cpu'):
+    # Load DPR question encoder and passage encoder from HuggingFace
+    q_enc = DPRQuestionEncoder.from_pretrained('facebook/dpr-question_encoder-single-nq-base').to(device)
+    p_enc = DPRContextEncoder.from_pretrained('facebook/dpr-ctx_encoder-single-nq-base').to(device)
+    q_tok = DPRQuestionEncoderTokenizer.from_pretrained('facebook/dpr-question_encoder-single-nq-base')
+    p_tok = DPRContextEncoderTokenizer.from_pretrained('facebook/dpr-ctx_encoder-single-nq-base')
+    return q_enc, p_enc, q_tok, p_tok
+
+def encode_texts(texts: List[str], tokenizer, encoder, max_len: int = 128, device: str = 'cpu') -&gt; torch.Tensor:
+    # Tokenise, encode, and L2-normalise a list of texts
+    inputs = tokenizer(texts, return_tensors='pt', padding=True, truncation=True, max_length=max_len).to(device)
+    with torch.no_grad():
+        emb = encoder(**inputs).pooler_output
+    return F.normalize(emb, dim=-1)
+
+def dpr_retrieve(query: str, passages: List[str], q_enc, p_enc, q_tok, p_tok, k: int = 10) -&gt; List[Tuple[str, float]]:
+    q_emb  = encode_texts([query], q_tok, q_enc, max_len=64)
+    p_emb  = encode_texts(passages, p_tok, p_enc, max_len=256)
+    scores = (q_emb @ p_emb.T).squeeze(0)
+    top    = torch.topk(scores, k=min(k, len(passages)))
+    return [(passages[i], float(scores[i])) for i in top.indices]
+</code></pre>
+<h2>Contrastive Training with Hard Negatives</h2>
+<p>Bi-encoders are trained with contrastive learning: given a (query, positive passage, negative passages) triplet, the model is trained to maximise similarity between the query and the positive passage while minimising similarity with negatives. The InfoNCE loss treats all other passages in the mini-batch as negatives; with batch size 128 each query sees 127 in-batch negatives — cheap but semantically easy. Hard negatives are passages that are superficially relevant (they contain query terms or are topically adjacent) but do not actually answer the question. Adding hard negatives dramatically improves trained model quality: DPR trained with BM25-mined hard negatives achieves Recall@5 of 41.5 on Natural Questions versus 31.0 with random negatives alone. The standard recipe is to retrieve the top 50-100 candidates per query using BM25, label them positive or negative based on gold annotations, and use the top-ranked non-positive candidates as hard negatives for contrastive training. ANCE (Approximate Nearest-neighbour Negative Contrastive Estimation) extends this by periodically updating the hard negatives during training using the current dense model, which provides better and better hard negatives as training progresses.</p>
+<pre><code class="language-python">import random
+import numpy as np
+from rank_bm25 import BM25Okapi
+from typing import List, Dict
+
+def mine_hard_negatives(
+        queries: List[str], positives: List[List[str]],
+        corpus: List[str], top_k: int = 50) -&gt; List[Dict]:
+    # Use BM25 to retrieve top-k candidates; keep non-relevant ones as hard negatives
+    bm25    = BM25Okapi([doc.split() for doc in corpus])
+    triples = []
+    for query, pos_list in zip(queries, positives):
+        pos_set   = set(pos_list)
+        top_idxs  = np.argsort(bm25.get_scores(query.split()))[::-1][:top_k]
+        hard_negs = [corpus[i] for i in top_idxs if corpus[i] not in pos_set]
+        if hard_negs:
+            triples.append({'query': query,
+                            'positive': random.choice(pos_list),
+                            'negative': hard_negs[0]})
+    return triples
+
+corpus    = [f'Doc {i}: {[&quot;ML&quot;,&quot;NLP&quot;,&quot;CV&quot;,&quot;IR&quot;][i % 4]} research topic' for i in range(2000)]
+queries   = ['What is dense retrieval?', 'How does BM25 rank documents?']
+positives = [['Dense retrieval uses neural bi-encoders to embed text.'],
+             ['BM25 ranks documents using term frequency and inverse document frequency.']]
+triples   = mine_hard_negatives(queries, positives, corpus, top_k=50)
+print(f'Mined {len(triples)} training triples')
+if triples:
+    print(f'Example hard negative: {triples[0][&quot;negative&quot;]}')
+</code></pre>
+<h2>Embedding Space Quality</h2>
+<p>The quality of a bi-encoder is measured by how well its embedding space captures semantic similarity across diverse retrieval tasks. The primary benchmark is BEIR (Benchmarking IR), which aggregates NDCG@10 across 18 heterogeneous tasks including question answering, fact verification, biomedical retrieval, and entity retrieval. A secondary standard is MS MARCO MRR@10 for passage ranking in general web queries. A well-trained embedding space clusters semantically related passages near each other regardless of vocabulary differences. Isotropy — the degree to which embeddings spread uniformly across all dimensions — is a key quality indicator: degenerate spaces have high anisotropy where embeddings cluster near a few directions, reducing effective capacity. SimCSE, E5, and BGE training recipes address anisotropy through contrastive loss that spreads embeddings uniformly. Embedding norms are always standardised via L2 normalisation so that retrieval scores are directly comparable across documents of different lengths and domains.</p>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>BEIR avg NDCG@10</th>
+<th>Encoding speed (sent/s, GPU)</th>
+<th>Dim</th>
+<th>License</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DPR (NQ)</td>
+<td>38.2</td>
+<td>1,200</td>
+<td>768</td>
+<td>CC-BY-NC 4.0</td>
+<td>Separate encoders; NQ-tuned; original bi-encoder</td>
+</tr>
+<tr>
+<td>E5-large-v2</td>
+<td>54.5</td>
+<td>800</td>
+<td>1024</td>
+<td>MIT</td>
+<td>Query/passage prefix; top open BEIR model</td>
+</tr>
+<tr>
+<td>BGE-large-en-v1.5</td>
+<td>54.3</td>
+<td>850</td>
+<td>1024</td>
+<td>MIT</td>
+<td>FlagEmbedding; instruction variant available</td>
+</tr>
+<tr>
+<td>GTE-large</td>
+<td>52.8</td>
+<td>900</td>
+<td>1024</td>
+<td>Apache 2.0</td>
+<td>Alibaba; strong multilingual performance</td>
+</tr>
+<tr>
+<td>Cohere embed-v3</td>
+<td>55.0</td>
+<td>API only</td>
+<td>1024</td>
+<td>Commercial</td>
+<td>Cloud API; best-in-class on MTEB overall</td>
+</tr>
+<tr>
+<td>OpenAI text-embedding-3-large</td>
+<td>54.9</td>
+<td>API only</td>
+<td>3072</td>
+<td>Commercial</td>
+<td>Matryoshka dims; 3072 truncatable to 256</td>
+</tr>
+</tbody>
+</table>
+<h2>FAISS for ANN Search</h2>
+<p>With millions of document embeddings, computing exact cosine similarity against every vector at query time becomes a bottleneck even on GPU. Facebook AI Similarity Search (FAISS) provides approximate nearest-neighbour (ANN) indices that trade a small recall reduction for orders-of-magnitude speedup. The most common FAISS index types for production RAG are: IndexFlatIP (exact brute-force inner product — accurate but O(N) per query, suitable for up to 10M documents on GPU); IndexIVFFlat (partitions space into n_list clusters and searches only the nearest n_probe at query time, 10-50x faster at 99% recall with proper tuning); IndexHNSW (hierarchical navigable small-world graph, excellent recall-speed trade-off for corpora up to 50M documents); and IndexIVFPQ (combines IVF with product quantisation, reducing memory 8-16x at a small recall cost). For a 1M-document corpus with 768-dim float32 embeddings, the raw index requires 3 GB of RAM; IVF+PQ can reduce this to under 500 MB. FAISS runs natively on GPU for IndexFlat and IndexIVFFlat, reducing exact search latency to under 5 ms per query at 10M scale.</p>
+<blockquote>
+<p><strong>Indexing vs. Query Latency</strong>: Dense retrieval requires embedding all documents upfront — on a 1M-document corpus this takes 2-4 hours on a single A100 GPU but queries are then under 10 ms with FAISS. BM25 requires no precomputation beyond building the inverted index (minutes for 1M docs) but misses semantic matches and can be slower on very large corpora without Elasticsearch sharding. Plan for the pre-indexing cost as part of your deployment pipeline.</p>
+</blockquote>
+<pre><code class="language-python">import numpy as np
+import faiss
+from sentence_transformers import SentenceTransformer
+from typing import List, Tuple
+
+def build_faiss_index(passages: List[str], model_name: str = 'intfloat/e5-large-v2') -&gt; Tuple:
+    # Encode passages and build an inner-product FAISS flat index
+    model = SentenceTransformer(model_name)
+    embs  = model.encode(passages, batch_size=256, normalize_embeddings=True, show_progress_bar=True)
+    embs  = np.array(embs, dtype=np.float32)
+    index = faiss.IndexFlatIP(embs.shape[1])  # exact inner product = cosine on unit vecs
+    index.add(embs)
+    print(f'Built index: {index.ntotal:,} vectors, dim={embs.shape[1]}')
+    return model, index
+
+def faiss_query(query: str, model, index, passages: List[str], k: int = 10) -&gt; List[Tuple[str, float]]:
+    q    = np.array(model.encode([query], normalize_embeddings=True), dtype=np.float32)
+    D, I = index.search(q, k)   # D = scores (1, k), I = indices (1, k)
+    return [(passages[idx], float(D[0][r])) for r, idx in enumerate(I[0]) if idx &gt;= 0]
+
+passages     = [f'Passage {i}: topic {i % 20}' for i in range(100_000)]
+model, index = build_faiss_index(passages)
+hits         = faiss_query('What is dense retrieval?', model, index, passages, k=10)
+for rank, (t, score) in enumerate(hits, 1):
+    print(f'{rank:2d}. [{score:.4f}] {t[:70]}')
+</code></pre>
+<h2>Domain Adaptation</h2>
+<p>Pre-trained bi-encoders (E5, BGE, GTE) are trained on general-domain web text — Wikipedia, Common Crawl, MS MARCO. For specialised domains such as medical literature, legal documents, financial reports, or scientific papers, out-of-the-box BEIR performance can be 10-20 percentage points lower than on general benchmarks. Domain adaptation options include: (1) full fine-tuning on domain-specific (query, passage) pairs with InfoNCE loss — highest quality but requires 10K+ labelled pairs; (2) LoRA/PEFT adapters added to Transformer layers — reduces trainable parameters 10x while retaining 90% of fine-tuning quality; (3) GPL (Generative Pseudo Labelling) — uses a generative model to synthesise training queries for unlabelled target-domain documents, scored and filtered by a cross-encoder reranker, producing a clean training set without manual annotation; (4) TART and InstructOR — prepend a natural-language task instruction to guide the encoder towards domain-specific similarity. GPL is the most practical when no labelled data exists: generate 3 candidate queries per document, filter with a reranker, and fine-tune for 1-2 epochs on the resulting synthetic query-document pairs.</p>
+<pre><code class="language-python">import numpy as np
+from sentence_transformers import SentenceTransformer
+from typing import List, Dict
+
+def benchmark_embedding_model(
+        model_name: str, queries: List[str], corpus: List[str],
+        query_prefix: str = 'query: ', passage_prefix: str = 'passage: ') -&gt; Dict:
+    # Load bi-encoder, prepend E5/BGE prefixes, encode, compute Recall@10
+    model   = SentenceTransformer(model_name)
+    q_texts = [query_prefix + q for q in queries]
+    c_texts = [passage_prefix + c for c in corpus]
+    q_embs  = model.encode(q_texts, normalize_embeddings=True, show_progress_bar=False)
+    c_embs  = model.encode(c_texts, normalize_embeddings=True, batch_size=128, show_progress_bar=True)
+    scores  = q_embs @ c_embs.T              # (n_queries, n_corpus)
+    top10   = np.argsort(-scores, axis=1)[:, :10]
+    recall  = float(np.mean([1 if i in top10[qi] else 0
+                             for qi, i in enumerate(range(len(queries)))]))
+    print(f'Model: {model_name} | Recall@10={recall:.3f} | corpus={len(corpus)}')
+    return {'model': model_name, 'recall_at_10': recall}
+
+corpus  = [f'AI research passage {i} on topic {i % 20}' for i in range(5000)]
+queries = ['What is retrieval augmented generation?', 'How does FAISS work?',
+           'Explain contrastive learning for text embeddings']
+for m in ['intfloat/e5-large-v2', 'BAAI/bge-large-en-v1.5']:
+    benchmark_embedding_model(m, queries, corpus)
+</code></pre>
+<h2>Dense vs Sparse Retrieval</h2>
+<p>Dense and sparse (BM25) retrieval have complementary strengths and weaknesses that make hybrid combinations consistently superior to either alone. BM25 excels at exact keyword matching, rare technical terms, entity names, alphanumeric patterns (product codes, chemical formulae, model numbers), and any scenario where the user knows the exact phrasing used in the document. Dense retrieval excels at semantic similarity, paraphrase matching, implicit information needs, and cross-lingual retrieval. On BEIR, BM25 outperforms dense models on TREC-COVID (medical queries with expert terminology) and Robust04 (news with entity-centric queries), while dense models dominate on NQ, HotpotQA, FiQA, and FEVER. The practical recommendation for production RAG is always to implement hybrid retrieval rather than choosing one approach exclusively. The exception is resource-constrained deployments where storing and serving dense embeddings (3-6 GB per 1M documents) is infeasible; in those cases BM25 alone provides a strong baseline with negligible memory overhead.</p>
+<ul>
+<li>Dense retrieval requires pre-encoding all documents; BM25 builds an inverted index incrementally</li>
+<li>Dense models handle paraphrasing, synonyms, and cross-lingual queries; BM25 fails on all three</li>
+<li>BM25 handles rare entity names and alphanumeric patterns; dense models can miss these</li>
+<li>Dense indices use 3-6 GB RAM per 1M documents; BM25 inverted indexes use 0.1-0.5 GB</li>
+<li>Hybrid retrieval (BM25 + dense) consistently outperforms either alone by 2-5 NDCG points on BEIR</li>
+<li>Domain adaptation of dense models (GPL or fine-tuning) can recover 10-20 point gaps on specialised corpora</li>
+</ul>
+<h2>Key Takeaways</h2>
+<p>Dense retrieval represents a fundamental shift from keyword matching to semantic understanding in information retrieval. Bi-encoders trained with contrastive learning on hard negatives can match semantically equivalent passages that share no surface vocabulary. The trade-off versus BM25 is clear: higher quality on most tasks but requires pre-encoding all documents, storing embeddings, and serving with an ANN index. Modern open models — E5-large-v2 and BGE-large-en — achieve state-of-the-art BEIR scores. Hard negative mining is the single highest-leverage training technique, typically yielding 5-10 Recall@k points over random negatives. For production RAG systems, measure domain-specific retrieval recall before and after domain adaptation: a 5-10% improvement in retrieval recall typically translates to a 3-8% improvement in downstream LLM answer accuracy, since the bottleneck in most RAG systems is retrieval rather than generation.</p>
+<ul>
+<li>Bi-encoder architecture: query encoder and passage encoder independently produce L2-normalised vectors</li>
+<li>DPR introduced the paradigm; E5-large-v2 and BGE-large-en-v1.5 are current open-source state-of-the-art</li>
+<li>Hard negative mining with BM25 is essential: use top-50 BM25 non-relevant passages per query</li>
+<li>FAISS IndexFlatIP for exact search up to 10M docs; IndexIVFFlat or HNSW for larger corpora</li>
+<li>Domain adaptation via GPL requires no labelled data: synthesise queries, rerank, fine-tune for 1-2 epochs</li>
+<li>Always combine with BM25 in hybrid search for production RAG — dense alone misses exact-match queries</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

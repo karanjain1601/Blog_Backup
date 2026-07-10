@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Linear Regression — OLS, Normal Equations, and QR | Notes Backup</title>
+  <meta name="description" content="Derive OLS θ=(XᵀX)⁻¹Xᵀy from first principles, explore QR decomposition for numerical stability, compute hat-matrix leverage and Cook&#x27;s distance, and trace the ridge regression coefficient path." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Linear Regression — OLS, Normal Equations, and QR</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Derive OLS θ=(XᵀX)⁻¹Xᵀy from first principles, explore QR decomposition for numerical stability, compute hat-matrix leverage and Cook&#x27;s distance, and trace the ridge regression coefficient path.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Linear Regression — OLS, Normal Equations, and QR</h1>
+<p>Linear regression models the response y ∈ ℝⁿ as y = Xθ + ε, where X ∈ ℝⁿˣᵖ is the design matrix, θ ∈ ℝᵖ are unknown parameters, and ε is the error vector. Under standard Gauss-Markov assumptions, Ordinary Least Squares (OLS) produces the Best Linear Unbiased Estimator. Understanding the closed-form solution, its geometric interpretation through the hat matrix, and numerically stable implementation via QR decomposition is foundational to all supervised learning.</p>
+<h2>OLS Objective and Derivation</h2>
+<p>OLS minimises the Residual Sum of Squares: RSS = ‖y − Xθ‖² = (y − Xθ)ᵀ(y − Xθ). Expanding gives yᵀy − 2θᵀXᵀy + θᵀXᵀXθ. Differentiating with respect to θ and setting the gradient to zero: ∂RSS/∂θ = −2Xᵀy + 2XᵀXθ = 0, which gives the Normal Equations XᵀXθ = Xᵀy. Since XᵀX is positive semi-definite, this is a convex quadratic with a unique minimum when XᵀX is invertible (X has full column rank p).</p>
+<h2>Normal Equations and Invertibility</h2>
+<p>When X has full column rank, the unique OLS solution is θ̂ = (XᵀX)⁻¹Xᵀy. Multicollinearity causes near-rank deficiency: XᵀX becomes nearly singular and the Variance Inflation Factor VIF_j = 1/(1−R²_j) diverges. The condition number satisfies κ(XᵀX) = κ(X)², so forming the normal equations squares the numerical difficulty. Ridge regression guarantees invertibility by adding λI: θ̂_ridge = (XᵀX + λI)⁻¹Xᵀy, which always yields a positive-definite system for λ &gt; 0.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.linear_model import LinearRegression
+from sklearn.datasets import make_regression
+from sklearn.metrics import r2_score
+
+np.random.seed(42)
+X, y, true_coef = make_regression(
+    n_samples=200, n_features=5, noise=10.0, coef=True, random_state=42
+)
+
+# OLS closed form: theta = (X^T X)^{-1} X^T y
+X_b = np.hstack([np.ones((len(X), 1)), X])  # prepend intercept column
+XtX = X_b.T @ X_b
+Xty = X_b.T @ y
+theta_ols = np.linalg.solve(XtX, Xty)  # prefer solve over inv
+
+lr = LinearRegression().fit(X, y)
+
+print('OLS scratch: intercept={:.4f}'.format(theta_ols[0]))
+print('sklearn:     intercept={:.4f}'.format(lr.intercept_))
+print('Max coef difference: {:.2e}'.format(
+    np.abs(theta_ols[1:] - lr.coef_).max()))
+print('R^2 = {:.4f}'.format(r2_score(y, X_b @ theta_ols)))
+</code></pre>
+<h2>QR Decomposition for Numerical Stability</h2>
+<p>QR decomposition writes X = QR where Q ∈ ℝⁿˣᵖ has orthonormal columns (QᵀQ = I) and R ∈ ℝᵖˣᵖ is upper triangular. Substituting into the normal equations: RᵀRθ = RᵀQᵀy → Rθ = Qᵀy. Solving this triangular system via back-substitution has condition number κ(R) = κ(X), not κ(X)². This avoids squaring the numerical difficulty and is the preferred approach for ill-conditioned designs. LAPACK's dgelsd and dgelsy routines (used by numpy and sklearn) internally use QR with column pivoting.</p>
+<pre><code class="language-python">import numpy as np
+
+np.random.seed(0)
+n, p = 150, 12
+X = np.random.randn(n, p)
+y = X @ np.random.randn(p) + 0.1 * np.random.randn(n)
+X_b = np.hstack([np.ones((n, 1)), X])
+
+# Normal equations: condition number squared
+kappa_xtx = np.linalg.cond(X_b.T @ X_b)
+theta_ne = np.linalg.solve(X_b.T @ X_b, X_b.T @ y)
+
+# QR decomposition: condition number preserved
+Q, R = np.linalg.qr(X_b, mode='reduced')
+theta_qr = np.linalg.solve(R, Q.T @ y)
+
+kappa_x = np.linalg.cond(X_b)
+print(f'cond(X_b)      = {kappa_x:.2f}')
+print(f'cond(X_bT X_b) = {kappa_xtx:.2f}  (cond^2 = {kappa_x**2:.2f})')
+print(f'Max |theta_NE - theta_QR| = {np.abs(theta_ne - theta_qr).max():.2e}')
+print('QR avoids squaring the condition number.')
+</code></pre>
+<h2>Hat Matrix and Influence Diagnostics</h2>
+<p>The hat matrix H = X(XᵀX)⁻¹Xᵀ projects y onto col(X): ŷ = Hy. H is symmetric and idempotent with trace(H) = rank(X) = p. The diagonal hᵢᵢ ∈ [p/n, 1] is the leverage score of observation i — how much it influences its own fitted value. The standard threshold for high leverage is hᵢᵢ &gt; 2p/n. Cook's distance Dᵢ = rᵢ² hᵢᵢ / (p · MSE · (1−hᵢᵢ)²) measures how much the full coefficient vector shifts when observation i is removed, combining leverage and residual magnitude.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.linear_model import LinearRegression
+
+np.random.seed(1)
+n = 60
+X = np.random.randn(n, 3)
+y = 2 * X[:, 0] - X[:, 1] + np.random.randn(n)
+
+# Inject a high-leverage outlier
+X[-1] = [9.0, 9.0, 9.0]
+y[-1] = -30.0
+
+X_b = np.hstack([np.ones((n, 1)), X])
+p_params = X_b.shape[1]
+
+H = X_b @ np.linalg.solve(X_b.T @ X_b, X_b.T)
+leverages = np.diag(H)
+threshold = 2 * p_params / n
+
+lr = LinearRegression().fit(X, y)
+resid = y - lr.predict(X)
+mse = resid @ resid / (n - p_params)
+cooks_d = (resid**2 / (p_params * mse)) * (leverages / (1 - leverages)**2)
+
+print(f'Leverage threshold 2p/n = {threshold:.3f}')
+print(f'Outlier leverage = {leverages[-1]:.4f}, Cook D = {cooks_d[-1]:.4f}')
+print(f'High-leverage indices: {np.where(leverages &gt; threshold)[0].tolist()}')
+print(f'Tr(H) = {leverages.sum():.1f}, p = {p_params}')
+</code></pre>
+<blockquote>
+<p><strong>High Leverage ≠ High Influence</strong>: A high-leverage point (large hᵢᵢ) lies far from the centroid of X and has the potential to pull the regression line. It exerts high influence only when it is also a response outlier. Always examine both leverage (hᵢᵢ &gt; 2p/n) and Cook's distance (Dᵢ &gt; 4/n) before removing any observation.</p>
+</blockquote>
+<h2>Ridge Regression Path</h2>
+<p>Ridge regression adds an L2 penalty: minimise ‖y − Xθ‖² + λ‖θ‖². The closed-form solution θ̂_ridge = (XᵀX + λI)⁻¹Xᵀy always exists for λ &gt; 0 because XᵀX + λI is positive definite even when XᵀX is singular. As λ increases all coefficients shrink proportionally toward zero — but never exactly zero. The Bayesian interpretation: ridge is the MAP estimate under a Gaussian prior θ ~ N(0, σ²I/λ). The optimal λ is found via cross-validation or generalised cross-validation (GCV).</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.linear_model import Ridge
+from sklearn.preprocessing import StandardScaler
+from sklearn.datasets import make_regression
+
+np.random.seed(42)
+X, y = make_regression(n_samples=100, n_features=10, n_informative=5,
+                        noise=15.0, random_state=42)
+scaler = StandardScaler()
+X_s = scaler.fit_transform(X)
+
+lambdas = np.logspace(-3, 5, 300)
+coefs = np.vstack([Ridge(alpha=lam).fit(X_s, y).coef_ for lam in lambdas])
+
+# Verify closed form at lambda=10
+lam_check = 10.0
+theta_cf = np.linalg.solve(
+    X_s.T @ X_s + lam_check * np.eye(X_s.shape[1]), X_s.T @ y
+)
+sk_coef = Ridge(alpha=lam_check).fit(X_s, y).coef_
+print(f'Closed form vs sklearn at lambda={lam_check}: max diff = {np.abs(theta_cf - sk_coef).max():.2e}')
+
+for idx, label in [(0, 'lambda=0.001'), (150, 'lambda=32'), (280, 'lambda=1e4')]:
+    print(f'  {label}: coef norm = {np.linalg.norm(coefs[idx]):.3f}')
+print('All coefs shrink toward zero as lambda increases; none become exactly zero.')
+</code></pre>
+<h2>OLS vs Ridge vs LASSO Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>OLS</th>
+<th>Ridge (L2)</th>
+<th>LASSO (L1)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Closed form</td>
+<td>Yes — (XᵀX)⁻¹Xᵀy</td>
+<td>Yes — (XᵀX+λI)⁻¹Xᵀy</td>
+<td>No — non-differentiable at 0</td>
+</tr>
+<tr>
+<td>Handles multicollinearity</td>
+<td>No — XᵀX may be singular</td>
+<td>Yes — λI guarantees PD</td>
+<td>Partial — picks one of correlated group</td>
+</tr>
+<tr>
+<td>Exact sparsity</td>
+<td>No</td>
+<td>No (shrinks ≈ 0)</td>
+<td>Yes — true zeros</td>
+</tr>
+<tr>
+<td>Bayesian prior</td>
+<td>Flat (improper)</td>
+<td>Gaussian N(0, σ²/λ·I)</td>
+<td>Laplace (double-exponential)</td>
+</tr>
+<tr>
+<td>Geometry</td>
+<td>Unconstrained min</td>
+<td>L2 ball (sphere)</td>
+<td>L1 ball (diamond/polytope)</td>
+</tr>
+<tr>
+<td>Interpretability</td>
+<td>Unbiased coefficients</td>
+<td>Biased but stable</td>
+<td>Sparse, easy to explain</td>
+</tr>
+</tbody>
+</table>
+<h2>Gauss-Markov Theorem and Assumptions</h2>
+<p>Gauss-Markov: OLS is BLUE (Best Linear Unbiased Estimator) under four conditions: (1) linearity E[y|X]=Xθ, (2) strict exogeneity E[ε|X]=0, (3) homoscedasticity Var(ε|X)=σ²I, (4) no perfect multicollinearity. 'Best' means minimum variance among all linear unbiased estimators. Normality of ε is NOT required for BLUE — it is needed for exact finite-sample inference (t- and F-tests). Under normality, OLS coincides with MLE.</p>
+<ul>
+<li>Linearity: E[y|X]=Xθ. Diagnose with residual vs fitted plots; fix with transformations.</li>
+<li>Strict exogeneity: E[ε|X]=0. Violated by omitted variables, simultaneity, or measurement error.</li>
+<li>Homoscedasticity: Var(ε|X)=σ²I. Test with Breusch-Pagan; fix with WLS or sandwich standard errors.</li>
+<li>No autocorrelation: Cov(εᵢ,εⱼ)=0. Use Durbin-Watson test; apply GLS or HAC errors for time series.</li>
+<li>No perfect multicollinearity: rank(X)=p. Check VIF — values above 10 indicate serious collinearity.</li>
+<li>Normality of errors: needed for exact F/t tests; not required for consistency or the BLUE property.</li>
+</ul>
+<h2>R-squared and Adjusted R-squared</h2>
+<p>R² = 1 − RSS/TSS measures the proportion of total variance explained. It always increases when predictors are added, even spurious ones, making it a poor model selection criterion. Adjusted R² = 1 − (RSS/(n−p−1))/(TSS/(n−1)) penalises extra parameters and can decrease. For formal model comparison use AIC = n·ln(RSS/n) + 2p or BIC = n·ln(RSS/n) + p·ln(n). BIC penalises complexity more heavily and is model-selection consistent — it selects the true model as n→∞ if the true model is in the candidate set.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

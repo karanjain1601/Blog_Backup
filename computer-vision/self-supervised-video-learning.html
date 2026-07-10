@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Self-Supervised Video Learning: Temporal Pretext Tasks and Contrastive Methods | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Self-Supervised Video Learning: Temporal Pretext Tasks and Contrastive Methods</h1>
+      
+      <h1>Self-Supervised Video Learning: Temporal Pretext Tasks and Contrastive Methods</h1>
+<p>Self-supervised video learning trains visual encoders without manual labels, using the structure of video itself as supervision. Videos contain natural temporal information — motion, causality, co-occurrence — that static images lack. Pretext tasks exploit this signal: predict temporal order, fill masked patches, or contrast different augmented views of the same clip without requiring any human annotation.</p>
+<p>The payoff is large-scale pretraining: unlabeled video is abundant on the web while labeled datasets like Kinetics are expensive to annotate at scale. SSL-pretrained encoders achieve competitive or superior accuracy on downstream action recognition, video retrieval, and temporal grounding tasks compared to supervised ImageNet or Kinetics pretraining when downstream labeled fine-tuning data is limited.</p>
+<p>Early SSL video methods designed explicit temporal pretext tasks. Temporal order prediction shuffles clip segments and trains the model to predict their correct sequence, requiring understanding of causality and motion direction. Other tasks include predicting video playback speed (slow, normal, fast), predicting rotation angle across time, and future frame prediction given a window of past context frames.</p>
+<pre><code class="language-python"># Temporal order prediction pretext task\nclips = sample_clips(video, n=3)\nshuffle(clips)\npred_order = model(clips)\nloss = cross_entropy(pred_order, true_order)
+</code></pre>
+<p>Order-based pretext tasks are limited because the discriminative features they require do not fully align with action recognition. A model that distinguishes temporal order via scene changes does not need to understand human actions at all. More powerful pretext tasks — contrastive learning over diverse augmentations — learn richer representations that transfer considerably better to recognition and localization tasks.</p>
+<p>Contrastive learning treats two augmented views of the same video clip as positive pairs and clips from different videos as negatives. The encoder learns to embed positives close together and negatives far apart in feature space. Augmentations include random crop, color jitter, temporal jitter (sampling different frames), and speed perturbation — creating diverse positive views from the same source clip.</p>
+<pre><code class="language-python"># VideoMoCo: momentum contrastive learning for video\nqueue = deque(maxlen=queue_size)\nkey_feat = momentum_encoder(aug_clip1)\nquery_feat = encoder(aug_clip2)\nloss = info_nce(query_feat, key_feat, list(queue))\nqueue.append(key_feat.detach())
+</code></pre>
+<p>Momentum encoders slowly update toward the online encoder via exponential moving average with momentum near 0.999, preventing representation collapse while maintaining a large and consistent negative queue. CVRL extends MoCo to video by sampling temporally close clips as positives and temporally distant clips as negatives within the same video, directly exploiting temporal continuity as a supervisory signal.</p>
+<blockquote>
+<p>****: VideoMAE uses a 90% masking ratio — far higher than image MAE's 75%. The reasoning: video has high temporal redundancy, so easy patches are everywhere. High masking forces the model to learn temporal dynamics rather than copying from nearby visible frames.</p>
+</blockquote>
+<p>Masked video modeling extends BERT-style masking to spatiotemporal patches. A video is divided into non-overlapping 3D tube patches covering 16x16 spatial pixels across 2 temporal frames. A large fraction of patches are masked; the encoder processes only visible patches and a lightweight decoder reconstructs masked pixel values, forcing the model to learn temporal dynamics to fill the gaps.</p>
+<pre><code class="language-python"># Masked autoencoder for video (tube masking)\nmask = tube_mask(video, ratio=0.90)\nvisible = video[~mask]\nencoded = encoder(visible)\ndecoded = decoder(encoded, mask_positions=mask)\nloss = mse_loss(decoded[mask], video[mask])
+</code></pre>
+<p>VideoMAE uses a tube masking strategy rather than random frame masking — entire temporal tubes at the same spatial location across all frames are masked together. This prevents trivial solutions where the model copies visible adjacent frames to fill gaps. V-JEPA extends this idea to a joint-embedding architecture that predicts representations rather than raw pixels, avoiding texture memorization artifacts entirely.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Pretext Task</th>
+<th>UCF-101 Linear %</th>
+<th>Kinetics-400 %</th>
+<th>Epochs</th>
+<th>Data</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>3D RotNet</td>
+<td>Rotation prediction</td>
+<td>62.9</td>
+<td>—</td>
+<td>100</td>
+<td>Kinetics</td>
+</tr>
+<tr>
+<td>CVRL</td>
+<td>Contrastive (temporal)</td>
+<td>93.4</td>
+<td>66.1</td>
+<td>200</td>
+<td>Kinetics</td>
+</tr>
+<tr>
+<td>VideoMoCo</td>
+<td>Contrastive (MoCo)</td>
+<td>78.7</td>
+<td>—</td>
+<td>200</td>
+<td>Kinetics</td>
+</tr>
+<tr>
+<td>VideoMAE</td>
+<td>Masked reconstruction</td>
+<td>96.0</td>
+<td>81.5</td>
+<td>2400</td>
+<td>Kinetics</td>
+</tr>
+<tr>
+<td>V-JEPA</td>
+<td>Joint-embedding pred</td>
+<td>95.5</td>
+<td>81.9</td>
+<td>90</td>
+<td>VideoMix2M</td>
+</tr>
+</tbody>
+</table>
+<p>After pretraining, the encoder is transferred by linear probing — training only a classification head on frozen features — or full fine-tuning, updating all parameters on the labeled target dataset. Linear probe accuracy measures representation quality independent of fine-tuning tricks. Full fine-tuning on small datasets risks catastrophic forgetting of representations learned during long self-supervised pretraining.</p>
+<pre><code class="language-python"># Linear probe evaluation on frozen SSL features\nencoder.eval()\nfeats = [encoder(clip).detach().cpu() for clip in dataset]\nX, y = torch.stack(feats).numpy(), labels\nclf = LogisticRegression(max_iter=1000)\nclf.fit(X_train, y_train)\nacc = clf.score(X_test, y_test)
+</code></pre>
+<p>Common downstream benchmarks are UCF-101 and HMDB-51 for action recognition linear probe; Kinetics-400 and Kinetics-700 for large-scale fine-tuning; Something-Something v2 for motion-sensitive evaluation; and AVA for spatial action detection in movies. SSL methods excelling on UCF-101 often lag on Something-Something, revealing different inductive biases in what each pretext task captures.</p>
+<p>Data augmentation strategy during pretraining must match the pretext objective. VideoMAE uses random resized crop, horizontal flip, and color jitter but avoids strong augmentations like CutOut to preserve the reconstruction target. Contrastive methods use stronger augmentation since pixel fidelity is not required. Mismatched augmentation and pretext objective is a common cause of transfer underperformance.</p>
+<p>The field has converged on two dominant paradigms: masked autoencoding (VideoMAE, MAE-ST) and joint-embedding prediction (V-JEPA). Masked pixel reconstruction excels on standard recognition benchmarks because it learns fine-grained texture and motion cues. Joint-embedding methods avoid texture memorization and learn more semantic representations, transferring better to object-level and temporal localization tasks.</p>
+<p>Future directions include scaling to billion-parameter video models, multi-modal pretraining with audio and text such as InternVideo and VideoPrism, and parameter-efficient fine-tuning via adapters or LoRA. The open question is whether the optimal pretext task depends on the target domain — general recognition versus temporal grounding versus anomaly detection — or whether one method can serve all use cases.</p>
+    </article>
+  </main>
+</body>
+</html>

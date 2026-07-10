@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Decoder-Only Transformers — GPT Architecture and Autoregressive LMs | Notes Backup</title>
+  <meta name="description" content="Deep dive into decoder-only transformer architecture: causal self-attention, GPT-1/2/3 evolution, weight tying, KV cache, and autoregressive sampling strategies." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Decoder-Only Transformers — GPT Architecture and Autoregressive LMs</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Deep dive into decoder-only transformer architecture: causal self-attention, GPT-1/2/3 evolution, weight tying, KV cache, and autoregressive sampling strategies.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Decoder-Only Transformers — GPT Architecture and Autoregressive LMs</h1>
+<p>Decoder-only transformers form the backbone of modern large language models. Unlike encoder-decoder architectures, they rely solely on causal (masked) self-attention — each position attends only to itself and positions to its left. This constraint makes them naturally suited for autoregressive generation: predict the next token given all previous tokens. The GPT family demonstrated that this simple architecture, when scaled, produces emergent capabilities ranging from coherent text generation to few-shot in-context learning without any task-specific fine-tuning.</p>
+<h2>Decoder-Only Architecture Overview</h2>
+<p>A decoder-only transformer first maps each token to a dense vector via a token embedding matrix E ∈ ℝ^{V×d}, then adds positional embeddings P ∈ ℝ^{T×d}. This combined representation passes through L identical blocks, each containing: LayerNorm → Causal Multi-Head Attention → residual add → LayerNorm → Feed-Forward Network → residual add. After L blocks, a final LayerNorm projects through an output matrix (often tied to E^T) to logits over the vocabulary. Pre-norm placement (LayerNorm before each sublayer) is universal in modern implementations for training stability.</p>
+<h2>GPT Family: GPT-1, GPT-2, GPT-3</h2>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Params</th>
+<th>Layers</th>
+<th>d_model</th>
+<th>Heads</th>
+<th>Trained Tokens</th>
+<th>Capability Milestone</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GPT-1 (2018)</td>
+<td>117M</td>
+<td>12</td>
+<td>768</td>
+<td>12</td>
+<td>~1B (BooksCorpus)</td>
+<td>Supervised fine-tuning baseline; transfer learning for NLP</td>
+</tr>
+<tr>
+<td>GPT-2 small (2019)</td>
+<td>117M</td>
+<td>12</td>
+<td>768</td>
+<td>12</td>
+<td>~10B (WebText)</td>
+<td>Coherent multi-paragraph generation; initially withheld</td>
+</tr>
+<tr>
+<td>GPT-2 XL (2019)</td>
+<td>1.5B</td>
+<td>48</td>
+<td>1600</td>
+<td>25</td>
+<td>~10B (WebText)</td>
+<td>Zero-shot task performance; scaling demo</td>
+</tr>
+<tr>
+<td>GPT-3 (2020)</td>
+<td>175B</td>
+<td>96</td>
+<td>12288</td>
+<td>96</td>
+<td>~300B tokens</td>
+<td>In-context learning; few-shot prompting emerges</td>
+</tr>
+</tbody>
+</table>
+<h2>Transformer Block: Pre-Norm and Causal MHA</h2>
+<p>Causal attention enforces the autoregressive constraint via an upper-triangular mask: the attention weight from position i to position j is set to −∞ before softmax whenever j &gt; i. Combined with pre-norm, each block computes x ← x + Attn(LN(x)) then x ← x + FFN(LN(x)). The FFN typically uses a 4× expansion ratio (d_ffn = 4d) with GELU activation. SwiGLU replaces GELU in LLaMA and PaLM: FFN(x) = (xW₁ ⊙ SiLU(xW_gate)) W₂, trading one matrix multiply for improved quality.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class CausalSelfAttention(nn.Module):
+    def __init__(self, d_model, n_heads, max_len=512):
+        super().__init__()
+        self.n_heads = n_heads
+        self.d_head = d_model // n_heads
+        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.proj = nn.Linear(d_model, d_model, bias=False)
+        self.register_buffer('mask', torch.tril(torch.ones(max_len, max_len)))
+
+    def forward(self, x):
+        B, T, C = x.shape
+        q, k, v = self.qkv(x).split(C, dim=-1)
+        def reshape(t): return t.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
+        q, k, v = reshape(q), reshape(k), reshape(v)
+        att = (q @ k.transpose(-2, -1)) * self.d_head ** -0.5
+        att = att.masked_fill(self.mask[:T, :T] == 0, float('-inf'))
+        out = F.softmax(att, dim=-1) @ v
+        return self.proj(out.transpose(1, 2).contiguous().view(B, T, C))
+
+class GPTBlock(nn.Module):
+    def __init__(self, d_model=768, n_heads=12, ffn_mult=4):
+        super().__init__()
+        self.ln1, self.ln2 = nn.LayerNorm(d_model), nn.LayerNorm(d_model)
+        self.attn = CausalSelfAttention(d_model, n_heads)
+        self.ffn = nn.Sequential(
+            nn.Linear(d_model, d_model * ffn_mult), nn.GELU(),
+            nn.Linear(d_model * ffn_mult, d_model)
+        )
+    def forward(self, x):
+        x = x + self.attn(self.ln1(x))
+        return x + self.ffn(self.ln2(x))
+
+block = GPTBlock()
+x = torch.randn(2, 32, 768)
+print(f'Output: {block(x).shape}')  # torch.Size([2, 32, 768])
+print(f'Block params: {sum(p.numel() for p in block.parameters()):,}')
+</code></pre>
+<h2>Weight Tying: Shared Embedding and Output Projection</h2>
+<p>Weight tying sets the output projection matrix equal to the transpose of the token embedding matrix: W_out = E^T, so that the same parameters govern both token lookup and vocabulary prediction. This reduces parameter count by V×d (≈38M for GPT-2 small with V=50257, d=768) and ensures that the geometric distances in embedding space are consistent between input and output. It also regularizes the model: tokens that appear in similar contexts will have similar embeddings and similar output probabilities.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class TiedGPT(nn.Module):
+    def __init__(self, vocab_size=50257, d_model=768, n_layers=12,
+                 n_heads=12, max_len=1024):
+        super().__init__()
+        self.tok_emb = nn.Embedding(vocab_size, d_model)
+        self.pos_emb = nn.Embedding(max_len, d_model)
+        self.blocks = nn.ModuleList([GPTBlock(d_model, n_heads) for _ in range(n_layers)])
+        self.ln_f = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, vocab_size, bias=False)
+        # Weight tying: output head shares weights with token embedding
+        self.head.weight = self.tok_emb.weight
+
+    def forward(self, idx):
+        B, T = idx.shape
+        pos = torch.arange(T, device=idx.device)
+        x = self.tok_emb(idx) + self.pos_emb(pos)
+        for block in self.blocks:
+            x = block(x)
+        return self.head(self.ln_f(x))  # (B, T, vocab_size)
+
+model = TiedGPT(n_layers=2)  # shallow for demo
+total = sum(p.numel() for p in model.parameters())
+untied_total = total + model.tok_emb.weight.numel()
+print(f'Params with tying:    {total:,}')
+print(f'Params without tying: {untied_total:,}')
+print(f'Savings: {untied_total - total:,} ({100*(untied_total-total)/untied_total:.1f}%)')
+assert model.head.weight.data_ptr() == model.tok_emb.weight.data_ptr(), 'Weights not tied!'
+</code></pre>
+<h2>Language Modeling Objective and Training</h2>
+<p>The training objective is next-token prediction via cross-entropy loss applied at every position simultaneously. For a sequence [x₁, x₂, ..., x_T], the model predicts P(xₜ | x₁,...,xₜ₋₁) for all t in a single forward pass (teacher forcing). The loss is L = −(1/T) Σₜ log P(xₜ | x&lt;t). This parallelism over sequence positions is a fundamental advantage over RNNs: the entire sequence is processed in one forward-backward pass. Perplexity = exp(L) is the primary evaluation metric — lower is better, with well-trained models achieving perplexities in the single digits on held-out data.</p>
+<blockquote>
+<p><strong>Pre-Norm vs Post-Norm</strong>: Original attention (Vaswani 2017) used post-normalization: sublayer output → residual add → LayerNorm. GPT-2 and nearly all modern LLMs switched to pre-normalization: LayerNorm → sublayer → residual add. Pre-norm allows larger learning rates and scales more stably to hundreds of layers because gradients bypass LayerNorm through the residual stream. Post-norm can achieve marginally better final perplexity at small scale but diverges more easily.</p>
+</blockquote>
+<h2>Autoregressive Inference: Sampling Strategies</h2>
+<p>During inference, the model generates one token per step. The logits z ∈ ℝ^V are converted to probabilities via softmax(z/τ) where τ is temperature. Greedy decoding (argmax) is deterministic but often produces repetitive text. Top-k sampling truncates to the k highest-probability tokens; top-p (nucleus) sampling picks the smallest token set whose cumulative probability exceeds p — more adaptive than top-k since it varies set size based on the distribution shape. Best practice is top-p=0.9 with temperature around 0.8 for open-ended generation.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def top_p_filter(logits, top_p=0.9):
+    sorted_logits, sorted_idx = torch.sort(logits, descending=True)
+    cum_probs = sorted_logits.softmax(dim=-1).cumsum(dim=-1)
+    # Remove tokens once cumulative probability exceeds top_p
+    remove_mask = cum_probs - sorted_logits.softmax(dim=-1) &gt; top_p
+    sorted_logits[remove_mask] = float('-inf')
+    return torch.zeros_like(logits).scatter_(-1, sorted_idx, sorted_logits)
+
+def sample_token(logits, temperature=0.8, top_k=50, top_p=0.9):
+    logits = logits.float() / max(temperature, 1e-8)
+    if top_k &gt; 0:
+        kth_val = torch.topk(logits, min(top_k, logits.size(-1)))[0][..., -1, None]
+        logits = logits.masked_fill(logits &lt; kth_val, float('-inf'))
+    if top_p &lt; 1.0:
+        logits = top_p_filter(logits, top_p)
+    return torch.multinomial(F.softmax(logits, dim=-1), num_samples=1)
+
+# Compare entropy under different temperatures
+torch.manual_seed(0)
+vocab_size, seq_len = 200, 10
+logits = torch.randn(vocab_size)
+print(f'{'Temp':&gt;6}  {'Entropy':&gt;8}  {'Max Prob':&gt;10}  {'Effective Vocab':&gt;15}')
+for temp in [0.3, 0.7, 1.0, 1.5, 2.0]:
+    p = F.softmax(logits / temp, dim=-1)
+    ent = -(p * p.log()).sum().item()
+    eff = torch.exp(torch.tensor(ent)).item()
+    print(f'{temp:&gt;6.1f}  {ent:&gt;8.3f}  {p.max().item():&gt;10.4f}  {eff:&gt;15.1f}')
+</code></pre>
+<h2>KV Cache for Fast Inference</h2>
+<p>Without a cache, generating T tokens requires O(T²) attention computations total. With a KV cache, previously computed K and V projections are stored and reused: each new step appends one row to the cache and runs attention over the full history. Per-step computation drops from O(T×d) to O(d) for the attention — the bottleneck becomes memory bandwidth rather than FLOPs. Cache memory per layer is 2 × T × d_model bytes (float16); for a 175B model with T=4096 that is 2 × 4096 × 12288 × 96 layers × 2 bytes ≈ 18 GB just for KV cache.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class KVCacheAttention(nn.Module):
+    def __init__(self, d_model=512, n_heads=8):
+        super().__init__()
+        self.n_heads = n_heads
+        self.d_head = d_model // n_heads
+        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.proj = nn.Linear(d_model, d_model, bias=False)
+        self.k_cache = self.v_cache = None
+
+    def reset_cache(self): self.k_cache = self.v_cache = None
+
+    def forward(self, x, use_cache=False):
+        B, T, C = x.shape
+        q, k, v = self.qkv(x).split(C, dim=-1)
+        def split(t): return t.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
+        q, k, v = split(q), split(k), split(v)
+        if use_cache and self.k_cache is not None:
+            k = torch.cat([self.k_cache, k], dim=2)  # (B, H, T_past+T, d_head)
+            v = torch.cat([self.v_cache, v], dim=2)
+        if use_cache:
+            self.k_cache, self.v_cache = k.detach(), v.detach()
+        att = F.softmax((q @ k.transpose(-2, -1)) * self.d_head ** -0.5, dim=-1)
+        return self.proj((att @ v).transpose(1, 2).contiguous().view(B, T, C))
+
+attn = KVCacheAttention()
+x_prompt = torch.randn(1, 8, 512)   # prompt of length 8
+attn(x_prompt, use_cache=True)
+print(f'Cache after prompt:  k={attn.k_cache.shape}')  # (1, 8, 8, 64)
+for step in range(3):
+    attn(torch.randn(1, 1, 512), use_cache=True)  # generate one token
+print(f'Cache after 3 steps: k={attn.k_cache.shape}')  # (1, 8, 11, 64)
+</code></pre>
+<h2>Why Decoder-Only Dominates Modern LLMs</h2>
+<p>Encoder-decoder architectures require separate encoder and decoder stacks — nearly double the parameters for similar capability. Encoder-only models (BERT) cannot generate text autoregressively. Decoder-only is the simplest unified architecture where the same model handles pretraining, supervised fine-tuning, RLHF, and zero/few-shot inference. At scale, in-context learning eliminates the need for task-specific fine-tuning for many applications. Empirically, decoder-only models consistently match or exceed encoder-decoder models at comparable compute once scaled past roughly 10B parameters.</p>
+<ul>
+<li>Single unified architecture: pretraining, SFT, RLHF, and inference use the same forward pass.</li>
+<li>In-context learning: GPT-3 showed that task specification via prompts replaces fine-tuning for many tasks.</li>
+<li>Simpler training: one loss function (NLL over all positions), no cross-attention, no encoder-decoder alignment.</li>
+<li>KV cache efficiency: causal attention caches naturally — bidirectional attention (BERT-style) cannot.</li>
+<li>Predictable scaling: Kaplan and Chinchilla scaling laws are best characterized for decoder-only models.</li>
+<li>Instruction following: RLHF + decoder-only is now the standard recipe for aligned LLMs (GPT-4, Claude, Gemini).</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

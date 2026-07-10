@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FT-Transformer — Feature Tokenization for Tabular Data | Notes Backup</title>
+  <meta name="description" content="FT-Transformer converts each tabular feature into an embedding token and processes them with a standard Transformer encoder, enabling explicit pairwise feature interactions via self-attention." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>FT-Transformer — Feature Tokenization for Tabular Data</h1>
+      <ul class='note-meta'><li><strong>description:</strong> FT-Transformer converts each tabular feature into an embedding token and processes them with a standard Transformer encoder, enabling explicit pairwise feature interactions via self-attention.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>FT-Transformer — Feature Tokenization for Tabular Data</h1>
+<p>FT-Transformer (Gorishniy et al., Yandex Research, 2021) applies the Transformer architecture to tabular data by treating each feature as a token. A standard MLP operates on concatenated raw features and lacks explicit feature-interaction modeling; FT-Transformer's self-attention lets any feature attend to any other, capturing interaction effects directly.</p>
+<h2>Feature Tokenization</h2>
+<p>Each feature is projected to a d-dimensional embedding before being processed by the Transformer encoder. Numerical and categorical features are tokenized differently, but the result is the same shape: one vector of dimension d per feature per sample.</p>
+<ul>
+<li>Numerical feature i: embed_i = W_i · x_i + b_i  (scalar × d-vector + bias = unique embedding per feature value)</li>
+<li>Categorical feature j: standard embedding lookup table, one vector per category</li>
+<li>Special [CLS] token prepended to the sequence — its output is used for the final prediction</li>
+<li>Sequence length = number of features + 1 ([CLS])</li>
+<li>Transformer encoder with multi-head self-attention processes the full feature token sequence</li>
+</ul>
+<h2>FT-Transformer Implementation</h2>
+<p>Below is a minimal FT-Transformer for numerical features. The key module is NumericalTokenizer, which gives each feature its own linear projection.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from torch import Tensor
+
+class NumericalTokenizer(nn.Module):
+    &quot;&quot;&quot;Project each numerical feature to a d-dim embedding.&quot;&quot;&quot;
+    def __init__(self, n_features: int, d_token: int):
+        super().__init__()
+        # One weight vector per feature (not shared)
+        self.weight = nn.Parameter(torch.empty(n_features, d_token))
+        self.bias   = nn.Parameter(torch.zeros(n_features, d_token))
+        nn.init.kaiming_uniform_(self.weight)
+
+    def forward(self, x: Tensor) -&gt; Tensor:  # x: (B, F)
+        # Outer product: each scalar x_i multiplies its own weight vector
+        return x.unsqueeze(-1) * self.weight.unsqueeze(0) + self.bias.unsqueeze(0)
+        # Output shape: (B, F, d_token)
+
+class FTTransformer(nn.Module):
+    def __init__(self, n_features: int, d_token: int, n_heads: int,
+                 n_layers: int, d_ffn: int, n_classes: int):
+        super().__init__()
+        self.tokenizer = NumericalTokenizer(n_features, d_token)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, d_token))
+        encoder_layer  = nn.TransformerEncoderLayer(
+            d_model=d_token, nhead=n_heads,
+            dim_feedforward=d_ffn, batch_first=True
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
+        self.head    = nn.Linear(d_token, n_classes)
+
+    def forward(self, x: Tensor) -&gt; Tensor:  # x: (B, F)
+        tokens = self.tokenizer(x)                       # (B, F, d)
+        cls    = self.cls_token.expand(x.size(0), -1, -1)  # (B, 1, d)
+        tokens = torch.cat([cls, tokens], dim=1)         # (B, F+1, d)
+        out    = self.encoder(tokens)                    # (B, F+1, d)
+        return self.head(out[:, 0])                      # (B, n_classes)
+</code></pre>
+<h2>Visualizing Attention Patterns</h2>
+<p>Self-attention weights reveal which feature pairs the model treats as interacting. Extracting attention maps from a trained FT-Transformer provides interpretable feature-interaction heatmaps.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+import matplotlib.pyplot as plt
+
+def extract_attention_weights(model, x_sample):
+    &quot;&quot;&quot;Extract attention weights from each Transformer layer.&quot;&quot;&quot;
+    model.eval()
+    attention_maps = []
+
+    def hook_fn(module, input, output):
+        # TransformerEncoderLayer stores attn_output_weights when need_weights=True
+        pass  # hook approach varies by PyTorch version
+
+    with torch.no_grad():
+        tokens = model.tokenizer(x_sample)
+        cls    = model.cls_token.expand(x_sample.size(0), -1, -1)
+        tokens = torch.cat([cls, tokens], dim=1)
+        # Access attention weights via forward with output_attentions
+        for layer in model.encoder.layers:
+            attn_out, attn_weights = layer.self_attn(
+                tokens, tokens, tokens, need_weights=True, average_attn_weights=True
+            )
+            attention_maps.append(attn_weights.detach().cpu().numpy())
+            tokens = layer(tokens)  # continue forward pass
+    return attention_maps
+
+# Plot average attention for first sample (feature vs feature)
+feature_names = [f'F{i}' for i in range(10)]
+attn = np.random.rand(11, 11)  # placeholder — replace with actual weights
+plt.figure(figsize=(8, 6))
+plt.imshow(attn, cmap='Blues', vmin=0, vmax=attn.max())
+plt.colorbar(label='Attention weight')
+plt.title('FT-Transformer Feature Attention (layer 1)')
+plt.tight_layout()
+plt.savefig('ft_attention.png', dpi=150)
+</code></pre>
+<h2>FT-Transformer vs MLP vs XGBoost</h2>
+<p>On a controlled benchmark, FT-Transformer outperforms a plain MLP on datasets with rich feature interactions, and can match XGBoost on larger tabular datasets. The advantage over MLP comes from explicit pairwise attention; the gap versus XGBoost shrinks with increasing n.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+import torch.nn as nn
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+from sklearn.neural_network import MLPClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+import xgboost as xgb
+
+# Dataset with interaction effects
+X, y = make_classification(
+    n_samples=5000, n_features=10, n_informative=8,
+    n_redundant=0, n_clusters_per_class=2, random_state=42
+)
+X_tr, X_te, y_tr, y_te = train_test_split(
+    X.astype(np.float32), y, test_size=0.2, random_state=42
+)
+
+# XGBoost baseline
+xgb_model = xgb.XGBClassifier(n_estimators=200, max_depth=6, random_state=42)
+xgb_model.fit(X_tr, y_tr)
+print(f'XGBoost:       {accuracy_score(y_te, xgb_model.predict(X_te)):.4f}')
+
+# MLP baseline
+mlp = Pipeline([('sc', StandardScaler()),
+                ('net', MLPClassifier(hidden_layer_sizes=(128, 64), max_iter=300))])
+mlp.fit(X_tr, y_tr)
+print(f'MLP:           {accuracy_score(y_te, mlp.predict(X_te)):.4f}')
+
+# FT-Transformer (simplified training loop)
+model = FTTransformer(n_features=10, d_token=64, n_heads=4,
+                      n_layers=3, d_ffn=128, n_classes=2)
+print(f'FT-Transformer params: {sum(p.numel() for p in model.parameters()):,}')
+</code></pre>
+<h2>Numerical vs Categorical Tokenization</h2>
+<p>The key design decision in FT-Transformer is how to tokenize heterogeneous feature types. Numerical features use a unique linear projection per feature; categoricals use learned embedding tables.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class CategoricalTokenizer(nn.Module):
+    def __init__(self, cardinalities: list, d_token: int):
+        super().__init__()
+        # One embedding table per categorical column
+        self.embeddings = nn.ModuleList([
+            nn.Embedding(n_cats, d_token) for n_cats in cardinalities
+        ])
+
+    def forward(self, x_cat: torch.Tensor) -&gt; torch.Tensor:
+        # x_cat: (B, n_cat_features) — integer indices
+        tokens = [emb(x_cat[:, i]) for i, emb in enumerate(self.embeddings)]
+        return torch.stack(tokens, dim=1)  # (B, n_cat_features, d_token)
+
+class MixedTokenizer(nn.Module):
+    def __init__(self, n_num: int, cardinalities: list, d_token: int):
+        super().__init__()
+        self.num_tokenizer = NumericalTokenizer(n_num, d_token)
+        self.cat_tokenizer = CategoricalTokenizer(cardinalities, d_token)
+
+    def forward(self, x_num: torch.Tensor, x_cat: torch.Tensor) -&gt; torch.Tensor:
+        num_tokens = self.num_tokenizer(x_num)  # (B, n_num, d)
+        cat_tokens = self.cat_tokenizer(x_cat)  # (B, n_cat, d)
+        return torch.cat([num_tokens, cat_tokens], dim=1)  # (B, n_num+n_cat, d)
+
+# Test
+tokenizer = MixedTokenizer(n_num=5, cardinalities=[10, 50, 200], d_token=64)
+x_num = torch.randn(32, 5)
+x_cat = torch.randint(0, 10, (32, 3))
+tokens = tokenizer(x_num, x_cat)
+print(f'Token sequence shape: {tokens.shape}')  # (32, 8, 64)
+</code></pre>
+<hr />
+<h2>Architecture Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Architecture</th>
+<th>Feature Interactions</th>
+<th>Attention</th>
+<th>Pretraining</th>
+<th>Benchmark</th>
+<th>Scalability</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Plain MLP</td>
+<td>Implicit (all layers)</td>
+<td>None</td>
+<td>None</td>
+<td>Weaker on interaction-heavy data</td>
+<td>Fast training</td>
+</tr>
+<tr>
+<td>FT-Transformer</td>
+<td>Explicit pairwise (self-attention)</td>
+<td>Feature-to-feature</td>
+<td>MLM-style possible</td>
+<td>Competitive with XGBoost at large n</td>
+<td>O(F²) per layer</td>
+</tr>
+<tr>
+<td>TabNet</td>
+<td>Sequential sparse (attention mask)</td>
+<td>Step-wise feature selection</td>
+<td>Reconstruction pretraining</td>
+<td>Competitive, often behind FT-Transformer</td>
+<td>O(F) per step</td>
+</tr>
+<tr>
+<td>XGBoost</td>
+<td>Explicit (split hierarchy)</td>
+<td>None — greedy splitting</td>
+<td>None</td>
+<td>State-of-the-art on most benchmarks</td>
+<td>Scales to millions of rows</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>FT-Transformer Best Use Cases</strong>: FT-Transformer is most effective when (1) your dataset is large enough (n &gt; 10k) to train deep attention layers, (2) features have meaningful pairwise interactions that axis-aligned splits miss, and (3) you want a single neural backbone for tabular + other modalities in an end-to-end system.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<ul>
+<li>FT-Transformer tokenizes each feature into a d-dim vector — numerical via unique linear projection, categorical via embedding lookup</li>
+<li>A [CLS] token aggregates information from all feature tokens; its output drives the prediction head</li>
+<li>Self-attention enables explicit, learnable pairwise feature interactions — unlike MLP which relies on implicit interactions</li>
+<li>FT-Transformer competes with XGBoost on large tabular datasets but rarely outperforms it on small n</li>
+<li>Mixed numerical-categorical inputs are handled cleanly with different tokenizer heads</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

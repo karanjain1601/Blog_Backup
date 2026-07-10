@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Evaluating Quantized Models: Perplexity and Beyond | Notes Backup</title>
+  <meta name="description" content="Using perplexity on standard benchmarks plus downstream task accuracy to rigorously evaluate the quality of quantized LLMs." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Evaluating Quantized Models: Perplexity and Beyond</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Using perplexity on standard benchmarks plus downstream task accuracy to rigorously evaluate the quality of quantized LLMs.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Evaluating Quantized Models: Perplexity and Beyond</h1>
+<p>Evaluating a quantized large language model requires more than a single number. Perplexity on a standard corpus gives a fast, reproducible signal, but it does not capture the full picture: a model that maintains low perplexity can still degrade sharply on structured reasoning, mathematical problem-solving, or commonsense inference tasks that require precise token predictions at key positions. A rigorous quantization evaluation pipeline combines corpus-level perplexity on WikiText-2 and C4 with zero-shot task accuracy across multiple benchmarks, uses statistical thresholds to detect catastrophic quantization failures, and runs as a CI gate before any quantized checkpoint is deployed to production.</p>
+<h2>Overview</h2>
+<p>The standard quantization evaluation workflow operates at three levels of granularity. First, perplexity on a held-out text corpus provides a token-level quality signal that is sensitive to the average quality of next-token predictions across the distribution. Second, zero-shot benchmark accuracy on tasks such as ARC-Easy, HellaSwag, WinoGrande, and MMLU measures the model's ability to complete structured reasoning tasks that are important for real-world use. Third, a regression suite enforces hard thresholds on both perplexity delta and per-task accuracy drop, ensuring that any quantization configuration that degrades model quality beyond acceptable limits is automatically flagged before deployment. Together these three levels form a complete evaluation pipeline that is both fast enough to run on every quantization candidate and sensitive enough to catch subtle quality regressions that perplexity alone would miss.</p>
+<h2>Perplexity as a Proxy Metric</h2>
+<p>Perplexity (PPL) measures how well a language model predicts a held-out text corpus. For a sequence of N tokens x_1, ..., x_N, perplexity is defined as exp(-1/N * sum_i log P(x_i | x_1,...,x_{i-1})). A lower perplexity means the model assigns higher average probability to the observed tokens. For quantization evaluation, the key quantity is the perplexity delta: how much does PPL increase when moving from the FP16 reference to the quantized model? A delta below 0.1 points is generally considered negligible; a delta of 0.1-0.5 is acceptable for 4-bit quantization; a delta above 1.0 points is a clear quality regression; and a delta above 5.0 points indicates catastrophic degradation where the model has lost coherence.</p>
+<p>Perplexity is attractive because it is fast to compute, dataset-independent (any unlabelled text corpus suffices), and provides a continuous quality signal rather than a binary pass/fail. However, it has well-documented limitations as a proxy for downstream task accuracy. Perplexity is dominated by the most frequent token patterns in the corpus, so a model can maintain low perplexity by accurately predicting common syntactic structures while silently losing the rare, precise predictions needed for mathematical reasoning or factual recall. Several papers have documented cases where a quantized model's perplexity increase was below 0.1 on WikiText-2 but accuracy on MMLU dropped by more than 5 percentage points — a gap large enough to matter in production. This motivates including at least one downstream benchmark alongside perplexity in any quantization evaluation suite.</p>
+<h2>Wikitext-2 and C4 Benchmarks</h2>
+<p>WikiText-2 is the standard perplexity benchmark for LLM quantization research. It consists of Wikipedia articles with minimal preprocessing, providing approximately 2M training tokens and 246K test tokens. Its vocabulary is broad, its sentences are well-formed, and its domain — encyclopedic prose — is well-represented in most LLM pretraining datasets, making it a reliable diagnostic for weight rounding errors. C4 (Colossal Cleaned Crawled Corpus) is a larger, more diverse alternative drawn from Common Crawl that better covers the web-text distribution most modern LLMs are trained on. For quantization research, WikiText-2 is preferred because its fixed test set enables reproducible comparison across papers; for deployment validation, C4 is preferable because it better reflects the distribution of real user queries. Evaluating on both and reporting both PPL values is the most complete approach. The standard stride for sliding-window perplexity evaluation is 512 tokens with a context window of 1024 tokens, which balances computational cost against accuracy of the perplexity estimate.</p>
+<pre><code class="language-python">import math
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+from datasets import load_dataset
+
+def compute_ppl(model, tokenizer, text, stride=512, max_len=1024):
+    enc = tokenizer(text, return_tensors=&quot;pt&quot;)
+    seq_len, nlls, prev_end = enc.input_ids.size(1), [], 0
+    for begin in range(0, seq_len, stride):
+        end = min(begin + max_len, seq_len)
+        trg_len = end - prev_end
+        ids = enc.input_ids[:, begin:end].cuda()
+        target = ids.clone()
+        target[:, :-trg_len] = -100
+        with torch.no_grad():
+            nlls.append(model(ids, labels=target).loss * trg_len)
+        prev_end = end
+        if end == seq_len:
+            break
+    return math.exp(torch.stack(nlls).sum() / prev_end)
+
+test_text = &quot; &quot;.join(load_dataset(&quot;wikitext&quot;, &quot;wikitext-2-raw-v1&quot;, split=&quot;test&quot;)[&quot;text&quot;])
+tok = AutoTokenizer.from_pretrained(&quot;meta-llama/Llama-2-7b-hf&quot;)
+fp16 = AutoModelForCausalLM.from_pretrained(&quot;meta-llama/Llama-2-7b-hf&quot;, torch_dtype=torch.float16).cuda()
+fp16_ppl = compute_ppl(fp16, tok, test_text)
+del fp16; torch.cuda.empty_cache()
+nf4_cfg = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type=&quot;nf4&quot;, bnb_4bit_compute_dtype=torch.float16)
+nf4 = AutoModelForCausalLM.from_pretrained(&quot;meta-llama/Llama-2-7b-hf&quot;, quantization_config=nf4_cfg, device_map=&quot;auto&quot;)
+nf4_ppl = compute_ppl(nf4, tok, test_text)
+print(f&quot;FP16 PPL: {fp16_ppl:.3f}  |  4-bit NF4 PPL: {nf4_ppl:.3f}  |  Delta: {nf4_ppl - fp16_ppl:+.3f}&quot;)
+</code></pre>
+<h2>Task-Level Evaluation</h2>
+<p>The lm-evaluation-harness library (by EleutherAI) provides a unified interface for running zero-shot and few-shot evaluations on hundreds of benchmarks. The most informative tasks for quantization evaluation are: ARC-Easy and ARC-Challenge (multiple-choice science questions requiring factual recall and reasoning), HellaSwag (commonsense NLI requiring understanding of plausible story continuations), WinoGrande (Winograd schema pronoun disambiguation), and MMLU (Massive Multitask Language Understanding — 57 subjects spanning STEM, humanities, and social sciences). Running all four on a 7B model takes 15-45 minutes on a single A100 GPU at limit=250 examples per task, making it feasible as a CI evaluation. The key output is the per-task accuracy drop relative to the FP16 baseline. A relative accuracy drop above 2% on any task warrants investigation; a drop above 5% warrants rejecting the quantization configuration and revisiting calibration or bit-width settings.</p>
+<pre><code class="language-python">import torch
+from lm_eval import evaluator
+from lm_eval.models.huggingface import HFLM
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+
+MODEL = &quot;meta-llama/Llama-2-7b-hf&quot;
+TASKS = [&quot;arc_easy&quot;, &quot;hellaswag&quot;, &quot;winogrande&quot;, &quot;mmlu&quot;]
+
+def run_eval(model_kwargs, label):
+    lm = HFLM(pretrained=MODEL, **model_kwargs)
+    res = evaluator.simple_evaluate(model=lm, tasks=TASKS, num_fewshot=0, limit=250, batch_size=8)
+    scores = {}
+    print(f&quot;\n=== {label} ===&quot;)
+    for t in TASKS:
+        acc = res[&quot;results&quot;][t].get(&quot;acc,none&quot;, res[&quot;results&quot;][t].get(&quot;acc&quot;, 0))
+        scores[t] = round(acc * 100, 2)
+        print(f&quot;  {t:&lt;14}: {scores[t]:.2f}%&quot;)
+    return scores
+
+fp16 = run_eval({&quot;dtype&quot;: &quot;float16&quot;}, &quot;FP16 Baseline&quot;)
+nf4_cfg = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type=&quot;nf4&quot;, bnb_4bit_compute_dtype=torch.float16)
+nf4 = run_eval({&quot;quantization_config&quot;: nf4_cfg}, &quot;4-bit NF4&quot;)
+print(&quot;\nAccuracy drop (NF4 vs FP16):&quot;)
+for t in TASKS:
+    delta = nf4[t] - fp16[t]
+    status = &quot;WARN&quot; if delta &lt; -3.0 else &quot;OK&quot;
+    print(f&quot;  [{status}] {t:&lt;14}: {delta:+.2f}%&quot;)
+</code></pre>
+<ul>
+<li>ARC-Easy (acc): Elementary-level science questions; moderately sensitive to quantization — 4-bit NF4 typically drops 0.5-1.5% vs FP16.</li>
+<li>HellaSwag (acc_norm): Commonsense NLI graded by length-normalized log-likelihood; stable under quantization for 4-bit but degrades at 2-bit.</li>
+<li>WinoGrande (acc): Pronoun disambiguation requiring world knowledge; requires correct token ordering — small PPL changes can flip answers.</li>
+<li>MMLU (acc): 57-subject multiple choice exam; the most sensitive to quantization among standard benchmarks due to rare-fact precision requirements.</li>
+<li>TruthfulQA (mc1/mc2): Measures hallucination; not always included but can reveal quantization-induced confabulation increases.</li>
+<li>GSM8K (exact_match, 5-shot): Grade-school math; highly sensitive to quantization because it requires correct multi-step numerical reasoning.</li>
+</ul>
+<h2>Zero-shot Accuracy Degradation</h2>
+<p>Accuracy degradation under quantization follows predictable patterns across model sizes and quantization methods. For weight-only quantization (GPTQ, AWQ, NF4), 4-bit models typically lose less than 1-2% absolute accuracy on ARC-Easy and HellaSwag but can lose 3-8% on MMLU, particularly in the science and mathematics subcategories where precise numerical token predictions are required. Activation quantization (W8A8) is more aggressive: 8-bit activations introduce quantization error on every token's hidden state, and models above 13B parameters show measurably higher degradation on MMLU than smaller models because larger models have more severe activation outliers that expand the quantization range. The degradation pattern also depends heavily on the task format: multiple-choice tasks are less sensitive to quantization than generative tasks such as code completion or math word problems, because multiple-choice requires only selecting the most probable option from a small set rather than generating a precise sequence.</p>
+<table>
+<thead>
+<tr>
+<th>Quant Config</th>
+<th>WikiText-2 PPL</th>
+<th>ARC-Easy (%)</th>
+<th>HellaSwag (%)</th>
+<th>MMLU (%)</th>
+<th>Acceptable?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FP16 baseline</td>
+<td>5.47</td>
+<td>74.1</td>
+<td>78.3</td>
+<td>46.2</td>
+<td>Yes (reference)</td>
+</tr>
+<tr>
+<td>INT8 PTQ (W8A8)</td>
+<td>5.49</td>
+<td>74.0</td>
+<td>78.2</td>
+<td>46.1</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>4-bit GPTQ (g128)</td>
+<td>5.56</td>
+<td>73.5</td>
+<td>77.8</td>
+<td>45.7</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>4-bit AWQ (g128)</td>
+<td>5.54</td>
+<td>73.7</td>
+<td>78.0</td>
+<td>45.9</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>4-bit NF4 + DQ</td>
+<td>5.59</td>
+<td>73.4</td>
+<td>77.6</td>
+<td>45.5</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>2-bit AQLM</td>
+<td>6.83</td>
+<td>69.1</td>
+<td>72.2</td>
+<td>40.8</td>
+<td>Marginal — MMLU below threshold</td>
+</tr>
+</tbody>
+</table>
+<h2>Catastrophic Quantization</h2>
+<p>Catastrophic quantization occurs when a quantization configuration pushes a model past a tipping point where perplexity and downstream accuracy collapse non-linearly. This is most common when the bit-width is too low for the model size (e.g., 2-bit quantization on a 7B model without Hessian-based calibration), when the group size is too large for the bit-width (e.g., group_size=1024 with 3-bit weights on a 7B model), or when sensitive layers — particularly the first embedding layer or the last language model head — are quantized as aggressively as intermediate feed-forward layers. Catastrophic quantization is characterized by a PPL spike that is disproportionately larger than the linear trend: while reducing from 8-bit to 4-bit might increase PPL by 0.1 points, reducing from 4-bit to 2-bit with the same group size might increase PPL by 8-15 points. Detecting this non-linearity by fitting a linear trend over bit-width and flagging deviations above a threshold is the key diagnostic technique.</p>
+<blockquote>
+<p><strong>Perplexity Can Be Misleading</strong>: Perplexity on wikitext-2 is a fast proxy but can be misleading: models that maintain low PPL sometimes show &gt;5% accuracy drops on reasoning tasks like MMLU — always include at least one downstream benchmark in your evaluation suite. The gap between PPL improvement and task accuracy is especially large for MMLU subcategories involving mathematics, formal science, and factual recall, where precise rare-token predictions matter but contribute minimally to average cross-entropy loss.</p>
+</blockquote>
+<pre><code class="language-python">import numpy as np
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from datasets import load_dataset
+
+def sweep_and_detect(model_id, bit_cfgs, test_enc, threshold=2.0):
+    &quot;&quot;&quot;Sweep bit configs, fit linear PPL trend, flag deviations as catastrophic.&quot;&quot;&quot;
+    results = []
+    for bits, bnb_cfg in bit_cfgs:
+        m = AutoModelForCausalLM.from_pretrained(model_id, quantization_config=bnb_cfg, device_map=&quot;auto&quot;)
+        with torch.no_grad():
+            ids = test_enc[&quot;input_ids&quot;].to(m.device)
+            ppl = float(np.exp(m(ids, labels=ids).loss.item()))
+        results.append((bits, ppl))
+        del m; torch.cuda.empty_cache()
+    trend = np.polyfit([b for b, _ in results], [p for _, p in results], 1)
+    print(f&quot;{'Bits':&gt;5}  {'PPL':&gt;8}  {'Trend':&gt;8}  {'Delta':&gt;8}  Status&quot;)
+    for bits, ppl in sorted(results):
+        expected = float(np.polyval(trend, bits))
+        delta = ppl - expected
+        flag = &quot;CATASTROPHIC&quot; if delta &gt; threshold else &quot;OK&quot;
+        print(f&quot;{bits:&gt;5}  {ppl:&gt;8.3f}  {expected:&gt;8.3f}  {delta:&gt;+8.3f}  {flag}&quot;)
+    return results
+
+MODEL = &quot;meta-llama/Llama-2-7b-hf&quot;
+tok = AutoTokenizer.from_pretrained(MODEL)
+test_text = &quot; &quot;.join(load_dataset(&quot;wikitext&quot;, &quot;wikitext-2-raw-v1&quot;, split=&quot;test&quot;)[&quot;text&quot;][:100])
+enc = tok(test_text[:2048], return_tensors=&quot;pt&quot;)
+configs = [
+    (8, BitsAndBytesConfig(load_in_8bit=True)),
+    (4, BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type=&quot;nf4&quot;, bnb_4bit_compute_dtype=torch.float16)),
+    (4, BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type=&quot;fp4&quot;, bnb_4bit_compute_dtype=torch.float16)),
+]
+sweep_and_detect(MODEL, configs, enc)
+</code></pre>
+<h2>Evaluation Pipeline</h2>
+<p>A production quantization evaluation pipeline combines all three evaluation levels — perplexity, task accuracy, and catastrophic detection — into a single CI-compatible script. The pipeline loads a quantized model checkpoint, runs sliding-window perplexity on a fixed WikiText-2 test slice, runs lm-eval-harness on a reduced task suite (arc_easy, hellaswag, mmlu with limit=250 for speed), compares all outputs against a per-model threshold dictionary, and exits with a non-zero return code if any threshold is violated. The threshold dictionary is model-specific because a 7B model and a 70B model have different baseline perplexities and different sensitivity profiles — a 70B model at 4-bit typically shows smaller relative accuracy drops than a 7B model at the same bit-width, because larger models are more robust to weight perturbations when they have redundant capacity. Thresholds should be calibrated by running the pipeline on the FP16 baseline and a known-good quantization (4-bit GPTQ with group_size=128 is a reliable anchor) and using those as the acceptable quality envelope. The pipeline should store per-run results in a JSON artifact so that trends across quantization configurations can be tracked over time.</p>
+<p>The regression suite below defines thresholds inline for clarity. In practice, thresholds are loaded from a per-model YAML config file so that they can be updated without modifying pipeline code. The suite uses sys.exit(1) on failure so that CI systems (GitHub Actions, Jenkins, Buildkite) detect the failure automatically. The pipeline is designed to run in under 30 minutes for a 7B model on a single A100 GPU: perplexity computation on WikiText-2 with stride=512 takes approximately 5 minutes, and the reduced lm-eval suite takes approximately 20 minutes.</p>
+<pre><code class="language-python">import sys
+import json
+import torch
+from pathlib import Path
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+
+THRESHOLDS = {
+    &quot;max_ppl_delta&quot;: 0.30,
+    &quot;arc_easy&quot;: 68.0,
+    &quot;hellaswag&quot;: 74.0,
+    &quot;mmlu&quot;: 41.0,
+}
+
+def ci_check(fp16_ppl: float, quant_ppl: float, scores: dict, out_path: str = None) -&gt; bool:
+    &quot;&quot;&quot;Assert all quantization quality thresholds pass; sys.exit(1) on failure.&quot;&quot;&quot;
+    fails = []
+    delta = quant_ppl - fp16_ppl
+    if delta &gt; THRESHOLDS[&quot;max_ppl_delta&quot;]:
+        fails.append(f&quot;PPL delta {delta:+.3f} exceeds max allowed {THRESHOLDS['max_ppl_delta']}&quot;)
+    for task in [&quot;arc_easy&quot;, &quot;hellaswag&quot;, &quot;mmlu&quot;]:
+        acc = scores.get(task, 0.0)
+        if acc &lt; THRESHOLDS[task]:
+            fails.append(f&quot;{task} accuracy {acc:.2f}% below minimum {THRESHOLDS[task]}%&quot;)
+    report = {&quot;ppl_delta&quot;: delta, &quot;scores&quot;: scores, &quot;failures&quot;: fails, &quot;passed&quot;: len(fails) == 0}
+    if out_path:
+        Path(out_path).write_text(json.dumps(report, indent=2))
+    if fails:
+        for msg in fails:
+            print(f&quot;  [FAIL] {msg}&quot;)
+        sys.exit(1)
+    print(f&quot;  [PASS] delta={delta:+.3f}  arc_easy={scores.get('arc_easy',0):.1f}%  &quot;
+          f&quot;hellaswag={scores.get('hellaswag',0):.1f}%  mmlu={scores.get('mmlu',0):.1f}%&quot;)
+    return True
+
+ci_check(
+    fp16_ppl=5.682,
+    quant_ppl=5.791,
+    scores={&quot;arc_easy&quot;: 71.2, &quot;hellaswag&quot;: 76.4, &quot;mmlu&quot;: 43.8},
+    out_path=&quot;quant_eval_report.json&quot;,
+)
+</code></pre>
+<h2>Key Takeaways</h2>
+<ul>
+<li>Perplexity on WikiText-2 is the standard fast proxy for quantization quality — always compute with stride=512 and a fixed max context length for reproducibility.</li>
+<li>The perplexity delta threshold of 0.3 points is a good starting point for 4-bit weight-only quantization on 7B models; tighten to 0.1 for 13B+ models.</li>
+<li>MMLU is the most sensitive downstream benchmark for detecting quantization quality loss — include it even when evaluating on a subset of 250 examples per subject.</li>
+<li>4-bit AWQ and GPTQ with group_size=128 are the highest-quality 4-bit quantization methods on WikiText-2 and most downstream benchmarks.</li>
+<li>2-bit quantization (AQLM, QuIP#) produces significant PPL spikes on 7B models — acceptable only on 70B+ models where redundant capacity absorbs the error.</li>
+<li>Catastrophic quantization is detectable by fitting a linear PPL trend over bit-widths and flagging configs where observed PPL exceeds the trend by more than 2 points.</li>
+<li>Build a regression suite with per-model threshold dictionaries and run it as a CI gate — use sys.exit(1) on failure so that CI systems catch quantization regressions automatically.</li>
+<li>Evaluate on both WikiText-2 (for reproducibility) and C4 (for deployment realism) — models can have very different relative rankings on the two corpora depending on pretraining data mix.</li>
+<li>Never rely on perplexity alone: include at least arc_easy and hellaswag in every quantization evaluation run to catch silent downstream accuracy regressions.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

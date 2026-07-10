@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RealNVP — Affine Coupling Layers for Image Flows | Notes Backup</title>
+  <meta name="description" content="RealNVP (Dinh et al. 2016) extends NICE with affine coupling layers y2 = x2 * exp(s(x1)) + t(x1), alternating checkerboard and channel-wise masks, a multi-scale architecture that factors out half the channels at each scale, and achieves competitive bits-per-dim on CIFAR-10 and CelebA." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>RealNVP — Affine Coupling Layers for Image Flows</h1>
+      <ul class='note-meta'><li><strong>description:</strong> RealNVP (Dinh et al. 2016) extends NICE with affine coupling layers y2 = x2 * exp(s(x1)) + t(x1), alternating checkerboard and channel-wise masks, a multi-scale architecture that factors out half the channels at each scale, and achieves competitive bits-per-dim on CIFAR-10 and CelebA.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>RealNVP — Affine Coupling Layers for Image Flows</h1>
+<p>RealNVP (Real-valued Non-Volume Preserving transformations, Dinh et al. 2016) is the first normalizing flow to achieve high-quality image generation at moderate resolution. It extends NICE's additive coupling with affine coupling — adding a learned scale factor exp(s(x₁)) that makes the mapping non-volume-preserving and strictly more expressive. The affine coupling layer, combined with alternating checkerboard and channel-wise masks and a multi-scale architecture that progressively factors out dimensions, allowed RealNVP to achieve 3.49 bits/dim on CIFAR-10 and generate recognisable face images on CelebA 64×64.</p>
+<h2>Affine Coupling Layer</h2>
+<p>An affine coupling layer splits the input x into two halves [x₁, x₂]. The first half passes through unchanged: y₁ = x₁. The second half is transformed by a learned scale and shift: y₂ = x₂ ⊙ exp(s(x₁)) + t(x₁), where s and t are the outputs of arbitrary neural networks taking x₁ as input. The Jacobian is lower-triangular with exp(s(x₁)) on the diagonal entries corresponding to x₂. Thus log|det J| = Σᵢ sᵢ(x₁) — the sum of log-scales. Inversion is: x₂ = (y₂ − t(y₁)) ⊙ exp(−s(y₁)), computed in a single forward pass through the same s and t networks.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class AffineCoupling(nn.Module):
+    '''RealNVP affine coupling: y2 = x2 * exp(s(x1)) + t(x1).'''
+    def __init__(self, d, hidden=128):
+        super().__init__()
+        d1 = d // 2; self.d1 = d1
+        self.st = nn.Sequential(
+            nn.Linear(d1, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+            nn.Linear(hidden, (d - d1) * 2))  # outputs [s; t] concatenated
+
+    def forward(self, x):
+        x1, x2 = x[:, :self.d1], x[:, self.d1:]
+        st = self.st(x1); s, t = st.chunk(2, dim=1)
+        s  = torch.tanh(s)          # bound s for numerical stability
+        y1 = x1                     # identity passthrough
+        y2 = x2 * torch.exp(s) + t # affine transform
+        log_det = s.sum(dim=1)      # sum of log-scales
+        return torch.cat([y1, y2], dim=1), log_det
+
+    def inverse(self, y):
+        y1, y2 = y[:, :self.d1], y[:, self.d1:]
+        st = self.st(y1); s, t = st.chunk(2, dim=1)
+        s  = torch.tanh(s)
+        x2 = (y2 - t) * torch.exp(-s)   # invert affine
+        return torch.cat([y1, x2], dim=1)
+
+layer = AffineCoupling(d=8)
+x = torch.randn(4, 8)
+y, ld = layer(x)
+print('log|det J|:', ld.tolist())
+print('Reconstruction error:', (x - layer.inverse(y)).abs().max().item())
+</code></pre>
+<h2>Alternating Checkerboard and Channel Masks</h2>
+<p>A single coupling layer only transforms half of the dimensions. To allow all dimensions to interact, RealNVP alternates between different masks. For 2D images, it uses checkerboard masks: pixels at positions where (i+j) is even form group A; others form group B. Successive coupling layers alternate between A-masked and B-masked, ensuring every pixel is transformed in alternate layers. After three checkerboard-masked layers, the spatial dimensions are reshaped to channel-wise splits, and the pattern switches to channel-wise alternation for deeper layers.</p>
+<pre><code class="language-python">import torch
+
+def checkerboard_mask(h, w, start=0, device='cpu'):
+    '''Checkerboard spatial mask: 1 at (i,j) where (i+j+start) is even.'''
+    rows = torch.arange(h, device=device).unsqueeze(1)  # (H,1)
+    cols = torch.arange(w, device=device).unsqueeze(0)  # (1,W)
+    return ((rows + cols + start) % 2).float()           # (H,W)
+
+def apply_mask_coupling(x, mask, coupling_fn):
+    '''Apply coupling layer with given spatial mask.
+    x: (B,C,H,W); mask: (H,W) binary mask.'''
+    mask = mask.unsqueeze(0).unsqueeze(0)   # (1,1,H,W) broadcast
+    x_pass  = x * mask                      # masked (passthrough) part
+    x_trans = x * (1 - mask)               # part to be transformed
+    return x_pass, x_trans
+
+mask_a = checkerboard_mask(4, 4, start=0)
+mask_b = checkerboard_mask(4, 4, start=1)
+print('Mask A:\n', mask_a.numpy())
+print('Complement check:', (mask_a + mask_b == 1).all().item())
+</code></pre>
+<h2>Multi-Scale Architecture</h2>
+<p>RealNVP introduces a multi-scale architecture to progressively compress the representation. After every two coupling layers at a given spatial scale, half of the channels are factored out (passed directly to the prior) and the spatial dimensions are squeezed (2×2 blocks reshaped to 4× channels). The remaining half is processed at the next scale with additional coupling layers. This is the 'squeezing' operation: (B,C,H,W) → (B,4C,H/2,W/2). This reduces memory, allows gradients to reach early layers efficiently, and gives the model a coarse-to-fine generative structure similar to Laplacian pyramids.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class MultiScaleFlow(nn.Module):
+    '''RealNVP multi-scale: factor out half channels at each scale.'''
+    def __init__(self, d=16, n_scales=3, hidden=64):
+        super().__init__()
+        self.couplings = nn.ModuleList()
+        cur_d = d
+        for _ in range(n_scales):
+            # Two coupling layers per scale (alternating masks)
+            self.couplings.append(AffineCoupling(cur_d, hidden=hidden))
+            self.couplings.append(AffineCoupling(cur_d, hidden=hidden))
+            cur_d = cur_d // 2   # factor out half dimensions
+        self.n_scales = n_scales
+
+    def forward(self, x):
+        z_parts, log_det = [], torch.zeros(x.size(0))
+        h = x
+        idx = 0
+        for scale in range(self.n_scales):
+            for _ in range(2):   # two couplings per scale
+                h, ld = self.couplings[idx](h); log_det += ld; idx += 1
+            split = h.size(1) // 2
+            z_parts.append(h[:, :split])
+            h = h[:, split:]     # continue with remaining dims
+        z_parts.append(h)
+        return torch.cat(z_parts, dim=1), log_det
+
+flow = MultiScaleFlow(d=16, n_scales=3, hidden=32)
+x = torch.randn(4, 16)
+z, ld = flow(x)
+print('z shape: {}  log_det mean: {:.3f}'.format(z.shape, ld.mean().item()))
+</code></pre>
+<h2>Log-Determinant and Training Objective</h2>
+<p>Training RealNVP maximises log p_X(x) = log p_Z(z) + Σ log|det Jₖ| = log N(z;0,I) + Σₖ Σᵢ sₖᵢ(x₁). The log-determinant term Σ sᵢ(x₁) is computed by summing log-scales from every affine coupling layer. Tanh is applied to s to bound the log-scales — preventing exp(s) from becoming too large or too small. Deep ResNet architectures are used for the s and t networks within each coupling layer. Batch normalisation is applied between coupling layers in the original paper; later works prefer ActNorm (data-dependent initialisation to unit activation statistics).</p>
+<blockquote>
+<p><strong>Coupling vs Autoregressive: Parallelism Trade-off</strong>: Affine coupling (RealNVP): both forward (density evaluation) and inverse (sampling) run in parallel — all dimensions computed simultaneously per layer. Autoregressive (MAF): forward pass is parallel (evaluate all sᵢ simultaneously via MADE), but inversion requires d sequential passes. IAF reverses this. For generative applications (fast sampling), RealNVP/Glow's coupling layers are preferable. For density estimation applications, MAF's parallel forward pass is fine. Glow (Kingma &amp; Dhariwal 2018) adds 1×1 invertible convolutions to RealNVP for full mixing, achieving 3.35 bits/dim on CIFAR-10.</p>
+</blockquote>
+<h2>Sample Generation from RealNVP</h2>
+<p>To generate a new image: sample z ~ N(0,I) at the same dimensionality as x, then apply the inverse of each coupling layer in reverse order. For affine coupling, the inverse x₂ = (y₂ − t(y₁)) ⊙ exp(−s(y₁)) is analytically exact and requires one forward pass through the s,t networks (not a separate inversion network). All dimensions are computed in parallel. For multi-scale models, the factored-out z parts are mapped back through their respective inverse scales. Reducing the temperature (scaling z by τ &lt; 1) gives sharper but less diverse samples — analogous to the truncation trick in BigGAN.</p>
+<pre><code class="language-python">import torch
+
+def realnvp_generate(flow, n=8, temperature=1.0):
+    '''Generate samples: z ~ N(0,I)*temp, apply inverse couplings.'''
+    flow.eval()
+    with torch.no_grad():
+        z = torch.randn(n, 16) * temperature  # scale by temp for quality
+        # Invert multi-scale flow
+        z_parts = torch.split(z, [2, 2, 4, 8], dim=1)
+        h = z_parts[-1]           # start from final (smallest) part
+        for scale in range(flow.n_scales - 1, -1, -1):
+            h = torch.cat([z_parts[scale], h], dim=1)
+            for i in range(1, -1, -1):  # reverse two couplings per scale
+                idx = scale * 2 + i
+                h = flow.couplings[idx].inverse(h)
+        samples = h
+    print('Generated {} samples, shape: {}'.format(n, samples.shape))
+    print('  mean={:.4f}  std={:.4f}'.format(
+          samples.mean().item(), samples.std().item()))
+    return samples
+
+flow = MultiScaleFlow(d=16, n_scales=3, hidden=32)
+samples = realnvp_generate(flow, n=8, temperature=0.8)
+print('Temperature 0.8: sharper (less diverse) than full-temperature sampling.')
+</code></pre>
+<h2>Bits-Per-Dim Evaluation</h2>
+<p>Bits-per-dim (BPD) is the standard metric for normalizing flows on image benchmarks: BPD = −log₂ p(x) / D where D is the number of pixels×channels. Lower BPD means higher likelihood. RealNVP achieves 3.49 BPD on CIFAR-10. Glow achieves 3.35. A uniform distribution over [0,255] gives 8.0 BPD. A model achieving 0 BPD would memorise the data. BPD is directly comparable across flow models but incomparable to GANs (which have no likelihood). For VAEs, the reported value is typically the ELBO-derived BPD — a pessimistic (higher) estimate of the true BPD.</p>
+<ul>
+<li>3.49 BPD: RealNVP on CIFAR-10 (2016) — first flow to work on natural images</li>
+<li>3.35 BPD: Glow on CIFAR-10 (2018) — adds 1x1 invertible conv for full mixing</li>
+<li>2.98 BPD: Flow++ (2019) — variational dequantization and logistic mixture coupling</li>
+<li>8.00 BPD: Uniform baseline (no compression at all)</li>
+<li>Temperature sampling: multiply z by tau&lt;1 for sharper images, tau&gt;1 for more diversity</li>
+<li>ActNorm: data-dependent initialisation of normalisation scale+bias, replaces batch norm in Glow</li>
+</ul>
+<h2>NICE vs RealNVP vs MAF vs Glow Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Coupling Type</th>
+<th>Parallel Sampling</th>
+<th>Parallel Training</th>
+<th>log-det Cost</th>
+<th>Expressivity</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>NICE (2014)</td>
+<td>Additive: y2=x2+m(x1)</td>
+<td>Yes</td>
+<td>Yes</td>
+<td>Zero (volume preserving)</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>RealNVP (2016)</td>
+<td>Affine: y2=x2*exp(s)+t</td>
+<td>Yes</td>
+<td>Yes</td>
+<td>O(d) sum of log-scales</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>MAF (2017)</td>
+<td>Autoregressive affine</td>
+<td>No (sequential d steps)</td>
+<td>Yes (MADE)</td>
+<td>O(d) diagonal</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Glow (2018)</td>
+<td>Affine + 1x1 invertible conv</td>
+<td>Yes</td>
+<td>Yes</td>
+<td>O(d) + O(C^3) per 1x1</td>
+<td>High</td>
+</tr>
+</tbody>
+</table>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LSTM — Forget Gate, Input Gate, Output Gate, and Cell State | Notes Backup</title>
+  <meta name="description" content="Derive all four LSTM gates from scratch, implement stateful PyTorch nn.LSTM, benchmark on the adding problem, visualise gate activations, and compare parameter count with GRU and vanilla RNN." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>LSTM — Forget Gate, Input Gate, Output Gate, and Cell State</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Derive all four LSTM gates from scratch, implement stateful PyTorch nn.LSTM, benchmark on the adding problem, visualise gate activations, and compare parameter count with GRU and vanilla RNN.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>LSTM — Forget Gate, Input Gate, Output Gate, and Cell State</h1>
+<p>The Long Short-Term Memory (LSTM) network was introduced by Hochreiter and Schmidhuber (1997) to solve the vanishing gradient problem in plain RNNs. The key innovation is a separate cell state Cₜ that acts as long-term memory, updated additively rather than through repeated matrix multiplication. Three gating mechanisms — forget (fₜ), input (iₜ), and output (oₜ) gates — control information flow using sigmoid activations (0 = block completely, 1 = pass completely). The forget gate bias is initialised to 1 (Jozefowicz 2015), which keeps the cell state active by default and significantly improves learning on long-range tasks. An LSTM has 4× the parameters of a vanilla RNN: four weight matrices of size H×(H+I) instead of one.</p>
+<h2>The Cell State — Long-Term Memory</h2>
+<p>The cell state Cₜ ∈ ℝᴴ is the LSTM's long-term memory. Its update equation Cₜ = fₜ⊙Cₜ₋₁ + iₜ⊙C̃ₜ is additive — unlike the RNN hidden state which is overwritten at each step. The additive structure means the gradient ∂Cₜ/∂Cₜ₋₁ = diag(fₜ) is a diagonal matrix, not a full Wₕₕᵀ. With forget gates near 1, the gradient flows back through the cell state without exponential decay — the constant error carousel effect. The hidden state hₜ = oₜ⊙tanh(Cₜ) is a filtered version of the cell state, shared with downstream layers.</p>
+<h2>Gate Equations</h2>
+<p>All four gates take the same input — the concatenation [hₜ₋₁, xₜ] — and differ only in their weight matrices and roles. Forget gate: fₜ = σ(Wf[hₜ₋₁,xₜ]+bf). Input gate: iₜ = σ(Wi[hₜ₋₁,xₜ]+bi). Candidate cell: C̃ₜ = tanh(Wc[hₜ₋₁,xₜ]+bc). Cell update: Cₜ = fₜ⊙Cₜ₋₁ + iₜ⊙C̃ₜ. Output gate: oₜ = σ(Wo[hₜ₋₁,xₜ]+bo). Hidden state: hₜ = oₜ⊙tanh(Cₜ). The sigmoid gates produce values in (0,1), enabling soft gating — partial forgetting or partial writing — rather than hard binary decisions.</p>
+<pre><code class="language-python">import numpy as np
+
+class LSTMCell:
+    def __init__(self, input_size, hidden_size):
+        H, I = hidden_size, input_size
+        scale = 1.0 / np.sqrt(H)
+        # Combined weight matrix for all 4 gates [f, i, g, o]
+        self.W = np.random.randn(4 * H, H + I) * scale
+        self.b = np.zeros((4 * H, 1))
+        # Forget gate bias = 1 (Jozefowicz 2015 recommendation)
+        self.b[:H] = 1.0
+        self.H = H
+
+    def _sigmoid(self, x):
+        return 1.0 / (1.0 + np.exp(-np.clip(x, -20, 20)))
+
+    def forward(self, x, h_prev, c_prev):
+        H = self.H
+        z = self.W @ np.vstack([h_prev, x]) + self.b  # (4H, 1)
+        f = self._sigmoid(z[:H])        # forget gate
+        i = self._sigmoid(z[H:2*H])     # input gate
+        g = np.tanh(z[2*H:3*H])         # candidate cell
+        o = self._sigmoid(z[3*H:])      # output gate
+        c = f * c_prev + i * g          # additive cell update
+        h = o * np.tanh(c)              # hidden state
+        return h, c, dict(f=f, i=i, g=g, o=o)
+
+np.random.seed(42)
+I, H, T = 8, 16, 6
+cell = LSTMCell(I, H)
+h = np.zeros((H, 1)); c = np.zeros((H, 1))
+for t in range(T):
+    x = np.random.randn(I, 1)
+    h, c, gates = cell.forward(x, h, c)
+    print(f't={t}: |h|={np.linalg.norm(h):.4f}, |c|={np.linalg.norm(c):.4f}, '
+          f'f_mean={gates[&quot;f&quot;].mean():.3f}, i_mean={gates[&quot;i&quot;].mean():.3f}')
+</code></pre>
+<h2>PyTorch nn.LSTM</h2>
+<p>PyTorch's nn.LSTM is an optimised fused implementation of the four gate equations. It returns two tensors: out (all hidden states) and a tuple (h_n, c_n) of the final hidden and cell states. For stateful processing, both h_n and c_n must be passed as the initial state to the next chunk. PyTorch's gate order is [input, forget, cell, output] — different from the conventional [forget, input, cell, output]. The bias layout is bias_ih (input-hidden bias) and bias_hh (hidden-hidden bias) each of shape 4×H, concatenated in gate order.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+torch.manual_seed(42)
+I, H, num_layers, B, T = 16, 32, 2, 8, 20
+
+lstm = nn.LSTM(input_size=I, hidden_size=H,
+               num_layers=num_layers, batch_first=True)
+x = torch.randn(B, T, I)
+
+# Single pass over full sequence
+out, (h_n, c_n) = lstm(x)
+print(f'out shape:  {out.shape}  (B, T, H)')
+print(f'h_n shape:  {h_n.shape}  (num_layers, B, H)')
+print(f'c_n shape:  {c_n.shape}  (num_layers, B, H)')
+
+# Stateful: split into chunks, carry both h and c
+chunk = 5
+h_s = torch.zeros(num_layers, B, H)
+c_s = torch.zeros(num_layers, B, H)
+chunk_outs = []
+for start in range(0, T, chunk):
+    xc = x[:, start:start + chunk, :]
+    out_c, (h_s, c_s) = lstm(xc, (h_s, c_s))
+    h_s = h_s.detach(); c_s = c_s.detach()
+    chunk_outs.append(out_c)
+all_out = torch.cat(chunk_outs, dim=1)
+
+print(f'Stateful vs single-pass max diff: {(out.detach() - all_out).abs().max():.4e}')
+n_params = sum(p.numel() for p in lstm.parameters())
+print(f'LSTM params ({num_layers}L, H={H}, I={I}): {n_params}')
+# 4 gates x (H*H + H*I + H_bias) x num_layers
+expected = num_layers * 4 * (H * H + H * I + 2 * H)
+print(f'Expected: {expected}  (4 gates * (H^2 + H*I + 2*H) * num_layers)')
+</code></pre>
+<h2>The Adding Problem — Long-Range Dependency Benchmark</h2>
+<p>The adding problem (Hochreiter and Schmidhuber 1997) tests long-range dependency learning. A sequence of length T contains random values in [0,1] with a binary mask that marks exactly two positions. The task is to output the sum of the two marked values. The LSTM must remember the first marked value (potentially at t=0) until it sees the second marker (potentially at t=T-1) — a lag of up to T steps. The baseline MSE for always predicting the mean (1.0) is 0.1667 for uniform [0,1] inputs. An LSTM trained with BPTT can solve this for T up to several hundred; a vanilla RNN fails for T&gt;20–30.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+torch.manual_seed(42)
+
+def make_adding_batch(B=64, T=100, device='cpu'):
+    seq  = torch.rand(B, T, device=device)
+    mask = torch.zeros(B, T, device=device)
+    for b in range(B):
+        idx = torch.randperm(T)[:2]
+        mask[b, idx] = 1.0
+    target = (seq * mask).sum(dim=1)   # scalar target per sequence
+    x = torch.stack([seq, mask], dim=2)  # (B, T, 2)
+    return x, target
+
+H, B, epochs = 64, 128, 400
+baseline_mse  = 0.1667  # Var[U1+U2] for U ~ Uniform[0,1]
+
+for T in [30, 100, 200]:
+    lstm = nn.LSTM(input_size=2, hidden_size=H, batch_first=True)
+    fc   = nn.Linear(H, 1)
+    opt  = torch.optim.Adam(list(lstm.parameters()) + list(fc.parameters()), lr=1e-3)
+    for ep in range(epochs):
+        x, y  = make_adding_batch(B, T)
+        out, _ = lstm(x)
+        pred   = fc(out[:, -1, :]).squeeze(1)
+        loss   = nn.functional.mse_loss(pred, y)
+        opt.zero_grad(); loss.backward(); opt.step()
+    with torch.no_grad():
+        x, y  = make_adding_batch(512, T)
+        pred  = fc(lstm(x)[0][:, -1, :]).squeeze(1)
+        mse   = nn.functional.mse_loss(pred, y).item()
+    solved = mse &lt; 0.01 * baseline_mse
+    print(f'T={T:3d}: test MSE={mse:.6f}, baseline={baseline_mse:.4f}, '
+          f'solved={solved}')
+</code></pre>
+<h2>Gate Activation Visualization</h2>
+<p>Visualising the forget gate activations reveals the LSTM's learned memory management strategy. On tasks requiring long-range memory (e.g., the adding problem), the forget gate near the marker position typically drops below 0.5 (selectively overwriting memory), while remaining above 0.9 for filler steps (preserving the stored value). The input gate shows the complementary pattern: high activation only when meaningful new information arrives. Inspecting gate statistics — mean, variance, fraction near 0 or 1 — is a key diagnostic for understanding LSTM failure modes.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+torch.manual_seed(0)
+I, H, T, B = 4, 8, 20, 1
+
+lstm = nn.LSTM(I, H, batch_first=True)
+# Initialise forget gate bias to 2.0 for strong default memory
+with torch.no_grad():
+    # PyTorch gate order: [input(i), forget(f), cell(g), output(o)]
+    lstm.bias_ih_l0[H:2*H] = 2.0   # forget gate bias in bias_ih
+    lstm.bias_hh_l0[H:2*H] = 2.0   # forget gate bias in bias_hh
+
+x = torch.randn(B, T, I)
+forget_gates = []; input_gates = []
+h = torch.zeros(1, B, H); c = torch.zeros(1, B, H)
+
+with torch.no_grad():
+    for t in range(T):
+        xt = x[:, t:t+1, :]              # (B, 1, I)
+        _, (h, c) = lstm(xt, (h, c))
+        # Recompute gates for inspection
+        W_ih = lstm.weight_ih_l0          # (4H, I)
+        W_hh = lstm.weight_hh_l0          # (4H, H)
+        gates_raw = (W_ih @ xt.squeeze() +
+                     W_hh @ h.squeeze() +
+                     lstm.bias_ih_l0 + lstm.bias_hh_l0)
+        i_gate = torch.sigmoid(gates_raw[:H])
+        f_gate = torch.sigmoid(gates_raw[H:2*H])
+        forget_gates.append(f_gate.numpy().copy())
+        input_gates.append(i_gate.numpy().copy())
+
+fg = np.array(forget_gates)  # (T, H)
+ig = np.array(input_gates)
+print(f'Forget gate -- mean: {fg.mean():.4f}, std: {fg.std():.4f}')
+print(f'Input  gate -- mean: {ig.mean():.4f}, std: {ig.std():.4f}')
+print(f'Fraction forget &gt; 0.9 (preserving): {(fg &gt; 0.9).mean():.2%}')
+print(f'Fraction input  &lt; 0.1 (blocking):   {(ig &lt; 0.1).mean():.2%}')
+</code></pre>
+<h2>Parameter Count and Initialization</h2>
+<p>An LSTM with hidden size H and input size I has 4×(H×H + H×I + H) parameters (for bias): 4 gates × (Wₕₕ + Wₕₓ + b). For H=512, I=256: 4×(262144 + 131072 + 512) = 1,574,912 ≈ 1.6M parameters per layer. The GRU uses 3 gates: 3×(H²+H×I+H) ≈ 75% of the LSTM parameter count. A vanilla RNN uses 1 set: H²+H×I+H ≈ 25% of LSTM. The forget gate bias should be initialised to 1.0 (not 0.0): Jozefowicz et al. (2015) showed that forget gate bias = 1 outperforms 0 on nearly all tasks by ensuring the cell state is preserved by default at the start of training.</p>
+<blockquote>
+<p><strong>Forget Gate Bias Initialisation</strong>: Always initialise the LSTM forget gate bias to 1.0 (or higher, up to 3.0 for tasks with very long dependencies). In PyTorch: with torch.no_grad(): lstm.bias_ih_l0[H:2<em>H].fill_(1.0); lstm.bias_hh_l0[H:2</em>H].fill_(1.0). This ensures the cell state is preserved by default at the start of training, giving gradients a clear path back through time from the first epoch. Forget bias = 0 (PyTorch default) causes the network to forget everything initially, making early gradient signal sparse.</p>
+</blockquote>
+<h2>LSTM Equations Summary</h2>
+<table>
+<thead>
+<tr>
+<th>Gate / State</th>
+<th>Equation</th>
+<th>Purpose</th>
+<th>Output Range</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Forget gate</td>
+<td>fₜ = σ(Wf·[hₜ₋₁, xₜ] + bf)</td>
+<td>Decides what fraction of Cₜ₋₁ to keep</td>
+<td>(0, 1) per dimension</td>
+</tr>
+<tr>
+<td>Input gate</td>
+<td>iₜ = σ(Wi·[hₜ₋₁, xₜ] + bi)</td>
+<td>Decides what to write into cell state</td>
+<td>(0, 1) per dimension</td>
+</tr>
+<tr>
+<td>Candidate cell</td>
+<td>C̃ₜ = tanh(Wc·[hₜ₋₁, xₜ] + bc)</td>
+<td>New content to potentially write</td>
+<td>(-1, 1)</td>
+</tr>
+<tr>
+<td>Cell update</td>
+<td>Cₜ = fₜ⊙Cₜ₋₁ + iₜ⊙C̃ₜ</td>
+<td>Additive update — linear gradient highway</td>
+<td>ℝ (unbounded)</td>
+</tr>
+<tr>
+<td>Output gate</td>
+<td>oₜ = σ(Wo·[hₜ₋₁, xₜ] + bo)</td>
+<td>Decides what to expose as hidden state</td>
+<td>(0, 1) per dimension</td>
+</tr>
+<tr>
+<td>Hidden state</td>
+<td>hₜ = oₜ⊙tanh(Cₜ)</td>
+<td>Output passed to next layer / decoder</td>
+<td>(-1, 1)</td>
+</tr>
+</tbody>
+</table>
+<h2>LSTM Variants</h2>
+<p>Several LSTM variants have been proposed to reduce parameters or improve performance. Peephole connections (Gers &amp; Schmidhuber 2000) allow gates to depend on the cell state Cₜ₋₁ directly, adding H parameters per gate. The GRU (Cho 2014) merges the forget and input gates into a single update gate and eliminates the cell state, using 3 gates and 75% of LSTM parameters — often matching LSTM quality. Coupled input-forget gates (iₜ = 1−fₜ) reduce to 3 parameters sets while maintaining the additive update structure. Empirically, plain LSTM with forget bias = 1 is competitive with all variants on most benchmarks.</p>
+<ul>
+<li>Cell state Cₜ: long-term memory with additive update -- avoids repeated Whh multiplication.</li>
+<li>Forget gate bias = 1.0: critical init trick; PyTorch default is 0 -- always override.</li>
+<li>Parameter count: 4<em>(H^2 + H</em>I + H) per layer; ~4x vanilla RNN, ~1.33x GRU.</li>
+<li>Peephole connections: gates read Ct-1 directly -- adds H params per gate, minor improvement.</li>
+<li>GRU: 3 gates, no cell state, ht = (1-zt)<em>ht-1 + zt</em>h_tilde -- simpler, often comparable.</li>
+<li>Stacked LSTM: multiple layers (num_layers &gt; 1 in PyTorch) -- each layer takes hidden states of previous as input.</li>
+<li>Dropout in LSTM: apply between layers (not within time steps) -- variational dropout for temporal consistency.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

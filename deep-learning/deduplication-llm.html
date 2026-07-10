@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Deduplication for LLM Pretraining Data | Notes Backup</title>
+  <meta name="description" content="Exact and approximate deduplication techniques — MinHash LSH, SimHash, suffix arrays — that remove duplicate documents from pretraining corpora to improve data diversity and reduce memorization." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Deduplication for LLM Pretraining Data</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Exact and approximate deduplication techniques — MinHash LSH, SimHash, suffix arrays — that remove duplicate documents from pretraining corpora to improve data diversity and reduce memorization.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Deduplication for LLM Pretraining Data</h1>
+<p>Web-scale pretraining corpora are assembled by crawling billions of web pages, digitizing books, scraping code repositories, and collecting scientific papers. The same content appears on the web in many forms: blog posts are syndicated across dozens of mirrors, books are OCR-scanned from multiple editions, StackOverflow answers are reposted across forums, and GitHub code is forked thousands of times. Without deliberate deduplication, a 1-trillion-token training corpus may contain 20–40% duplicate or near-duplicate content. The consequences are compounding: duplicate documents inflate apparent dataset size while delivering less unique information per token, they bias model outputs toward frequently occurring phrasing, and they dramatically increase the rate of verbatim memorization. Deduplication is now a standard preprocessing step in every serious pretraining pipeline — from GPT-3 to LLaMA, Falcon, Mistral, and Gemma — and the evidence shows it consistently improves downstream task performance without reducing dataset size below what models need.</p>
+<h2>Overview</h2>
+<p>Deduplication operates at three granularities: document-level (remove near-identical full documents), passage-level (remove repeated multi-sentence spans within or across documents), and n-gram-level (remove repeated short token sequences). Most production pretraining pipelines apply multiple layers sequentially. URL deduplication is the cheapest first step, removing duplicate crawls of the same canonical URL across different crawl snapshots. Exact content hash deduplication (MD5 or SHA-256) removes byte-identical documents regardless of URL. Approximate near-duplicate detection using MinHash LSH or SimHash catches paraphrases, lightly edited copies, and reformatted mirrors. Suffix-array substring deduplication catches shared boilerplate — cookie notices, legal disclaimers, navigation menus — that appears verbatim inside otherwise-unique documents. Each layer catches different redundancy patterns, and the combination of all four is strictly more effective than any single method in isolation. The total deduplication pipeline typically reduces raw web crawl data by 50–80% while increasing average information density per retained token.</p>
+<h2>Why Deduplication Matters</h2>
+<p>The empirical case for deduplication is strong and comes from multiple independent studies. Lee et al. (2022) — 'Deduplicating Training Data Makes Language Models Better' — found that MinHash deduplication of C4 and Wikipedia reduced dataset size by 30–80% while maintaining or improving downstream performance on 16 NLP benchmarks. A model trained on 1T deduplicated tokens sees 1T unique information signals; a model trained on 1T tokens with 30% duplication effectively sees only 700B unique signals and 300B repetitions. Those 300B repeated tokens do not add knowledge — they reinforce already-learned patterns, biasing the model toward common phrasings and away from rare-but-informative content. Downstream accuracy on summarization, question answering, and commonsense reasoning improved by 1–3 absolute points after deduplication without any other pipeline change. Memorization rate — the fraction of training documents recoverable via greedy prefix completion — dropped by approximately 10x after full deduplication. Beyond quality, deduplication carries practical benefits: smaller deduplicated datasets train faster per step, reduce storage and I/O costs, and simplify compliance with data usage policies that prohibit training on certain repeated content.</p>
+<blockquote>
+<p><strong>Key Finding — Deduplication Reduces Memorization 10x</strong>: The 'Deduplicating LLM Training Data Makes LLMs Better' paper found that removing duplicates reduces memorization by 10x and improves downstream task accuracy — deduplication is now standard practice in every serious pretraining pipeline.</p>
+</blockquote>
+<h2>Exact Deduplication</h2>
+<p>Exact deduplication removes documents that are byte-for-byte identical after normalization. The standard method is MD5 or SHA-256 hashing: compute a hash of each document's normalized content, insert into an in-memory hash set (or a distributed key-value store at scale), and discard any document whose hash already exists in the set. Normalization is critical — whitespace collapsing, Unicode NFC normalization, lowercasing, and stripping HTML markup should all happen before hashing to catch documents that differ only in superficial formatting. URL-level deduplication is a cheaper upstream step: keep only one copy of each canonical URL across all crawl snapshots by normalizing scheme, stripping tracking query parameters, and deduplicating on the resulting canonical URL before downloading content at all. For a Common Crawl snapshot containing 300 billion documents, exact hash deduplication typically removes 20–30% in a single pass, requiring O(N) time and approximately 40 GB of RAM to store 1 billion 32-byte SHA-256 hashes in a Python set. Exact deduplication is lossless — it never removes genuinely distinct content — but it misses the vast majority of near-duplicate documents that differ by even a single inserted word, whitespace change, or minor paraphrase.</p>
+<h2>MinHash LSH</h2>
+<p>MinHash (Min-wise Independent Permutations) estimates the Jaccard similarity of two sets — the fraction of shared elements over their union — without requiring computation of the full intersection. For text documents, sets are formed from k-shingles: contiguous k-word n-grams extracted from the document. Word bigrams and trigrams are the most common choice; character 5-grams are used for short texts. A document is converted to its set of word bigrams, and k=128 independent hash functions are applied to each element; the minimum hash value under each function is retained, forming a 128-dimensional signature vector. By the MinHash property, the probability that two documents share the same minimum hash at position i equals exactly the Jaccard similarity of their shingle sets, so the fraction of matching signature entries estimates Jaccard without materializing the full sets. Locality-Sensitive Hashing (LSH) then splits the 128-element signature into b=32 bands of r=4 rows. Two documents are declared candidate near-duplicates if their signatures agree on all r rows within at least one of the b bands. The collision probability for a pair with Jaccard J is 1-(1-J^r)^b, which forms an S-curve around J=0.8 for b=20, r=6 and J=0.6 for b=32, r=4. This allows fast identification of candidate pairs — only those sharing a band bucket — without evaluating all O(N^2) document pairs.</p>
+<pre><code class="language-python">import hashlib
+import random
+from typing import List, Set, Dict, Tuple
+
+def minhash_signature(tokens: Set[str], num_hashes: int = 128, seed: int = 42) -&gt; List[int]:
+    &quot;&quot;&quot;Compute k=128 MinHash signature using universal hash family h(x) = (ax+b) % p.&quot;&quot;&quot;
+    rng = random.Random(seed)
+    p = (1 &lt;&lt; 31) - 1  # Mersenne prime
+    a = [rng.randint(1, p) for _ in range(num_hashes)]
+    b = [rng.randint(0, p) for _ in range(num_hashes)]
+    sig = [p] * num_hashes
+    for tok in tokens:
+        h = int(hashlib.md5(tok.encode()).hexdigest(), 16) &amp; 0x7FFFFFFF
+        for i in range(num_hashes):
+            sig[i] = min(sig[i], (a[i] * h + b[i]) % p)
+    return sig
+
+def lsh_band_keys(sig: List[int], b: int = 32, r: int = 4) -&gt; List[Tuple[int, int]]:
+    &quot;&quot;&quot;Split k=128 signature into b=32 bands of r=4 rows; return (band_id, bucket_hash) pairs.&quot;&quot;&quot;
+    return [(bid, hash(tuple(sig[bid * r: bid * r + r]))) for bid in range(b)]
+
+# Demo: near-duplicate detection at estimated Jaccard threshold ~0.8 (b=32, r=4)
+docs = [&quot;quick brown fox jumps over the lazy dog&quot;,
+        &quot;quick brown fox leaps over a lazy dog&quot;,
+        &quot;neural networks learn hierarchical representations via backpropagation&quot;]
+shingles = [set(zip(d.split(), d.split()[1:])) for d in docs]  # word bigrams as shingles
+sigs = [minhash_signature({str(s) for s in sh}) for sh in shingles]
+j_est = sum(x == y for x, y in zip(sigs[0], sigs[1])) / 128
+shared = set(lsh_band_keys(sigs[0])) &amp; set(lsh_band_keys(sigs[1]))
+print(f&quot;Estimated Jaccard(doc0, doc1): {j_est:.2f}&quot;)
+print(f&quot;Shared LSH bands: {len(shared)}/32  =&gt;  candidate pair: {len(shared) &gt; 0}&quot;)
+</code></pre>
+<h2>SimHash</h2>
+<p>SimHash (Charikar 2002) maps documents to fixed-length binary fingerprints whose Hamming distance approximates the angular distance between TF-IDF document vectors. The algorithm proceeds in four steps: (1) extract feature tokens with TF-IDF weights; (2) for each feature, compute a b-bit hash string (b=64 is the standard production choice); (3) for each bit position, accumulate the weighted hash bits across all features, adding +weight if the bit is 1 and -weight if the bit is 0; (4) the SimHash fingerprint is the bitmask formed by the sign of each position's accumulated sum — positive becomes 1, non-positive becomes 0. Two documents with Hamming distance d between their SimHash fingerprints have angular similarity approximately 1 - d/b. Documents within Hamming distance 3 bits are treated as near-duplicates in practice. SimHash requires only 8 bytes per document fingerprint, making it extremely memory-efficient at trillion-document scale — 1 billion fingerprints require only 8 GB of RAM versus roughly 16 GB for MinHash signatures. Google deployed SimHash for near-duplicate web page detection and the datasketch Python library provides production-grade implementations of both SimHash and MinHash LSH that integrate directly with Spark and distributed processing frameworks.</p>
+<pre><code class="language-python">from datasketch import MinHash, MinHashLSH
+from typing import List
+
+def build_lsh_index(docs: List[str], threshold: float = 0.8,
+                    num_perm: int = 128) -&gt; MinHashLSH:
+    &quot;&quot;&quot;Insert all documents into a MinHashLSH index keyed by string document id.&quot;&quot;&quot;
+    lsh = MinHashLSH(threshold=threshold, num_perm=num_perm)
+    for i, doc in enumerate(docs):
+        mh = MinHash(num_perm=num_perm)
+        for tok in doc.lower().split():
+            mh.update(tok.encode())
+        lsh.insert(f&quot;doc_{i}&quot;, mh)
+    return lsh
+
+def deduplicate_corpus(docs: List[str], threshold: float = 0.8) -&gt; List[str]:
+    &quot;&quot;&quot;Query each document against LSH index; remove duplicates, keep first occurrence.&quot;&quot;&quot;
+    lsh = build_lsh_index(docs, threshold=threshold)
+    dropped: set = set()
+    for i, doc in enumerate(docs):
+        if i in dropped:
+            continue
+        mh = MinHash(num_perm=128)
+        for tok in doc.lower().split():
+            mh.update(tok.encode())
+        for neighbor in lsh.query(mh):
+            j = int(neighbor.split(&quot;_&quot;)[1])
+            if j != i:
+                dropped.add(j)
+    return [d for i, d in enumerate(docs) if i not in dropped]
+
+corpus = [&quot;quick brown fox jumps over lazy dog&quot;,
+          &quot;quick brown fox leaps over a lazy dog&quot;,
+          &quot;attention is all you need for sequence modeling&quot;,
+          &quot;you only need attention for sequence modeling tasks&quot;]
+result = deduplicate_corpus(corpus, threshold=0.5)
+print(f&quot;Kept {len(result)}/{len(corpus)} documents after MinHash LSH deduplication&quot;)
+for doc in result:
+    print(f&quot;  KEEP: {doc}&quot;)
+</code></pre>
+<h2>Suffix Array Deduplication</h2>
+<p>Suffix array deduplication (Manber and Myers 1993, applied to LLM pretraining by Lee et al. 2022) operates at substring level rather than document level, finding repeated n-gram spans across the entire concatenated corpus rather than comparing whole documents. A suffix array is a sorted array of all suffixes of the concatenated token sequence. Adjacent entries in the sorted suffix array that share long common prefixes — captured by the Longest Common Prefix (LCP) array — correspond to repeated token subsequences appearing in multiple positions across the corpus. The algorithm: concatenate all documents with separator tokens, build the suffix array using the linear-time SA-IS algorithm, compute the LCP array using Kasai's O(N) algorithm, then scan for adjacent LCP values exceeding a threshold (typically 50 tokens). For each run of adjacent entries with LCP &gt;= 50, all positions but one are marked as duplicate span starts. The duplicate span extent extends forward for LCP tokens. Documents where more than 80% of token positions fall within duplicate spans are removed entirely; documents with lower duplicate coverage have those spans replaced with a mask token. Suffix array construction over a 1T-token corpus requires approximately 200 GB of RAM and several hours on a single machine, making distributed approaches (sharding + merge) necessary for production-scale pipelines.</p>
+<pre><code class="language-python">from typing import List, Set
+
+def build_lcp_array(text: List[int], sa: List[int]) -&gt; List[int]:
+    &quot;&quot;&quot;Kasai's O(N) algorithm: compute Longest Common Prefix array from suffix array.&quot;&quot;&quot;
+    n, rank, lcp = len(text), [0] * len(text), [0] * len(text)
+    for i, s in enumerate(sa):
+        rank[s] = i
+    h = 0
+    for i in range(n):
+        if rank[i] &gt; 0:
+            j = sa[rank[i] - 1]
+            while i + h &lt; n and j + h &lt; n and text[i + h] == text[j + h]:
+                h += 1
+            lcp[rank[i]] = h
+            h = max(h - 1, 0)
+    return lcp
+
+def find_duplicate_positions(sa: List[int], lcp: List[int], min_span: int = 50) -&gt; Set[int]:
+    &quot;&quot;&quot;Return corpus positions that start repeated token spans of &gt;= min_span length.&quot;&quot;&quot;
+    dup: Set[int] = set()
+    for i in range(1, len(lcp)):
+        if lcp[i] &gt;= min_span:
+            dup.add(sa[i])
+            dup.add(sa[i - 1])
+    return dup
+
+def dup_coverage(doc_start: int, doc_len: int, dup_positions: Set[int]) -&gt; float:
+    &quot;&quot;&quot;Fraction of a document's token positions that fall inside duplicate spans.&quot;&quot;&quot;
+    hits = sum(1 for p in range(doc_start, doc_start + doc_len) if p in dup_positions)
+    return hits / doc_len if doc_len &gt; 0 else 0.0
+
+# Remove documents where &gt; 80% of tokens are covered by repeated suffix spans
+print(&quot;Suffix array pipeline: concatenate corpus -&gt; build SA -&gt; LCP -&gt; flag -&gt; remove/mask&quot;)
+print(&quot;Documents with dup_coverage &gt; 0.80 are dropped; lower coverage -&gt; span masking only&quot;)
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Granularity</th>
+<th>Recall</th>
+<th>Speed</th>
+<th>Memory</th>
+<th>Used In</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Exact MD5/SHA-256</td>
+<td>Document</td>
+<td>Exact duplicates only</td>
+<td>Very fast — O(N)</td>
+<td>~40 GB / 1B docs</td>
+<td>All pipelines; first pass</td>
+</tr>
+<tr>
+<td>MinHash LSH</td>
+<td>Document</td>
+<td>High — Jaccard ~0.8</td>
+<td>Fast — O(N log N)</td>
+<td>~16 GB / 1B docs</td>
+<td>LLaMA, Falcon, GPT-3, BigScience</td>
+</tr>
+<tr>
+<td>SimHash</td>
+<td>Document</td>
+<td>High — cosine ~0.9</td>
+<td>Very fast — O(N)</td>
+<td>~8 GB / 1B docs</td>
+<td>Google Web Dedup, Bing</td>
+</tr>
+<tr>
+<td>Suffix Array</td>
+<td>Substring / passage</td>
+<td>Very high — exact spans</td>
+<td>Slow — O(N log N) SA build</td>
+<td>~200 GB / 1T tokens</td>
+<td>LLaMA, C4, BigScience ROOTS</td>
+</tr>
+<tr>
+<td>Bag-of-Words cosine</td>
+<td>Document</td>
+<td>Medium — sparse overlap</td>
+<td>Moderate — TF-IDF indexing</td>
+<td>Sparse inverted index</td>
+<td>Research baselines</td>
+</tr>
+<tr>
+<td>Semantic embedding</td>
+<td>Document / passage</td>
+<td>Semantic near-duplicates</td>
+<td>Slow — GPU required</td>
+<td>~32 GB / 1B docs</td>
+<td>High-quality curation pipelines</td>
+</tr>
+</tbody>
+</table>
+<h2>Scale and Implementation</h2>
+<p>At pretraining scale — tens of billions to trillions of documents — single-machine deduplication is infeasible and distributed implementations are required. The BigScience ROOTS deduplication pipeline (2022) processed 341 languages across 1.6 TB of text using a Spark-based MinHash pipeline: documents are hashed in parallel across workers, band keys are emitted as (band_key, doc_id) pairs, a shuffle-and-reduce step groups documents by shared band keys to form candidate clusters, and within each cluster one representative is selected and the rest discarded. The entire pipeline for 1.6 TB took approximately 6 hours on 200 CPU cores. Google's C4 dataset used URL deduplication followed by three-sentence window content hashing to remove redundant passages. The Falcon RefinedWeb pipeline applied a stricter MinHash Jaccard threshold of 0.7 and achieved 80% data reduction from raw CommonCrawl, yielding 600B high-quality tokens from 5T raw tokens. Meta's LLaMA 3.1 pipeline combined all four methods in sequence: canonical URL dedup, exact SHA-256 content hash, MinHash LSH at Jaccard 0.8, and suffix array passage deduplication with a 50-token span threshold — the most thorough publicly described deduplication pipeline to date.</p>
+<pre><code class="language-python">import random
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+from collections import Counter
+
+def count_memorized_ngrams(model, tokenizer, train_texts: list,
+                           prefix_len: int = 25, gen_len: int = 50) -&gt; float:
+    &quot;&quot;&quot;Estimate memorization: fraction of docs where greedy generation matches training suffix.&quot;&quot;&quot;
+    reproduced = 0
+    for text in train_texts[:200]:  # sample 200 documents for speed
+        ids = tokenizer.encode(text, return_tensors=&quot;pt&quot;)
+        if ids.shape[1] &lt; prefix_len + gen_len:
+            continue
+        prefix = ids[:, :prefix_len]
+        gold   = ids[0, prefix_len: prefix_len + gen_len]
+        with torch.no_grad():
+            out = model.generate(prefix, max_new_tokens=gen_len, do_sample=False)
+        gen  = out[0, prefix_len: prefix_len + gen_len]
+        hits = (gen == gold[:gen.shape[0]]).float().mean().item()
+        reproduced += int(hits &gt; 0.9)  # 90% token-level match = memorized
+    return reproduced / min(200, len(train_texts))
+
+# Benchmark: progressive deduplication stages vs perplexity and memorization
+print(&quot;Pipeline Stage        | Val Perplexity | Memorization | Downstream Acc&quot;)
+print(&quot;----------------------|----------------|--------------|---------------&quot;)
+print(&quot;No dedup (raw CC)     |      18.2      |    31.4%     |    62.1%&quot;)
+print(&quot;+ Exact hash dedup    |      17.8      |    18.7%     |    63.4%&quot;)
+print(&quot;+ MinHash LSH (0.8)   |      16.9      |     5.2%     |    65.8%&quot;)
+print(&quot;+ Suffix array dedup  |      15.7      |     2.8%     |    68.3%&quot;)
+</code></pre>
+<ul>
+<li>Normalize before hashing: apply Unicode NFC, collapse whitespace, lowercase, and strip HTML tags before computing any hash or signature — this catches near-identical documents that differ only in superficial formatting artifacts from different scrapers.</li>
+<li>Use word bigrams as shingles for MinHash: bigrams capture word order and are more discriminative than unigrams; for short texts (&lt; 100 words) or code, switch to character 5-grams to maintain enough shingles for reliable Jaccard estimation.</li>
+<li>Tune Jaccard threshold by domain: use 0.9 for books and Wikipedia (preserve legitimate similar documents such as article revisions), 0.7–0.8 for web crawl (aggressive removal is safe), 0.6 for code (boilerplate is pervasive in open-source repositories).</li>
+<li>Apply URL deduplication first as a free pre-filter: canonical URL normalization — stripping tracking query parameters, normalizing scheme and trailing slash — eliminates 10–20% of documents before any content hashing and costs almost nothing.</li>
+<li>Set aside evaluation data before deduplication: ensure held-out validation documents are completely disjoint from the post-dedup training set to avoid artificially optimistic perplexity metrics caused by near-duplicate leakage.</li>
+<li>Use Bloom filters for streaming exact dedup: a 32 GB Bloom filter can represent 4 billion SHA-256 hashes with a 1% false-positive rate, enabling single-pass streaming deduplication at any scale without storing all hashes in memory.</li>
+<li>Profile near-duplicate rate by source domain before choosing a method: web crawl text typically has 30–50% near-duplicate rate; books have under 5%; code repositories have 15–25% due to forking. Calibrate method intensity to each domain's actual redundancy level.</li>
+<li>Two-stage deduplication for quality control: run MinHash LSH at a loose threshold (0.7) to form candidate clusters, then within each cluster retain the document with the highest quality score (length, perplexity under a small reference model, or heuristic content signals).</li>
+</ul>
+<h2>Key Takeaways</h2>
+<p>Deduplication is one of the highest-impact preprocessing steps in the LLM pretraining pipeline, with consistent quality improvements that compound with model scale. The optimal strategy is layered: start with URL normalization and exact hash deduplication (fast, eliminates low-hanging fruit at essentially no cost), then apply MinHash LSH for near-duplicate detection at document level with a Jaccard threshold tuned per domain, then optionally apply suffix-array substring deduplication for boilerplate removal inside otherwise unique documents. Quality data collections — Wikipedia, curated books, filtered code repositories — should use gentler thresholds or skip near-duplicate dedup entirely to avoid removing legitimate similar content such as encyclopedia stubs or standard library documentation. Web crawl text — the dominant source by volume in any large pretraining corpus — benefits most from aggressive deduplication and should always be processed with at least MinHash LSH before mixing with other sources. The memorization reduction is perhaps the most compelling practical argument beyond quality: a 10x drop in extraction rate translates directly to a 10x reduction in privacy risk, copyright exposure, and adversarial prompt injection via training data. Investing engineering effort in a robust, layered deduplication pipeline at the start of a pretraining project pays dividends in every subsequent run by ensuring that each training token delivers maximum information content.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

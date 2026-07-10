@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TabPFN — In-Context Learning for Tabular Data | Notes Backup</title>
+  <meta name="description" content="TabPFN performs Bayesian inference on small tabular datasets in a single forward pass by treating the entire training set as context — no gradient updates at inference time." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>TabPFN — In-Context Learning for Tabular Data</h1>
+      <ul class='note-meta'><li><strong>description:</strong> TabPFN performs Bayesian inference on small tabular datasets in a single forward pass by treating the entire training set as context — no gradient updates at inference time.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>TabPFN — In-Context Learning for Tabular Data</h1>
+<p>TabPFN (Hollmann et al. 2022) is a Prior-Fitted Network: a Transformer trained offline on millions of synthetic datasets drawn from a causal generative prior. At inference time, the entire training set (X_train, y_train) is appended as context tokens, and the model predicts y_test in a single forward pass — no fine-tuning, no training loop, no hyperparameter search.</p>
+<h2>Prior-Fitted Networks and In-Context Learning</h2>
+<p>The key insight: if you train a meta-learner on diverse synthetic datasets sampled from a prior p(D), it learns to approximate Bayesian posterior inference for any new dataset from that prior. At test time, it conditions on the observed (X_train, y_train) pairs to predict y_test — the same mechanism as GPT few-shot learning.</p>
+<ul>
+<li>Prior: synthetic datasets drawn from a causal Bayesian network (random graph, random CPT parameters)</li>
+<li>Meta-training: given (X_train, y_train, X_test), predict y_test — trained on millions of synthetic tasks</li>
+<li>Inference: [X_train; y_train; X_test] → y_test in one Transformer forward pass</li>
+<li>No gradient updates at inference — the 'learning' happens by reading context, not weight updates</li>
+<li>Output: class probabilities (calibrated) from softmax — not just argmax</li>
+<li>Complexity: O(n²) in context length (n = number of training samples)</li>
+</ul>
+<h2>TabPFN Inference — One Line of Code</h2>
+<p>TabPFN's API is intentionally minimal. Installation and inference require no configuration — the pre-trained model weights are downloaded once and cached locally.</p>
+<pre><code class="language-python"># pip install tabpfn
+import numpy as np
+from sklearn.datasets import load_breast_cancer, make_classification
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, roc_auc_score
+from tabpfn import TabPFNClassifier
+
+# Small tabular dataset (TabPFN designed for n &lt; 1000)
+X, y = make_classification(
+    n_samples=500, n_features=20, n_informative=10, random_state=42
+)
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+
+# TabPFN: no hyperparameters, no training loop
+clf = TabPFNClassifier(device='cpu', N_ensemble_configurations=32)
+clf.fit(X_train, y_train)   # stores training data — no gradient updates
+
+proba  = clf.predict_proba(X_test)
+preds  = proba.argmax(axis=1)
+acc    = accuracy_score(y_test, preds)
+auc    = roc_auc_score(y_test, proba[:, 1])
+print(f'Accuracy: {acc:.4f}  AUC: {auc:.4f}')
+</code></pre>
+<h2>Comparing TabPFN with Classical Baselines</h2>
+<p>On small tabular datasets (n &lt; 1000), TabPFN's in-context Bayesian inference frequently outperforms XGBoost with default hyperparameters and competes with well-tuned random forests, all without any hyperparameter search.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.datasets import make_classification
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import accuracy_score
+from sklearn.ensemble import RandomForestClassifier
+from tabpfn import TabPFNClassifier
+import xgboost as xgb
+
+X, y = make_classification(
+    n_samples=400, n_features=15, n_informative=8, random_state=0
+)
+
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=0)
+models = {
+    'TabPFN':   TabPFNClassifier(device='cpu', N_ensemble_configurations=16),
+    'XGBoost':  xgb.XGBClassifier(n_estimators=100, random_state=0, eval_metric='logloss'),
+    'RF':       RandomForestClassifier(n_estimators=200, random_state=0),
+}
+
+for name, model in models.items():
+    scores = []
+    for tr, te in skf.split(X, y):
+        model.fit(X[tr], y[tr])
+        scores.append(accuracy_score(y[te], model.predict(X[te])))
+    print(f'{name:&lt;10}: {np.mean(scores):.4f} +/- {np.std(scores):.4f}')
+</code></pre>
+<h2>Calibration and Uncertainty</h2>
+<p>Because TabPFN approximates Bayesian posterior inference, its probability outputs are well-calibrated out of the box. This makes it useful for risk-sensitive applications where overconfident classifiers are problematic.</p>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+from sklearn.calibration import calibration_curve
+from sklearn.metrics import brier_score_loss
+from tabpfn import TabPFNClassifier
+import xgboost as xgb
+
+X, y = make_classification(n_samples=400, n_features=10, random_state=42)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.3, random_state=42)
+
+models = {
+    'TabPFN':  TabPFNClassifier(device='cpu'),
+    'XGBoost': xgb.XGBClassifier(n_estimators=100, eval_metric='logloss')
+}
+
+fig, ax = plt.subplots(1, 1, figsize=(6, 5))
+ax.plot([0, 1], [0, 1], 'k--', label='Perfect calibration')
+
+for name, model in models.items():
+    model.fit(X_tr, y_tr)
+    proba = model.predict_proba(X_te)[:, 1]
+    prob_true, prob_pred = calibration_curve(y_te, proba, n_bins=10)
+    brier = brier_score_loss(y_te, proba)
+    ax.plot(prob_pred, prob_true, marker='o', label=f'{name} (Brier={brier:.3f})')
+
+ax.set_xlabel('Mean predicted probability')
+ax.set_ylabel('Fraction of positives')
+ax.legend()
+plt.tight_layout()
+plt.savefig('calibration.png', dpi=150)
+</code></pre>
+<h2>Scaling Behavior: When TabPFN Degrades</h2>
+<p>TabPFN's context length is limited (training supports up to ~1024 rows). Performance degrades beyond this limit, and the O(n²) attention cost makes inference slow. Understanding this crossover is essential for deciding when to use TabPFN.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+from tabpfn import TabPFNClassifier
+import xgboost as xgb
+import time
+
+train_sizes = [100, 250, 500, 800, 1000]
+print(f'{&quot;n_train&quot;:&gt;8}  {&quot;TabPFN&quot;:&gt;10}  {&quot;XGBoost&quot;:&gt;10}  {&quot;TabPFN_t&quot;:&gt;10}')
+
+for n in train_sizes:
+    X, y = make_classification(
+        n_samples=n + 200, n_features=15, n_informative=8, random_state=42
+    )
+    X_tr, X_te, y_tr, y_te = train_test_split(
+        X, y, test_size=200, random_state=42
+    )
+    # TabPFN
+    t0 = time.time()
+    tabpfn = TabPFNClassifier(device='cpu', N_ensemble_configurations=8)
+    tabpfn.fit(X_tr[:n], y_tr[:n])
+    tabpfn_acc = accuracy_score(y_te, tabpfn.predict(X_te))
+    tabpfn_t   = time.time() - t0
+    # XGBoost
+    xgb_model = xgb.XGBClassifier(n_estimators=100, random_state=42, eval_metric='logloss')
+    xgb_model.fit(X_tr[:n], y_tr[:n])
+    xgb_acc = accuracy_score(y_te, xgb_model.predict(X_te))
+    print(f'{n:&gt;8}  {tabpfn_acc:&gt;10.4f}  {xgb_acc:&gt;10.4f}  {tabpfn_t:&gt;9.1f}s')
+</code></pre>
+<hr />
+<h2>TabPFN vs Classical Methods</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>n limit</th>
+<th>Training time</th>
+<th>Inference time</th>
+<th>Acc (small n)</th>
+<th>Acc (large n)</th>
+<th>HPO needed</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>TabPFN</td>
+<td>~1000 (context)</td>
+<td>None (zero-shot)</td>
+<td>Seconds (O(n²))</td>
+<td>Excellent</td>
+<td>N/A — not applicable</td>
+<td>No</td>
+</tr>
+<tr>
+<td>XGBoost</td>
+<td>Millions</td>
+<td>Seconds to minutes</td>
+<td>Milliseconds</td>
+<td>Good</td>
+<td>Excellent</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Random Forest</td>
+<td>Millions</td>
+<td>Seconds</td>
+<td>Milliseconds</td>
+<td>Good</td>
+<td>Good</td>
+<td>Moderate</td>
+</tr>
+<tr>
+<td>MLP</td>
+<td>Tens of millions</td>
+<td>Minutes to hours</td>
+<td>Milliseconds</td>
+<td>Poor</td>
+<td>Moderate</td>
+<td>Yes (heavy)</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>TabPFN Zero-Shot Performance</strong>: TabPFN with no hyperparameter tuning outperforms XGBoost with default settings on the majority of OpenML-CC18 benchmark datasets with fewer than 1000 training samples. It is the best first-try model for small tabular classification problems.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<ul>
+<li>TabPFN performs in-context Bayesian inference: entire training set as context, predictions in one forward pass</li>
+<li>Meta-trained on millions of synthetic datasets from a causal generative prior — no task-specific training</li>
+<li>Best performance at n &lt; 1000, d &lt; 100 — outside this range, XGBoost typically wins</li>
+<li>Well-calibrated probability outputs without post-hoc calibration (Platt scaling, isotonic regression)</li>
+<li>O(n²) inference complexity — practical limit is around 1000 training samples</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

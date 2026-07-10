@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NumPy — Broadcasting, Vectorization, and Advanced Indexing | Notes Backup</title>
+  <meta name="description" content="NumPy&#x27;s core patterns for high-performance array computing: broadcasting rules, replacing Python loops with vectorized operations, fancy and boolean indexing, and einsum for tensor contractions." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>NumPy — Broadcasting, Vectorization, and Advanced Indexing</h1>
+      <ul class='note-meta'><li><strong>description:</strong> NumPy&#x27;s core patterns for high-performance array computing: broadcasting rules, replacing Python loops with vectorized operations, fancy and boolean indexing, and einsum for tensor contractions.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>NumPy — Broadcasting, Vectorization, and Advanced Indexing</h1>
+<p>NumPy is the foundation of scientific Python computing. Its performance advantage over pure Python comes from three mechanisms: vectorized operations (C-compiled kernels over entire arrays), broadcasting (implicit shape alignment without copying), and advanced indexing (fancy and boolean masks). Mastering these replaces slow Python loops with fast, readable array expressions.</p>
+<ul>
+<li>Vectorized ops: C-compiled, no Python loop overhead — 10–1000x faster than for loops for numerical work</li>
+<li>Broadcasting: implicit shape alignment without data copying — shapes expanded logically, not physically</li>
+<li>Fancy indexing: select arbitrary elements with integer arrays — always returns a copy (safe to modify)</li>
+<li>Boolean indexing: mask arrays with boolean conditions — use np.where for conditional assignment</li>
+<li>einsum: Einstein notation for arbitrary tensor contractions — clearer and often faster than chained dots</li>
+</ul>
+<h2>Vectorization: Replacing Python Loops</h2>
+<p>Python loops over array elements are slow because each iteration incurs Python interpreter overhead. NumPy operations execute in C over contiguous memory blocks — 10 to 1000x faster for numerical computations.</p>
+<pre><code class="language-python">import numpy as np
+import time
+
+# Benchmark: compute pairwise squared distances
+# Python loop version
+def pairwise_dist_python(X):
+    n = len(X)
+    D = np.zeros((n, n))
+    for i in range(n):
+        for j in range(n):
+            diff = X[i] - X[j]
+            D[i, j] = np.dot(diff, diff)
+    return D
+
+# Vectorized version using broadcasting
+def pairwise_dist_numpy(X):
+    # ||x_i - x_j||^2 = ||x_i||^2 + ||x_j||^2 - 2 x_i·x_j
+    sq_norms = (X ** 2).sum(axis=1)       # (n,)
+    D = sq_norms[:, None] + sq_norms[None, :] - 2 * X @ X.T
+    return np.maximum(D, 0)               # clip numerical negatives
+
+rng = np.random.default_rng(42)
+X   = rng.standard_normal((200, 32))
+
+t0 = time.perf_counter()
+D_py = pairwise_dist_python(X)
+py_t = time.perf_counter() - t0
+
+t0 = time.perf_counter()
+D_np = pairwise_dist_numpy(X)
+np_t = time.perf_counter() - t0
+
+print(f'Python loop: {py_t*1000:.1f} ms')
+print(f'NumPy vec:   {np_t*1000:.2f} ms')
+print(f'Speedup:     {py_t/np_t:.0f}x')
+print(f'Results match: {np.allclose(D_py, D_np, atol=1e-8)}')
+</code></pre>
+<h2>Broadcasting Rules</h2>
+<p>Broadcasting allows operations between arrays of different shapes without explicit copying. The rules are applied to trailing dimensions: arrays are compatible if corresponding dimensions are equal or one of them is 1.</p>
+<ul>
+<li>Step 1: Prepend 1s to the shorter shape until both have the same number of dimensions</li>
+<li>Step 2: Output shape = max of each pair of dimensions (error if neither is 1 and they differ)</li>
+<li>Example: (3, 1, 5) + (4, 1) → (3, 1, 5) + (1, 4, 1) → output (3, 4, 5)</li>
+<li>No data is copied — broadcasting is a virtual replication applied during computation</li>
+<li>Common use: subtract row mean (X - X.mean(axis=1, keepdims=True)) — keepdims preserves broadcastable shape</li>
+</ul>
+<pre><code class="language-python">import numpy as np
+
+rng = np.random.default_rng(0)
+X   = rng.integers(0, 10, (4, 3))   # (4, 3) matrix
+print('X shape:', X.shape)
+
+# Subtract column mean (broadcast over rows)
+col_mean = X.mean(axis=0)            # (3,)
+X_centered = X - col_mean            # (4, 3) - (3,) -&gt; broadcasts to (4, 3)
+print('Column-centered shape:', X_centered.shape)
+
+# Subtract row mean
+row_mean = X.mean(axis=1, keepdims=True)  # (4, 1) — keepdims preserves rank
+X_row_centered = X - row_mean             # (4, 3) - (4, 1) -&gt; broadcasts to (4, 3)
+print('Row-centered shape:', X_row_centered.shape)
+
+# Outer product via broadcasting
+a = np.array([1, 2, 3])   # (3,)
+b = np.array([10, 20])    # (2,)
+outer = a[:, None] * b[None, :]  # (3, 1) * (1, 2) -&gt; (3, 2)
+print('Outer product:', outer)
+
+# Pairwise differences between two sets of points
+A = rng.standard_normal((5, 4))  # 5 points in R^4
+B = rng.standard_normal((3, 4))  # 3 points in R^4
+diff = A[:, None, :] - B[None, :, :]  # (5, 1, 4) - (1, 3, 4) -&gt; (5, 3, 4)
+print('Pairwise diff shape:', diff.shape)
+</code></pre>
+<h2>Advanced Indexing: Fancy and Boolean</h2>
+<p>Advanced indexing selects arbitrary subsets of an array by providing integer arrays (fancy indexing — gather operation) or boolean masks. Advanced indexing always returns a copy, unlike basic slicing which returns a view.</p>
+<pre><code class="language-python">import numpy as np
+
+rng = np.random.default_rng(42)
+X   = rng.integers(0, 100, (8, 5))
+print('X shape:', X.shape)
+
+# Fancy indexing: select specific rows by index array
+row_indices = np.array([0, 3, 7, 2])
+selected = X[row_indices]    # (4, 5) — copies rows 0, 3, 7, 2
+print('Fancy indexed shape:', selected.shape)
+
+# Boolean indexing (mask)
+mask = X[:, 0] &gt; 50          # (8,) boolean mask on first column
+X_filtered = X[mask]         # rows where first column &gt; 50
+print(f'Boolean filtered: {X_filtered.shape[0]} rows kept')
+
+# Combined: fancy row + column indexing (gather)
+rows = np.array([0, 1, 2, 3])
+cols = np.array([4, 3, 2, 1])  # one col per row
+diag_like = X[rows, cols]      # (4,) — element (0,4), (1,3), (2,2), (3,1)
+print('Scatter gather result:', diag_like)
+
+# Scatter: place values at specific indices
+out = np.zeros((10, 5), dtype=int)
+out[row_indices] = selected    # scatter rows back
+print('Scatter output shape:', out.shape)
+
+# Advanced index is a COPY — modifying does not affect original
+X_filtered[0, 0] = 999
+print(f'Original X[0,0] unchanged: {X[0,0] != 999}')
+</code></pre>
+<h2>einsum for Tensor Contractions</h2>
+<p>np.einsum (Einstein summation notation) expresses arbitrary tensor operations in a concise string syntax. It replaces nested dot products, transpositions, and trace operations with a single readable expression, and can be compiled to optimized BLAS calls.</p>
+<pre><code class="language-python">import numpy as np
+
+rng  = np.random.default_rng(0)
+A    = rng.standard_normal((3, 4))
+B    = rng.standard_normal((4, 5))
+C    = rng.standard_normal((3, 4, 5))
+D    = rng.standard_normal((3, 4))
+
+# Matrix multiply: ij,jk -&gt; ik
+AB   = np.einsum('ij,jk-&gt;ik', A, B)
+assert AB.shape == (3, 5)
+assert np.allclose(AB, A @ B)
+print(f'matmul:        {AB.shape}')
+
+# Outer product: i,j -&gt; ij
+a, b = np.array([1., 2., 3.]), np.array([10., 20., 30., 40.])
+outer = np.einsum('i,j-&gt;ij', a, b)
+assert np.allclose(outer, np.outer(a, b))
+print(f'outer product: {outer.shape}')
+
+# Trace: ii -&gt; (scalar)
+sq = rng.standard_normal((5, 5))
+trace = np.einsum('ii-&gt;', sq)
+assert np.isclose(trace, np.trace(sq))
+print(f'trace:         {trace:.4f}')
+
+# Batch matrix multiply: bij,bjk -&gt; bik
+batch_A = rng.standard_normal((8, 3, 4))
+batch_B = rng.standard_normal((8, 4, 5))
+batch_AB = np.einsum('bij,bjk-&gt;bik', batch_A, batch_B)
+assert batch_AB.shape == (8, 3, 5)
+print(f'batch matmul:  {batch_AB.shape}')
+
+# Attention scores: bhqd,bhkd -&gt; bhqk
+Q = rng.standard_normal((2, 4, 10, 64))  # batch, heads, queries, d
+K = rng.standard_normal((2, 4, 12, 64))  # batch, heads, keys, d
+scores = np.einsum('bhqd,bhkd-&gt;bhqk', Q, K)
+print(f'attention:     {scores.shape}')  # (2, 4, 10, 12)
+</code></pre>
+<hr />
+<h2>einsum Pattern Reference</h2>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>einsum Notation</th>
+<th>Equivalent NumPy Call</th>
+<th>Use Case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Matrix multiply</td>
+<td>ij,jk-&gt;ik</td>
+<td>A @ B</td>
+<td>Linear layers, attention</td>
+</tr>
+<tr>
+<td>Outer product</td>
+<td>i,j-&gt;ij</td>
+<td>np.outer(a, b)</td>
+<td>Rank-1 update, embedding outer</td>
+</tr>
+<tr>
+<td>Trace</td>
+<td>ii-&gt;</td>
+<td>np.trace(A)</td>
+<td>Regularization terms</td>
+</tr>
+<tr>
+<td>Batch matmul</td>
+<td>bij,bjk-&gt;bik</td>
+<td>np.matmul(A, B)</td>
+<td>Batched linear transforms</td>
+</tr>
+<tr>
+<td>Attention scores</td>
+<td>bhqd,bhkd-&gt;bhqk</td>
+<td>(Q @ K.T) per head</td>
+<td>Multi-head self-attention</td>
+</tr>
+<tr>
+<td>Element sum over axis</td>
+<td>ij-&gt;i</td>
+<td>A.sum(axis=1)</td>
+<td>Row reduction</td>
+</tr>
+</tbody>
+</table>
+<p>For performance-critical paths, benchmark np.einsum against manual @ chains. On small arrays, einsum overhead can dominate; on large tensors (&gt;1000 elements per dimension), einsum often matches or beats manual implementations because NumPy selects optimal BLAS routines internally.</p>
+<blockquote>
+<p><strong>einsum Optimization with optimize=True</strong>: For einsum expressions involving three or more tensors, use np.einsum('...', A, B, C, optimize=True). NumPy finds the optimal contraction order — which can reduce complexity from O(n^6) to O(n^4) for a three-tensor contraction. Always benchmark against manual @ chains for performance-critical paths.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<ul>
+<li>Vectorization replaces Python loops with C-compiled array operations — 10-1000x speedup</li>
+<li>Broadcasting: align trailing dims, prepend 1s to shorter shape, expand dims with size 1 — no data copy</li>
+<li>Fancy indexing returns a copy; basic slicing returns a view — modifying a fancy index result is safe</li>
+<li>einsum expresses arbitrary tensor contractions in Einstein notation — clearer than nested transposes and dots</li>
+<li>Use optimize=True in einsum for multi-tensor contractions and np.einsum_path for profiling the contraction order</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

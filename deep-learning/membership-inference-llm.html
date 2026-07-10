@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Membership Inference Attacks on LLMs | Notes Backup</title>
+  <meta name="description" content="Using a model&#x27;s output probabilities to infer whether specific text was in its training set — covering loss-based attacks, neighborhood comparisons, MIN-K%, and differential privacy defenses." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Membership Inference Attacks on LLMs</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Using a model&#x27;s output probabilities to infer whether specific text was in its training set — covering loss-based attacks, neighborhood comparisons, MIN-K%, and differential privacy defenses.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Membership Inference Attacks on LLMs</h1>
+<p>Membership inference attacks (MIAs) ask a deceptively simple question: given a text sample x and a language model M, was x part of M's training set? The question matters for privacy — if an adversary can confirm that a specific patient record, private email, or copyrighted passage was memorized, it constitutes a privacy breach even if the model never directly outputs that text. MIAs were studied originally for classifiers (Shokri et al., 2017), where the signal is strong because small models overfit visibly. For large language models trained on trillions of tokens, the signal is weaker and harder to separate from the baseline behavior of a well-calibrated language model — but the stakes are far higher given the sensitivity of data that may have been ingested at web scale.</p>
+<h2>Overview</h2>
+<p>The core observation behind most MIAs on language models is that empirical risk minimization drives the model to assign higher probability to training examples than to held-out examples, on average. This gap between member and non-member probabilities creates a statistical signal that can be exploited. However, confounds are severe: (1) text difficulty varies enormously — a simple encyclopedia sentence is low-perplexity regardless of training membership, while a complex technical argument is high-perplexity regardless; (2) modern LLMs are trained on data with many near-duplicates, so non-member text resembling a training example may receive similarly high probability; (3) LLMs generalize rather than memorize most content, producing weak membership signal on single-occurrence examples. Evaluation follows the ROC framework: attacks are compared by true positive rate at a fixed false positive rate (TPR@FPR), with FPR=0.1 and FPR=0.01 as standard operating points.</p>
+<p>The WikiMIA benchmark (Shi et al., 2023) provides standardized evaluation for MIA on large language models. It constructs (member, non-member) pairs where members are Wikipedia articles published before the model's training cutoff and non-members are articles published after, controlling for writing style and domain. The benchmark evaluates across GPT-NeoX-20B, OPT-66B, Falcon-7B, and LLaMA-65B. A separate benchmark, BookMIA, uses copyright-controlled book text that is more likely to be memorized verbatim due to lower frequency in web crawls, showing higher attack AUC across the board (0.70-0.85) compared to WikiMIA (0.55-0.72) because book text is rarer and memorization signal is stronger.</p>
+<h2>Membership Inference Threat</h2>
+<p>Privacy violations from successful MIAs escalate sharply when suspected training text contains PII (names, addresses, identification numbers), sensitive attributes (medical conditions, financial status, political beliefs), or confidential information (trade secrets, private communications). Carlini et al. (2021) demonstrated verbatim extraction of training data from GPT-2 — showing that models not only assign high probability to training data but can be prompted to regurgitate it exactly. MIA is a weaker, more broadly applicable version of the same underlying privacy vulnerability: it does not require extracting the text, only confirming its presence. The practical threat model covers black-box API access — querying the model and observing logprob outputs, which most LLM APIs expose — making the attack applicable to GPT-4, Claude, Gemini, and similar production systems.</p>
+<p>EU GDPR's right to erasure (Article 17) requires organizations to delete a user's data upon request. For a model trained on that data, the only compliant remedy is retraining or machine unlearning — both of which are computationally infeasible for frontier models. MIA therefore matters for regulatory compliance, not just academic privacy analysis: it provides the audit mechanism to detect whether a claimed deletion was effective. In practice, organizations handling sensitive data in training corpora must either (a) avoid collecting the data initially, (b) apply differential privacy during training, or (c) implement machine unlearning and verify with MIA auditing that the unlearned examples no longer show elevated membership signal.</p>
+<h2>Loss-Based Attack</h2>
+<p>The loss-based attack is the simplest and most natural MIA baseline: classify a sequence as a member if the model's cross-entropy loss on it falls below a threshold τ. Given sequence x = (t_1, ..., t_n), the membership score is s(x) = -(1/n) Σ log P(t_i | t_1, ..., t_{i-1}), which is negative average log probability — equivalently, negative perplexity in log space. Lower loss means the model assigns higher probability to the sequence. The threshold τ is calibrated on a held-out set with known membership labels to achieve the desired FPR. In white-box settings, the loss is computed exactly from model logits. In black-box settings, APIs that return logprobs (such as the OpenAI API with logprobs=1) enable approximate loss computation. A normalization variant uses the zlib compression ratio as a text-difficulty baseline: score(x) = loss(x) / compress_ratio(x), which partially corrects for inherently predictable text at zero additional compute cost.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from sklearn.metrics import roc_curve, auc
+
+def compute_sequence_loss(model, tokenizer, text, device='cuda', max_length=1024):
+    '''Return average cross-entropy loss for a text sequence.'''
+    enc = tokenizer(text, return_tensors='pt', truncation=True,
+                    max_length=max_length).to(device)
+    with torch.no_grad():
+        out = model(**enc, labels=enc['input_ids'])
+    return out.loss.item()  # scalar; lower =&gt; model assigns higher probability
+
+def run_loss_mia(model_name, members, non_members, device='cuda'):
+    '''Loss-based MIA: score = -loss; evaluate AUC and TPR@FPR=0.1 and 0.01.'''
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name, torch_dtype=torch.float16, device_map=device)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model.eval()
+    scores, labels = [], []
+    for text in members:
+        scores.append(-compute_sequence_loss(model, tokenizer, text, device))
+        labels.append(1)
+    for text in non_members:
+        scores.append(-compute_sequence_loss(model, tokenizer, text, device))
+        labels.append(0)
+    scores, labels = np.array(scores), np.array(labels)
+    fpr, tpr, _ = roc_curve(labels, scores)
+    roc_auc = auc(fpr, tpr)
+    tpr01  = float(tpr[np.searchsorted(fpr, 0.10)])
+    tpr001 = float(tpr[np.searchsorted(fpr, 0.01)])
+    print(f'Loss MIA: AUC={roc_auc:.3f} | TPR@FPR=0.1={tpr01:.3f} | TPR@FPR=0.01={tpr001:.3f}')
+    return fpr, tpr, roc_auc
+</code></pre>
+<p>Loss-based attacks perform modestly on large language models. On WikiMIA, raw loss achieves AUC 0.55-0.65 depending on the model — barely above chance (0.50). The fundamental limitation is that loss is confounded by text difficulty: a simple, grammatical sentence receives low loss from any well-trained LM, regardless of training membership. The zlib normalization improves AUC by 3-5 points over raw loss on most benchmarks by dividing the model's loss by the text's compression ratio, which estimates inherent complexity. The approach is fastest of all MIA methods, requiring only a single forward pass per sequence, and is therefore used as the baseline in all MIA papers.</p>
+<h2>MIN-K% Attack</h2>
+<p>MIN-K% (Shi et al., 2023) is a calibration-free attack that exploits the distribution of per-token log probabilities within a sequence rather than their average. The key insight: when a model has not memorized a sequence, some tokens will be genuinely surprising — a rare word in an unusual context — and receive very low log probability. When the model has memorized the sequence, even the surprising tokens benefit from the memorized context and receive more probability than the language prior would suggest. MIN-K% takes the bottom K% of per-token log probabilities (the K% most surprising tokens), averages them, and uses this as the membership score. Members have a higher 'floor' on their log probability distribution — the worst tokens are not as bad — compared to non-members. Empirically K=20 (the worst 20% of tokens) works best across a range of models.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from sklearn.metrics import roc_auc_score, roc_curve
+
+def get_token_log_probs(model, tokenizer, text, device='cuda', max_length=1024):
+    '''Compute per-token log probabilities for a text sequence.'''
+    enc = tokenizer(text, return_tensors='pt', truncation=True,
+                    max_length=max_length).to(device)
+    with torch.no_grad():
+        logits = model(**enc).logits          # (1, seq_len, vocab)
+    log_probs = torch.log_softmax(logits, dim=-1)
+    ids = enc['input_ids'][0]                  # (seq_len,)
+    # logit at position i predicts token at position i+1; shift accordingly
+    per_token = log_probs[0, :-1].gather(1, ids[1:].unsqueeze(1)).squeeze(1)
+    return per_token.cpu().float().numpy()
+
+def mink_mia(model_name, members, non_members, k_pct=0.20, device='cuda'):
+    '''MIN-K% MIA: average of bottom-k% per-token log probs as membership score.'''
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name, torch_dtype=torch.float16, device_map=device)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model.eval()
+    def score(text):
+        lps = get_token_log_probs(model, tokenizer, text, device)
+        k   = max(1, int(len(lps) * k_pct))
+        return float(np.sort(lps)[:k].mean())  # more negative =&gt; likely non-member
+    scores = [score(t) for t in members] + [score(t) for t in non_members]
+    labels = [1]*len(members) + [0]*len(non_members)
+    auc = roc_auc_score(labels, scores)
+    print(f'MIN-K% (k={k_pct:.0%}) AUC: {auc:.3f}')
+    for k in [0.05, 0.10, 0.20, 0.30, 0.50]:
+        sc2 = [float(np.sort(get_token_log_probs(model, tokenizer, t, device))[:max(1,int(len(get_token_log_probs(model, tokenizer, t, device))*k))].mean()) for t in members+non_members]
+        print(f'  k={k:.0%}: AUC={roc_auc_score(labels, sc2):.3f}')
+    return auc
+</code></pre>
+<p>MIN-K% achieves AUC of 0.60-0.72 on WikiMIA and 0.72-0.82 on BookMIA, consistently outperforming raw loss by 5-10 AUC points. The optimal k varies by model and corpus: for well-calibrated models trained on diverse data, k=20% works best; for models that overfit (smaller models or repeated training data), k=5-10% captures stronger signal from the very worst tokens. A follow-up, MIN-K%++ (Zhang et al., 2024), incorporates both the mean and variance of log probabilities, further improving AUC by 2-4 points. The key advantage of MIN-K% is that it requires no external reference model, no neighbor generation, and only a single forward pass per sequence — making it the default practical attack for auditing LLMs at scale.</p>
+<h2>Neighborhood Comparison</h2>
+<p>Neighborhood comparison attacks (Mattern et al., 2023) decompose the membership signal into intrinsic text difficulty and model-specific memorization. The approach generates n semantically similar neighbors x_1', ..., x_n' for each query text x by applying small perturbations — word substitutions, sentence paraphrases, minor structural edits. Since neighbors preserve semantic content and approximate difficulty of x but are very unlikely to have appeared verbatim in training data, they serve as a calibration baseline. The membership score is log P(x) - mean log P(x_i'): how much more likely the model finds x compared to its paraphrases. If this gap is large, the model has memorized the specific phrasing of x, not just its semantic content. The attack is significantly more expensive than loss-based methods — generating 50 high-quality paraphrases for a 500-word passage using an LLM takes 30-60 seconds — but achieves AUC improvements of 3-8 points over MIN-K%.</p>
+<p>Neighbor generation options include: (1) masked language model substitution — randomly masking 15% of tokens and filling with RoBERTa, fast but only local changes; (2) T5 round-trip paraphrase — translating to another language and back using an MT model, broader changes but potential meaning drift; (3) LLM-based paraphrase — prompting GPT-4 to rewrite while preserving meaning, highest quality but expensive. The choice of neighbor generation method directly affects attack AUC: LLM-generated neighbors consistently outperform masked LM substitution by 3-5 AUC points because they produce more semantically natural alternatives that the target model would not assign specifically higher probability to. For audit scenarios where accuracy is critical and compute budget allows, neighborhood comparison remains the highest-quality MIA approach available.</p>
+<h2>Calibrating with Reference Models</h2>
+<p>Reference model calibration (Carlini et al., 2021) provides a clean decomposition of the membership signal. Rather than comparing the target model's loss against a fixed threshold, it computes the loss ratio: score(x) = L_ref(x) / L_target(x), where L_ref is the loss under a reference model trained on different data. Text that is inherently easy receives low loss from both models, making the ratio approximately 1.0 and correctly not flagging it as a member. Text that was specifically memorized by the target model receives low target loss but higher reference loss, producing a ratio substantially above 1.0. The reference model acts as an estimate of expected text difficulty, stripping out the confound that plagues raw loss-based attacks. Using a reference model of the same architecture but different pretraining data — e.g., EleutherAI's Pythia models trained on different shuffles of the Pile — reduces false positive rate substantially on inherently low-perplexity text.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from sklearn.metrics import roc_auc_score, roc_curve
+
+def get_loss(model, tokenizer, text, device, max_length=512):
+    enc = tokenizer(text, return_tensors='pt', truncation=True,
+                    max_length=max_length).to(device)
+    with torch.no_grad():
+        return model(**enc, labels=enc['input_ids']).loss.item()
+
+def reference_mia(target_name, ref_name, members, non_members, device='cuda'):
+    '''Reference-model MIA: score = ref_loss / target_loss (higher =&gt; likely member).'''
+    target_mdl = AutoModelForCausalLM.from_pretrained(
+        target_name, torch_dtype=torch.float16, device_map=device)
+    ref_mdl    = AutoModelForCausalLM.from_pretrained(
+        ref_name,   torch_dtype=torch.float16, device_map=device)
+    target_tok = AutoTokenizer.from_pretrained(target_name)
+    ref_tok    = AutoTokenizer.from_pretrained(ref_name)
+    target_mdl.eval(); ref_mdl.eval()
+    scores, labels = [], []
+    for text, lbl in [(t,1) for t in members] + [(t,0) for t in non_members]:
+        t_loss = get_loss(target_mdl, target_tok, text, device)
+        r_loss = get_loss(ref_mdl,    ref_tok,    text, device)
+        scores.append(r_loss / (t_loss + 1e-9))  # ratio &gt; 1 =&gt; target memorized
+        labels.append(lbl)
+    scores, labels = np.array(scores), np.array(labels)
+    auc = roc_auc_score(labels, scores)
+    fpr, tpr, _ = roc_curve(labels, scores)
+    tpr10  = float(tpr[np.searchsorted(fpr, 0.10)])
+    tpr01  = float(tpr[np.searchsorted(fpr, 0.01)])
+    print(f'Ref-model MIA: AUC={auc:.3f} | TPR@FPR=0.1={tpr10:.3f} | TPR@FPR=0.01={tpr01:.3f}')
+    return scores, labels
+</code></pre>
+<p>Reference model calibration achieves AUC of 0.65-0.80 on WikiMIA and 0.78-0.88 on BookMIA — the strongest single-pass attack when a suitable reference model is available. The key practical constraint is that the reference model must be trained on different data than the target: using a model from the same organization's family can introduce confounds if models share training data. Pythia (EleutherAI) provides useful reference models across scales (70M to 12B parameters) trained on the Pile with different random seeds. When the target model's training data is partially known — e.g., it includes Common Crawl and GitHub — using a reference model trained only on Wikipedia and books can amplify the membership signal on web-crawl content.</p>
+<h2>Differential Privacy Defense</h2>
+<p>Differential privacy (DP) is the gold standard for membership inference defense because it provides a formal, mathematically provable bound on information leakage. DP-SGD (Abadi et al., 2016) modifies stochastic gradient descent in two ways: (1) per-sample gradient clipping — each sample's gradient is clipped to maximum L2 norm C, limiting the influence of any individual training example; (2) Gaussian noise addition — noise with standard deviation σ = C × noise_multiplier is added to the clipped gradient sum before each parameter update. The privacy budget ε is tracked using the Rényi DP accountant: smaller ε means more noise, less information leakage, and stronger privacy. The formal guarantee: the trained model's output distribution changes by at most exp(ε) between any two adjacent datasets differing by one example — bounding the information that membership in the training set provides to any adversary, even a computationally unbounded one.</p>
+<p>For language models, the implementation challenge is that standard mini-batch gradient computation averages gradients across the batch, making it impossible to clip individual sample gradients without per-sample backward passes. Opacus (Yousefpour et al., 2021) solves this with Ghost Clipping (Li et al., 2021), which computes per-sample gradient norms without materializing per-sample gradients, reducing memory overhead significantly. In practice, DP is applied during fine-tuning on a specific sensitive dataset rather than pretraining — pretraining with strong DP (ε &lt; 10) over trillions of tokens would require impractically large noise multipliers that destroy model quality. The privacy-utility tradeoff is severe: at ε=1 (strong DP), model perplexity degrades by 20-40% and downstream task accuracy by 5-15 percentage points; at ε=10, the degradation is smaller but still measurable; at ε=100, the model is close to non-private in utility but the formal guarantee still rules out worst-case adversaries.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+from opacus import PrivacyEngine
+from transformers import GPT2LMHeadModel, GPT2Tokenizer
+from torch.utils.data import DataLoader, TensorDataset
+from sklearn.metrics import roc_auc_score
+
+def train_dp_lm(model_name, texts, target_epsilon, delta=1e-5,
+                max_grad_norm=1.0, epochs=5, batch_size=8, device='cuda'):
+    '''Fine-tune a causal LM with DP-SGD; prints per-epoch loss and epsilon spent.'''
+    tokenizer = GPT2Tokenizer.from_pretrained(model_name)
+    tokenizer.pad_token = tokenizer.eos_token
+    model = GPT2LMHeadModel.from_pretrained(model_name).to(device)
+    enc = tokenizer(texts, return_tensors='pt', padding=True,
+                    truncation=True, max_length=256)
+    ds  = TensorDataset(enc['input_ids'], enc['attention_mask'])
+    dl  = DataLoader(ds, batch_size=batch_size, shuffle=True)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5)
+    privacy_engine = PrivacyEngine()
+    model, optimizer, dl = privacy_engine.make_private_with_epsilon(
+        module=model, optimizer=optimizer, data_loader=dl,
+        epochs=epochs, target_epsilon=target_epsilon,
+        target_delta=delta, max_grad_norm=max_grad_norm,
+    )
+    model.train()
+    for epoch in range(epochs):
+        total = 0.0
+        for ids, mask in dl:
+            ids, mask = ids.to(device), mask.to(device)
+            loss = model(ids, attention_mask=mask, labels=ids).loss
+            optimizer.zero_grad(); loss.backward(); optimizer.step()
+            total += loss.item()
+        eps_now = privacy_engine.get_epsilon(delta)
+        print(f'Epoch {epoch+1}: loss={total/len(dl):.3f}, eps_used={eps_now:.2f}')
+    return model, privacy_engine
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Attack</th>
+<th>TPR@FPR=0.01</th>
+<th>TPR@FPR=0.1</th>
+<th>What's needed</th>
+<th>Defense</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Loss threshold</td>
+<td>0.04–0.08</td>
+<td>0.13–0.20</td>
+<td>Single forward pass, threshold calibration</td>
+<td>DP-SGD ε≤10 or deduplication</td>
+</tr>
+<tr>
+<td>Perplexity / zlib</td>
+<td>0.05–0.11</td>
+<td>0.15–0.28</td>
+<td>Forward pass + zlib compression ratio</td>
+<td>DP-SGD ε≤10</td>
+</tr>
+<tr>
+<td>MIN-K%</td>
+<td>0.06–0.14</td>
+<td>0.18–0.32</td>
+<td>Per-token log probs, k% selection</td>
+<td>DP-SGD ε≤3 or aggressive dedup</td>
+</tr>
+<tr>
+<td>Neighborhood</td>
+<td>0.08–0.18</td>
+<td>0.22–0.40</td>
+<td>Neighbor generator (LLM or MLM)</td>
+<td>DP-SGD ε≤3</td>
+</tr>
+<tr>
+<td>Zlib ratio</td>
+<td>0.05–0.11</td>
+<td>0.16–0.28</td>
+<td>Zlib compression + single forward pass</td>
+<td>DP-SGD ε≤10</td>
+</tr>
+<tr>
+<td>Reference model ratio</td>
+<td>0.10–0.22</td>
+<td>0.28–0.50</td>
+<td>Reference model of comparable scale</td>
+<td>DP-SGD ε≤1 or full data dedup</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Why MIA on LLMs Differs from Classifiers</strong>: Membership inference on LLMs is harder than on classifiers because language models are trained on internet-scale data with many near-duplicates — the same text may appear at inference time even if not in training, producing false positives. A classifier trained on 10K examples overfits obviously; an LLM trained on 1T tokens is much harder to audit because most text receives reasonably high probability simply from learning the language distribution. The practical attack surface concentrates on text that appears many times in training (duplicated content) or on unique high-sensitivity documents memorized verbatim due to their rarity — single-occurrence examples sit near chance-level detection for all current attacks.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<ul>
+<li>Loss/perplexity threshold is the MIA baseline — single forward pass, AUC 0.55–0.65 on large LLMs, severely confounded by inherent text difficulty.</li>
+<li>Zlib normalization (loss / compress_ratio) corrects for text difficulty at zero cost, improving AUC by 3–5 points over raw loss.</li>
+<li>MIN-K% uses the bottom-K% of per-token log probs to separate memorization signal from text difficulty, achieving AUC 0.60–0.72 on WikiMIA with no additional model.</li>
+<li>Neighborhood comparison generates paraphrases and checks whether the target model specifically favors the original — highest accuracy (3–8 AUC point gain) but 50–100x more expensive.</li>
+<li>Reference model calibration (ref_loss / target_loss) achieves AUC 0.65–0.80, removing text-difficulty confounds — requires a comparable reference model trained on different data.</li>
+<li>Differential privacy (DP-SGD) is the only approach with formal guarantees — ε≤10 substantially reduces TPR; ε≤1 nearly eliminates MIA signal at the cost of 20–40% perplexity degradation.</li>
+<li>Training data deduplication is the most practical first defense — memorization and MIA success correlate strongly with duplication frequency; text appearing &gt;10 times is the highest-risk category.</li>
+<li>For GDPR right-to-erasure compliance, DP-SGD during fine-tuning is the only scalable solution; retraining frontier models after individual data removal is computationally infeasible.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

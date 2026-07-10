@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Learned Positional Embeddings — BERT and GPT Style | Notes Backup</title>
+  <meta name="description" content="Explore nn.Embedding(max_seq_len, d_model) as a trainable lookup table for positional encoding: parameter count, BERT and GPT-2 maximum lengths, addition to token embeddings, extrapolation failure at lengths beyond training, position interpolation, and empirical comparison against sinusoidal PE." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Learned Positional Embeddings — BERT and GPT Style</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Explore nn.Embedding(max_seq_len, d_model) as a trainable lookup table for positional encoding: parameter count, BERT and GPT-2 maximum lengths, addition to token embeddings, extrapolation failure at lengths beyond training, position interpolation, and empirical comparison against sinusoidal PE.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Learned Positional Embeddings — BERT and GPT Style</h1>
+<p>Transformers have no built-in notion of order — a set of token embeddings passed through self-attention is permutation-equivariant without additional structure. Positional information must be injected explicitly. BERT and GPT-family models do this with learned positional embeddings: an nn.Embedding(max_seq_len, d_model) lookup table trained end-to-end alongside the rest of the model. Each position index 0, 1, …, max_seq_len−1 maps to a dedicated d-dimensional vector that is added (not concatenated) to the corresponding token embedding before the first Transformer layer.</p>
+<h2>Why Transformers Need Positional Information</h2>
+<p>Self-attention computes a weighted sum of value vectors using query-key dot products. If you permute the input sequence, every pairwise dot product changes, but the same set of outputs is produced — just reordered. This means the model cannot distinguish 'the cat sat' from 'sat cat the' without an external position signal. Sinusoidal and learned embeddings both solve this by making each position's embedding unique, so after addition the attention scores carry position-sensitive information. The choice between sinusoidal (fixed mathematical formula) and learned (trainable parameters) affects parameter count, extrapolation, and performance.</p>
+<h2>Learned Positional Embeddings — Architecture and Design</h2>
+<p>The implementation is a single nn.Embedding module. During a forward pass, the integer sequence [0, 1, …, L−1] is looked up to produce a (L, d_model) matrix that is added element-wise to the token embedding matrix of the same shape. BERT-base uses max_seq_len=512 and d_model=768, giving 512 × 768 = 393,216 parameters in the position table. GPT-2 small uses max_seq_len=1024 with d_model=768, giving 786,432 parameters. These parameters are small relative to total model size (BERT-base has ~110M total parameters) but important for quality. Standard initialisation uses N(0, 0.02) or N(0, 1/√d_model).</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class LearnedPositionalEmbedding(nn.Module):
+    def __init__(self, max_seq_len, d_model, dropout=0.1):
+        super().__init__()
+        self.pos_embedding = nn.Embedding(max_seq_len, d_model)
+        self.dropout = nn.Dropout(dropout)
+        self._init_weights()
+
+    def _init_weights(self):
+        nn.init.normal_(self.pos_embedding.weight, mean=0.0, std=0.02)
+
+    def forward(self, token_embeddings):
+        # token_embeddings: (batch, seq_len, d_model)
+        batch, seq_len, d_model = token_embeddings.shape
+        positions = torch.arange(seq_len, device=token_embeddings.device)
+        pos_emb = self.pos_embedding(positions)         # (seq_len, d_model)
+        return self.dropout(token_embeddings + pos_emb) # broadcasts over batch
+
+model = LearnedPositionalEmbedding(max_seq_len=512, d_model=768)
+x = torch.randn(2, 10, 768)
+out = model(x)
+print('Input:', x.shape, '-&gt; Output:', out.shape)
+param_count = sum(p.numel() for p in model.parameters())
+print('Parameters:', param_count, '== 512 x 768 =', 512*768, 'for BERT-base')
+print('Embedding weight shape:', model.pos_embedding.weight.shape)
+</code></pre>
+<h2>Parameter Count and Memory Footprint</h2>
+<p>Parameter count scales linearly with both max_seq_len and d_model: params = max_seq_len × d_model. For BERT-large (max_seq_len=512, d_model=1024) this is 524,288 — still less than 0.5% of the 340M total parameters. Memory cost at inference: the full embedding table is always loaded into GPU memory regardless of the actual sequence length, which matters for batch inference. The table fits in ~3 MB for BERT-base (393K × 4 bytes float32), negligible compared to attention and FFN weights. During training, gradients accumulate only for the position rows that appear in the current batch, making the effective gradient update sparse.</p>
+<blockquote>
+<p><strong>Addition vs Concatenation</strong>: Learned positional embeddings are always added to token embeddings, never concatenated. Addition preserves d_model dimension (no parameter increase in subsequent layers) and allows the model to learn any linear combination of token and position information in the first attention projection. Concatenation would require halving both token and position dimensions or increasing all downstream weight matrices — neither is standard practice.</p>
+</blockquote>
+<h2>Extrapolation Failure Beyond Training Length</h2>
+<p>The central weakness of learned positional embeddings is hard extrapolation failure: position index L is simply not in the embedding table if L ≥ max_seq_len. Attempting a forward pass with a sequence longer than the training maximum raises an IndexError or returns garbage (if indices are clamped). Even without an error, empirical results show perplexity spiking sharply at lengths beyond the training maximum — the model never encountered those position vectors during training, so they are meaningless to the attention heads. This is in contrast to sinusoidal PE, which is defined by a closed-form formula at any position.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class TinyTransformerLM(nn.Module):
+    def __init__(self, vocab_size, d_model, max_seq_len):
+        super().__init__()
+        self.token_emb  = nn.Embedding(vocab_size, d_model)
+        self.pos_emb    = nn.Embedding(max_seq_len, d_model)
+        layer = nn.TransformerEncoderLayer(d_model, nhead=4, batch_first=True, dim_feedforward=128)
+        self.encoder    = nn.TransformerEncoder(layer, num_layers=2)
+        self.head       = nn.Linear(d_model, vocab_size)
+        self.max_seq_len = max_seq_len
+
+    def forward(self, x):
+        seq_len = x.shape[1]
+        pos = torch.arange(seq_len, device=x.device)
+        emb = self.token_emb(x) + self.pos_emb(pos)
+        return self.head(self.encoder(emb))
+
+torch.manual_seed(42)
+model = TinyTransformerLM(vocab_size=100, d_model=64, max_seq_len=32)
+model.eval()
+criterion = nn.CrossEntropyLoss()
+for seq_len in [16, 32, 40, 48]:
+    try:
+        x = torch.randint(0, 100, (1, seq_len))
+        logits = model(x)
+        loss   = criterion(logits.view(-1, 100), x.view(-1))
+        print('seq_len=' + str(seq_len) + '  loss=' + str(round(loss.item(), 3)))
+    except Exception as e:
+        print('seq_len=' + str(seq_len) + '  ERROR: ' + type(e).__name__)
+</code></pre>
+<h2>Position Interpolation for Length Extension</h2>
+<p>Position interpolation (Press et al. 2022; Chen et al. 2023 for RoPE) adapts learned embeddings to longer sequences by rescaling position IDs so that new positions map into the trained range. For a model trained with max_seq_len=512 that needs to process 768 tokens, positions [0, 767] are linearly scaled to [0, 511]: pos_id_new = pos_id × (512/768). After rescaling, fractional position IDs are rounded to the nearest integer, giving a mapping into the trained vocabulary of positions. The model is then fine-tuned for a small number of steps on longer sequences using the interpolated IDs. This approach is far cheaper than retraining from scratch and recovers most of the original performance.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def interpolate_positions(seq_len, training_len):
+    # Scale position IDs to fit within [0, training_len)
+    positions = torch.arange(seq_len, dtype=torch.float32)
+    scale = training_len / seq_len
+    return (positions * scale).clamp(0, training_len - 1).long()
+
+class LearnedPEInterpolation(nn.Module):
+    def __init__(self, max_seq_len, d_model):
+        super().__init__()
+        self.pos_emb     = nn.Embedding(max_seq_len, d_model)
+        self.max_seq_len = max_seq_len
+
+    def forward(self, x, use_interpolation=False):
+        seq_len = x.shape[1]
+        if use_interpolation and seq_len &gt; self.max_seq_len:
+            pos_ids = interpolate_positions(seq_len, self.max_seq_len)
+        else:
+            pos_ids = torch.arange(seq_len, device=x.device)
+        return x + self.pos_emb(pos_ids)
+
+model = LearnedPEInterpolation(max_seq_len=512, d_model=64)
+x_normal = torch.randn(1, 256, 64)
+x_long   = torch.randn(1, 768, 64)
+out_normal = model(x_normal)
+out_long   = model(x_long, use_interpolation=True)
+print('Normal seq (256):', out_normal.shape)
+print('Long seq (768) with interpolation:', out_long.shape)
+print('Positions 0-767 are mapped into [0, 512) via linear rescaling.')
+print('Fine-tuning on longer sequences after interpolation improves quality.')
+</code></pre>
+<h2>Learned vs Sinusoidal — Empirical Comparison</h2>
+<p>In practice, learned and sinusoidal positional embeddings perform similarly on standard NLP benchmarks. The original BERT paper (Devlin et al. 2018) found no significant difference between the two on GLUE tasks. GPT-2 used learned embeddings without ablating sinusoidal. Key structural differences: sinusoidal embeddings encode order by mathematical construction — nearby positions have similar vectors and the pattern is deterministic — while learned embeddings start random and must acquire this structure during training. Order sensitivity measures how well a PE scheme distinguishes adjacent positions; sinusoidal achieves this by design while learned embeddings depend on training signal.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import math
+
+def sinusoidal_pe(seq_len, d_model):
+    pe  = torch.zeros(seq_len, d_model)
+    pos = torch.arange(seq_len).unsqueeze(1).float()
+    div = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+    pe[:, 0::2] = torch.sin(pos * div)
+    pe[:, 1::2] = torch.cos(pos * div)
+    return pe
+
+def order_sensitivity(pe_matrix):
+    # Mean cosine distance between consecutive position embeddings
+    pe = pe_matrix / (pe_matrix.norm(dim=-1, keepdim=True) + 1e-8)
+    return (1 - (pe[:-1] * pe[1:]).sum(dim=-1)).mean().item()
+
+seq_len, d_model = 64, 128
+sin_pe    = sinusoidal_pe(seq_len, d_model)
+sin_score = order_sensitivity(sin_pe)
+learned   = nn.Embedding(seq_len, d_model)
+nn.init.normal_(learned.weight, std=0.02)
+learned_pe    = learned.weight.detach()
+learned_score = order_sensitivity(learned_pe)
+print('Sinusoidal  order-sensitivity:', round(sin_score, 4))
+print('Learned (random init):', round(learned_score, 4))
+print('Sinusoidal encodes order by design; learned must train to achieve it.')
+norm_sin = sin_pe / sin_pe.norm(dim=-1, keepdim=True)
+for d in [1, 4, 16, 32]:
+    cos_sim = (norm_sin[0] * norm_sin[d]).sum().item()
+    print('cos(pos0, pos' + str(d) + ')=' + str(round(cos_sim, 4)))
+print('Similarity decays with distance in sinusoidal PE -&gt; encodes order.')
+</code></pre>
+<h2>When to Use RoPE and ALiBi Instead</h2>
+<p>For applications requiring sequences significantly longer than the training length, or where the model must handle variable-length inputs efficiently, RoPE (Rotary Position Embeddings) and ALiBi (Attention with Linear Biases) outperform both learned and sinusoidal PE. RoPE encodes relative position directly in the attention score via rotation, is parameter-free, and supports length extension via YaRN. ALiBi adds a per-head linear bias proportional to token distance, also parameter-free and strong on length generalisation. Modern LLMs (LLaMA 1/2/3, Mistral, Falcon, Qwen) have almost universally adopted RoPE over learned or sinusoidal embeddings.</p>
+<ul>
+<li>Use learned PE when: max sequence length is fixed and well within training budget (BERT, GPT-2 style classification/generation)</li>
+<li>Use sinusoidal PE when: no extra parameters are acceptable and mild extrapolation is needed</li>
+<li>Use RoPE when: training large autoregressive LLMs — encodes relative distance, no params, YaRN extends context</li>
+<li>Use ALiBi when: strong out-of-distribution length generalisation is required with minimal implementation cost</li>
+<li>Avoid learned PE for: long-context tasks (code, legal, scientific) where sequences regularly exceed training length</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Params</th>
+<th>Extrapolation</th>
+<th>Relative Info in Score</th>
+<th>Current LLM Use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Sinusoidal PE</td>
+<td>0</td>
+<td>Weak (periodic formula)</td>
+<td>No</td>
+<td>Rare — original Transformer only</td>
+</tr>
+<tr>
+<td>Learned PE</td>
+<td>max_len × d_model</td>
+<td>None — IndexError</td>
+<td>No</td>
+<td>BERT (512×768=393K), GPT-2 (1024×768)</td>
+</tr>
+<tr>
+<td>RoPE</td>
+<td>0</td>
+<td>Good via YaRN/Linear</td>
+<td>Yes — rotation</td>
+<td>LLaMA 1/2/3, Mistral, Falcon, Qwen</td>
+</tr>
+<tr>
+<td>ALiBi</td>
+<td>h per-head slopes</td>
+<td>Strong</td>
+<td>Yes — additive bias</td>
+<td>MPT, BLOOM, some RWKV variants</td>
+</tr>
+<tr>
+<td>NoPE (no PE)</td>
+<td>0</td>
+<td>Implicit via causal mask</td>
+<td>Implicit only</td>
+<td>Experimental / sparse attention models</td>
+</tr>
+</tbody>
+</table>
+<p>The table above summarises the five main positional encoding strategies. Learned PE remains a solid baseline for short-context models but is rarely chosen for new architectures due to its hard extrapolation ceiling. RoPE has emerged as the dominant choice for decoder-only LLMs precisely because it encodes relative position in the attention score with zero additional parameters and supports context extension via frequency scaling.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

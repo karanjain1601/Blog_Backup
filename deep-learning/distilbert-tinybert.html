@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DistilBERT and TinyBERT — BERT Compression via Distillation | Notes Backup</title>
+  <meta name="description" content="DistilBERT distills BERT-base into a 6-layer model using MLM, cosine, and soft-CE losses. TinyBERT extends this with layer-wise attention and hidden state distillation in two stages. Covers every-other-layer mapping, attention matrix transfer, two-stage distillation, and comparison on GLUE." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>DistilBERT and TinyBERT — BERT Compression via Distillation</h1>
+      <ul class='note-meta'><li><strong>description:</strong> DistilBERT distills BERT-base into a 6-layer model using MLM, cosine, and soft-CE losses. TinyBERT extends this with layer-wise attention and hidden state distillation in two stages. Covers every-other-layer mapping, attention matrix transfer, two-stage distillation, and comparison on GLUE.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>DistilBERT and TinyBERT — BERT Compression via Distillation</h1>
+<p>BERT-base has 110M parameters, 12 layers, and a 768-dimensional hidden state. For many production use cases it is too large: too slow for real-time inference, too expensive to serve at scale, and too memory-intensive for on-device deployment. DistilBERT and TinyBERT compress BERT via knowledge distillation — training a smaller student model to mimic the larger teacher — retaining 96–97% of BERT's GLUE score at 40–60% of its size and latency.</p>
+<h2>DistilBERT — Task-Agnostic Pretraining Distillation</h2>
+<p>DistilBERT (Sanh et al. 2019) distills BERT-base during pretraining, not fine-tuning. The student has 6 layers (half of BERT-base's 12), same hidden dim (768) and head count (12), but no token-type embeddings and no pooler. The teacher is BERT-base trained on the same MLM corpus. Three loss terms are combined: (1) L_MLM — student's masked language model loss on true labels; (2) L_cos — cosine similarity between student and teacher hidden states at the last layer; (3) L_CE — cross-entropy of student outputs against teacher's soft probability distribution with temperature T=4.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+def distilbert_distillation_loss(
+    student_logits: torch.Tensor,    # (B, seq_len, vocab_size)
+    teacher_logits: torch.Tensor,    # (B, seq_len, vocab_size)
+    student_hidden: torch.Tensor,    # (B, seq_len, hidden)
+    teacher_hidden: torch.Tensor,    # (B, seq_len, hidden)
+    true_labels: torch.Tensor,       # (B, seq_len) — -100 for non-masked tokens
+    temperature: float = 4.0,
+    alpha_mlm: float = 0.33,
+    alpha_cos: float = 0.33,
+    alpha_kd: float = 0.34,
+) -&gt; torch.Tensor:
+    &quot;&quot;&quot;Three-component DistilBERT distillation loss.&quot;&quot;&quot;
+    # 1. MLM loss (student vs true labels)
+    mlm_loss = F.cross_entropy(
+        student_logits.view(-1, student_logits.size(-1)),
+        true_labels.view(-1),
+        ignore_index=-100
+    )
+
+    # 2. Cosine similarity loss on hidden states
+    # Cosine distance = 1 - cosine_similarity, minimise this
+    cos_loss = (1 - F.cosine_similarity(student_hidden, teacher_hidden, dim=-1)).mean()
+
+    # 3. Soft cross-entropy (KD) at temperature T
+    T = temperature
+    soft_teacher = F.softmax(teacher_logits / T, dim=-1)
+    log_soft_student = F.log_softmax(student_logits / T, dim=-1)
+    # Only compute on masked positions (where true_labels != -100)
+    mask = (true_labels != -100).unsqueeze(-1).expand_as(soft_teacher)
+    kd_loss = F.kl_div(log_soft_student[mask].view(-1, soft_teacher.size(-1)),
+                        soft_teacher[mask].view(-1, soft_teacher.size(-1)),
+                        reduction='batchmean') * (T ** 2)
+
+    total = alpha_mlm * mlm_loss + alpha_cos * cos_loss + alpha_kd * kd_loss
+    return total, {'mlm': mlm_loss.item(), 'cos': cos_loss.item(), 'kd': kd_loss.item()}
+</code></pre>
+<h2>Every-Other-Layer Mapping</h2>
+<p>DistilBERT initializes student layer i from teacher layer 2i (every other teacher layer). With 6 student layers: student[0] ← teacher[1], student[1] ← teacher[3], ..., student[5] ← teacher[11]. This initialization gives the student a strong starting point and is partially responsible for DistilBERT's efficiency — the pre-training distillation is short because most of the knowledge is already present in the initialized weights.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from transformers import BertModel, BertConfig
+
+def initialize_distilbert_from_bert(teacher_bert: BertModel,
+                                    n_student_layers: int = 6) -&gt; nn.ModuleList:
+    &quot;&quot;&quot;
+    Copy every-other teacher layer into student.
+    Teacher: 12 layers. Student: 6 layers.
+    Mapping: student[i] &lt;- teacher[2*i + 1] (1-indexed teacher layers).
+    &quot;&quot;&quot;
+    teacher_layers = teacher_bert.encoder.layer  # ModuleList of 12 BertLayer
+    student_layers = nn.ModuleList()
+
+    for i in range(n_student_layers):
+        teacher_idx = 2 * i + 1  # 1, 3, 5, 7, 9, 11
+        if teacher_idx &gt;= len(teacher_layers):
+            teacher_idx = len(teacher_layers) - 1
+        # Deep copy the teacher layer's state dict into a new layer
+        import copy
+        student_layer = copy.deepcopy(teacher_layers[teacher_idx])
+        student_layers.append(student_layer)
+        print(f'Student layer {i} &lt;- Teacher layer {teacher_idx}')
+
+    return student_layers
+
+# Demo with a tiny BERT config (avoids downloading full model)
+config = BertConfig(num_hidden_layers=12, hidden_size=128,
+                    num_attention_heads=4, intermediate_size=512)
+tiny_bert = BertModel(config)
+student_layers = initialize_distilbert_from_bert(tiny_bert, n_student_layers=6)
+print(f'\nStudent has {len(student_layers)} layers initialized from every-other teacher layer.')
+</code></pre>
+<h2>TinyBERT — Layer-Wise Attention and Hidden Distillation</h2>
+<p>TinyBERT (Jiao et al. 2020) applies distillation at every layer, not just the final output. The student (4 or 6 layers, 312 or 768 hidden dim) learns from: (1) embedding layer outputs, (2) attention matrices A_s ≈ A_t (MSE between student and teacher attention weight matrices at each head), (3) hidden states H_s · W_h ≈ H_t (MSE after projecting student hidden states to teacher's dimension), and (4) prediction layer outputs. A linear mapping W_h of shape (d_student, d_teacher) is introduced to bridge dimension mismatches.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class TinyBERTLayerLoss(nn.Module):
+    &quot;&quot;&quot;TinyBERT intermediate layer distillation: attention + hidden state.&quot;&quot;&quot;
+
+    def __init__(self, student_dim: int = 312, teacher_dim: int = 768):
+        super().__init__()
+        # Learnable linear mapping from student to teacher dimension
+        self.hidden_mapping = nn.Linear(student_dim, teacher_dim, bias=False)
+
+    def attention_loss(
+        self,
+        student_attn: torch.Tensor,  # (B, H_s, seq, seq)
+        teacher_attn: torch.Tensor,  # (B, H_t, seq, seq)
+    ) -&gt; torch.Tensor:
+        &quot;&quot;&quot;MSE between student and teacher attention matrices (head-averaged).&quot;&quot;&quot;
+        # If student has fewer heads, average teacher heads to match
+        H_s, H_t = student_attn.shape[1], teacher_attn.shape[1]
+        if H_t != H_s:
+            teacher_attn = teacher_attn.view(
+                teacher_attn.shape[0], H_s, H_t // H_s, *teacher_attn.shape[2:]
+            ).mean(dim=2)
+        return F.mse_loss(student_attn, teacher_attn)
+
+    def hidden_loss(
+        self,
+        student_hidden: torch.Tensor,  # (B, seq, d_student)
+        teacher_hidden: torch.Tensor,  # (B, seq, d_teacher)
+    ) -&gt; torch.Tensor:
+        &quot;&quot;&quot;MSE between projected student hidden states and teacher hidden states.&quot;&quot;&quot;
+        projected = self.hidden_mapping(student_hidden)  # (B, seq, d_teacher)
+        return F.mse_loss(projected, teacher_hidden)
+
+    def forward(self, student_attn, teacher_attn, student_hidden, teacher_hidden):
+        attn_l = self.attention_loss(student_attn, teacher_attn)
+        hidden_l = self.hidden_loss(student_hidden, teacher_hidden)
+        return attn_l + hidden_l, {'attn': attn_l.item(), 'hidden': hidden_l.item()}
+
+# Demo
+B, seq, H_s, H_t, d_s, d_t = 2, 32, 4, 12, 312, 768
+loss_fn = TinyBERTLayerLoss(d_s, d_t)
+student_attn = torch.randn(B, H_s, seq, seq).softmax(-1)
+teacher_attn = torch.randn(B, H_t, seq, seq).softmax(-1)
+student_h = torch.randn(B, seq, d_s)
+teacher_h = torch.randn(B, seq, d_t)
+total, parts = loss_fn(student_attn, teacher_attn, student_h, teacher_h)
+print(f'Total layer loss: {total.item():.4f}  attn={parts[&quot;attn&quot;]:.4f}  hidden={parts[&quot;hidden&quot;]:.4f}')
+</code></pre>
+<h2>Two-Stage Distillation</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def two_stage_tinybert_training(student, teacher,
+                                general_loader, task_loader,
+                                criterion_task, layer_loss_fn,
+                                general_epochs=3, task_epochs=10,
+                                lr=5e-5):
+    &quot;&quot;&quot;
+    TinyBERT two-stage training:
+    Stage 1 (General Distillation): train on MLM corpus with layer-wise KD from BERT.
+    Stage 2 (Task-Specific Distillation): fine-tune with task loss + layer KD from fine-tuned teacher.
+    &quot;&quot;&quot;
+    optimizer = torch.optim.AdamW(student.parameters(), lr=lr)
+
+    # Stage 1: General distillation on unlabeled text
+    print('=== Stage 1: General Distillation ===')
+    for epoch in range(general_epochs):
+        total_loss = 0.0
+        for batch in general_loader:
+            optimizer.zero_grad()
+            # Get teacher intermediate representations
+            with torch.no_grad():
+                teacher_outputs = teacher(**batch, output_attentions=True,
+                                          output_hidden_states=True)
+            student_outputs = student(**batch, output_attentions=True,
+                                      output_hidden_states=True)
+            # Layer-wise distillation loss
+            loss = sum(
+                layer_loss_fn(
+                    s_attn, t_attn, s_h, t_h
+                )[0]
+                for s_attn, t_attn, s_h, t_h in zip(
+                    student_outputs.attentions,
+                    teacher_outputs.attentions[1::2],  # every-other teacher layer
+                    student_outputs.hidden_states[1:],
+                    teacher_outputs.hidden_states[2::2],
+                )
+            )
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+        print(f'  Epoch {epoch+1}: avg_loss={total_loss/max(1,len(general_loader)):.4f}')
+
+    print('=== Stage 2: Task-Specific Distillation ===')
+    # Stage 2 omitted for brevity — uses task loss + KD from task-fine-tuned teacher
+    print('Stage 2: fine-tune student on task with layer KD from task-fine-tuned BERT teacher.')
+
+print('Two-stage TinyBERT: general -&gt; task-specific distillation pipeline defined.')
+</code></pre>
+<blockquote>
+<p><strong>Why Two-Stage Distillation Works Better</strong>: In single-stage distillation, the student is distilled directly on the task with a small dataset. The student never sees the breadth of linguistic patterns that BERT learned from billions of tokens. General distillation first gives the student general language understanding from unlabeled text, then task-specific distillation fine-tunes it for the task. This two-stage approach consistently outperforms single-stage on GLUE by 1–2 points.</p>
+</blockquote>
+<h2>Patient Knowledge Distillation</h2>
+<p>Patient KD (Sun et al. 2019) distills from multiple teacher layers simultaneously rather than just the final layer. The student is trained to match the output of teacher layers 3, 6, 9, and 12 (for PKD-skip) or all layers (for PKD-last). This patient approach prevents the student from overfitting to the final teacher layer too early. The loss combines task cross-entropy with MSE on normalized hidden states at each patient layer, providing a denser supervisory signal throughout training.</p>
+<ul>
+<li>DistilBERT: task-agnostic distillation during pretraining; 6 layers; MLM + cosine + soft-CE losses.</li>
+<li>TinyBERT: task-specific + general distillation; 4 or 6 layers; embedding + attention + hidden + prediction losses.</li>
+<li>Patient KD: multi-layer teacher supervision; avoids premature convergence to final layer representation.</li>
+<li>Layer mapping: student[i] ← teacher[2i] for every-other init; TinyBERT learns a linear projection W_h.</li>
+<li>Temperature T=4 in soft cross-entropy: flatter teacher distribution reveals more class relationship information.</li>
+<li>On GLUE MNLI-m: DistilBERT ≈ 82.2, TinyBERT-4 ≈ 82.5, BERT-base ≈ 84.6 — TinyBERT-4 at 14.5M params.</li>
+</ul>
+<h2>BERT Compression Model Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Params</th>
+<th>Layers</th>
+<th>GLUE Score</th>
+<th>Inference Speed vs BERT</th>
+<th>Distillation Type</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>BERT-base</td>
+<td>110M</td>
+<td>12</td>
+<td>79.6</td>
+<td>1× (baseline)</td>
+<td>N/A (teacher)</td>
+</tr>
+<tr>
+<td>DistilBERT</td>
+<td>66M</td>
+<td>6</td>
+<td>77.0 (~97%)</td>
+<td>1.6×</td>
+<td>Task-agnostic pretraining KD</td>
+</tr>
+<tr>
+<td>TinyBERT-4L</td>
+<td>14.5M</td>
+<td>4</td>
+<td>75.5 (~95%)</td>
+<td>2.5×</td>
+<td>General + task-specific, layer-wise</td>
+</tr>
+<tr>
+<td>TinyBERT-6L</td>
+<td>67M</td>
+<td>6</td>
+<td>79.4 (~99%)</td>
+<td>1.8×</td>
+<td>General + task-specific, layer-wise</td>
+</tr>
+<tr>
+<td>ALBERT-base</td>
+<td>12M</td>
+<td>12 (shared)</td>
+<td>76.1 (~96%)</td>
+<td>~1× (param sharing, not faster)</td>
+<td>None (weight sharing only)</td>
+</tr>
+</tbody>
+</table>
+<h2>Task-Specific Distillation Fine-Tuning Details</h2>
+<p>In TinyBERT's task-specific stage, the teacher is a fine-tuned BERT (not the original pre-trained BERT). Data augmentation is applied: the training set is expanded with word substitutions using a language model, tripling the number of training examples. This augmented data is fed to both teacher and student, and the student matches the teacher's intermediate representations across all layers simultaneously. The combined augmentation + layer-wise KD is what gives TinyBERT-4L such high GLUE scores at only 14.5M parameters.</p>
+<p>DistilBERT's simplicity is its main advantage: no layer-mapping matrix, no attention transfer, no data augmentation — just three pretraining losses applied over the same MLM dataset as BERT. This makes DistilBERT straightforward to reproduce and extend to domain-specific corpora (e.g., distilling BioBERT into a smaller biomedical model). The main limitation is that task-agnostic distillation is less effective than task-specific: DistilBERT fine-tuned on GLUE consistently lags TinyBERT-6L by 2–3 points despite having similar size.</p>
+<ul>
+<li>Temperature T=4 in soft CE: teacher distribution at T=4 reveals ranking information between non-target classes.</li>
+<li>Cosine loss in DistilBERT: ensures student hidden space is aligned with teacher, preventing representation collapse.</li>
+<li>TinyBERT layer mapping matrix W_h: initialized to random orthogonal matrix for stable early-training gradient flow.</li>
+<li>Data augmentation for task-specific stage: masked LM word replacement using BERT-base as augmentation model.</li>
+<li>Gradient conflicts: layer-wise losses at different layers may conflict — weight them inversely by layer index.</li>
+<li>Tiny student, large teacher gap: &gt;4× size difference causes attention mismatch — use intermediate teacher for very small students.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Score Matching and Score-Based Generative Models | Notes Backup</title>
+  <meta name="description" content="Derive the score function and score matching objectives, implement denoising score matching from scratch, build a noise-conditional score network (NCSN), run annealed Langevin dynamics, and understand the mathematical equivalence between DDPM epsilon-prediction and score estimation." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Score Matching and Score-Based Generative Models</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Derive the score function and score matching objectives, implement denoising score matching from scratch, build a noise-conditional score network (NCSN), run annealed Langevin dynamics, and understand the mathematical equivalence between DDPM epsilon-prediction and score estimation.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Score Matching and Score-Based Generative Models</h1>
+<p>Score-based generative models train a neural network to estimate the gradient of the log data density — the score function s(x) = ∇_x log p(x). This single principle unifies denoising score matching, noise-conditional score networks (NCSN), and DDPMs. Rather than approximating p(x) directly (which requires a tractable normalizing constant Z), score models approximate ∇_x log p(x), which cancels Z. A learned score field then drives iterative sampling via Langevin dynamics or reverse-time SDEs, enabling generation without likelihood evaluation.</p>
+<h2>The Score Function</h2>
+<p>For a distribution p(x) = p̃(x)/Z, the score is s(x) = ∇_x log p(x) = ∇_x log p̃(x) — Z cancels in the gradient. The score is a vector field pointing toward higher-density regions. For a Gaussian p(x) = N(μ, σ²I) the score is (μ − x)/σ², a linear restoring force toward the mean. A neural score network s_θ(x) approximates this field across the entire data distribution, enabling gradient ascent on log p without ever computing the partition function.</p>
+<h2>Explicit Score Matching (Hyvärinen 2005)</h2>
+<p>Hyvärinen (2005) showed the squared-error objective E[‖s_θ(x) − ∇_x log p(x)‖²] equals E[tr(∇_x s_θ(x)) + ½‖s_θ(x)‖²] via integration by parts — no p(x) needed. The trace term tr(∇_x s_θ(x)) requires O(d) backward passes for d-dimensional inputs. At image resolution 64×64 (d=12288), this is computationally intractable. Sliced score matching (Song et al. 2020) reduces cost via random projections, but denoising score matching (DSM) provides a cleaner solution with a closed-form target.</p>
+<h2>Denoising Score Matching (Vincent 2011)</h2>
+<p>Vincent (2011) proved that training on corrupted inputs is equivalent to score matching. Given x̃ = x + σε with ε ~ N(0,I), the conditional score is ∇_{x̃} log p(x̃|x) = (x − x̃)/σ² — computable without Jacobian traces. The DSM loss L = E[‖s_θ(x̃) − (x−x̃)/σ²‖²] trains the score network to predict the direction from any noisy point back toward clean data. This is precisely what DDPMs do: predicting noise ε_θ ≈ ε is equivalent to estimating the score s_θ(x̃) ≈ −ε/σ, just scaled differently.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class ScoreNet(nn.Module):
+    def __init__(self, data_dim=2, hidden=128):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(data_dim, hidden), nn.SiLU(),
+            nn.Linear(hidden, hidden), nn.SiLU(),
+            nn.Linear(hidden, data_dim)
+        )
+    def forward(self, x):
+        return self.net(x)
+
+def dsm_loss(score_net, x, sigma=0.5):
+    &quot;&quot;&quot;DSM: s_theta(x_tilde) approx (x - x_tilde) / sigma^2.&quot;&quot;&quot;
+    noise = torch.randn_like(x) * sigma
+    x_tilde = x + noise
+    target = (x - x_tilde) / (sigma ** 2)
+    return F.mse_loss(score_net(x_tilde), target)
+
+torch.manual_seed(42)
+net = ScoreNet()
+opt = torch.optim.Adam(net.parameters(), lr=1e-3)
+data = torch.cat([torch.randn(512, 2) + 2.0, torch.randn(512, 2) - 2.0])
+for step in range(300):
+    x = data[torch.randint(len(data), (64,))]
+    loss = dsm_loss(net, x, sigma=0.4)
+    opt.zero_grad(); loss.backward(); opt.step()
+    if step % 100 == 0:
+        print(f'Step {step}: DSM loss = {loss.item():.4f}')
+</code></pre>
+<h2>Noise Conditional Score Networks (NCSN)</h2>
+<p>Song &amp; Ermon (2019) extended DSM to multiple noise levels. NCSN trains s_θ(x, σ) over a geometric sequence σ_1 &gt; ... &gt; σ_L (e.g. σ_1=1.0 to σ_L=0.01, L=10). The weighted loss Σ_l σ_l² · E[‖s_θ(x̃,σ_l) − (x−x̃)/σ_l²‖²] balances scale contributions — the σ_l² weight makes each term dimensionally uniform. Large σ guides from broad noise; small σ refines fine structure. Multi-scale training also solves the score estimation problem in low-density regions, where single-σ methods produce noisy, unreliable estimates.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+class NCSNScoreNet(nn.Module):
+    def __init__(self, data_dim=2, hidden=128, n_sigmas=10):
+        super().__init__()
+        self.sigma_embed = nn.Embedding(n_sigmas, 16)
+        self.net = nn.Sequential(
+            nn.Linear(data_dim + 16, hidden), nn.SiLU(),
+            nn.Linear(hidden, hidden), nn.SiLU(),
+            nn.Linear(hidden, data_dim)
+        )
+    def forward(self, x, sigma_idx):
+        emb = self.sigma_embed(sigma_idx)
+        return self.net(torch.cat([x, emb], dim=-1))
+
+def ncsn_loss(net, x, sigmas):
+    B = x.size(0)
+    idx = torch.randint(0, len(sigmas), (B,))
+    sig = sigmas[idx].unsqueeze(1)
+    x_tilde = x + torch.randn_like(x) * sig
+    target = (x - x_tilde) / (sig ** 2)
+    pred = net(x_tilde, idx)
+    return ((sig ** 2) * (pred - target).pow(2)).mean()
+
+torch.manual_seed(0)
+sigmas = torch.tensor(np.geomspace(1.0, 0.01, 10), dtype=torch.float32)
+ncsnnet = NCSNScoreNet()
+opt = torch.optim.Adam(ncsnnet.parameters(), lr=3e-4)
+data = torch.cat([torch.randn(500,2)*0.3+2.0, torch.randn(500,2)*0.3-2.0])
+for step in range(400):
+    x = data[torch.randint(len(data), (128,))]
+    loss = ncsn_loss(ncsnnet, x, sigmas)
+    opt.zero_grad(); loss.backward(); opt.step()
+    if step % 100 == 0:
+        print(f'Step {step}: NCSN loss = {loss.item():.5f}')
+</code></pre>
+<h2>Langevin Dynamics Sampling</h2>
+<p>Annealed Langevin dynamics samples from p_data(x) using the score. Starting from x_0 ~ N(0, σ_1²I), for each level l run K steps: x_{k+1} = x_k + (α_l/2)·s_θ(x_k,σ_l) + √α_l·ε_k where α_l = ε·(σ_l/σ_L)² keeps signal-to-noise constant across levels. Under correct score estimation, the stationary distribution at each level is p_{σ_l}(x) — a smoothed version of p_data. As σ_l → 0 across L levels, the chain converges to samples from p_data(x). Typical settings: L=10 noise levels, K=100 Langevin steps per level, ε=2×10⁻⁵.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+
+@torch.no_grad()
+def annealed_langevin(score_net, sigmas, n_samples=64,
+                      data_dim=2, K=50, step_lr=2e-5):
+    &quot;&quot;&quot;Annealed Langevin: large sigma -&gt; small sigma, K steps each.&quot;&quot;&quot;
+    x = torch.randn(n_samples, data_dim) * float(sigmas[0])
+    for l, sigma in enumerate(sigmas):
+        sigma_idx = torch.full((n_samples,), l, dtype=torch.long)
+        alpha = step_lr * (float(sigma) / float(sigmas[-1])) ** 2
+        for _ in range(K):
+            score = score_net(x, sigma_idx)
+            x = x + (alpha / 2) * score + (alpha ** 0.5) * torch.randn_like(x)
+    return x
+
+torch.manual_seed(7)
+samples = annealed_langevin(ncsnnet, sigmas, n_samples=200, K=80)
+near_pos = (samples[:, 0] &gt; 1.0).float().mean().item()
+near_neg = (samples[:, 0] &lt; -1.0).float().mean().item()
+print(f'Mode coverage: +2 region={near_pos:.1%}, -2 region={near_neg:.1%}')
+print(f'Sample mean x: {samples[:,0].mean():.3f}  (expected ~0, bimodal)')
+print(f'Sample std  x: {samples[:,0].std():.3f}   (expected ~2, two modes at +-2)')
+</code></pre>
+<h2>Connection to DDPM — epsilon-Prediction as Score Estimation</h2>
+<p>In DDPM, x_t = √ᾱ_t·x_0 + √(1−ᾱ_t)·ε with ε ~ N(0,I). The score of the marginal p_t(x_t) is ∇_{x_t} log p_t(x_t) = −ε/√(1−ᾱ_t). A network that predicts ε from x_t therefore implicitly estimates the score: s_θ(x_t,t) = −ε_θ(x_t,t)/√(1−ᾱ_t). The DDPM simple loss ‖ε_θ(x_t,t) − ε‖² is a DSM objective with the σ²-weighting absorbed into the noise schedule. Every trained DDPM is simultaneously a score network — no architectural change required to apply score-based samplers.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+
+def make_alpha_bar(T=1000, beta_start=1e-4, beta_end=0.02):
+    betas = torch.linspace(beta_start, beta_end, T)
+    return torch.cumprod(1.0 - betas, dim=0)
+
+def eps_to_score(eps_pred, t, alpha_bar):
+    &quot;&quot;&quot;s_theta(x_t, t) = -eps_theta(x_t, t) / sqrt(1 - alpha_bar[t])&quot;&quot;&quot;
+    abt = alpha_bar[t].view(-1, 1)
+    return -eps_pred / torch.sqrt(1.0 - abt)
+
+def score_to_eps(score, t, alpha_bar):
+    abt = alpha_bar[t].view(-1, 1)
+    return -score * torch.sqrt(1.0 - abt)
+
+torch.manual_seed(0)
+alpha_bar = make_alpha_bar(T=1000)
+B, D = 8, 16
+t = torch.randint(0, 1000, (B,))
+eps = torch.randn(B, D)
+score = eps_to_score(eps, t, alpha_bar)
+eps_rt = score_to_eps(score, t, alpha_bar)
+print(f'Round-trip error: {(eps - eps_rt).abs().max():.2e}  (should be ~0)')
+print('Score magnitude at different noise levels:')
+for t_val in [999, 750, 500, 250, 50]:
+    tt = torch.full((1,), t_val)
+    mag = eps_to_score(torch.ones(1, D), tt, alpha_bar).norm().item()
+    print(f'  t={t_val:4d}: score_norm = {mag:.4f}')
+</code></pre>
+<h2>SDE Formulation — Unifying All Diffusion Models</h2>
+<p>Song et al. (2021) showed every diffusion process is a special case of a forward SDE: dx = f(x,t)dt + g(t)dW. The reverse SDE is dx = [f(x,t) − g(t)²s_θ(x,t)]dt + g(t)dW̄. DDPM uses VP-SDE (variance-preserving, linear β schedule); NCSN uses VE-SDE (variance-exploding, geometric σ sequence). Setting the diffusion term to zero gives the probability flow ODE — a deterministic sampler equivalent to DDIM. Any numerical ODE/SDE solver can be plugged in once s_θ is learned, enabling flexible speed-quality tradeoffs without retraining.</p>
+<h2>Score Matching Methods Compared</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Estimand</th>
+<th>Loss form</th>
+<th>Noise schedule</th>
+<th>Sampling</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Explicit SM (Hyvärinen 2005)</td>
+<td>∇_x log p(x)</td>
+<td>tr(∇s_θ) + ½‖s_θ‖²  — no p(x) required</td>
+<td>None (clean data)</td>
+<td>Langevin dynamics</td>
+</tr>
+<tr>
+<td>DSM (Vincent 2011)</td>
+<td>(x−x̃)/σ²  — conditional score</td>
+<td>‖s_θ(x̃) − (x−x̃)/σ²‖²  — Jacobian-free</td>
+<td>Single fixed σ</td>
+<td>Langevin dynamics</td>
+</tr>
+<tr>
+<td>NCSN (Song &amp; Ermon 2019)</td>
+<td>s_θ(x,σ_l) across L levels</td>
+<td>Weighted DSM: Σ_l σ_l²‖s_θ(x̃,l)−target‖²</td>
+<td>Geometric σ_1&gt;…&gt;σ_L</td>
+<td>Annealed Langevin (K steps/level)</td>
+</tr>
+<tr>
+<td>DDPM (Ho et al. 2020)</td>
+<td>ε_θ(x_t,t) ≡ −score·√(1−ᾱ_t)</td>
+<td>Simple: ‖ε_θ(x_t,t)−ε‖²</td>
+<td>Linear β schedule, T=1000</td>
+<td>Ancestral sampling (T reverse steps)</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Score Estimation is the Core of All Diffusion Models</strong>: Every modern generative diffusion system — DDPM, latent diffusion, EDM, consistency models — learns a score network under the hood. Architectures differ (UNet, DiT, ViT) but the training signal is always denoising, which is DSM. Mastering score matching gives you a unified lens for understanding and improving any diffusion-based generator.</p>
+</blockquote>
+<ul>
+<li>Score = ∇_x log p(x): the normalizing constant Z cancels — score is computable without knowing Z.</li>
+<li>Explicit SM requires a Jacobian trace (O(d) passes); DSM replaces it with the closed-form target (x−x̃)/σ².</li>
+<li>NCSN trains at L noise levels; annealed Langevin sweeps coarse-to-fine, solving low-density estimation.</li>
+<li>DDPM epsilon-prediction is score estimation in disguise: s_θ = −ε_θ / √(1−ᾱ_t).</li>
+<li>SDE framework unifies all methods: VP-SDE (DDPM), VE-SDE (NCSN), probability flow ODE (DDIM).</li>
+<li>Sliced score matching and denoising diffusion probabilistic models converge to the same objective.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

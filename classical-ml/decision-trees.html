@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Decision Trees — Information Gain, Gini, and Pruning | Notes Backup</title>
+  <meta name="description" content="Deep dive into CART, ID3, and C4.5 algorithms: greedy recursive splitting on information gain and Gini impurity, why trees overfit, and how cost-complexity pruning with ccp_alpha controls model complexity." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Decision Trees — Information Gain, Gini, and Pruning</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Deep dive into CART, ID3, and C4.5 algorithms: greedy recursive splitting on information gain and Gini impurity, why trees overfit, and how cost-complexity pruning with ccp_alpha controls model complexity.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Decision Trees — Information Gain, Gini, and Pruning</h1>
+<h2>What Are Decision Trees?</h2>
+<p>A decision tree partitions feature space into axis-aligned rectangular regions through greedy recursive binary splits. Each internal node tests a single feature against a threshold; each leaf predicts a class label or real value. Trees are intrinsically interpretable — every prediction is a traceable chain of if-then rules — yet they also underpin powerful ensembles like Random Forests and Gradient Boosting.</p>
+<h2>Splitting Criteria — Information Gain and Gini Impurity</h2>
+<p>At each node the algorithm tries every feature-threshold pair and picks the one maximising purity gain. Information Gain: IG = H(parent) − Σ(nₖ/n) H(childₖ) where H(p) = −Σ pᵢ log₂(pᵢ) is Shannon entropy. Gini impurity avoids the log: Gini = 1 − Σ pₖ², ranging from 0 (pure) to (1−1/K) for K equal classes. For regression CART uses MSE impurity: (1/n) Σ(yᵢ − ȳ)², so the best split minimises weighted child MSE. Gini and entropy produce nearly identical splits in practice; Gini is slightly faster.</p>
+<pre><code class="language-python">import numpy as np
+from collections import Counter
+from sklearn.datasets import load_iris
+from sklearn.model_selection import train_test_split
+
+def gini(y):
+    n = len(y)
+    counts = Counter(y)
+    return 1.0 - sum((c / n) ** 2 for c in counts.values())
+
+def best_split(X, y):
+    best_gain, best_feat, best_thresh = -1, None, None
+    parent_g = gini(y)
+    n = len(y)
+    for feat in range(X.shape[1]):
+        for thresh in np.unique(X[:, feat]):
+            left = X[:, feat] &lt;= thresh
+            if left.sum() == 0 or (~left).sum() == 0:
+                continue
+            gain = parent_g - (
+                left.sum() / n * gini(y[left]) +
+                (~left).sum() / n * gini(y[~left]))
+            if gain &gt; best_gain:
+                best_gain, best_feat, best_thresh = gain, feat, thresh
+    return best_feat, best_thresh, best_gain
+
+def build_tree(X, y, max_depth=5, depth=0):
+    if depth &gt;= max_depth or len(set(y)) == 1 or len(y) &lt; 2:
+        return Counter(y).most_common(1)[0][0]
+    feat, thresh, gain = best_split(X, y)
+    if feat is None or gain &lt;= 0:
+        return Counter(y).most_common(1)[0][0]
+    mask = X[:, feat] &lt;= thresh
+    return {'feat': feat, 'thresh': thresh,
+            'left':  build_tree(X[mask],  y[mask],  max_depth, depth + 1),
+            'right': build_tree(X[~mask], y[~mask], max_depth, depth + 1)}
+
+X, y = load_iris(return_X_y=True)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
+tree = build_tree(X_tr, y_tr, max_depth=4)
+print('Root split — feature:', tree['feat'], 'threshold:', round(tree['thresh'], 2))
+</code></pre>
+<h2>Algorithm Comparison — ID3, C4.5, and CART</h2>
+<p>Three generations of decision tree algorithms differ in impurity measure, split type, and pruning support. ID3 (Quinlan 1986) uses information gain with multi-way categorical splits and no pruning. C4.5 improves with gain ratio (corrects high-cardinality bias), continuous feature binning, missing-value handling, and error-based post-pruning. CART (Breiman et al. 1984) enforces binary splits, supports both Gini/MSE, and implements cost-complexity pruning — this is what sklearn implements.</p>
+<table>
+<thead>
+<tr>
+<th>Algorithm</th>
+<th>Impurity Measure</th>
+<th>Split Type</th>
+<th>Multi-way Splits</th>
+<th>Pruning</th>
+<th>Regression</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ID3</td>
+<td>Information Gain (entropy)</td>
+<td>Categorical only</td>
+<td>Yes</td>
+<td>None</td>
+<td>No</td>
+</tr>
+<tr>
+<td>C4.5</td>
+<td>Gain Ratio (entropy)</td>
+<td>Categorical + continuous</td>
+<td>Yes</td>
+<td>Error-based post-pruning</td>
+<td>No</td>
+</tr>
+<tr>
+<td>CART</td>
+<td>Gini (class) / MSE (reg)</td>
+<td>Binary only</td>
+<td>No</td>
+<td>Cost-complexity (ccp_alpha)</td>
+<td>Yes</td>
+</tr>
+</tbody>
+</table>
+<h2>sklearn DecisionTreeClassifier with Visualization</h2>
+<p>sklearn's DecisionTreeClassifier implements CART. max_depth is the most direct complexity control. min_samples_leaf prevents splits that produce tiny leaves, providing implicit regularisation. plot_tree renders the learned tree with class distributions and thresholds at each node.</p>
+<pre><code class="language-python">from sklearn.tree import DecisionTreeClassifier, plot_tree
+from sklearn.datasets import load_iris
+from sklearn.model_selection import train_test_split
+import matplotlib.pyplot as plt
+
+data = load_iris()
+X, y = data.data, data.target
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
+
+clf = DecisionTreeClassifier(
+    criterion='gini',
+    max_depth=4,
+    min_samples_split=10,
+    min_samples_leaf=5,
+    random_state=42
+)
+clf.fit(X_tr, y_tr)
+print(f'Train: {clf.score(X_tr, y_tr):.4f}  Test: {clf.score(X_te, y_te):.4f}')
+print(f'Depth: {clf.get_depth()}  Leaves: {clf.get_n_leaves()}')
+
+fig, ax = plt.subplots(figsize=(14, 7))
+plot_tree(clf, feature_names=data.feature_names,
+          class_names=data.target_names, filled=True, rounded=True, ax=ax)
+plt.tight_layout()
+plt.savefig('decision_tree.png', dpi=150)
+plt.show()
+</code></pre>
+<h2>Stopping Criteria and Why Trees Overfit</h2>
+<p>An unconstrained decision tree grows until every leaf is pure — achieving 0 training error but catastrophic generalisation. This is because trees have unlimited representational capacity; a depth-k binary tree can represent 2^k distinct leaf predictions. Depth directly controls the bias-variance trade-off: shallow trees have high bias and low variance; deep trees have near-zero bias but extreme variance. Each additional level doubles the number of leaf nodes.</p>
+<blockquote>
+<p><strong>Default max_depth=None Causes Overfitting</strong>: sklearn's DecisionTreeClassifier defaults to max_depth=None, growing until all leaves are pure or smaller than min_samples_split. On any non-trivial dataset this memorises the training data. Always set max_depth, use ccp_alpha, or wrap the tree in an ensemble.</p>
+</blockquote>
+<ul>
+<li>max_depth: hard ceiling on depth — most direct regularisation lever</li>
+<li>min_samples_split: require at least N samples to attempt a split (default 2)</li>
+<li>min_samples_leaf: require at least N samples in each resulting leaf</li>
+<li>min_impurity_decrease: split only if impurity reduction exceeds this delta</li>
+<li>max_leaf_nodes: best-first growth limited to k leaves (alternative to max_depth)</li>
+<li>max_features: limit features evaluated per split (used inside Random Forests)</li>
+</ul>
+<h2>Cost-Complexity Pruning</h2>
+<p>Post-pruning via cost-complexity (weakest-link) pruning minimises R_α(T) = R(T) + α|T| where R(T) is node impurity and |T| is the leaf count. As α increases from 0 the weakest subtrees are collapsed until only the root remains. cost_complexity_pruning_path() returns the full (alpha, impurity) sequence — cross-validate to choose the best alpha.</p>
+<pre><code class="language-python">from sklearn.tree import DecisionTreeClassifier
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split
+import matplotlib.pyplot as plt
+import numpy as np
+
+X, y = load_breast_cancer(return_X_y=True)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Compute full pruning path
+path = DecisionTreeClassifier(random_state=42).cost_complexity_pruning_path(X_tr, y_tr)
+alphas = path.ccp_alphas[:-1]   # drop last trivial alpha
+
+train_scores, test_scores = [], []
+for alpha in alphas:
+    dt = DecisionTreeClassifier(ccp_alpha=alpha, random_state=42)
+    dt.fit(X_tr, y_tr)
+    train_scores.append(dt.score(X_tr, y_tr))
+    test_scores.append(dt.score(X_te, y_te))
+
+best = int(np.argmax(test_scores))
+print(f'Best ccp_alpha: {alphas[best]:.6f}  Test acc: {test_scores[best]:.4f}')
+
+plt.figure(figsize=(9, 5))
+plt.plot(alphas, train_scores, marker='o', ms=4, label='Train')
+plt.plot(alphas, test_scores,  marker='o', ms=4, label='Test')
+plt.xlabel('ccp_alpha'); plt.ylabel('Accuracy')
+plt.title('Cost-Complexity Pruning Path'); plt.legend(); plt.grid(True)
+plt.tight_layout(); plt.show()
+</code></pre>
+<h2>Feature Importance from Tree Splits</h2>
+<p>Mean Decrease in Impurity (MDI / Gini importance) sums each feature's impurity reduction across all nodes weighted by the fraction of samples reaching each split. Values normalise to sum to 1. MDI is fast and built into every tree model, but it is biased toward high-cardinality features because they offer more candidate thresholds. Permutation importance and SHAP give unbiased alternatives.</p>
+<pre><code class="language-python">from sklearn.tree import DecisionTreeClassifier
+from sklearn.datasets import load_breast_cancer
+import matplotlib.pyplot as plt
+import numpy as np
+
+data = load_breast_cancer()
+X, y = data.data, data.target
+
+clf = DecisionTreeClassifier(max_depth=6, random_state=42)
+clf.fit(X, y)
+
+importances = clf.feature_importances_
+top_idx = np.argsort(importances)[::-1][:10]
+
+plt.figure(figsize=(10, 5))
+plt.bar(range(10), importances[top_idx], color='steelblue')
+plt.xticks(range(10), [data.feature_names[i] for i in top_idx],
+           rotation=45, ha='right')
+plt.title('Decision Tree Feature Importances (Gini MDI)')
+plt.tight_layout(); plt.show()
+
+for i in top_idx[:5]:
+    print(f'  {data.feature_names[i]:&lt;35s}  importance={importances[i]:.4f}')
+</code></pre>
+<h2>Continuous vs Categorical Splits</h2>
+<p>For continuous features CART evaluates (n−1) midpoints between sorted unique values. For categorical features with K categories there are 2^(K−1)−1 possible binary subsets — exponential cost avoided by: sorting categories by target mean (for regression/binary) and evaluating K−1 ordered splits, or using one-hot encoding. High-cardinality categoricals (many unique values) are expensive and bias MDI importance — always encode or limit cardinality.</p>
+<ul>
+<li>Gini and entropy produce nearly identical splits — choose Gini for speed</li>
+<li>CART uses binary splits; ID3/C4.5 allow multi-way categorical splits</li>
+<li>An unconstrained tree perfectly memorises training data — always regularise</li>
+<li>Cost-complexity pruning is the most principled post-pruning method for CART</li>
+<li>MDI feature importance is fast but biased toward high-cardinality and continuous features</li>
+<li>Depth controls the bias-variance trade-off more directly than any other parameter</li>
+</ul>
+<blockquote>
+<p><strong>Practical Pruning Workflow</strong>: Start with max_depth 3–8. Run cost_complexity_pruning_path() and plot train vs test accuracy across the alpha range. Select the largest alpha where test accuracy is near its peak — gives the simplest tree with good generalisation.</p>
+</blockquote>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

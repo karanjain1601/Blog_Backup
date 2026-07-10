@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MAF and IAF — Autoregressive Normalizing Flows | Notes Backup</title>
+  <meta name="description" content="MAF (Masked Autoregressive Flow) evaluates density in O(1) using MADE but samples in O(d). IAF reverses the trade-off: O(1) sampling, O(d) density. Covers MADE masking, forward/inverse passes, and when to use each (density estimation vs VAE posteriors)." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>MAF and IAF — Autoregressive Normalizing Flows</h1>
+      <ul class='note-meta'><li><strong>description:</strong> MAF (Masked Autoregressive Flow) evaluates density in O(1) using MADE but samples in O(d). IAF reverses the trade-off: O(1) sampling, O(d) density. Covers MADE masking, forward/inverse passes, and when to use each (density estimation vs VAE posteriors).</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>MAF and IAF — Autoregressive Normalizing Flows</h1>
+<p>Autoregressive models factorize p(x) = Π p(x_i | x_{&lt;i}). MAF (Papamakarios et al., 2017) reframes this as a normalizing flow where each conditional is a Gaussian: p(x_i | x_{&lt;i}) = N(μ_i(x_{&lt;i}), σ_i(x_{&lt;i})). The resulting transformation y_i = (x_i - μ_i) / σ_i is an invertible affine map. Because MADE computes all μ_i, σ_i in a single forward pass, density evaluation is O(1). Sampling requires inverting the autoregressive structure sequentially, making it O(d). IAF (Kingma et al., 2016) reverses the parameterization to get fast sampling at the cost of slow density.</p>
+<h2>Autoregressive Models as Normalizing Flows</h2>
+<p>A normalizing flow requires a bijective mapping f: x → z with tractable Jacobian determinant. An autoregressive model where y_i = (x_i - μ_i(x_{&lt;i})) / σ_i(x_{&lt;i}) is exactly this: the Jacobian is lower-triangular (output y_i depends on x_{≤i} but the transformation of x_i depends only on x_{&lt;i}), so its determinant is the product of diagonal elements: det J = Π_i (1/σ_i). The log-determinant is -Σ_i log σ_i. This structure — lower-triangular Jacobian, unit-diagonal or diagonal — is the key that links autoregressive models to normalizing flows and justifies using MADE as the backbone.</p>
+<h2>MADE — Masked Autoencoder for Distribution Estimation</h2>
+<p>MADE (Germain et al., 2015) implements a masked MLP that computes all conditionals p(x_i | x_{&lt;i}) in a single forward pass. Each hidden unit is assigned a degree m ∈ {0, ..., d-1}; connections are masked so that unit j in layer l can only receive input from units in layer l-1 with degree ≤ m_j. The output for x_i uses only hidden units with degree &lt; i, enforcing the autoregressive property. The mask matrices are fixed at initialization; the weights are learned normally.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class MADE(nn.Module):
+    &quot;&quot;&quot;Masked Autoencoder for Distribution Estimation (Germain et al. 2015).
+    Enforces output_i depends only on inputs 0..i-1 via static masks.&quot;&quot;&quot;
+    def __init__(self, d, hidden=128, n_out=2):
+        super().__init__()
+        self.d, self.n_out = d, n_out
+        m_in  = torch.arange(d)
+        m_h   = torch.randint(0, d - 1, (hidden,))
+        m_out = torch.arange(d).repeat(n_out)
+        # mask[i,j]=1 iff hidden unit i can see input j
+        self.mask1 = (m_h.unsqueeze(1) &gt;= m_in.unsqueeze(0)).float()   # (h, d)
+        # mask[i,j]=1 iff output i can see hidden unit j (strict inequality)
+        self.mask2 = (m_out.unsqueeze(1) &gt; m_h.unsqueeze(0)).float()   # (d*n, h)
+        self.fc1 = nn.Linear(d, hidden)
+        self.fc2 = nn.Linear(hidden, d * n_out)
+        self.register_buffer('_m1', self.mask1)
+        self.register_buffer('_m2', self.mask2)
+
+    def forward(self, x):
+        h = F.relu(F.linear(x, self.fc1.weight * self._m1, self.fc1.bias))
+        o = F.linear(h, self.fc2.weight * self._m2, self.fc2.bias)
+        return o.view(x.shape[0], self.d, self.n_out)
+
+d, B = 8, 16
+made = MADE(d, hidden=64)
+x = torch.randn(B, d)
+out = made(x)
+print(f&quot;Output shape: {out.shape}  (batch={B}, d={d}, 2 params per dim)&quot;)
+print(&quot;MADE: all conditionals computed in ONE forward pass -&gt; O(1) density eval&quot;)
+</code></pre>
+<h2>MAF — Forward Pass (Density Evaluation)</h2>
+<p>In MAF the transformation is y_i = (x_i - μ_i(x_{&lt;i})) × exp(-α_i(x_{&lt;i})). MADE computes all (μ_i, α_i) in one pass from x, so the forward transformation (x → y, used for density evaluation) is O(1). The log-determinant is diagonal: log|det J| = -Σ_i α_i(x_{&lt;i}), which comes out of the same MADE pass. Training a stack of MAF layers by maximum likelihood is therefore efficient.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class MAFLayer(nn.Module):
+    &quot;&quot;&quot;Single MAF layer. Forward (density) is O(1); inverse (sample) is O(d).&quot;&quot;&quot;
+    def __init__(self, d, hidden=128):
+        super().__init__()
+        self.made = MADE(d, hidden=hidden, n_out=2)
+
+    def forward(self, x):
+        &quot;&quot;&quot;Density eval: one MADE pass computes all (mu_i, log_sigma_i).&quot;&quot;&quot;
+        params  = self.made(x)              # (B, d, 2)
+        mu      = params[..., 0]
+        log_sig = params[..., 1]
+        y       = (x - mu) * (-log_sig).exp()
+        log_det = -log_sig.sum(dim=-1)     # (B,)
+        return y, log_det
+
+    def log_prob(self, x):
+        y, log_det = self.forward(x)
+        log_pz = -0.5 * (y ** 2 + torch.log(torch.tensor(2 * torch.pi))).sum(-1)
+        return log_pz + log_det
+
+d, B = 8, 32
+layer = MAFLayer(d)
+x = torch.randn(B, d)
+y, ld = layer.forward(x)
+lp   = layer.log_prob(x)
+print(f&quot;x: {x.shape} -&gt; y: {y.shape}&quot;)
+print(f&quot;log_det range: [{ld.min():.2f}, {ld.max():.2f}]&quot;)
+print(f&quot;log_prob range: [{lp.min():.2f}, {lp.max():.2f}]&quot;)
+print(&quot;Forward (density): 1 MADE pass for entire batch -&gt; O(1)&quot;)
+</code></pre>
+<h2>MAF — Inverse Pass (Sampling)</h2>
+<p>To sample from MAF: draw y ~ N(0,I), then invert y_i = (x_i - μ_i) / σ_i to get x_i = y_i × σ_i(x_{&lt;i}) + μ_i(x_{&lt;i}). Computing x_i requires x_{&lt;i}, so the inversion is inherently sequential: compute x_1, then x_2 (using x_1), …, x_d (using x_{1:d-1}). Each step calls MADE once, yielding O(d) evaluations total. This makes MAF impractical as a decoder or posterior in a VAE where sampling speed matters.</p>
+<pre><code class="language-python">import torch
+import time
+
+def maf_inverse(layer, y, d):
+    &quot;&quot;&quot;Invert MAF: x_i = y_i * exp(log_s_i(x_{&lt;i})) + mu_i(x_{&lt;i}).
+    Requires d sequential MADE evaluations.&quot;&quot;&quot;
+    x = torch.zeros_like(y)
+    for i in range(d):
+        params  = layer.made(x)       # full MADE pass, but only output i used
+        mu_i    = params[:, i, 0]
+        log_si  = params[:, i, 1]
+        x[:, i] = y[:, i] * log_si.exp() + mu_i
+    return x
+
+d, B = 8, 16
+layer  = MAFLayer(d)
+x_orig = torch.randn(B, d)
+y, _   = layer.forward(x_orig)
+
+t0 = time.perf_counter()
+x_rec = maf_inverse(layer, y, d)
+ms_sample = (time.perf_counter() - t0) * 1000
+
+t0 = time.perf_counter()
+_, _ = layer.forward(x_orig)
+ms_density = (time.perf_counter() - t0) * 1000
+
+print(f&quot;Reconstruction error: {(x_orig - x_rec).abs().max():.2e}&quot;)
+print(f&quot;Density eval:  {ms_density:.3f} ms  [1 MADE pass]&quot;)
+print(f&quot;Sampling:      {ms_sample:.3f} ms  [{d} MADE passes]&quot;)
+print(f&quot;Slowdown: ~{ms_sample/max(ms_density,0.001):.1f}x  (scales as O(d))&quot;)
+</code></pre>
+<h2>IAF — Inverse Autoregressive Flow</h2>
+<p>IAF (Kingma et al., 2016) reverses the MAF parameterization: the transformation is z_i = μ_i(z_{&lt;i}) + σ_i(z_{&lt;i}) × ε_i where ε ~ N(0,I). Now the forward pass (sampling) is x → z, which is O(1) since all (μ_i, σ_i) are functions of z_{&lt;i} that can be computed via MADE in one pass from z. But density evaluation requires inverting: z_i = (x_i - μ_i(z_{&lt;i})) / σ_i(z_{&lt;i}), which is sequential in z_{&lt;i} — O(d) passes. IAF is therefore ideal as a flexible posterior approximation in VAEs (fast sampling during training), but not for standalone density estimation.</p>
+<blockquote>
+<p><strong>MAF vs IAF Use Cases</strong>: Use MAF when you need fast density evaluation and can tolerate slow sampling: training a generative flow on log-likelihood, or as a prior. Use IAF when you need fast sampling and can tolerate slow density: as a flexible variational posterior q(z|x) in a VAE, where you sample z at every training step but rarely evaluate its exact density. Parallel WaveNet uses IAF as a fast student distilled from an autoregressive WaveNet teacher.</p>
+</blockquote>
+<h2>Density vs Sampling Speed Benchmark</h2>
+<pre><code class="language-python">import torch
+import time
+import numpy as np
+
+def flow_benchmark(d=16, B=256, n_layers=4, n_trials=30):
+    &quot;&quot;&quot;Wall-clock comparison: density eval vs sampling in MAF.&quot;&quot;&quot;
+    dummy = torch.zeros(B, d, 2)
+    timings = {}
+
+    t0 = time.perf_counter()
+    for _ in range(n_trials):
+        x = torch.randn(B, d)
+        for _ in range(n_layers):
+            mu, log_s = dummy[..., 0], dummy[..., 1]
+            x = (x - mu) * (-log_s).exp()
+    timings['density'] = (time.perf_counter() - t0) / n_trials * 1000
+
+    t0 = time.perf_counter()
+    for _ in range(n_trials):
+        z = torch.randn(B, d)
+        for _ in range(n_layers):
+            x_out = torch.zeros_like(z)
+            for i in range(d):
+                x_out[:, i] = z[:, i]   # placeholder sequential step
+            z = x_out
+    timings['sample'] = (time.perf_counter() - t0) / n_trials * 1000
+
+    print(f&quot;Benchmark: d={d}, B={B}, layers={n_layers}&quot;)
+    print(f&quot;  Density eval: {timings['density']:6.2f} ms  (O(1)/layer, parallel over d)&quot;)
+    print(f&quot;  Sampling:     {timings['sample']:6.2f} ms  (O(d)/layer, serial)&quot;)
+    print(f&quot;  Ratio:        {timings['sample']/max(timings['density'],0.001):.1f}x&quot;)
+    print(&quot;  IAF reverses: sampling O(1), density O(d)&quot;)
+    print(&quot;  Use MAF for NF training; IAF for VAE posterior&quot;)
+
+flow_benchmark(d=16)
+</code></pre>
+<h2>Flow Model Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Forward (density)</th>
+<th>Inverse (sample)</th>
+<th>Expressivity</th>
+<th>Parallel train</th>
+<th>Parallel sample</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>NICE</td>
+<td>O(1)</td>
+<td>O(1)</td>
+<td>Low (additive only)</td>
+<td>Yes</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>RealNVP</td>
+<td>O(1)</td>
+<td>O(1)</td>
+<td>Medium (affine coupling)</td>
+<td>Yes</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>MAF</td>
+<td>O(1) via MADE</td>
+<td>O(d) sequential</td>
+<td>High (autoregressive)</td>
+<td>Yes</td>
+<td>No</td>
+</tr>
+<tr>
+<td>IAF</td>
+<td>O(d) sequential</td>
+<td>O(1) via MADE</td>
+<td>High (autoregressive)</td>
+<td>No (density needed)</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Glow</td>
+<td>O(1)</td>
+<td>O(1)</td>
+<td>High (learnable perm)</td>
+<td>Yes</td>
+<td>Yes</td>
+</tr>
+</tbody>
+</table>
+<h2>Neural Spline Flows</h2>
+<p>Neural Spline Flows (Durkan et al., 2019) replace the affine coupling (scale + shift) with a monotone rational-quadratic spline, greatly increasing expressivity without sacrificing invertibility or O(1) log-det. The spline is parameterized by K knot positions and derivatives; the inverse is computed analytically. NSF achieves significantly better bits/dim than affine-based flows on image benchmarks and is now widely used in physics-inspired generative models.</p>
+<ul>
+<li>Affine coupling: y = x * exp(s) + t — linear, limited expressivity in each layer.</li>
+<li>Spline coupling: y = spline(x; W, H, D) — nonlinear monotone, much more expressive.</li>
+<li>Inverse: analytic (solve quadratic for rational-quadratic spline) — no sequential steps.</li>
+<li>Log-det: derivative of spline — still O(1) and numerically stable.</li>
+<li>Trade-off: more compute per layer but fewer layers needed for equivalent quality.</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

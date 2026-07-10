@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mixed Precision Training — FP16, BF16, and GradScaler | Notes Backup</title>
+  <meta name="description" content="Automatic mixed precision training: using FP16/BF16 for forward activations with FP32 master weights, gradient scaling to prevent underflow, and torch.autocast for seamless integration." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Mixed Precision Training — FP16, BF16, and GradScaler</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Automatic mixed precision training: using FP16/BF16 for forward activations with FP32 master weights, gradient scaling to prevent underflow, and torch.autocast for seamless integration.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Mixed Precision Training — FP16, BF16, and GradScaler</h1>
+<p>Mixed precision training runs the forward pass in FP16 or BF16 while maintaining FP32 master weights. This delivers ~2x memory savings on activations and 2–8x compute speedup on tensor cores, with minimal accuracy degradation when combined with gradient scaling. It is now standard practice for training on modern GPUs.</p>
+<ul>
+<li>Memory saving: activations stored in FP16/BF16 use half the bytes — enables larger batch sizes or bigger models</li>
+<li>Compute speedup: NVIDIA tensor cores perform FP16 GEMM at 2–8x the FP32 throughput</li>
+<li>Master weights in FP32: optimizer states and weights stay in FP32 — accuracy preserved</li>
+<li>Gradient scaling (FP16 only): multiply loss before backward, divide after — prevents gradient underflow</li>
+<li>BF16 needs no scaling: same exponent range as FP32 — native on A100/H100/TPU</li>
+</ul>
+<h2>FP32 vs FP16 vs BF16</h2>
+<p>The three floating-point formats differ in exponent range and mantissa precision. These differences determine overflow risk, numerical stability, and which operations must stay in FP32.</p>
+<table>
+<thead>
+<tr>
+<th>Format</th>
+<th>Exponent bits</th>
+<th>Mantissa bits</th>
+<th>Range</th>
+<th>Precision</th>
+<th>Overflow risk</th>
+<th>GPU support</th>
+<th>Recommended use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FP32</td>
+<td>8</td>
+<td>23</td>
+<td>~1.2e-38 to ~3.4e+38</td>
+<td>~7 decimal digits</td>
+<td>Very low</td>
+<td>All GPUs</td>
+<td>Master weights, loss accumulation</td>
+</tr>
+<tr>
+<td>FP16</td>
+<td>5</td>
+<td>10</td>
+<td>~6e-8 to ~65504</td>
+<td>~3 decimal digits</td>
+<td>High (max=65504)</td>
+<td>V100, A100, H100, consumer</td>
+<td>Forward activations with GradScaler</td>
+</tr>
+<tr>
+<td>BF16</td>
+<td>8</td>
+<td>7</td>
+<td>~1.2e-38 to ~3.4e+38</td>
+<td>~2 decimal digits</td>
+<td>Very low (FP32 range)</td>
+<td>A100, H100, TPU, newer Ampere</td>
+<td>Preferred for training — no scaler needed</td>
+</tr>
+</tbody>
+</table>
+<h2>torch.autocast and GradScaler</h2>
+<p>torch.autocast automatically selects the appropriate dtype for each operation within its context — GEMM and convolutions run in FP16 for speed; loss functions and normalization stay in FP32 for stability. GradScaler multiplies the loss by a scale factor before backward() to prevent gradient underflow.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from torch.cuda.amp import autocast, GradScaler
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+model     = nn.Sequential(nn.Linear(512, 256), nn.GELU(), nn.Linear(256, 10)).to(device)
+optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+scaler    = GradScaler()  # manages dynamic loss scaling for FP16
+
+X = torch.randn(128, 512, device=device)
+y = torch.randint(0, 10, (128,), device=device)
+criterion = nn.CrossEntropyLoss()
+
+for step in range(5):
+    optimizer.zero_grad(set_to_none=True)
+
+    # autocast: forward pass in FP16 (or BF16 on Ampere)
+    with autocast(device_type=device, dtype=torch.float16):
+        logits = model(X)
+        loss   = criterion(logits, y)
+
+    # scaler.scale(): multiply loss by scale to prevent gradient underflow
+    scaler.scale(loss).backward()
+
+    # scaler.step(): unscale gradients, check for inf/nan, then optimizer step
+    # (skips step if inf/nan found — protects weights)
+    scaler.step(optimizer)
+
+    # scaler.update(): adjust scale factor for next step
+    scaler.update()
+
+    print(f'Step {step+1}: loss={loss.item():.4f}  scale={scaler.get_scale():.0f}')
+</code></pre>
+<h2>Why GradScaler is Needed for FP16</h2>
+<p>FP16 gradients underflow to zero when their magnitude is below ~6e-8. GradScaler prevents this by scaling up the loss before backward(), keeping gradients in the representable FP16 range, then unscaling before the optimizer update.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+# Demonstrate FP16 underflow without scaling
+x = torch.tensor([1e-5], dtype=torch.float16)
+print(f'FP16 value 1e-5: {x.item()}')  # prints 0.0 — underflow!
+
+x_fp32 = torch.tensor([1e-5], dtype=torch.float32)
+print(f'FP32 value 1e-5: {x_fp32.item()}')  # prints 1e-5 correctly
+
+# GradScaler behavior: scale loss by S, divide gradients by S after backward
+S = 65536.0  # typical initial scale value
+small_grad = torch.tensor([1e-5])  # would underflow in FP16
+scaled_grad = small_grad * S      # now within FP16 range
+print(f'\nScaled grad in FP16: {scaled_grad.to(torch.float16).item()}')
+print(f'Unscaled:            {(scaled_grad.to(torch.float16) / S).item()}')
+
+# BF16 does NOT need GradScaler (same exponent range as FP32)
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+model = nn.Linear(10, 5).to(device)
+with torch.autocast(device_type=device, dtype=torch.bfloat16):
+    out = model(torch.randn(4, 10, device=device))
+print(f'\nBF16 output dtype: {out.dtype}')  # bfloat16
+</code></pre>
+<h2>BF16 vs FP16 Training Stability</h2>
+<p>BF16 is preferred for training on Ampere (A100) and later GPUs because it has the same exponent range as FP32 — no overflow risk — with only reduced mantissa precision. No gradient scaling is needed. FP16 is still used where BF16 hardware support is unavailable.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from torch.cuda.amp import autocast, GradScaler
+import time
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+def train_precision(dtype, use_scaler, n_steps=20):
+    model = nn.Sequential(
+        nn.Linear(1024, 512), nn.GELU(),
+        nn.Linear(512, 256), nn.GELU(),
+        nn.Linear(256, 10)
+    ).to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    scaler    = GradScaler() if use_scaler else None
+    X = torch.randn(256, 1024, device=device)
+    y = torch.randint(0, 10, (256,), device=device)
+    criterion = nn.CrossEntropyLoss()
+    losses = []
+    t0 = time.perf_counter()
+    for _ in range(n_steps):
+        optimizer.zero_grad(set_to_none=True)
+        with autocast(device_type=device, dtype=dtype):
+            loss = criterion(model(X), y)
+        if scaler:
+            scaler.scale(loss).backward(); scaler.step(optimizer); scaler.update()
+        else:
+            loss.backward(); optimizer.step()
+        losses.append(loss.item())
+    elapsed = time.perf_counter() - t0
+    return losses[-1], elapsed
+
+for name, dt, sc in [('FP32', torch.float32, False),
+                      ('FP16+scaler', torch.float16, True),
+                      ('BF16', torch.bfloat16, False)]:
+    final_loss, t = train_precision(dt, sc)
+    print(f'{name:&lt;15}: final_loss={final_loss:.4f}  time={t:.2f}s')
+</code></pre>
+<hr />
+<h2>Memory Profiling with Mixed Precision</h2>
+<p>Mixed precision cuts activation memory roughly in half. The FP32 master weights and optimizer states remain, so the savings depend on the ratio of activation memory to parameter memory — larger batch sizes amplify the benefit.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from torch.cuda.amp import autocast
+
+if not torch.cuda.is_available():
+    print('CUDA not available — skipping memory profiling')
+else:
+    device = 'cuda'
+    model = nn.Sequential(
+        nn.Linear(2048, 1024), nn.GELU(),
+        nn.Linear(1024, 512), nn.GELU(),
+        nn.Linear(512, 10)
+    ).to(device)
+    X = torch.randn(512, 2048, device=device)
+
+    # FP32 baseline
+    torch.cuda.reset_peak_memory_stats()
+    out_fp32 = model(X)
+    fp32_mem = torch.cuda.max_memory_allocated() / 1e6
+    del out_fp32; torch.cuda.empty_cache()
+
+    # FP16 with autocast
+    torch.cuda.reset_peak_memory_stats()
+    with autocast(device_type='cuda', dtype=torch.float16):
+        out_fp16 = model(X)
+    fp16_mem = torch.cuda.max_memory_allocated() / 1e6
+    del out_fp16; torch.cuda.empty_cache()
+
+    print(f'FP32 peak memory: {fp32_mem:.1f} MB')
+    print(f'FP16 peak memory: {fp16_mem:.1f} MB')
+    print(f'Memory reduction: {100*(1-fp16_mem/fp32_mem):.1f}%')
+</code></pre>
+<p>For production training pipelines, mixed precision is nearly always worth enabling. The memory savings allow larger batch sizes or models that would OOM in FP32, and the throughput increase shortens experiment iteration time. The one exception: very small models where the overhead of autocast context switching exceeds the compute savings.</p>
+<blockquote>
+<p><strong>BF16 for A100+ Training</strong>: On Ampere (A100) and later GPUs, use torch.autocast(device_type='cuda', dtype=torch.bfloat16) without a GradScaler. BF16 is numerically safer than FP16 (same exponent range as FP32) and equally fast on A100 tensor cores. FP16 with GradScaler remains necessary on Volta (V100) and older consumer GPUs.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<ul>
+<li>FP16 max value is ~65504 — gradients below ~6e-8 underflow to zero; GradScaler scales loss to keep gradients representable</li>
+<li>BF16 has FP32's exponent range — no overflow or underflow risk; preferred for A100/H100 training without GradScaler</li>
+<li>torch.autocast selects dtype per operation — GEMM/conv in FP16, normalization and loss in FP32 for stability</li>
+<li>GradScaler workflow: scale(loss).backward() → step(optimizer) → update() → automatically adjusts scale factor</li>
+<li>Mixed precision cuts activation memory ~2x and delivers 2–8x compute speedup via tensor core GEMM</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

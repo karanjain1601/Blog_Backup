@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Spectral Clustering — Graph Laplacian and Normalized Cut | Notes Backup</title>
+  <meta name="description" content="Understand spectral clustering from first principles: similarity graph construction, unnormalized and normalized graph Laplacians, spectral embedding via the k smallest eigenvectors, the normalized cut objective, connection to Markov chains, and comparison with k-means on non-convex benchmarks." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Spectral Clustering — Graph Laplacian and Normalized Cut</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Understand spectral clustering from first principles: similarity graph construction, unnormalized and normalized graph Laplacians, spectral embedding via the k smallest eigenvectors, the normalized cut objective, connection to Markov chains, and comparison with k-means on non-convex benchmarks.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Spectral Clustering — Graph Laplacian and Normalized Cut</h1>
+<p>Spectral clustering solves the problem k-means cannot: clustering data with non-convex, non-spherical structure. The core insight is to represent the data as a similarity graph, then cluster in the graph's spectral (Laplacian eigenvector) space rather than the original feature space. In the spectral embedding, non-convex shapes in input space become linearly separable — a simple k-means in the embedding then recovers the true clusters. The method is grounded in graph partitioning theory and connects to random walks on graphs.</p>
+<h2>Similarity Graph Construction</h2>
+<p>Given n points, construct a weighted graph where nodes are points and edge weights encode similarity. Two common choices: (1) ε-neighborhood graph: connect points with dist(xᵢ,xⱼ) ≤ ε, with binary or RBF-weighted edges; (2) k-NN graph: connect each point to its k nearest neighbors, with weights w(xᵢ,xⱼ) = exp(−‖xᵢ−xⱼ‖²/(2σ²)). The RBF (Gaussian) kernel σ controls the neighborhood scale — smaller σ means only very nearby points are connected. The resulting weight matrix W ∈ ℝⁿˣⁿ is symmetric with wᵢⱼ ≥ 0. The degree matrix D is diagonal with Dᵢᵢ = Σⱼ wᵢⱼ.</p>
+<h2>Graph Laplacian</h2>
+<p>The unnormalized graph Laplacian is L = D − W. L is symmetric positive semi-definite: for any vector f, fᵀLf = (1/2) Σᵢⱼ wᵢⱼ(fᵢ−fⱼ)² ≥ 0. The smallest eigenvalue is always 0 (eigenvector = constant 1). The multiplicity of eigenvalue 0 equals the number of connected components — a key theorem linking spectral properties to graph structure. For a connected graph, the second-smallest eigenvalue λ₂ (Fiedler value) measures the graph's algebraic connectivity; its eigenvector (Fiedler vector) reveals the most natural bipartition. The normalized Laplacian L_sym = D^{−1/2}LD^{−1/2} = I − D^{−1/2}WD^{−1/2} is preferred for spectral clustering as it accounts for degree heterogeneity.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.cluster import KMeans
+from sklearn.datasets import make_moons
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import adjusted_rand_score
+
+def spectral_clustering_scratch(X, k, sigma=0.5, n_neighbors=10):
+    &quot;&quot;&quot;Spectral clustering: affinity -&gt; Laplacian -&gt; eigenvectors -&gt; k-means.&quot;&quot;&quot;
+    n = X.shape[0]
+    # Build RBF affinity matrix (full, not kNN for simplicity)
+    dists_sq = ((X[:, None, :] - X[None, :, :]) ** 2).sum(axis=2)
+    W = np.exp(-dists_sq / (2 * sigma ** 2))
+    np.fill_diagonal(W, 0)  # no self-loops
+    # Degree matrix and normalized Laplacian
+    d = W.sum(axis=1)
+    D_inv_sqrt = np.diag(1.0 / np.sqrt(d + 1e-10))
+    L_sym = np.eye(n) - D_inv_sqrt @ W @ D_inv_sqrt
+    # Eigendecomposition — k smallest eigenvectors
+    eigvals, eigvecs = np.linalg.eigh(L_sym)
+    U = eigvecs[:, :k]  # rows = embeddings for each point
+    # Normalize rows to unit norm (standard practice)
+    norms = np.linalg.norm(U, axis=1, keepdims=True)
+    U_norm = U / (norms + 1e-10)
+    # K-Means in spectral space
+    km = KMeans(n_clusters=k, n_init=10, random_state=42)
+    labels = km.fit_predict(U_norm)
+    return labels, eigvals[:k+2]
+
+X, y_true = make_moons(n_samples=300, noise=0.07, random_state=42)
+X = StandardScaler().fit_transform(X)
+labels, eigvals = spectral_clustering_scratch(X, k=2, sigma=0.3)
+print(f&quot;Spectral ARI: {adjusted_rand_score(y_true, labels):.4f}&quot;)
+km_labels = KMeans(n_clusters=2, n_init=10, random_state=42).fit_predict(X)
+print(f&quot;K-Means ARI: {adjusted_rand_score(y_true, km_labels):.4f}&quot;)
+print(f&quot;First 4 eigenvalues: {eigvals[:4].round(6)}&quot;)
+</code></pre>
+<h2>Eigenvalue Analysis and Cluster Structure</h2>
+<p>The number of zero (or near-zero) eigenvalues of L reveals the number of connected components — and by extension, the number of natural clusters. An 'eigengap' heuristic: choose k where there is a large gap between λₖ and λₖ₊₁. The first k eigenvectors U ∈ ℝⁿˣᵏ give a k-dimensional spectral embedding where points from the same well-separated cluster are close together (nearly equal rows) and points from different clusters are far apart. The Fiedler vector u₂ (second eigenvector) bipartitions the graph along its weakest bottleneck — this is the spectral relaxation of the normalized cut problem.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.datasets import make_moons, make_circles
+from sklearn.preprocessing import StandardScaler
+
+def build_laplacian(X, sigma=0.5):
+    dists_sq = ((X[:, None, :] - X[None, :, :]) ** 2).sum(axis=2)
+    W = np.exp(-dists_sq / (2 * sigma ** 2))
+    np.fill_diagonal(W, 0)
+    d = W.sum(axis=1)
+    D_inv_sqrt = np.diag(1.0 / np.sqrt(d + 1e-10))
+    return np.eye(len(X)) - D_inv_sqrt @ W @ D_inv_sqrt, W
+
+for name, (X, y_true) in [('Moons', make_moons(200, noise=0.06, random_state=0)),
+                            ('Circles', make_circles(200, noise=0.04, factor=0.5, random_state=0))]:
+    X = StandardScaler().fit_transform(X)
+    L, W = build_laplacian(X, sigma=0.3)
+    eigvals = np.linalg.eigvalsh(L)
+    eigvals_sorted = np.sort(eigvals)[:8]
+    gaps = np.diff(eigvals_sorted)
+    best_k = np.argmax(gaps) + 1
+    print(f&quot;{name}: first 8 eigenvalues: {eigvals_sorted.round(4)}&quot;)
+    print(f&quot;  Eigengap heuristic suggests k={best_k} (gap={gaps[best_k-1]:.4f})&quot;)
+    print()
+</code></pre>
+<h2>sklearn SpectralClustering — Practical Usage</h2>
+<p>sklearn's SpectralClustering handles the full pipeline: affinity matrix construction (RBF kernel or precomputed), normalized Laplacian computation, eigendecomposition (ARPACK for sparse matrices), and k-means in the spectral embedding. Key parameters: n_clusters (k), affinity ('rbf', 'nearest_neighbors', or 'precomputed'), gamma (=1/2σ² for RBF), and n_neighbors (for k-NN affinity). The 'nearest_neighbors' affinity builds a sparse k-NN graph and is recommended for large n as it avoids the O(n²) dense affinity matrix.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.cluster import SpectralClustering
+from sklearn.datasets import make_moons, make_circles
+from sklearn.metrics import adjusted_rand_score
+from sklearn.preprocessing import StandardScaler
+
+datasets = [
+    ('Moons',   *make_moons(n_samples=300, noise=0.07, random_state=42)),
+    ('Circles', *make_circles(n_samples=300, noise=0.05, factor=0.5, random_state=42)),
+]
+
+for name, X, y_true in datasets:
+    X = StandardScaler().fit_transform(X)
+    # RBF affinity
+    sc_rbf = SpectralClustering(n_clusters=2, affinity='rbf', gamma=10.0,
+                                  n_init=10, random_state=42)
+    labels_rbf = sc_rbf.fit_predict(X)
+    # k-NN affinity (sparse — better for larger n)
+    sc_knn = SpectralClustering(n_clusters=2, affinity='nearest_neighbors',
+                                  n_neighbors=15, n_init=10, random_state=42)
+    labels_knn = sc_knn.fit_predict(X)
+    ari_rbf = adjusted_rand_score(y_true, labels_rbf)
+    ari_knn = adjusted_rand_score(y_true, labels_knn)
+    print(f&quot;{name}:&quot;)
+    print(f&quot;  RBF affinity (gamma=10): ARI={ari_rbf:.4f}&quot;)
+    print(f&quot;  k-NN affinity (k=15):   ARI={ari_knn:.4f}&quot;)
+    print()
+</code></pre>
+<h2>Normalized Cut Objective and Markov Chain Connection</h2>
+<p>Spectral clustering minimizes the Normalized Cut: Ncut(A,B) = cut(A,B)/vol(A) + cut(A,B)/vol(B) where cut(A,B) = Σ_{i∈A,j∈B} wᵢⱼ and vol(A) = Σ_{i∈A} dᵢ. Ncut penalizes cuts that isolate small clusters (low volume), balancing partition sizes. The normalized Laplacian eigenvectors provide the continuous relaxation of this combinatorial problem. The Markov chain connection: D⁻¹W is the transition matrix of a random walk on the graph. The spectral embedding groups points that a random walker visits together — intuitively, clusters are sets of nodes the walk rarely escapes from.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.cluster import SpectralClustering, KMeans
+from sklearn.datasets import make_moons, make_circles, make_blobs
+from sklearn.metrics import adjusted_rand_score
+from sklearn.preprocessing import StandardScaler
+
+datasets = [
+    ('Moons',   *make_moons(n_samples=400, noise=0.07, random_state=42)),
+    ('Circles', *make_circles(n_samples=400, noise=0.05, factor=0.5, random_state=42)),
+    ('Blobs',   *make_blobs(n_samples=400, centers=3, cluster_std=0.8, random_state=42)),
+]
+
+print(f&quot;{'Dataset':10s} {'Spectral ARI':&gt;14} {'KMeans ARI':&gt;12}&quot;)
+for name, X, y_true in datasets:
+    X = StandardScaler().fit_transform(X)
+    k = len(np.unique(y_true))
+    sc = SpectralClustering(n_clusters=k, affinity='rbf', gamma=8.0,
+                             n_init=10, random_state=42)
+    km = KMeans(n_clusters=k, n_init=10, random_state=42)
+    sp_labels = sc.fit_predict(X)
+    km_labels = km.fit_predict(X)
+    ari_sp = adjusted_rand_score(y_true, sp_labels)
+    ari_km = adjusted_rand_score(y_true, km_labels)
+    print(f&quot;{name:10s} {ari_sp:&gt;14.4f} {ari_km:&gt;12.4f}&quot;)
+</code></pre>
+<blockquote>
+<p><strong>Scalability Limitation</strong>: Naive spectral clustering requires an O(n²) dense affinity matrix and O(n³) eigendecomposition, limiting it to n &lt; 5,000–10,000. For larger datasets: (1) use nearest_neighbors affinity in sklearn to build a sparse graph; (2) use Nyström approximation to subsample landmark points; (3) use sklearn's SpectralClustering with eigen_solver='arpack' for the sparse eigenvalue solver. DBSCAN or HDBSCAN are often better choices for very large datasets with non-convex structure.</p>
+</blockquote>
+<h2>Tuning the Affinity — Sigma and k-NN Graph</h2>
+<p>The affinity parameter σ (or equivalently gamma = 1/2σ²) controls what counts as 'nearby.' Too small σ disconnects the graph — each point is isolated and the spectral embedding is degenerate. Too large σ connects everything and eliminates the cluster structure. The k-NN affinity avoids this sensitivity: connecting each point to its k nearest neighbors creates a sparse graph that preserves local topology without requiring σ to be set. For most datasets, k-NN affinity with k=10–30 outperforms RBF affinity and scales better via sparse linear algebra.</p>
+<h2>Clustering Algorithm Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>K-Means</th>
+<th>DBSCAN</th>
+<th>Spectral</th>
+<th>GMM</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Non-convex clusters</td>
+<td>No</td>
+<td>Yes</td>
+<td>Yes</td>
+<td>Partial (elliptical)</td>
+</tr>
+<tr>
+<td>Uses graph structure</td>
+<td>No</td>
+<td>Local density</td>
+<td>Yes — global graph</td>
+<td>No</td>
+</tr>
+<tr>
+<td>Outlier handling</td>
+<td>None</td>
+<td>Explicit noise</td>
+<td>None (all assigned)</td>
+<td>Soft low-density</td>
+</tr>
+<tr>
+<td>Scalable to n&gt;100K</td>
+<td>Yes (mini-batch)</td>
+<td>Yes (spatial index)</td>
+<td>No (O(n³) naive)</td>
+<td>Yes (mini-batch EM)</td>
+</tr>
+<tr>
+<td>k required</td>
+<td>Yes</td>
+<td>No</td>
+<td>Yes</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Main hyperparameter</td>
+<td>k</td>
+<td>ε, minPts</td>
+<td>k, σ (or k-NN)</td>
+<td>k, covariance type</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>Choosing affinity: RBF kernel with gamma tuned via k-distance plot; alternatively nearest_neighbors with k=10–30 for large n.</li>
+<li>Choosing sigma for RBF: set σ to the median pairwise distance or use sigma = kth-NN distance; too small disconnects the graph, too large connects everything.</li>
+<li>Eigengap heuristic for k: compute L_sym eigenvalues and look for a large gap — the natural k corresponds to the gap position.</li>
+<li>k-NN affinity is faster and more interpretable for high-dimensional data; RBF is smoother for low-dimensional data.</li>
+<li>Normalize rows of the embedding U to unit norm before k-means — this is standard practice in normalized spectral clustering.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

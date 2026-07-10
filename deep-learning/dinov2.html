@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DINOv2 — Curated Data and Improved SSL for Universal Features | Notes Backup</title>
+  <meta name="description" content="DINOv2 (Oquab et al. 2023) scales DINO with a carefully curated 142M-image dataset, adds iBOT masked image modeling and SwAV regularization, and produces frozen features that achieve state-of-the-art performance on depth estimation, segmentation, and classification via simple linear probes." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>DINOv2 — Curated Data and Improved SSL for Universal Features</h1>
+      <ul class='note-meta'><li><strong>description:</strong> DINOv2 (Oquab et al. 2023) scales DINO with a carefully curated 142M-image dataset, adds iBOT masked image modeling and SwAV regularization, and produces frozen features that achieve state-of-the-art performance on depth estimation, segmentation, and classification via simple linear probes.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>DINOv2 — Curated Data and Improved SSL for Universal Features</h1>
+<p>DINOv2 (Oquab et al. 2023) asked a simple question: what happens to self-supervised visual features when you fix the data and training recipe rather than just scaling the model? The answer was striking — frozen DINOv2 features outperform supervised ViT-L on depth estimation and match it on segmentation using nothing more than a single linear layer. The key innovations are a curated 142M-image dataset (LVD-142M), the combination of DINO + iBOT + SwAV objectives, and careful stabilisation tricks that allow training ViT-g (1B parameters) to completion.</p>
+<h2>Dataset Curation — LVD-142M</h2>
+<p>Prior self-supervised methods trained on ImageNet-1K (1.28M images) or uncurated internet crawls. DINOv2 proposes a middle path: harvest images from the internet, then aggressively filter for quality and diversity. Starting from 1.2B candidate images, the pipeline applies: (1) deduplication — remove near-duplicates using copy-detection hashing; (2) retrieval-based curation — use ImageNet-22K as seeds, retrieve nearest neighbours from the web pool using a pretrained SSL model, then threshold by similarity; (3) leakage prevention — deduplicate against downstream test sets (ImageNet val, ADE20K, etc.) to ensure fair evaluation. The result is LVD-142M: 142M high-quality, diverse, non-leaking images.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+import numpy as np
+from sklearn.preprocessing import normalize
+
+
+def extract_features_for_dedup(model, dataloader, device='cuda'):
+    &quot;&quot;&quot;Extract L2-normalised embeddings for near-duplicate detection.&quot;&quot;&quot;
+    model.eval()
+    all_feats, all_ids = [], []
+    with torch.no_grad():
+        for imgs, ids in dataloader:
+            feats = model(imgs.to(device))        # (B, D)
+            feats = F.normalize(feats, dim=1)     # unit sphere
+            all_feats.append(feats.cpu().numpy())
+            all_ids.extend(ids)
+    return np.vstack(all_feats), all_ids
+
+
+def near_duplicate_removal(features, ids, threshold=0.95):
+    &quot;&quot;&quot;Remove near-duplicates: cosine-similarity &gt; threshold.
+    Returns list of retained image ids.
+    Strategy: greedy — keep first occurrence, remove later duplicates.
+    &quot;&quot;&quot;
+    features = normalize(features, axis=1)  # ensure unit norm
+    n = len(features)
+    removed = set()
+    retained = []
+    for i in range(n):
+        if i in removed:
+            continue
+        retained.append(ids[i])
+        # Vectorised cosine similarity: feat_i dot all_j
+        sims = features[i] @ features[i+1:].T   # (n-i-1,)
+        dup_offsets = np.where(sims &gt; threshold)[0]
+        for off in dup_offsets:
+            removed.add(i + 1 + off)
+    return retained
+
+
+def quality_filter(scores, ids, min_score=0.5):
+    &quot;&quot;&quot;Keep images whose aesthetic/quality score exceeds threshold.&quot;&quot;&quot;
+    return [id_ for id_, s in zip(ids, scores) if s &gt;= min_score]
+
+
+print('Pipeline: extract -&gt; dedup (cosine &gt; 0.95) -&gt; quality filter -&gt; LVD-142M')
+</code></pre>
+<h2>iBOT — Masked Image Modeling with Online Tokenizer</h2>
+<p>Standard DINO predicts global CLS token representations across augmented views. iBOT (Image BERT pre-training with Online Tokenizer, Zhou et al. 2022) extends this to patch-level tokens. The teacher network generates patch-level token targets dynamically — there is no fixed discrete tokenizer (unlike BEiT, which uses a pretrained dVAE). Masked patches in the student view must match the corresponding teacher patch tokens. DINOv2 adopts iBOT's masking as an additional objective alongside the global DINO loss: L_total = L_DINO + λ·L_iBOT + μ·L_SwAV.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+def ibot_loss(student_patch_tokens, teacher_patch_tokens, mask, temp_s=0.1, temp_t=0.04):
+    &quot;&quot;&quot;iBOT masked image modeling loss.
+    student_patch_tokens: (B, N, D) — student ViT patch outputs
+    teacher_patch_tokens: (B, N, D) — teacher ViT patch outputs (stop-grad)
+    mask: (B, N) bool — True for masked positions to predict
+    &quot;&quot;&quot;
+    # Softmax-based cross-entropy in token probability space
+    # Teacher provides soft targets (sharpened); student predicts from context
+    s = student_patch_tokens[mask]   # (M, D) — masked positions only
+    t = teacher_patch_tokens[mask]   # (M, D)
+
+    # Compute soft targets from teacher (sinkhorn-normalised or simple softmax)
+    t_probs = F.softmax(t / temp_t, dim=-1).detach()   # (M, D) soft targets
+    s_log_probs = F.log_softmax(s / temp_s, dim=-1)    # (M, D)
+
+    loss = -(t_probs * s_log_probs).sum(dim=-1).mean()
+    return loss
+
+
+def random_block_mask(B, N_patches, mask_ratio=0.15, device='cpu'):
+    &quot;&quot;&quot;Sample a random mask for iBOT: mask_ratio fraction of patch tokens.&quot;&quot;&quot;
+    num_mask = int(N_patches * mask_ratio)
+    masks = torch.zeros(B, N_patches, dtype=torch.bool, device=device)
+    for i in range(B):
+        idx = torch.randperm(N_patches, device=device)[:num_mask]
+        masks[i, idx] = True
+    return masks
+
+
+# Demo: random masked patches, random token vectors
+B, N, D = 4, 196, 768   # ViT-B: 14x14=196 patches, dim=768
+student_tok = torch.randn(B, N, D)
+teacher_tok = torch.randn(B, N, D)
+mask = random_block_mask(B, N, mask_ratio=0.15)
+loss = ibot_loss(student_tok, teacher_tok, mask)
+print(f'iBOT loss: {loss.item():.4f}  |  masked patches: {mask.sum().item()}')
+</code></pre>
+<h2>Training Objectives — DINO + iBOT + SwAV Regularizer</h2>
+<p>DINOv2 combines three complementary self-supervised objectives. DINO provides global view consistency: the student's CLS token must match the teacher's CLS token across different augmented views. iBOT provides local patch-level prediction: student patches at masked positions must predict teacher patch tokens. The SwAV regularizer (Caron et al. 2020) uses online clustering to ensure that the feature space remains uniformly spread — preventing feature collapse without relying on the batch contrastive term. The three losses are weighted and summed: L = L_DINO + 0.5·L_iBOT + 0.1·L_SwAV.</p>
+<h2>Training Scale and Infrastructure</h2>
+<p>DINOv2-ViT-g has 1.1 billion parameters and was trained for 500K iterations on LVD-142M using 64 A100 GPUs over approximately 15 days. Stability at this scale required several techniques: stochastic depth (drop path), freezing patch projection for the first few thousand steps, gradient clipping, and Shampoo/AdamW with specific learning rate and weight decay schedules per parameter group (higher weight decay for attention parameters). Flash Attention 2 was used throughout to fit the ViT-g sequence length in memory.</p>
+<ul>
+<li>ViT-S/B/L/g backbones trained — ViT-g (1B) is the flagship model.</li>
+<li>AdamW with β₁=0.9, β₂=0.95, peak LR=0.001, weight decay=0.04 → 0.4 (cosine).</li>
+<li>Stochastic depth rate=0.4 for ViT-g to regularize the deep network.</li>
+<li>EMA momentum schedule: 0.994 → 1.0 (cosine over training) — teacher tracks student.</li>
+<li>64× A100 80GB, ~15 days wall-clock; ViT-L trains in ~3 days on same hardware.</li>
+<li>Flash Attention 2 enables ViT-g at batch size 3072 without gradient checkpointing.</li>
+</ul>
+<h2>Linear Probe Evaluation — Frozen Universal Features</h2>
+<p>The defining claim of DINOv2 is that its features are 'universal' — a single frozen backbone with a task-specific linear layer achieves strong performance across diverse dense prediction tasks. This is evaluated with a frozen linear probe: freeze the backbone entirely, extract CLS or patch features, train a linear layer with a standard optimizer. DINOv2-ViT-L achieves 86.5% ImageNet top-1 linear probe — 4% above MAE-ViT-L and within 1% of supervised ViT-L. On depth estimation and ADE20K segmentation the margin over MAE and CLIP is even larger.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
+
+
+def build_linear_probe(feat_dim: int, num_classes: int = 1000) -&gt; nn.Module:
+    return nn.Sequential(
+        nn.BatchNorm1d(feat_dim, affine=False, eps=1e-6),
+        nn.Linear(feat_dim, num_classes),
+    )
+
+
+def run_linear_probe(backbone, probe, train_loader, val_loader,
+                     epochs=20, lr=0.1, device='cuda'):
+    &quot;&quot;&quot;Freeze backbone; train linear probe only.&quot;&quot;&quot;
+    backbone.eval()
+    for p in backbone.parameters():
+        p.requires_grad_(False)
+
+    optimizer = torch.optim.SGD(probe.parameters(), lr=lr,
+                                momentum=0.9, weight_decay=0.0)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, epochs)
+    criterion = nn.CrossEntropyLoss()
+
+    for epoch in range(epochs):
+        probe.train()
+        for imgs, labels in train_loader:
+            imgs, labels = imgs.to(device), labels.to(device)
+            with torch.no_grad():
+                feats = backbone(imgs)  # (B, feat_dim) — CLS token
+            loss = criterion(probe(feats), labels)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+        scheduler.step()
+
+    # Validation
+    probe.eval()
+    correct = total = 0
+    with torch.no_grad():
+        for imgs, labels in val_loader:
+            imgs, labels = imgs.to(device), labels.to(device)
+            preds = probe(backbone(imgs)).argmax(1)
+            correct += (preds == labels).sum().item()
+            total += labels.size(0)
+    return correct / total
+
+
+print('DINOv2 linear probe: freeze backbone, BatchNorm + Linear head only.')
+print('DINOv2-ViT-L achieves ~86.5% top-1 with this simple protocol.')
+</code></pre>
+<h2>Depth Estimation with Frozen DINOv2 Features</h2>
+<p>Monocular depth estimation is one of the most demanding dense prediction tasks because it requires both local spatial accuracy and global scene understanding. DINOv2 patch features (14×14 spatial grid for a 224×224 image) can be fed directly into a single linear layer trained to predict a dense depth map. This is a remarkable demonstration of feature quality: no task-specific encoder training, no decoder, just a linear map from frozen patch tokens to depth values. DINOv2-ViT-L with this protocol outperforms many specialized depth networks fine-tuned end-to-end.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class DINOv2DepthLinear(nn.Module):
+    &quot;&quot;&quot;Single linear layer depth estimator on frozen DINOv2 patch tokens.&quot;&quot;&quot;
+
+    def __init__(self, backbone, patch_dim: int = 1024, output_h: int = 14,
+                 output_w: int = 14):
+        super().__init__()
+        self.backbone = backbone
+        self.output_h = output_h
+        self.output_w = output_w
+        # Freeze backbone
+        for p in self.backbone.parameters():
+            p.requires_grad_(False)
+        # One linear layer: patch_dim -&gt; 1 depth value per patch
+        self.depth_head = nn.Linear(patch_dim, 1)
+
+    def forward(self, x: torch.Tensor) -&gt; torch.Tensor:
+        &quot;&quot;&quot;x: (B, 3, H, W) -&gt; depth: (B, 1, H_out, W_out).&quot;&quot;&quot;
+        with torch.no_grad():
+            # DINOv2 returns dict with 'x_norm_patchtokens': (B, N_patches, D)
+            out = self.backbone.forward_features(x)
+            patch_tokens = out['x_norm_patchtokens']   # (B, 196, 1024) for ViT-L
+        depth = self.depth_head(patch_tokens)           # (B, 196, 1)
+        B, N, _ = depth.shape
+        depth = depth.view(B, self.output_h, self.output_w, 1)
+        depth = depth.permute(0, 3, 1, 2)               # (B, 1, H, W)
+        # Upsample to input resolution
+        depth = F.interpolate(depth, scale_factor=16,
+                              mode='bilinear', align_corners=False)
+        return depth
+
+
+print('DINOv2 depth probe: single nn.Linear on patch tokens -&gt; bilinear upsample.')
+print('ViT-L patch tokens: (B, 196, 1024) for 224x224 input with 14x14 patches.')
+</code></pre>
+<blockquote>
+<p><strong>Why DINOv2 Beats MAE on Frozen Evaluation</strong>: MAE is optimised to reconstruct pixel values from visible patches — it never sees a discriminative signal. Its features require fine-tuning to reach competitive accuracy. DINOv2 combines DINO (global discriminative) + iBOT (patch discriminative) + SwAV (cluster regularisation), ensuring the frozen representation is both spatially rich and globally semantic. On linear probe, DINOv2-ViT-L exceeds MAE-ViT-L by ~4% on ImageNet and by larger margins on dense tasks.</p>
+</blockquote>
+<h2>DINOv2 vs Prior Methods</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Pretraining Obj.</th>
+<th>Data</th>
+<th>k-NN Top-1</th>
+<th>Depth RMSE (↓)</th>
+<th>Seg. mIoU</th>
+<th>Classification Linear</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MAE ViT-L</td>
+<td>Pixel reconstruction</td>
+<td>ImageNet-1K</td>
+<td>56.5%</td>
+<td>0.339</td>
+<td>45.4</td>
+<td>75.8%</td>
+</tr>
+<tr>
+<td>CLIP ViT-L</td>
+<td>Image-text contrastive</td>
+<td>LAION-2B</td>
+<td>75.3%</td>
+<td>0.312</td>
+<td>48.1</td>
+<td>85.4%</td>
+</tr>
+<tr>
+<td>Supervised ViT-L</td>
+<td>Cross-entropy</td>
+<td>ImageNet-22K</td>
+<td>—</td>
+<td>0.294</td>
+<td>53.2</td>
+<td>87.3%</td>
+</tr>
+<tr>
+<td>DINOv2 ViT-L</td>
+<td>DINO+iBOT+SwAV</td>
+<td>LVD-142M</td>
+<td>81.1%</td>
+<td>0.271</td>
+<td>53.0</td>
+<td>86.5%</td>
+</tr>
+<tr>
+<td>DINOv2 ViT-g</td>
+<td>DINO+iBOT+SwAV</td>
+<td>LVD-142M</td>
+<td>83.5%</td>
+<td>0.258</td>
+<td>54.9</td>
+<td>87.1%</td>
+</tr>
+</tbody>
+</table>
+<p>DINOv2-ViT-g surpasses supervised ViT-L on depth and nearly matches it on segmentation — using only frozen features and a linear head. This represents a qualitative shift: for deployment scenarios where fine-tuning is expensive, DINOv2 provides a plug-and-play feature extractor competitive with supervised pretraining. Its primary limitation is training compute: 64 A100s for 15 days is beyond most research labs, though smaller DINOv2 variants (ViT-S, ViT-B) are practical to distil or fine-tune.</p>
+<ul>
+<li>DINOv2 ViT-S/B/L/g are open-sourced on HuggingFace — use torch.hub.load('facebookresearch/dinov2', 'dinov2_vitl14').</li>
+<li>forward_features() returns both CLS token and patch tokens — use patch tokens for dense tasks.</li>
+<li>DINOv2 features generalize to medical imaging and satellite imagery without any domain-specific fine-tuning.</li>
+<li>Inferior to fine-tuned supervised models on some tasks — frozen evaluation is not the end game.</li>
+<li>LVD-142M curation code is open-source; the curated dataset itself is not distributed due to licensing.</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

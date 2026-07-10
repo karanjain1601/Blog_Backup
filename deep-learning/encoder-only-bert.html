@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Encoder-Only Transformers — BERT, RoBERTa, and DeBERTa | Notes Backup</title>
+  <meta name="description" content="Encoder-only Transformers with bidirectional attention — BERT&#x27;s masked language modelling, fine-tuning for classification, and the improvements in RoBERTa, ELECTRA, and DeBERTa." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Encoder-Only Transformers — BERT, RoBERTa, and DeBERTa</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Encoder-only Transformers with bidirectional attention — BERT&#x27;s masked language modelling, fine-tuning for classification, and the improvements in RoBERTa, ELECTRA, and DeBERTa.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Encoder-Only Transformers — BERT, RoBERTa, and DeBERTa</h1>
+<p>Encoder-only Transformers use bidirectional self-attention: every token can attend to every other token in both directions simultaneously. There is no causal mask. This makes encoder models ideal for tasks that require understanding the full context of an input — classification, named entity recognition, question answering, and natural language inference — but they cannot generate text autoregressively. BERT (Devlin et al. 2018) established the encoder-only paradigm and set off a wave of improvements: RoBERTa, ELECTRA, DeBERTa, and many others.</p>
+<h2>Bidirectional Attention — Seeing All Tokens</h2>
+<p>In a standard encoder self-attention layer, the attention score matrix S = QKᵀ / √d_k has no mask applied — all L×L entries are used. This means every position can draw information from every other position, including future tokens. The attention weights form a dense L×L matrix after softmax. Bidirectionality is what makes encoders powerful for understanding tasks: the representation of the word 'bank' can simultaneously look left at 'river' and right at 'deposit' to resolve its meaning.</p>
+<ul>
+<li>Encoder: all positions attend to all others — full L×L attention matrix</li>
+<li>Decoder (causal): position i attends only to j ≤ i — lower-triangular matrix</li>
+<li>Encoder input: [CLS] token + real tokens + [SEP] token (WordPiece tokenised)</li>
+<li>[CLS] representation aggregates the whole-sequence meaning — used for classification</li>
+<li>Padding mask still applied: PAD tokens blocked from receiving attention (key_padding_mask)</li>
+</ul>
+<blockquote>
+<p><strong>Why Encoders Cannot Generate Text</strong>: During inference, an autoregressive generator must predict token t given tokens 0 through t-1 without seeing t+1, t+2, … Encoder-only models have no such constraint — they always see the entire input sequence. This makes them excellent understanders but incapable of sequential generation without modification (e.g., adding a causal decoder or using masked-token prediction iteratively).</p>
+</blockquote>
+<h2>Masked Language Modelling — BERT's Pretraining Objective</h2>
+<p>BERT is pretrained with Masked Language Modelling (MLM): 15% of input tokens are randomly selected. Of those, 80% are replaced with the special [MASK] token, 10% are replaced with a random token from the vocabulary, and 10% are left unchanged. The model is trained to predict the original token at each masked position using cross-entropy loss. This forces the model to build rich contextual representations because predicting a masked word requires understanding its left and right context simultaneously.</p>
+<h2>BERT Architecture and Fine-Tuning</h2>
+<p>BERT-base: 12 layers, 12 attention heads, d_model=768, d_ff=3072, 110M parameters. BERT-large: 24 layers, 16 heads, d_model=1024, d_ff=4096, 340M parameters. Fine-tuning adds a task-specific head on top of the pretrained encoder. For sentence classification, a linear layer maps the [CLS] token representation (shape d_model) to the number of classes. For token-level tasks (NER, POS tagging), a linear head is applied to every token's representation. BERT popularised the pretrain-then-finetune paradigm that now dominates NLP.</p>
+<h2>Code 1 — Encoder-Only Transformer Block from Scratch</h2>
+<p>A bidirectional (no causal mask) Transformer encoder block, showing that all L×L attention weight entries are non-zero.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class EncoderBlock(nn.Module):
+    &quot;&quot;&quot;Encoder-only Transformer block: bidirectional self-attention, no causal mask.
+    Pre-norm layout (modern variant).
+    &quot;&quot;&quot;
+    def __init__(self, d_model: int, n_heads: int, d_ff: int,
+                 dropout: float = 0.1):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.attn  = nn.MultiheadAttention(d_model, n_heads,
+                                            dropout=dropout, batch_first=True)
+        self.ff1   = nn.Linear(d_model, d_ff)
+        self.ff2   = nn.Linear(d_ff, d_model)
+        self.act   = nn.GELU()
+        self.drop  = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor,
+                key_padding_mask: torch.Tensor = None):
+        # No attn_mask passed -&gt; bidirectional (all positions attend to all)
+        n = self.norm1(x)
+        a, weights = self.attn(n, n, n, key_padding_mask=key_padding_mask)
+        x = x + self.drop(a)
+        x = x + self.drop(self.ff2(self.act(self.ff1(self.norm2(x)))))
+        return x, weights
+
+# BERT-base dimensions
+block = EncoderBlock(d_model=768, n_heads=12, d_ff=3072)
+x = torch.randn(2, 12, 768)
+out, attn = block(x)
+print('Encoder output:', out.shape)          # (2, 12, 768)
+print('Attention weights:', attn.shape)      # (2, 12, 12)
+print('Non-zero weights:', (attn &gt; 1e-6).sum().item(), '(all positions attend all)')
+</code></pre>
+<h2>Code 2 — MLM Data Preparation</h2>
+<p>Implementing the BERT masking strategy: 15% of tokens selected, 80% replaced with [MASK], 10% random, 10% unchanged. Labels of -100 at non-masked positions are ignored by CrossEntropyLoss.</p>
+<pre><code class="language-python">import torch
+import random
+
+def prepare_mlm_batch(token_ids: list, vocab_size: int,
+                       mask_token_id: int, mask_prob: float = 0.15,
+                       pad_id: int = 0):
+    &quot;&quot;&quot;BERT-style MLM masking.
+    Of selected positions: 80% -&gt; [MASK], 10% -&gt; random, 10% -&gt; unchanged.
+    Returns (input_ids, labels, attention_mask) as tensors.
+    labels[b, pos] = -100 (ignored) for non-masked positions.
+    &quot;&quot;&quot;
+    max_len = max(len(s) for s in token_ids)
+    inputs, labels, att_masks = [], [], []
+    for seq in token_ids:
+        ids   = list(seq)
+        label = [-100] * max_len
+        am    = [1] * len(seq) + [0] * (max_len - len(seq))
+        ids  += [pad_id] * (max_len - len(seq))
+        for pos in range(len(seq)):
+            if random.random() &lt; mask_prob:
+                label[pos] = ids[pos]          # store original token as target
+                r = random.random()
+                if r &lt; 0.80:                   # 80%: replace with [MASK]
+                    ids[pos] = mask_token_id
+                elif r &lt; 0.90:                 # 10%: replace with random token
+                    ids[pos] = random.randint(5, vocab_size - 1)
+                # 10%: leave unchanged
+        inputs.append(ids); labels.append(label); att_masks.append(am)
+    return torch.tensor(inputs), torch.tensor(labels), torch.tensor(att_masks)
+
+random.seed(42)
+seqs   = [[101, 2054, 2003, 1996, 3007, 102], [101, 4067, 2024, 4658, 102]]
+inp, lbl, am = prepare_mlm_batch(seqs, vocab_size=30000, mask_token_id=103)
+print('Input IDs:')
+print(inp)
+print('Labels (-100 = not masked):')
+print(lbl)
+</code></pre>
+<h2>Code 3 — BERT Fine-Tuning for Classification</h2>
+<p>Using HuggingFace transformers to fine-tune BERT for binary classification: a linear head on the [CLS] token representation with AdamW optimiser.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from transformers import BertModel, BertTokenizer
+from torch.optim import AdamW
+
+class BertForSentiment(nn.Module):
+    &quot;&quot;&quot;BERT encoder + linear classification head on the [CLS] token.&quot;&quot;&quot;
+    def __init__(self, n_classes: int = 2, dropout: float = 0.1):
+        super().__init__()
+        self.bert       = BertModel.from_pretrained('bert-base-uncased')
+        self.dropout    = nn.Dropout(dropout)
+        self.classifier = nn.Linear(768, n_classes)
+
+    def forward(self, input_ids, attention_mask, token_type_ids=None):
+        out = self.bert(input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        token_type_ids=token_type_ids)
+        cls_rep = out.last_hidden_state[:, 0, :]   # [CLS] token at position 0
+        return self.classifier(self.dropout(cls_rep))
+
+# Tokenise and run one training step
+tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+texts     = ['I love this film!', 'The movie was terrible.']
+labels    = torch.tensor([1, 0])
+enc       = tokenizer(texts, return_tensors='pt', padding=True, truncation=True)
+
+model   = BertForSentiment()
+optimr  = AdamW(model.parameters(), lr=2e-5, weight_decay=0.01)
+loss_fn = nn.CrossEntropyLoss()
+
+model.train()
+logits = model(enc['input_ids'], enc['attention_mask'])
+loss   = loss_fn(logits, labels)
+loss.backward()
+optimr.step()
+print('Logits:', logits.detach())
+print('Loss:  ', round(loss.item(), 4))
+</code></pre>
+<h2>Code 4 — ELECTRA Replaced Token Detection</h2>
+<p>ELECTRA (Clark et al. 2020) replaces MLM with a discriminative objective: a small generator corrupts tokens, and the discriminator must classify each token as real or replaced. More sample-efficient than MLM because the loss signal covers all tokens, not just the 15% masked.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import random
+
+def simulate_rtd(token_ids: torch.Tensor, gen_logits: torch.Tensor,
+                 replace_prob: float = 0.15):
+    &quot;&quot;&quot;Simulate ELECTRA replaced token detection data creation.
+    gen_logits: (B, L, V) — generator's token distribution at each position.
+    Returns (corrupted_ids, rtd_labels) where rtd_labels: 0=real, 1=replaced.
+    &quot;&quot;&quot;
+    B, L = token_ids.shape
+    corrupted = token_ids.clone()
+    rtd_labels = torch.zeros(B, L, dtype=torch.float)
+    probs = torch.softmax(gen_logits, dim=-1)
+    for b in range(B):
+        for pos in range(L):
+            if random.random() &lt; replace_prob:
+                orig        = token_ids[b, pos].item()
+                replacement = torch.multinomial(probs[b, pos], 1).item()
+                if replacement != orig:
+                    corrupted[b, pos]  = replacement
+                    rtd_labels[b, pos] = 1.0   # mark as replaced
+    return corrupted, rtd_labels
+
+class RTDHead(nn.Module):
+    &quot;&quot;&quot;Discriminator head: binary classification at every token position.&quot;&quot;&quot;
+    def __init__(self, d_model: int):
+        super().__init__()
+        self.linear = nn.Linear(d_model, 1)
+    def forward(self, hidden): return self.linear(hidden).squeeze(-1)  # (B, L)
+
+torch.manual_seed(0); random.seed(0)
+B, L, V, d = 2, 8, 1000, 256
+token_ids  = torch.randint(5, V, (B, L))
+gen_logits = torch.randn(B, L, V)
+corrupt, rtd_lbl = simulate_rtd(token_ids, gen_logits)
+print('Original: ', token_ids[0].tolist())
+print('Corrupted:', corrupt[0].tolist())
+print('RTD labels (1=replaced):', rtd_lbl[0].tolist())
+head    = RTDHead(d)
+hidden  = torch.randn(B, L, d)
+rtd_out = head(hidden)
+loss    = nn.BCEWithLogitsLoss()(rtd_out, rtd_lbl)
+print(f'RTD discriminator loss: {loss.item():.4f}')
+</code></pre>
+<h2>Encoder Models Compared</h2>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Pretraining Objective</th>
+<th>Params</th>
+<th>Tokens Seen</th>
+<th>GLUE Score</th>
+<th>Key Innovation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>BERT-base</td>
+<td>MLM + NSP</td>
+<td>110M</td>
+<td>16B</td>
+<td>80.5</td>
+<td>Bidirectional pretrain on large corpus</td>
+</tr>
+<tr>
+<td>BERT-large</td>
+<td>MLM + NSP</td>
+<td>340M</td>
+<td>16B</td>
+<td>82.1</td>
+<td>Scale: more layers, wider model</td>
+</tr>
+<tr>
+<td>RoBERTa</td>
+<td>MLM only (no NSP)</td>
+<td>125M</td>
+<td>~2T</td>
+<td>88.5</td>
+<td>Longer training, larger batches, more data</td>
+</tr>
+<tr>
+<td>ELECTRA-base</td>
+<td>Replaced Token Detection</td>
+<td>110M</td>
+<td>128B</td>
+<td>88.8</td>
+<td>Sample-efficient discriminative objective</td>
+</tr>
+<tr>
+<td>DeBERTa-base</td>
+<td>MLM + disentangled attn</td>
+<td>140M</td>
+<td>78B</td>
+<td>90.3</td>
+<td>Separate position and content attention keys</td>
+</tr>
+</tbody>
+</table>
+<p>Encoder-only models remain the top choice for NLU tasks — text classification, NER, extractive QA — where the full input is known at inference time. RoBERTa is the practical default: it significantly outperforms original BERT with only a training recipe change, no architecture modification. ELECTRA is the best choice when compute budget is tight, since its sample efficiency means it reaches RoBERTa-level quality with far less pretraining. DeBERTa currently holds the highest GLUE and SuperGLUE scores among encoder-only models, owing to its disentangled position and content attention.</p>
+    </article>
+  </main>
+</body>
+</html>

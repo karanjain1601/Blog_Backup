@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Downstream Evaluation — Linear Probe, Fine-Tuning, and k-NN | Notes Backup</title>
+  <meta name="description" content="A systematic guide to evaluating self-supervised representations via linear probing, full fine-tuning, k-NN retrieval, semi-supervised protocols, and transfer learning benchmarks, with standardised code for fair comparison across SSL methods." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Downstream Evaluation — Linear Probe, Fine-Tuning, and k-NN</h1>
+      <ul class='note-meta'><li><strong>description:</strong> A systematic guide to evaluating self-supervised representations via linear probing, full fine-tuning, k-NN retrieval, semi-supervised protocols, and transfer learning benchmarks, with standardised code for fair comparison across SSL methods.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Downstream Evaluation — Linear Probe, Fine-Tuning, and k-NN</h1>
+<p>Evaluating self-supervised learning is as important as the training objective itself. A representation that performs well under one evaluation protocol may fail another — revealing different aspects of what the encoder has learned. The field has converged on four standard protocols: linear probing (frozen encoder, linear classifier), full fine-tuning (unfreeze encoder), k-NN evaluation (no training at all), and semi-supervised learning (limited labels). Each measures something different: linear probe measures representation quality; fine-tuning measures learning capacity; k-NN measures feature geometry; semi-supervised measures label efficiency.</p>
+<h2>Linear Probe — Measuring Representation Quality</h2>
+<p>Linear evaluation is the gold standard for measuring the quality of self-supervised representations. The encoder is frozen completely (no gradient through its parameters). A single linear layer is trained on top of the frozen features using the labelled training set. The resulting top-1 accuracy on the validation set measures how linearly separable the features are — a high score indicates the encoder has organised semantic categories into distinct, linearly separable regions of the feature space without any label supervision. This is the most constrained protocol, making it the fairest measure of what SSL actually learned.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+from torch.utils.data import DataLoader
+
+
+def extract_features(backbone, dataloader, device='cuda'):
+    &quot;&quot;&quot;Extract frozen features from SSL backbone. Returns (features, labels) numpy arrays.&quot;&quot;&quot;
+    backbone.eval().to(device)
+    for p in backbone.parameters():
+        p.requires_grad_(False)
+
+    feats_list, label_list = [], []
+    with torch.no_grad():
+        for imgs, labels in dataloader:
+            imgs = imgs.to(device)
+            feats = backbone(imgs)                 # (B, D) — use CLS token or global avg pool
+            if feats.dim() &gt; 2:
+                feats = feats.flatten(1)           # flatten spatial dims if needed
+            feats_list.append(feats.cpu().numpy())
+            label_list.append(labels.numpy())
+    return np.vstack(feats_list), np.concatenate(label_list)
+
+
+def linear_probe_sklearn(backbone, train_loader, val_loader, device='cuda',
+                         max_iter=1000, C=0.316):
+    &quot;&quot;&quot;Frozen backbone + sklearn LogisticRegression linear probe.&quot;&quot;&quot;
+    print('Extracting train features...')
+    X_train, y_train = extract_features(backbone, train_loader, device)
+    print('Extracting val features...')
+    X_val,   y_val   = extract_features(backbone, val_loader, device)
+
+    # L2-normalise features (important for cosine-based SSL representations)
+    scaler  = StandardScaler(with_std=False)
+    X_train = scaler.fit_transform(X_train)
+    X_val   = scaler.transform(X_val)
+    norms   = np.linalg.norm(X_train, axis=1, keepdims=True)
+    X_train /= np.clip(norms, 1e-8, None)
+    norms   = np.linalg.norm(X_val, axis=1, keepdims=True)
+    X_val   /= np.clip(norms, 1e-8, None)
+
+    clf = LogisticRegression(max_iter=max_iter, C=C, solver='lbfgs',
+                             multi_class='multinomial', n_jobs=-1)
+    clf.fit(X_train, y_train)
+    acc = clf.score(X_val, y_val)
+    print(f'Linear probe accuracy: {acc*100:.2f}%')
+    return acc
+
+
+print('Linear probe: freeze backbone, train sklearn LogReg on extracted features.')
+print('Tip: L2-normalise features before LogReg for contrastive SSL methods.')
+</code></pre>
+<h2>Fine-Tuning — Ceiling Performance</h2>
+<p>Fine-tuning unfreezes the entire encoder and trains all parameters jointly with the linear head. This always achieves higher accuracy than linear probe because the encoder can adapt its representations to the downstream task. The gap between linear probe and fine-tune accuracy indicates how 'task-ready' the representation is: a small gap means the frozen features are nearly optimal (DINOv2 closes this gap substantially); a large gap means the representation needs task-specific restructuring (MAE features, which are designed for reconstruction, show large linear-to-finetune gaps). Fine-tuning uses a lower learning rate for backbone layers than for the newly added head.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader
+
+
+def finetune_ssl_model(backbone, train_loader, val_loader,
+                       num_classes: int = 1000, feat_dim: int = 768,
+                       backbone_lr: float = 1e-5, head_lr: float = 1e-3,
+                       epochs: int = 30, device: str = 'cuda'):
+    &quot;&quot;&quot;Fine-tune SSL backbone: lower LR for backbone, higher for new head.&quot;&quot;&quot;
+    head = nn.Linear(feat_dim, num_classes).to(device)
+    backbone = backbone.to(device)
+
+    # Separate parameter groups with different LRs
+    optimizer = torch.optim.AdamW([
+        {'params': backbone.parameters(), 'lr': backbone_lr, 'weight_decay': 0.05},
+        {'params': head.parameters(),     'lr': head_lr,     'weight_decay': 0.0},
+    ])
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, epochs)
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+
+    for epoch in range(epochs):
+        backbone.train(); head.train()
+        for imgs, labels in train_loader:
+            imgs, labels = imgs.to(device), labels.to(device)
+            feats  = backbone(imgs).flatten(1)   # (B, feat_dim)
+            logits = head(feats)
+            loss   = criterion(logits, labels)
+            optimizer.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(backbone.parameters(), max_norm=1.0)
+            optimizer.step()
+        scheduler.step()
+        if (epoch + 1) % 10 == 0:
+            print(f'  Epoch {epoch+1}/{epochs} done.')
+
+    # Validation
+    backbone.eval(); head.eval()
+    correct = total = 0
+    with torch.no_grad():
+        for imgs, labels in val_loader:
+            imgs, labels = imgs.to(device), labels.to(device)
+            preds = head(backbone(imgs).flatten(1)).argmax(1)
+            correct += (preds == labels).sum().item()
+            total   += labels.size(0)
+    acc = correct / total
+    print(f'Fine-tune accuracy: {acc*100:.2f}%')
+    return acc
+
+
+print('Fine-tune: lower LR for SSL backbone, standard LR for task head.')
+print('Layer-wise LR decay is also common: LR *= 0.65^layer_depth_from_head.')
+</code></pre>
+<h2>k-NN Evaluation — No Training Required</h2>
+<p>k-Nearest Neighbour evaluation requires no training after SSL pretraining. All training set images are encoded, and their features are stored in an index. A test image is classified by finding its k nearest neighbours in feature space (by cosine similarity) and taking a majority vote. k-NN accuracy is the fastest way to assess whether SSL features are semantically meaningful: if semantically similar images cluster together in the feature space, k-NN will perform well. DINO features famously produce k-NN accuracy of 78% on ImageNet with k=20 — close to supervised ResNet-50 — using no labelled training at all.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+import torch.nn.functional as F
+
+try:
+    import faiss
+    HAS_FAISS = True
+except ImportError:
+    HAS_FAISS = False
+    print('faiss not available — falling back to brute-force cosine k-NN.')
+
+
+def knn_evaluate(backbone, train_loader, val_loader,
+                 k: int = 20, device: str = 'cuda'):
+    &quot;&quot;&quot;k-NN evaluation using faiss IndexFlatIP (cosine similarity via L2 norm).&quot;&quot;&quot;
+    # Extract and L2-normalise features
+    def get_feats(loader):
+        backbone.eval()
+        all_f, all_l = [], []
+        with torch.no_grad():
+            for imgs, labels in loader:
+                f = backbone(imgs.to(device))
+                f = F.normalize(f.flatten(1), dim=1)   # unit norm for cosine
+                all_f.append(f.cpu().numpy())
+                all_l.append(labels.numpy())
+        return np.vstack(all_f).astype('float32'), np.concatenate(all_l)
+
+    train_feats, train_labels = get_feats(train_loader)
+    val_feats,   val_labels   = get_feats(val_loader)
+    D = train_feats.shape[1]
+
+    if HAS_FAISS:
+        index = faiss.IndexFlatIP(D)         # inner product = cosine for L2-normed vectors
+        index.add(train_feats)
+        _, I = index.search(val_feats, k)    # (N_val, k) — indices of k nearest neighbours
+    else:
+        # Brute-force: (N_val, N_train) cosine similarity matrix
+        sims = val_feats @ train_feats.T     # (N_val, N_train)
+        I    = np.argsort(-sims, axis=1)[:, :k]   # top-k indices
+
+    # Majority vote
+    knn_labels = train_labels[I]             # (N_val, k)
+    preds = np.apply_along_axis(
+        lambda row: np.bincount(row, minlength=int(train_labels.max())+1).argmax(),
+        axis=1, arr=knn_labels
+    )
+    acc = (preds == val_labels).mean()
+    print(f'k-NN (k={k}) accuracy: {acc*100:.2f}%')
+    return acc
+
+
+print('k-NN eval: extract features, L2-normalise, faiss IndexFlatIP, majority vote.')
+</code></pre>
+<h2>Semi-Supervised Protocol — 1% and 10% Labels</h2>
+<p>Semi-supervised evaluation tests label efficiency: how well does the SSL model perform when only 1% or 10% of ImageNet labels are available? The protocol is standardised: (1) select a balanced subset — equal number of examples per class; (2) freeze the SSL backbone; (3) fine-tune only the linear head (or a light MLP head) on the labelled subset; (4) evaluate on the full validation set. This protocol isolates the contribution of the SSL features from supervised data quantity. SimCLR v2 showed 74% top-1 with only 1% labels via distillation; DINOv2 exceeds 80% with 10% labels using just a linear layer.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+from torch.utils.data import Subset, DataLoader
+from torchvision.datasets import ImageFolder
+from collections import defaultdict
+
+
+def select_balanced_subset(dataset: ImageFolder, fraction: float = 0.01,
+                           seed: int = 42) -&gt; Subset:
+    &quot;&quot;&quot;Select a class-balanced fraction of a dataset.
+    Returns a Subset with fraction*len(dataset) samples, equally distributed.
+    &quot;&quot;&quot;
+    rng = np.random.default_rng(seed)
+    class_to_indices = defaultdict(list)
+    for idx, (_, label) in enumerate(dataset.samples):
+        class_to_indices[label].append(idx)
+
+    selected = []
+    for label, indices in class_to_indices.items():
+        n_select = max(1, int(len(indices) * fraction))
+        chosen   = rng.choice(indices, size=n_select, replace=False)
+        selected.extend(chosen.tolist())
+
+    rng.shuffle(selected)
+    print(f'Selected {len(selected)} samples ({fraction*100:.1f}%) '
+          f'from {len(dataset.classes)} classes.')
+    return Subset(dataset, selected)
+
+
+def semisup_eval(backbone, full_dataset: ImageFolder, val_loader: DataLoader,
+                 fraction: float = 0.01, feat_dim: int = 768,
+                 num_classes: int = 1000, epochs: int = 30, device: str = 'cuda'):
+    &quot;&quot;&quot;Semi-supervised evaluation: freeze backbone, train linear head on fraction% labels.&quot;&quot;&quot;
+    subset  = select_balanced_subset(full_dataset, fraction)
+    sub_loader = DataLoader(subset, batch_size=256, shuffle=True, num_workers=4)
+
+    backbone.eval().to(device)
+    for p in backbone.parameters():
+        p.requires_grad_(False)
+
+    head = torch.nn.Linear(feat_dim, num_classes).to(device)
+    opt  = torch.optim.AdamW(head.parameters(), lr=1e-3, weight_decay=0.0)
+    crit = torch.nn.CrossEntropyLoss()
+
+    for _ in range(epochs):
+        head.train()
+        for imgs, labels in sub_loader:
+            imgs, labels = imgs.to(device), labels.to(device)
+            with torch.no_grad():
+                feats = backbone(imgs).flatten(1)
+            loss = crit(head(feats), labels)
+            opt.zero_grad(); loss.backward(); opt.step()
+
+    head.eval()
+    correct = total = 0
+    with torch.no_grad():
+        for imgs, labels in val_loader:
+            imgs, labels = imgs.to(device), labels.to(device)
+            correct += (head(backbone(imgs).flatten(1)).argmax(1) == labels).sum().item()
+            total   += labels.size(0)
+    print(f'Semi-sup {fraction*100:.0f}% accuracy: {correct/total*100:.2f}%')
+    return correct / total
+
+
+print('Semi-supervised: balanced subset selection -&gt; freeze backbone -&gt; train linear head.')
+</code></pre>
+<blockquote>
+<p><strong>Standardise Evaluation Hyperparameters for Fair Comparison</strong>: SSL papers often report favorable evaluation numbers by tuning evaluation-specific hyperparameters (learning rate, epochs, augmentation during evaluation). Fair comparison requires: (1) same number of linear probe epochs (100 standard); (2) same optimizer (LBFGS or SGD+momentum); (3) same augmentation during feature extraction (resize + center crop, no random augmentation); (4) same fraction and seed for semi-supervised splits. The DINOv2 paper provides a standardised evaluation codebase — use it as the reference implementation when comparing SSL methods.</p>
+</blockquote>
+<h2>Transfer Learning and Domain Shift</h2>
+<p>Beyond ImageNet, SSL representations should generalise to other domains. Standard transfer benchmarks include: CIFAR-100 (32×32 object recognition), Flowers-102 (fine-grained flowers), Food-101 (fine-grained food categories), and CUB-200 (bird species — requires fine-grained discrimination). The transfer evaluation protocol is the same as linear probe: freeze backbone, train linear head, measure top-1. Strong SSL methods (DINOv2, DINO) consistently outperform supervised ImageNet pretraining on fine-grained benchmarks because their features are more diverse and less biased toward ImageNet-specific categories.</p>
+<ul>
+<li>CIFAR-100 transfer: DINOv2-ViT-L ~94% linear probe (ResNet-50 supervised: ~87%).</li>
+<li>Flowers-102: SSL methods often match or exceed supervised, as ImageNet has few flower classes.</li>
+<li>CUB-200: fine-grained discrimination favors rich patch-level features (DINOv2, iBOT).</li>
+<li>Medical imaging: SSL pretrained on natural images transfers well with only 100-500 labelled examples.</li>
+<li>Satellite imagery: domain gap is large — consider domain-specific SSL pretraining from scratch.</li>
+<li>k-NN transfer: high k-NN accuracy on transfer datasets = feature diversity, not just ImageNet overfitting.</li>
+</ul>
+<h2>Evaluation Protocol Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Protocol</th>
+<th>Labels Needed</th>
+<th>Compute</th>
+<th>What It Measures</th>
+<th>Standard Dataset</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Linear probe</td>
+<td>Full train set</td>
+<td>Low (frozen features + linear)</td>
+<td>Frozen representation quality</td>
+<td>ImageNet top-1</td>
+</tr>
+<tr>
+<td>Fine-tuning</td>
+<td>Full train set</td>
+<td>High (full backprop)</td>
+<td>Task ceiling / adaptability</td>
+<td>ImageNet top-1</td>
+</tr>
+<tr>
+<td>k-NN (k=20)</td>
+<td>Full train set (no training)</td>
+<td>Very low (index lookup)</td>
+<td>Feature geometry / clustering</td>
+<td>ImageNet top-1</td>
+</tr>
+<tr>
+<td>Semi-supervised (1%)</td>
+<td>1% of train set (~13K for ImageNet)</td>
+<td>Low (linear head only)</td>
+<td>Label efficiency</td>
+<td>ImageNet top-1</td>
+</tr>
+<tr>
+<td>Semi-supervised (10%)</td>
+<td>10% of train set (~128K)</td>
+<td>Low</td>
+<td>Label efficiency at scale</td>
+<td>ImageNet top-1</td>
+</tr>
+<tr>
+<td>Transfer (linear)</td>
+<td>Target domain full set</td>
+<td>Low (frozen features)</td>
+<td>Generalization to new domains</td>
+<td>CIFAR-100 / Flowers / CUB</td>
+</tr>
+</tbody>
+</table>
+<p>The relationship between these protocols tells a story about a representation. Large linear-to-finetune gap: representation needs task-specific restructuring (MAE, pixel reconstruction methods). Small gap: representation is already well-organised for the downstream task (DINOv2, DINO). High k-NN but lower linear probe: features form clusters but are not linearly separable (some contrastive methods). Low k-NN but good linear probe after training: features are linearly separable but not naturally clustered — the linear layer learns a non-trivial mapping. Tracking all four metrics provides a complete picture of SSL representation quality.</p>
+<ul>
+<li>Best practice: always report linear probe AND fine-tune — reporting only fine-tune hides representation quality.</li>
+<li>k-NN is free to compute once features are extracted — include it as a sanity check in every experiment.</li>
+<li>Use the same feature extraction transform: 256px resize, 224px center crop, ImageNet normalisation.</li>
+<li>Report standard deviation over 3 seeds for semi-supervised evaluations — high variance is common.</li>
+<li>DINOv2 evaluation codebase: github.com/facebookresearch/dinov2/tree/main/dinov2/eval — use as reference.</li>
+</ul>
+<h2>Choosing the Right Evaluation Protocol</h2>
+<p>The right evaluation protocol depends on the deployment scenario. If the encoder will be frozen in production (embedding service, search index), linear probe accuracy is the most relevant metric — optimise for it. If the encoder will be fine-tuned per-task (the common case), linear probe accuracy is a proxy but fine-tune accuracy is the true target. k-NN accuracy is the fastest diagnostic: it reveals whether features are geometrically meaningful without any training. For resource-constrained environments with few labels, semi-supervised 1% accuracy reveals the most important property — how much a model reduces labelling cost. Report all four for publishable work; start with k-NN for quick iteration.</p>
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sharp vs Flat Minima and Generalization | Notes Backup</title>
+  <meta name="description" content="Theoretical and empirical analysis of sharpness measures, PAC-Bayes generalization bounds, SAM optimizer, and why SGD noise biases training toward flat minima with better test performance." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Sharp vs Flat Minima and Generalization</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Theoretical and empirical analysis of sharpness measures, PAC-Bayes generalization bounds, SAM optimizer, and why SGD noise biases training toward flat minima with better test performance.</li><li><strong>topic:</strong> math-foundations</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Sharp vs Flat Minima and Generalization</h1>
+<p>Not all minima of a neural network's training loss are created equal: some generalize well to held-out data, others memorize the training set. The geometry of the minimum — specifically its sharpness (curvature) — predicts this difference. A flat minimum is one where the loss changes slowly as weights move in any direction; a sharp minimum has directions of high curvature where small weight perturbations cause large loss spikes. This note builds from formal sharpness measures through the PAC-Bayes bound that explains why flat minima generalize better, to the SAM optimizer that explicitly targets flat minima, and the connection between SGD noise and implicit regularization toward flat regions.</p>
+<h2>Measuring Sharpness</h2>
+<p>The largest Hessian eigenvalue λ_max measures sharpness in the worst-case direction: even one direction of high curvature makes a minimum sharp. The Hessian trace tr(H) = Σλᵢ measures average curvature over all directions — cheaper to estimate than λ_max (Hutchinson's estimator uses tr(H) ≈ Eᵥ[vᵀHv] with random ±1 vectors v). The sharpness ratio ρ_sharp = max_{‖δ‖≤ρ} [L(θ+δ) − L(θ)] asks: how much does loss increase if we perturb weights by at most ρ in any direction? Hochreiter and Schmidhuber (1997) gave a Minimum Description Length argument: a flat minimum can be encoded with lower weight precision (fewer bits) because small quantization errors leave the loss unchanged; fewer bits → shorter description → better generalization by MDL/Occam's razor. Practically: two models with the same training loss but different sharpness will have different test loss; the flatter model generalizes better by an amount predicted by the PAC-Bayes bound.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+import torch.nn as nn
+from torch.autograd.functional import hvp
+
+def hutchinson_trace(model, loss_fn, X, y, n_samples=20):
+    &quot;&quot;&quot;Estimate Hessian trace via Hutchinson's method.&quot;&quot;&quot;
+    loss = loss_fn(model(X), y)
+    params = [p for p in model.parameters() if p.requires_grad]
+    grads = torch.autograd.grad(loss, params, create_graph=True)
+    grad_vec = torch.cat([g.flatten() for g in grads])
+    trace_est = 0.0
+    for _ in range(n_samples):
+        v = torch.randint(0, 2, grad_vec.shape).float() * 2 - 1
+        Hv = torch.autograd.grad(grad_vec @ v.detach(), params,
+                                  retain_graph=True)
+        Hv_flat = torch.cat([h.flatten() for h in Hv])
+        trace_est += (v * Hv_flat).sum().item()
+    return trace_est / n_samples
+
+torch.manual_seed(0)
+X = torch.randn(64, 10)
+y = torch.randn(64, 1)
+model_sharp = nn.Sequential(nn.Linear(10, 4), nn.ReLU(), nn.Linear(4, 1))
+model_flat = nn.Sequential(nn.Linear(10, 4), nn.ReLU(), nn.Linear(4, 1))
+nn.init.normal_(list(model_sharp.parameters())[0], std=2.0)
+loss_fn = nn.MSELoss()
+trace_sharp = hutchinson_trace(model_sharp, loss_fn, X, y)
+trace_flat = hutchinson_trace(model_flat, loss_fn, X, y)
+print(f&quot;Sharp model Hessian trace estimate: {trace_sharp:.2f}&quot;)
+print(f&quot;Flat model Hessian trace estimate:  {trace_flat:.2f}&quot;)
+</code></pre>
+<h2>PAC-Bayes Bound and Sharpness</h2>
+<p>PAC-Bayes theorem (McAllester 1999): for any prior P and posterior Q over hypotheses, with probability at least 1−δ over samples of size n: L_test(Q) ≤ L_train(Q) + sqrt((KL(Q||P) + log(1/δ)) / (2n)). Setting Q = N(θ<em>, σ²I) (Gaussian posterior around the solution) and P = N(0, σ²I) (standard prior), the KL divergence KL(Q||P) ≈ ‖θ</em>‖²/(2σ²). Foret et al. (2021) interpret the sharpness-aware objective as minimizing an upper bound from this theorem: maximizing σ (allowed perturbation radius) to keep the loss stable is equivalent to minimizing the maximum loss in a ball of radius ρ around θ*. The SAM objective max_{‖ε‖≤ρ} L(θ+ε) directly measures the worst-case perturbation loss, and minimizing it simultaneously pushes down training loss and the KL term in the PAC-Bayes bound, giving a theoretical guarantee of better generalization.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import TensorDataset, DataLoader
+
+class SAM(optim.Optimizer):
+    &quot;&quot;&quot;Sharpness-Aware Minimization optimizer (Foret et al. 2021).&quot;&quot;&quot;
+    def __init__(self, params, base_optimizer, rho=0.05, **kwargs):
+        defaults = dict(rho=rho, **kwargs)
+        super().__init__(params, defaults)
+        self.base_optimizer = base_optimizer(self.param_groups, **kwargs)
+
+    @torch.no_grad()
+    def first_step(self, zero_grad=False):
+        &quot;&quot;&quot;Perturb weights: w̃ = w + rho * grad/||grad||.&quot;&quot;&quot;
+        grad_norm = torch.stack([p.grad.norm()
+            for group in self.param_groups
+            for p in group['params'] if p.grad is not None]).norm()
+        for group in self.param_groups:
+            scale = group['rho'] / (grad_norm + 1e-12)
+            for p in group['params']:
+                if p.grad is None: continue
+                e_w = p.grad * scale
+                p.add_(e_w)
+                self.state[p]['e_w'] = e_w
+        if zero_grad: self.zero_grad()
+
+    @torch.no_grad()
+    def second_step(self, zero_grad=False):
+        &quot;&quot;&quot;Restore weights and apply update using perturbed gradient.&quot;&quot;&quot;
+        for group in self.param_groups:
+            for p in group['params']:
+                if p.grad is None: continue
+                p.sub_(self.state[p]['e_w'])  # restore
+        self.base_optimizer.step()
+        if zero_grad: self.zero_grad()
+
+torch.manual_seed(1)
+print(&quot;SAM optimizer implemented — ready for training loop&quot;)
+</code></pre>
+<h2>Why SGD Finds Flat Minima</h2>
+<p>SGD with learning rate η and batch size B generates gradient noise whose covariance is proportional to ηC/B, where C is the empirical gradient covariance (Fisher information matrix). This noise acts as an implicit regularizer: the stationary distribution of SGD's stochastic process is not the minimizer of L(θ) itself, but of a penalized objective L(θ) + (η/4B)·tr(H(θ)). The penalty term tr(H) is the Hessian trace — precisely the average sharpness measure. Therefore: smaller batch size B → larger penalty coefficient → stronger preference for flat minima. This prediction matches empirical observations precisely: large-batch SGD finds sharper minima (Keskar et al. 2017), generalizes worse at the same training loss, and requires learning rate scaling or SAM to compensate. The implication for practitioners is that the batch size and learning rate jointly control an implicit regularization strength — the 'linear scaling rule' (LR ∝ B) attempts to keep this implicit regularization constant, but it only holds approximately in the linear regime and breaks for very large batch sizes.</p>
+<h2>SAM Optimizer: Sharpness-Aware Minimization</h2>
+<p>SAM (Foret et al. 2021) implements two-step updates that explicitly minimize worst-case perturbation loss. Step 1 (perturbation): compute ε̂ = ρ·∇L(θ)/‖∇L(θ)‖ and set w̃ = θ + ε̂ (perturb weights in the gradient direction by ρ, typically 0.05). Step 2 (update): compute gradient at the perturbed point ∇L(w̃), then update from the ORIGINAL θ: θ ← θ − η·∇L(w̃). This costs twice the compute of SGD (two forward-backward passes per step) but targets the flat-minima objective directly. ASAM (Adaptive SAM) scales the perturbation per parameter: ε̂ = ρ·|θ|·∇L/‖|θ|·∇L‖, making the perturbation scale-invariant and more effective for parameters with different magnitudes. Practical variants: GSAM (gradient magnitude-based SAM), mSAM (mini-batch SAM with gradient accumulation, halving compute overhead), SAM with EMA. On ImageNet with ResNet-50, SAM improves top-1 accuracy by 0.5-1.5% depending on data augmentation; on CIFAR-100, improvements of 1-3% are common.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import TensorDataset, DataLoader
+
+def sam_training_step(model, sam_optimizer, data, target, loss_fn):
+    &quot;&quot;&quot;Complete SAM two-step update.&quot;&quot;&quot;
+    # First forward-backward: compute gradient at current weights
+    sam_optimizer.zero_grad()
+    output = model(data)
+    loss = loss_fn(output, target)
+    loss.backward()
+    # First step: perturb weights
+    sam_optimizer.first_step(zero_grad=True)
+    # Second forward-backward: compute gradient at perturbed weights
+    loss_fn(model(data), target).backward()
+    # Second step: restore weights, apply update
+    sam_optimizer.second_step(zero_grad=True)
+    return loss.item()
+
+torch.manual_seed(42)
+X = torch.randn(200, 8)
+y = (X[:, 0] + X[:, 1] &gt; 0).long()
+dataset = TensorDataset(X, y)
+loader = DataLoader(dataset, batch_size=32, shuffle=True)
+model = nn.Sequential(nn.Linear(8, 16), nn.ReLU(), nn.Linear(16, 2))
+base_opt = optim.SGD
+sam_opt = SAM(model.parameters(), base_opt, lr=0.01, momentum=0.9, rho=0.05)
+loss_fn = nn.CrossEntropyLoss()
+for epoch in range(3):
+    total = sum(sam_training_step(model, sam_opt, xb, yb, loss_fn)
+                for xb, yb in loader)
+    print(f&quot;Epoch {epoch+1}: avg loss {total/len(loader):.4f}&quot;)
+</code></pre>
+<h2>ML Connections: Batch Size, LR, and Flatness</h2>
+<p>The flat minima connection unifies several empirical observations that previously seemed unrelated. First, large-batch training finds sharper minima because the noise covariance η·C/B is smaller at large B, weakening the implicit flat-minima regularization — this is why naive large-batch training generalizes worse and why SAM is especially effective when combined with large batches. Second, a higher learning rate η increases noise, biasing toward flatter minima within the stable training range — this is why the 'linear scaling rule' (double LR when doubling batch size) approximately preserves generalization. Third, dropout is another noise source that implicitly encourages flat minima by making the model robust to random unit deactivation, analogous to weight perturbation. Fourth, model soups (Wortsman et al. 2022) and SWA work because averaging multiple checkpoints moves the effective weights toward the geometric center of a flat valley, giving better calibration and generalization than any single checkpoint. Fifth, in self-supervised learning, the momentum encoder in BYOL/DINO tracks an exponential moving average of the online encoder, which implicitly samples from a flat region of weight space and provides more stable targets for representation learning.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import TensorDataset, DataLoader
+
+def make_data(n=300, seed=0):
+    torch.manual_seed(seed)
+    X = torch.randn(n, 6)
+    y = (X[:, 0] - X[:, 1] + 0.5 * X[:, 2] &gt; 0).long()
+    return X, y
+
+def train_model(X, y, batch_size, lr, use_sam=False, epochs=20):
+    model = nn.Sequential(nn.Linear(6, 12), nn.ReLU(), nn.Linear(12, 2))
+    loader = DataLoader(TensorDataset(X[:240], y[:240]), batch_size=batch_size)
+    if use_sam:
+        opt = SAM(model.parameters(), optim.SGD, lr=lr, rho=0.05)
+    else:
+        opt = optim.SGD(model.parameters(), lr=lr)
+    loss_fn = nn.CrossEntropyLoss()
+    for _ in range(epochs):
+        for xb, yb in loader:
+            if use_sam:
+                opt.zero_grad()
+                loss_fn(model(xb), yb).backward()
+                opt.first_step(zero_grad=True)
+                loss_fn(model(xb), yb).backward()
+                opt.second_step(zero_grad=True)
+            else:
+                opt.zero_grad()
+                loss_fn(model(xb), yb).backward()
+                opt.step()
+    with torch.no_grad():
+        preds = model(X[240:]).argmax(1)
+        return (preds == y[240:]).float().mean().item()
+
+X, y = make_data()
+print(f&quot;SGD small batch (B=16):  test acc = {train_model(X, y, 16, 0.05):.3f}&quot;)
+print(f&quot;SGD large batch (B=128): test acc = {train_model(X, y, 128, 0.05):.3f}&quot;)
+print(f&quot;SAM large batch (B=128): test acc = {train_model(X, y, 128, 0.05, use_sam=True):.3f}&quot;)
+</code></pre>
+<h2>Implementation Pitfalls</h2>
+<p>Four pitfalls when implementing SAM and flat-minima techniques. First, forgetting to restore weights after the first step: if the model parameters are not restored before the second gradient computation, the second gradient is computed at the perturbed point but the update is also applied at the perturbed point — losing the flat-minima objective entirely. Always save and restore original parameters. Second, using SAM with gradient accumulation without reducing per-step loss by the accumulation factor: accumulation inflates gradient norms, making the perturbation radius effectively larger than intended. Third, monitoring only training loss: SAM sometimes causes training loss to plateau while test loss continues to improve — this is a feature, not a bug, but can be misinterpreted as lack of progress. Fourth, using SAM when the generalization gap is small: if train and test accuracy are already within 1%, SAM adds compute overhead without meaningful benefit. Profile the generalization gap before adding SAM.</p>
+<h2>Practical Guidance</h2>
+<p>Practical guidelines for applying flat-minima insights. Choose batch size and learning rate together: use the largest batch size that fits in memory, then scale LR proportionally (linear scaling rule: LR = base_LR × B/256), and add SAM if the generalization gap is still larger than expected. For monitoring sharpness cheaply: log the gradient norm after backward() before clipping — gradient norm at critical points correlates with sharpness (higher gradient norm → sharper curvature along the trajectory). Use SWA as a free improvement: after the main training schedule, run 10-20 more epochs with a cyclic LR schedule (SWA-style) and average the checkpoints; this typically gains 0.3-0.5% accuracy with no architecture changes. For fine-tuning pre-trained models, start with lower ρ (e.g., 0.01 instead of 0.05) in SAM to avoid disrupting the pre-trained features, and increase ρ only if the generalization gap warrants it.</p>
+<blockquote>
+<p><strong>Warning</strong>: SAM doubles compute cost — only use it when the generalization gap (train accuracy minus test accuracy) exceeds 2%. Monitor train and test loss separately throughout SAM training: if both decrease together, SAM is working as expected. If train loss stops decreasing but test loss keeps improving, the model has found a flat minimum and you may safely reduce ρ to accelerate convergence. Never use SAM as a substitute for proper regularization (weight decay, dropout, data augmentation) — those should be in place first.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Optimizer</th>
+<th>Sharpness</th>
+<th>Generalization</th>
+<th>Compute Overhead</th>
+<th>Memory Overhead</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SGD small batch (B≤32)</td>
+<td>Low (flat)</td>
+<td>Best</td>
+<td>1×</td>
+<td>1×</td>
+</tr>
+<tr>
+<td>SGD large batch (B≥512)</td>
+<td>High (sharp)</td>
+<td>Worse at same LR</td>
+<td>1× (fast steps)</td>
+<td>1×</td>
+</tr>
+<tr>
+<td>Adam</td>
+<td>Medium-high</td>
+<td>Good (adaptive LR)</td>
+<td>1.3× (moment buffers)</td>
+<td>2× (m, v buffers)</td>
+</tr>
+<tr>
+<td>SAM + SGD</td>
+<td>Low (explicit)</td>
+<td>Best in class</td>
+<td>2× (two passes)</td>
+<td>1× + e_w buffer</td>
+</tr>
+<tr>
+<td>SWA</td>
+<td>Low (center of valley)</td>
+<td>Very good</td>
+<td>1× + averaging step</td>
+<td>2× (model + SWA model)</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>Key Takeaways</h2>
+<ul>
+<li>Sharpness is measured by λ_max (largest Hessian eigenvalue, worst-case curvature) or tr(H) (average curvature, cheaper via Hutchinson's estimator).</li>
+<li>PAC-Bayes theorem formalizes why flat minima generalize better: the generalization bound is controlled by KL(Q||P), which is smaller when the model is robust to weight perturbations.</li>
+<li>SAM minimizes max_{‖ε‖≤ρ} L(θ+ε): perturb weights in gradient direction, compute gradient at perturbed point, update from original weights — explicitly targeting the PAC-Bayes bound.</li>
+<li>SGD implicitly biases toward flat minima via gradient noise with scale η/B; large batch size weakens this bias, explaining the generalization gap of large-batch training.</li>
+<li>SWA (Stochastic Weight Averaging) places the model at the flat geometric center of a loss valley by averaging late-training checkpoints — free 0.3-0.5% improvement.</li>
+<li>Use SAM only when the generalization gap exceeds 2%; profile train/test loss separately and reduce ρ when both losses align.</li>
+<li>The linear scaling rule (LR ∝ B) approximately preserves the implicit flat-minima regularization when scaling batch size, but breaks at very large batches where the noise is no longer well-modeled as Gaussian.</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

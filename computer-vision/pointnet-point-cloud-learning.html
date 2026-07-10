@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PointNet: Deep Learning on Unordered Point Clouds | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>PointNet: Deep Learning on Unordered Point Clouds</h1>
+      
+      <h1>PointNet: Deep Learning on Unordered Point Clouds</h1>
+<h2>Overview</h2>
+<p>Point clouds are sets of 3D coordinates captured by LiDAR or depth sensors. Unlike images with regular pixel grids, point clouds are unordered and variable in size — two scans of the same scene may contain different numbers of points in different orders, making standard CNNs and RNNs ill-suited for direct processing.</p>
+<p>PointNet, introduced by Qi et al. in 2017, was the first deep network to operate directly on raw point clouds without voxelization or projection. It uses shared MLPs and a symmetric aggregation function to extract per-point and global features, achieving competitive results on classification and segmentation benchmarks.</p>
+<h2>Permutation Invariance</h2>
+<p>A function f is permutation-invariant if f(P) equals f applied to any permutation of P. Sorting points is an unstable approach due to sensitivity to ties and numeric precision. PointNet applies shared MLP transforms independently per point, then aggregates with symmetric max-pooling across the point dimension, producing identical output for any input ordering.</p>
+<pre><code># Per-point MLP shared across all N points
+per_point_feat = mlp(points)          # (B, N, 64)
+# Global feature via symmetric max-pooling
+global_feat = global_max_pool(per_point_feat, dim=1)  # (B, 1024)
+# Permutation-invariant: swapping any two rows
+# of 'points' yields the same global_feat
+</code></pre>
+<blockquote>
+<p><strong>info</strong>: PointNet's max-pool aggregation makes it provably permutation-invariant — the same output for any ordering of input points. It also handles variable-size point clouds naturally since max-pool reduces N points to a fixed-size global descriptor.</p>
+</blockquote>
+<h2>PointNet Architecture</h2>
+<p>The PointNet architecture has three stages. A T-Net predicts a 3x3 transformation matrix to canonicalize input coordinates. Shared MLP layers then extract per-point features of growing dimension (64, 128, 1024). Finally, max-pooling aggregates across all points to yield a fixed 1024-dimensional global feature vector used for classification or segmentation.</p>
+<pre><code>transform = t_net(points)             # (B, 3, 3)
+points_aligned = torch.bmm(points, transform)   # (B, N, 3)
+# Feature-space T-Net aligns 64-dim features
+feat_transform = t_net_feat(per_point_feat)      # (B, 64, 64)
+feat_aligned = torch.bmm(per_point_feat, feat_transform)
+# Regularizer: ||I - A*A^T||^2 keeps transform near orthogonal
+</code></pre>
+<p>The feature T-Net includes a regularization loss penalizing the transform matrix for deviating from orthogonality: L_reg = ||I - A*A^T||^2_F. This keeps the feature-space transformation numerically stable and improves final classification accuracy by roughly 1-2% on the ModelNet40 benchmark compared to using no feature alignment.</p>
+<h2>PointNet++ Hierarchical Learning</h2>
+<p>PointNet++ introduces hierarchical feature learning to capture local geometry that vanilla PointNet misses. Each Set Abstraction (SA) layer runs three steps: Farthest Point Sampling selects M representative centroids, ball query finds K neighbor points within a given radius, and a mini-PointNet encodes local geometry into a feature vector per centroid.</p>
+<pre><code>centroids = farthest_point_sample(xyz, n_centroids)    # (B, M)
+idx = ball_query(xyz, centroids, radius, n_samples)    # (B, M, K)
+grouped = index_points(feat, idx)                       # (B, M, K, C)
+local_feat = pointnet(grouped)                          # (B, M, C')
+</code></pre>
+<p>PointNet++ also supports multi-scale grouping (MSG), applying ball queries at different radii and concatenating the resulting features. This makes the model robust to varying point densities — a common issue in real LiDAR scans where nearby objects are densely sampled and distant objects yield only a handful of points per square meter.</p>
+<h2>Applications in 3D Detection</h2>
+<p>PointNet and PointNet++ serve as backbone encoders in many 3D object detection pipelines. VoteNet feeds PointNet++ features into a Hough voting module that predicts object centers. PointPillars voxelizes the point cloud into vertical pillars and uses a simplified PointNet per pillar to generate a pseudo-image for fast 2D CNN detection.</p>
+<pre><code>combined = torch.cat([global_feat, anchor_feat], dim=-1)
+pred = bbox_head(combined)
+# Predict 7 offsets: dx, dy, dz, dh, dw, dl, dtheta
+dx, dy, dz = pred[...,0], pred[...,1], pred[...,2]
+dh, dw, dl = pred[...,3], pred[...,4], pred[...,5]
+dtheta     = pred[...,6]
+# Apply 3D IoU NMS to suppress duplicate detections
+</code></pre>
+<p>3D IoU-based NMS is far more expensive than 2D NMS. Computing the intersection of two oriented 3D boxes requires polygon clipping in the horizontal plane plus interval overlap in the vertical axis. Libraries like iou3d-nms-cuda provide GPU-accelerated implementations essential for keeping 3D detection inference within real-time latency budgets.</p>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Task</th>
+<th>Input</th>
+<th>mAP / Acc %</th>
+<th>Speed (ms)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>PointNet</td>
+<td>Classification</td>
+<td>1024 pts</td>
+<td>89.2%</td>
+<td>~25</td>
+</tr>
+<tr>
+<td>PointNet</td>
+<td>Part Seg</td>
+<td>2048 pts</td>
+<td>83.7 mIoU</td>
+<td>~35</td>
+</tr>
+<tr>
+<td>PointNet++</td>
+<td>Classification</td>
+<td>1024 pts</td>
+<td>91.9%</td>
+<td>~40</td>
+</tr>
+<tr>
+<td>VoteNet</td>
+<td>3D Detection</td>
+<td>20k pts</td>
+<td>58.6 AP</td>
+<td>~200</td>
+</tr>
+<tr>
+<td>PointPillars</td>
+<td>3D Detection</td>
+<td>LiDAR voxels</td>
+<td>61.9 AP</td>
+<td>~16</td>
+</tr>
+</tbody>
+</table>
+<h2>Key Takeaways</h2>
+<p>PointNet's core insight is that a symmetric function (max-pool) applied to per-point feature transforms yields a permutation-invariant global descriptor. This eliminates the need for voxelization or graph construction and enables end-to-end training directly on raw 3D point sets with variable cardinality.</p>
+<p>PointNet++ addresses the locality problem by learning hierarchical representations through repeated Set Abstraction. Each layer captures features at a different spatial scale — from fine edge details to coarse shape structures — making it effective for both dense indoor scans and sparse outdoor LiDAR point clouds.</p>
+<p>Both architectures remain highly influential baselines. Modern successors like Point Transformer, 3DETR, and Mamba3D extend these foundations with attention or state-space mechanisms, yet retain the core principle of operating directly on unstructured 3D point sets without any voxelization preprocessing step.</p>
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ControlNet: Structural Conditioning for Diffusion Models | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>ControlNet: Structural Conditioning for Diffusion Models</h1>
+      
+      <h1>ControlNet: Structural Conditioning for Diffusion Models</h1>
+<h2>Overview</h2>
+<p>ControlNet by Zhang et al. (2023) enables structural conditioning of pretrained diffusion models without degrading their generative quality. It attaches a trainable copy of the U-Net encoder to process spatial control signals — edge maps, depth maps, human poses, segmentation masks — and injects learned features into the frozen original U-Net.</p>
+<p>The key insight is that a large pretrained model encodes rich generative knowledge that must be preserved during fine-tuning. ControlNet achieves this by locking original weights and learning only a trainable encoder copy, connected to the frozen decoder via zero-initialized convolutions that begin training with absolutely no influence on U-Net output.</p>
+<h2>Zero-Initialized Conditioning</h2>
+<p>Zero-convolutions are standard Conv2d layers initialized with weights and biases set to exactly zero. At the start of fine-tuning, the zero-conv output is identically zero regardless of its input. This means the ControlNet path contributes nothing to the U-Net output initially, fully preserving pretrained behavior and preventing gradient corruption of learned features.</p>
+<pre><code>import torch.nn as nn\n\nclass ZeroConv2d(nn.Conv2d):\n    def __init__(self, in_ch, out_ch):\n        super().__init__(in_ch, out_ch, kernel_size=1)\n        nn.init.zeros_(self.weight)\n        nn.init.zeros_(self.bias)\n\n# Output is zero at init regardless of input\n# Gradients build up naturally during training
+</code></pre>
+<p>As training proceeds, zero-conv weights evolve from zero, gradually activating the conditioning path. This creates a smooth training curriculum: early batches effectively fine-tune an unconditional model, then the conditioning signal progressively strengthens. This avoids catastrophic interference that occurs with standard random initialization of adapter connection layers.</p>
+<blockquote>
+<p><strong>warning</strong>: ControlNet's zero-convolutions are critical — without them, gradients from the conditioning path corrupt the pretrained U-Net weights in the first few steps. Never initialize the connection convolutions with standard random init.</p>
+</blockquote>
+<h2>Trainable Copy Architecture</h2>
+<p>ControlNet duplicates only the U-Net encoder (downsampling path) and middle block, not the decoder. The trainable copy processes the conditioning input through the same residual and attention blocks as the original encoder. Its outputs are added to corresponding skip connections of the frozen U-Net decoder via zero-initialized convolution layers.</p>
+<pre><code>class ControlNet(nn.Module):\n    def forward(self, x_t, t, condition, text_emb):\n        # Encode condition through trainable copy\n        cond_feats = self.trainable_encoder(condition, t, text_emb)\n        # Apply zero-conv before adding to frozen UNet skips\n        cond_feats = [self.zero_convs[i](f) for i, f in enumerate(cond_feats)]\n        # Frozen UNet decoder uses modified skip connections\n        return self.frozen_unet(x_t, t, text_emb, extra_skips=cond_feats)
+</code></pre>
+<p>The trainable encoder copy has the same parameter count as the original U-Net encoder, roughly 361M parameters for SD 1.5. Because the decoder is frozen and shared, inference adds only one encoder forward pass overhead. Multiple ControlNets can be combined additively, mixing pose, depth, and edge guidance simultaneously in a single denoising step.</p>
+<h2>Condition Types</h2>
+<p>ControlNet accepts any spatially-aligned conditioning map resized to match the latent spatial resolution. Standard conditions include Canny edges for sharp structural outlines, HED soft edges for boundary detection, depth maps from MiDaS or ZoeDepth, human skeletal poses from OpenPose, segmentation masks, and surface normal maps from 3D reconstruction pipelines.</p>
+<p>The raw conditioning image passes through a small trainable convolutional encoder — four Conv2d layers with SiLU activations — that maps it to the U-Net feature dimension before entering the trainable copy. This condition encoder is part of the ControlNet trainable parameters, learned jointly with the encoder copy during fine-tuning.</p>
+<table>
+<thead>
+<tr>
+<th>Condition Type</th>
+<th>Source</th>
+<th>Use Case</th>
+<th>Extra Params (M)</th>
+<th>FID Improvement</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Canny</td>
+<td>cv2.Canny</td>
+<td>Line art, architecture</td>
+<td>361</td>
+<td>~18% vs unconditioned</td>
+</tr>
+<tr>
+<td>Depth</td>
+<td>MiDaS/ZoeDepth</td>
+<td>3D-consistent scenes</td>
+<td>361</td>
+<td>~22% geometry fidelity</td>
+</tr>
+<tr>
+<td>HED</td>
+<td>HED boundary detector</td>
+<td>Soft edges, portraits</td>
+<td>361</td>
+<td>~15% detail preservation</td>
+</tr>
+<tr>
+<td>OpenPose</td>
+<td>Pose estimation</td>
+<td>Character poses, dance</td>
+<td>361</td>
+<td>~35% pose accuracy</td>
+</tr>
+<tr>
+<td>Segmentation</td>
+<td>ADE20k parser</td>
+<td>Scene layout control</td>
+<td>361</td>
+<td>~28% semantic accuracy</td>
+</tr>
+<tr>
+<td>Normal map</td>
+<td>3D reconstruction</td>
+<td>Surface texture control</td>
+<td>361</td>
+<td>~20% surface detail</td>
+</tr>
+</tbody>
+</table>
+<h2>Training and Fine-Tuning</h2>
+<p>ControlNet fine-tuning requires condition-image pairs: at minimum 1000-5000 pairs for a single condition type, though production models use millions. The original U-Net is fully frozen throughout training. Only the trainable encoder copy and zero-convolutions receive gradient updates, reducing effective trainable parameter count by roughly half versus full fine-tuning.</p>
+<pre><code>import cv2, torch\n\ndef extract_canny(img_np, lo=100, hi=200):\n    gray  = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)\n    edges = cv2.Canny(gray, lo, hi)\n    cond  = torch.from_numpy(edges).float() / 255.0\n    return cond.unsqueeze(0).unsqueeze(0)  # (1,1,H,W)
+</code></pre>
+<pre><code>def controlnet_train_step(controlnet, x0, cond, prompt):\n    t     = torch.randint(0, T, (x0.shape[0],))\n    noise = torch.randn_like(x0)\n    x_t   = forward_noise(x0, t, noise)\n    eps   = controlnet(x_t, t, cond, text_encode(prompt))\n    loss  = F.mse_loss(eps, noise)\n    loss.backward()  # gradients only reach ControlNet params\n    return loss.item()
+</code></pre>
+<p>Training uses the same epsilon-prediction MSE objective as DDPM, with the ControlNet-augmented U-Net substituted for the standard model. The frozen U-Net parameters are excluded from the optimizer, saving memory and preventing overfitting. Conditioning dropout of 50% — randomly replacing condition with zeros — improves robustness to missing or weak conditions.</p>
+<p>Fine-tuning a ControlNet for a new condition type typically takes 5,000-15,000 gradient steps with batch size 4 on a single A100. Zero-conv initialization makes convergence fast: useful conditioning often emerges within the first few hundred steps. This contrasts sharply with training a full diffusion model from scratch, requiring billions of image-text pairs.</p>
+<h2>Key Takeaways</h2>
+<p>ControlNet's zero-convolution trick elegantly solves the catastrophic forgetting problem for large generative model fine-tuning. By guaranteeing the pretrained model is undisturbed at initialization, it allows fine-tuning on small curated datasets without losing the generative quality accumulated through large-scale pretraining on billions of images.</p>
+<p>The trainable-copy architecture generalizes beyond edge and pose conditioning to any spatially-aligned signal, including color palettes, reference images, and custom synthetic conditions. Combined with open-weight SD releases, this enabled a massive ecosystem where specialized ControlNets are trained and shared for virtually every creative and technical imaging domain.</p>
+    </article>
+  </main>
+</body>
+</html>

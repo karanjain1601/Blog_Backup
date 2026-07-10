@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ViT Position Encoding: Learned, Sinusoidal, and 2D Variants | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>ViT Position Encoding: Learned, Sinusoidal, and 2D Variants</h1>
+      
+      <h1>ViT Position Encoding: Learned, Sinusoidal, and 2D Variants</h1>
+<h2>Overview</h2>
+<h2>Why Positional Encoding Matters</h2>
+<pre><code class="language-python">import torch, torch.nn as nn, torch.nn.functional as F
+
+class LearnedPosEmbed(nn.Module):
+    def __init__(self, num_patches, dim):
+        super().__init__()
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, dim))
+
+    def interpolate_to(self, new_h, new_w, patch_size=16):
+        cls, patch = self.pos_embed[:, :1], self.pos_embed[:, 1:]
+        gs = int(patch.shape[1] ** 0.5)
+        patch = patch.reshape(1, gs, gs, -1).permute(0, 3, 1, 2)
+        nh, nw = new_h // patch_size, new_w // patch_size
+        patch = F.interpolate(patch, (nh, nw), mode='bicubic', align_corners=False)
+        patch = patch.permute(0, 2, 3, 1).reshape(1, nh * nw, -1)
+        return torch.cat([cls, patch], dim=1)
+</code></pre>
+<h2>Learned vs Fixed Encodings</h2>
+<pre><code class="language-python">import torch
+
+def build_2d_sinusoidal(h_patches, w_patches, dim):
+    assert dim % 4 == 0
+    d = dim // 4
+    inv_freq = 1.0 / (10000 ** (torch.arange(0, d, dtype=torch.float) / d))
+    rows = torch.arange(h_patches).float().unsqueeze(1)
+    cols = torch.arange(w_patches).float().unsqueeze(1)
+    row_enc = torch.cat([torch.sin(rows * inv_freq), torch.cos(rows * inv_freq)], dim=-1)
+    col_enc = torch.cat([torch.sin(cols * inv_freq), torch.cos(cols * inv_freq)], dim=-1)
+    row_enc = row_enc.unsqueeze(1).expand(-1, w_patches, -1)
+    col_enc = col_enc.unsqueeze(0).expand(h_patches, -1, -1)
+    return torch.cat([row_enc, col_enc], dim=-1).reshape(-1, dim)
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Encoding Type</th>
+<th>Learnable</th>
+<th>Resolution Agnostic</th>
+<th>Relative?</th>
+<th>Used In</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Learned 1D</td>
+<td>Yes</td>
+<td>No (needs interp.)</td>
+<td>No</td>
+<td>ViT, DeiT</td>
+</tr>
+<tr>
+<td>Sinusoidal 1D</td>
+<td>No</td>
+<td>Yes</td>
+<td>No</td>
+<td>Early ViT variants</td>
+</tr>
+<tr>
+<td>Sinusoidal 2D</td>
+<td>No</td>
+<td>Yes</td>
+<td>No</td>
+<td>MAE, BEiT-v2</td>
+</tr>
+<tr>
+<td>RoPE 2D</td>
+<td>No</td>
+<td>Yes</td>
+<td>Yes</td>
+<td>RoFormer, EVA-02</td>
+</tr>
+<tr>
+<td>ALiBi Vision</td>
+<td>No</td>
+<td>Yes</td>
+<td>Yes</td>
+<td>Experimental</td>
+</tr>
+</tbody>
+</table>
+<h2>2D Sinusoidal and RoPE</h2>
+<pre><code class="language-python">import torch
+
+def apply_2d_rope(q, k, h_patches, w_patches, head_dim):
+    half = head_dim // 4
+    inv_freq = 1.0 / (10000 ** (torch.arange(0, half, dtype=q.dtype, device=q.device) / half))
+    rows = torch.arange(h_patches, device=q.device).float()
+    cols = torch.arange(w_patches, device=q.device).float()
+    row_grid, col_grid = torch.meshgrid(rows, cols, indexing='ij')
+    row_theta = row_grid.reshape(-1, 1) * inv_freq
+    col_theta = col_grid.reshape(-1, 1) * inv_freq
+    theta = torch.cat([row_theta, col_theta], dim=-1)
+    sin, cos = theta.sin()[None, None], theta.cos()[None, None]
+    q_rot = q * cos + rotate_half(q) * sin
+    k_rot = k * cos + rotate_half(k) * sin
+    return q_rot, k_rot
+</code></pre>
+<h2>Resolution Extrapolation</h2>
+<blockquote>
+<p><strong>info</strong>: Interpolating learned position embeddings to higher resolution requires bicubic interpolation on the 2D grid of patch positions — not linear 1D interpolation. Grid interpolation preserves 2D spatial structure.</p>
+</blockquote>
+<pre><code class="language-python">import torch
+
+def eval_resolution_transfer(model, val_loader_224, val_loader_384):
+    results = {}
+    for name, loader in [('224px', val_loader_224), ('384px', val_loader_384)]:
+        correct, total = 0, 0
+        with torch.no_grad():
+            for x, y in loader:
+                logits = model(x.cuda())
+                correct += (logits.argmax(1) == y.cuda()).sum().item()
+                total += y.size(0)
+        results[name] = correct / total
+        print(f'{name}: {results[name]:.4f}')
+    return results
+# Compare learned vs sinusoidal vs interpolated on the same val set
+</code></pre>
+<h2>Key Takeaways</h2>
+    </article>
+  </main>
+</body>
+</html>

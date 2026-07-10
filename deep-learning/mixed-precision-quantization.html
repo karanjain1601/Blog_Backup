@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mixed-Precision Quantization | Notes Backup</title>
+  <meta name="description" content="Assigning different bit-widths to different layers or attention heads based on sensitivity analysis, achieving better accuracy-compression tradeoffs than uniform quantization." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Mixed-Precision Quantization</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Assigning different bit-widths to different layers or attention heads based on sensitivity analysis, achieving better accuracy-compression tradeoffs than uniform quantization.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Mixed-Precision Quantization</h1>
+<p>Mixed-precision quantization assigns different numerical formats to different parts of a model — some layers at INT8, others at INT4, and the most sensitive at FP16 — rather than applying a single bit-width uniformly. This layer-heterogeneous approach recognizes that quantization sensitivity varies dramatically across a transformer: early embedding layers, the final language model head, and certain attention layers are far more sensitive to bit-width reduction than the bulk of feed-forward layers. By protecting the most sensitive layers and aggressively compressing the least sensitive, mixed-precision quantization achieves a better accuracy-compression Pareto frontier than any single uniform bit-width.</p>
+<h2>Overview</h2>
+<p>The central challenge in mixed-precision quantization is deciding which layers get which bit-width. This bit-width assignment problem is exponential in the number of layers: a 32-layer model with three choices per layer (INT4, INT8, FP16) has 3^32 ≈ 1.85 × 10^15 possible assignments. Practical methods fall into three categories: (1) sensitivity-based pruning — rank layers by quantization sensitivity and apply a threshold; (2) search-based methods — evolutionary algorithms or reinforcement learning to explore the assignment space guided by a quality metric; (3) algorithmic methods — LLM.int8() and AQLM, which derive mixed precision from the structure of the weight or activation tensors themselves. Each approach has different computational cost and optimality guarantees.</p>
+<h2>Layer Sensitivity Analysis</h2>
+<p>Sensitivity analysis quantifies how much quantizing each layer individually degrades the model's output quality. The simplest proxy is the Taylor expansion of the loss: the sensitivity of layer l is approximated as |∂L/∂W_l ⊙ W_l|, the element-wise product of gradients and weights summed over all parameters in that layer. Layers with high sensitivity — typically the first and last layers, layers in early transformer blocks, and attention output projections — receive higher bit-widths. Layers with low sensitivity — typically the middle feed-forward layers — receive aggressive quantization. This proxy is computed in a single backward pass and scales to very large models.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from dataclasses import dataclass
+from typing import Dict, List
+
+@dataclass
+class LayerSensitivity:
+    name: str
+    sensitivity: float
+    n_params: int
+    assigned_bits: int = 8
+
+def compute_taylor_sensitivity(
+    model_name: str,
+    calib_text: str,
+    high_bits: int = 8,
+    low_bits: int = 4,
+    sensitivity_threshold: float = 0.5
+) -&gt; List[LayerSensitivity]:
+    &quot;&quot;&quot;
+    Rank linear layers by Taylor sensitivity |grad * weight|.
+    Layers above sensitivity_threshold (relative) get high_bits;
+    layers below get low_bits.
+    &quot;&quot;&quot;
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float32)
+    model.eval()
+    # Forward + backward pass to get gradients
+    inputs = tokenizer(calib_text, return_tensors=&quot;pt&quot;, truncation=True, max_length=256)
+    input_ids = inputs[&quot;input_ids&quot;]
+    outputs = model(input_ids=input_ids, labels=input_ids)
+    loss = outputs.loss
+    loss.backward()
+    # Compute Taylor sensitivity per linear layer
+    sensitivities = []
+    for name, module in model.named_modules():
+        if not isinstance(module, nn.Linear):
+            continue
+        if module.weight.grad is None:
+            continue
+        # |grad * weight| summed — Taylor expansion proxy
+        s = (module.weight.grad * module.weight.data).abs().sum().item()
+        sensitivities.append(LayerSensitivity(
+            name=name, sensitivity=s, n_params=module.weight.numel()
+        ))
+    # Normalize and assign bit-widths
+    max_s = max(ls.sensitivity for ls in sensitivities) + 1e-8
+    for ls in sensitivities:
+        ls.sensitivity /= max_s
+        ls.assigned_bits = high_bits if ls.sensitivity &gt; sensitivity_threshold else low_bits
+    sensitivities.sort(key=lambda x: x.sensitivity, reverse=True)
+    print(f&quot;{'Layer':&lt;50} {'Sensitivity':&gt;12} {'Bits':&gt;6} {'Params':&gt;10}&quot;)
+    print(&quot;-&quot; * 82)
+    for ls in sensitivities[:10]:
+        print(f&quot;{ls.name:&lt;50} {ls.sensitivity:&gt;12.4f} {ls.assigned_bits:&gt;6} {ls.n_params:&gt;10,}&quot;)
+    n_high = sum(1 for ls in sensitivities if ls.assigned_bits == high_bits)
+    n_low = len(sensitivities) - n_high
+    print(f&quot;\nAssigned: {n_high} layers at INT{high_bits}, {n_low} layers at INT{low_bits}&quot;)
+    return sensitivities
+
+print(&quot;Taylor sensitivity: proxy for quantization impact via grad*weight product.&quot;)
+</code></pre>
+<h2>HAWQ and Hessian-Based Methods</h2>
+<p>HAWQ (Hessian Aware Quantization, Dong et al., 2019) uses the trace of the Hessian (second-order derivatives) as the sensitivity metric. The Hessian trace captures how curvature of the loss landscape responds to perturbations in each layer's weights. High Hessian trace → high sensitivity → higher bit-width assignment. HAWQ-V2 extends this to mixed-precision between different operators (attention vs FFN) rather than just between layers. Computing the exact Hessian is intractable for LLMs, but the Hutchinson estimator provides an unbiased Monte Carlo estimate of the trace using random Rademacher vectors and Hessian-vector products — computable in O(P) memory with O(P × n_samples) compute.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Effective Bits</th>
+<th>PPL Increase (7B)</th>
+<th>Memory vs FP16</th>
+<th>Compute Overhead</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Uniform INT8</td>
+<td>8.0</td>
+<td>+0.0 – 0.1</td>
+<td>50% reduction</td>
+<td>Low — standard INT8 matmul</td>
+</tr>
+<tr>
+<td>Uniform INT4</td>
+<td>4.0</td>
+<td>+0.5 – 2.0</td>
+<td>75% reduction</td>
+<td>Low — INT4 matmul kernel</td>
+</tr>
+<tr>
+<td>LLM.int8()</td>
+<td>~8.0 (mixed)</td>
+<td>+0.0 – 0.1</td>
+<td>~50% reduction</td>
+<td>Medium — FP16 outlier branch overhead</td>
+</tr>
+<tr>
+<td>Mixed INT8/INT4</td>
+<td>5.0 – 6.5</td>
+<td>+0.1 – 0.5</td>
+<td>60–70% reduction</td>
+<td>Medium — two kernel paths per layer</td>
+</tr>
+<tr>
+<td>AQLM 2-bit</td>
+<td>2.0 – 2.2</td>
+<td>+1.0 – 3.0</td>
+<td>87% reduction</td>
+<td>High — codebook lookup + decode</td>
+</tr>
+</tbody>
+</table>
+<h2>Evolutionary Search for Bit Assignments</h2>
+<p>Evolutionary search treats the bit-width assignment as a combinatorial optimization problem. The search space is {2, 4, 8}^N_layers, the fitness function is a weighted sum of perplexity and model size, and the algorithm maintains a population of candidate assignments. Each generation evaluates fitness by running a quantized forward pass at each candidate's bit-widths and computing perplexity on a small validation set. Tournament selection, crossover (swap sub-sequences of layer assignments), and mutation (randomly flip individual layer widths) evolve the population toward Pareto-optimal assignments. Evolutionary search finds better solutions than sensitivity-only methods but requires many evaluations — typically 200–500 forward passes.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+import random
+from dataclasses import dataclass, field
+from typing import List, Tuple
+
+@dataclass
+class Individual:
+    bits: List[int]           # bit-width per layer
+    perplexity: float = float('inf')
+    model_size_bits: int = 0
+    fitness: float = float('inf')
+
+def evolve_bit_assignment(
+    n_layers: int,
+    bit_choices: List[int],
+    fitness_fn,   # callable(bits_list) -&gt; (perplexity, size_bits)
+    n_population: int = 20,
+    n_generations: int = 30,
+    ppl_weight: float = 1.0,
+    size_weight: float = 0.3,
+    mutation_prob: float = 0.15
+) -&gt; Tuple[Individual, List[float]]:
+    &quot;&quot;&quot;Evolutionary search over per-layer bit-width assignments.&quot;&quot;&quot;
+    def make_individual():
+        bits = [random.choice(bit_choices) for _ in range(n_layers)]
+        return Individual(bits=bits)
+
+    def evaluate(ind: Individual) -&gt; Individual:
+        ppl, size = fitness_fn(ind.bits)
+        ind.perplexity = ppl
+        ind.model_size_bits = size
+        # Fitness: weighted sum (lower is better)
+        ind.fitness = ppl_weight * ppl + size_weight * (size / 1e9)
+        return ind
+
+    def crossover(a: Individual, b: Individual) -&gt; Individual:
+        cut = random.randint(1, n_layers - 1)
+        child_bits = a.bits[:cut] + b.bits[cut:]
+        return Individual(bits=child_bits)
+
+    def mutate(ind: Individual) -&gt; Individual:
+        bits = ind.bits.copy()
+        for i in range(n_layers):
+            if random.random() &lt; mutation_prob:
+                bits[i] = random.choice(bit_choices)
+        return Individual(bits=bits)
+
+    # Initialize and evaluate population
+    population = [evaluate(make_individual()) for _ in range(n_population)]
+    best_history = []
+
+    for gen in range(n_generations):
+        population.sort(key=lambda x: x.fitness)
+        best = population[0]
+        best_history.append(best.fitness)
+        if gen % 5 == 0:
+            avg_bits = np.mean(best.bits)
+            print(f&quot;Gen {gen:3d}: best_fitness={best.fitness:.4f} &quot;
+                  f&quot;PPL={best.perplexity:.2f} avg_bits={avg_bits:.2f}&quot;)
+        # Elitism + crossover + mutation
+        elite = population[:n_population // 4]
+        children = []
+        while len(children) &lt; n_population - len(elite):
+            a, b = random.sample(elite, 2)
+            child = mutate(crossover(a, b))
+            children.append(evaluate(child))
+        population = elite + children
+
+    population.sort(key=lambda x: x.fitness)
+    return population[0], best_history
+
+# Demo with synthetic fitness function
+def mock_fitness(bits):
+    avg_b = np.mean(bits)
+    ppl = 8.5 + max(0, (4.5 - avg_b) * 1.2) + np.random.normal(0, 0.05)
+    size = sum(bits) * 1e8
+    return ppl, size
+
+best_ind, history = evolve_bit_assignment(
+    n_layers=32, bit_choices=[4, 8], fitness_fn=mock_fitness,
+    n_population=16, n_generations=20
+)
+print(f&quot;\nBest assignment: avg={np.mean(best_ind.bits):.2f} bits, PPL={best_ind.perplexity:.2f}&quot;)
+print(f&quot;Bit widths (first 10 layers): {best_ind.bits[:10]}&quot;)
+</code></pre>
+<h2>LLM.int8() Mixed-Precision</h2>
+<p>LLM.int8() (Dettmers et al., 2022) is a mixed-precision quantization scheme built into the bitsandbytes library. It targets the outlier problem in large LLMs: at scales above 6B parameters, a small subset of activation dimensions (typically &lt;0.1%) carry magnitudes 60–100× larger than the median. These outlier features appear consistently in the same hidden dimensions across all tokens and all layers. LLM.int8() detects these outlier columns at calibration time and keeps them in FP16, while quantizing the remaining columns to INT8. The matrix multiplication is decomposed into two matrix multiplications: one FP16 for outlier columns, one INT8 for the rest, and their outputs are summed. This concession to FP16 for &lt;0.1% of values prevents the 2–5 perplexity point degradation that uniform INT8 suffers on large models.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+import bitsandbytes as bnb
+
+def load_int8_model(
+    model_name: str,
+    device_map: str = &quot;auto&quot;,
+    llm_int8_threshold: float = 6.0
+) -&gt; tuple:
+    &quot;&quot;&quot;
+    Load a model in LLM.int8() mixed-precision.
+    Outlier features with magnitude &gt; llm_int8_threshold * layer_std
+    are kept in FP16; all other features are quantized to INT8.
+    &quot;&quot;&quot;
+    bnb_config = BitsAndBytesConfig(
+        load_in_8bit=True,
+        llm_int8_threshold=llm_int8_threshold,
+        llm_int8_has_fp16_weight=False
+    )
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        quantization_config=bnb_config,
+        device_map=device_map,
+        torch_dtype=torch.float16
+    )
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    # Report memory usage
+    if torch.cuda.is_available():
+        mem_gb = torch.cuda.memory_allocated() / 1e9
+        print(f&quot;GPU memory allocated: {mem_gb:.2f} GB&quot;)
+    # Count INT8 vs FP16 linear layers
+    n_int8 = sum(1 for m in model.modules() if isinstance(m, bnb.nn.Linear8bitLt))
+    n_fp16 = sum(1 for m in model.modules() if isinstance(m, nn.Linear)
+                 and not isinstance(m, bnb.nn.Linear8bitLt))
+    total = sum(p.numel() for p in model.parameters())
+    print(f&quot;Linear8bitLt layers: {n_int8}  |  FP16 Linear: {n_fp16}&quot;)
+    print(f&quot;Total parameters: {total/1e9:.2f}B&quot;)
+    return model, tokenizer
+
+def benchmark_int8_vs_fp16(model_name: str, prompt: str):
+    &quot;&quot;&quot;Compare memory and throughput: FP16 baseline vs LLM.int8().&quot;&quot;&quot;
+    import time
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    inputs = tokenizer(prompt, return_tensors=&quot;pt&quot;)
+    for label, load_kwargs in [
+        (&quot;FP16&quot;,      {&quot;torch_dtype&quot;: torch.float16}),
+        (&quot;LLM.int8&quot;,  {&quot;quantization_config&quot;: BitsAndBytesConfig(load_in_8bit=True)}),
+    ]:
+        model = AutoModelForCausalLM.from_pretrained(model_name, device_map=&quot;auto&quot;, **load_kwargs)
+        inp = {k: v.to(model.device) for k, v in inputs.items()}
+        with torch.no_grad():
+            t0 = time.perf_counter()
+            _ = model.generate(**inp, max_new_tokens=64)
+            tps = 64 / (time.perf_counter() - t0)
+        mem = torch.cuda.max_memory_allocated() / 1e9
+        print(f&quot;{label:&lt;12} mem={mem:.1f} GB  tps={tps:.1f}&quot;)
+        del model
+        torch.cuda.empty_cache()
+
+print(&quot;LLM.int8(): keeps outlier features in FP16, quantizes 99.9%+ to INT8.&quot;)
+</code></pre>
+<blockquote>
+<p><strong>LLM.int8() Outlier Handling</strong>: LLM.int8() keeps &lt;0.1% of activation outlier features in FP16 while quantizing everything else to INT8 — this small concession prevents the 2–5 PPL spike that uniform INT8 suffers on large models. The outlier dimensions are consistent across tokens and layers, so they can be identified once during calibration and handled with a fixed FP16 path at inference.</p>
+</blockquote>
+<h2>AQLM and Vector Quantization</h2>
+<p>AQLM (Additive Quantization of Language Models, Egiazarian et al., 2024) applies vector quantization to LLM weight matrices, achieving effective 2-bit compression with substantially lower perplexity degradation than scalar INT2 quantization. Instead of quantizing each weight scalar independently, AQLM groups weight columns into vectors of length 8 or 16 and encodes each vector as a sum of M codebook lookups from codebooks of size 2^B. For M=2, B=8: each vector is encoded as two 8-bit codebook indices, giving an effective 2 bits per weight. The codebooks are learned by minimizing layer-wise output reconstruction error. At inference, the encoded indices are dequantized on the fly before the matrix multiplication.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+
+class AQLMQuantizer(nn.Module):
+    &quot;&quot;&quot;
+    Simplified AQLM: additive vector quantization of weight columns.
+    Encodes each weight column as a sum of M codebook lookups.
+    M=2, codebook_size=256 gives ~2 bits/weight for column_dim=8.
+    &quot;&quot;&quot;
+
+    def __init__(self, d_out: int, d_in: int,
+                 column_dim: int = 8,
+                 n_codebooks: int = 2,
+                 codebook_size: int = 256):
+        super().__init__()
+        assert d_in % column_dim == 0, &quot;d_in must be divisible by column_dim&quot;
+        self.d_out = d_out
+        self.d_in = d_in
+        self.column_dim = column_dim
+        self.n_codebooks = n_codebooks
+        self.codebook_size = codebook_size
+        n_groups = d_in // column_dim  # number of column groups per output row
+        # Codebooks: (n_codebooks, codebook_size, column_dim)
+        self.codebooks = nn.Parameter(
+            torch.randn(n_codebooks, codebook_size, column_dim) * 0.02
+        )
+        # Indices: (d_out, n_groups, n_codebooks) — stored as int16
+        self.register_buffer(
+            &quot;indices&quot;,
+            torch.zeros(d_out, n_groups, n_codebooks, dtype=torch.int16)
+        )
+
+    def encode(self, weight: torch.Tensor):
+        &quot;&quot;&quot;Encode a weight matrix into codebook indices (greedy).&quot;&quot;&quot;
+        d_out, d_in = weight.shape
+        n_groups = d_in // self.column_dim
+        W = weight.view(d_out, n_groups, self.column_dim)  # (d_out, G, col_dim)
+        indices = torch.zeros(d_out, n_groups, self.n_codebooks, dtype=torch.int16)
+        for m in range(self.n_codebooks):
+            # Residual after previous codebooks
+            residual = W.clone()
+            if m &gt; 0:
+                for prev in range(m):
+                    prev_codes = self.codebooks[prev][indices[:, :, prev].long()]  # (d_out, G, col_dim)
+                    residual = residual - prev_codes
+            # Find nearest codebook entry
+            cb = self.codebooks[m]  # (CB, col_dim)
+            dists = torch.cdist(
+                residual.reshape(-1, self.column_dim),
+                cb
+            )  # (d_out*G, CB)
+            nearest = dists.argmin(dim=-1).reshape(d_out, n_groups).to(torch.int16)
+            indices[:, :, m] = nearest
+        self.indices.copy_(indices)
+
+    def decode(self) -&gt; torch.Tensor:
+        &quot;&quot;&quot;Reconstruct weight from codebook indices.&quot;&quot;&quot;
+        d_out, n_groups, _ = self.indices.shape
+        recon = torch.zeros(d_out, n_groups, self.column_dim,
+                            device=self.codebooks.device)
+        for m in range(self.n_codebooks):
+            recon += self.codebooks[m][self.indices[:, :, m].long()]
+        return recon.view(d_out, self.d_in)
+
+    def forward(self, x: torch.Tensor) -&gt; torch.Tensor:
+        W_hat = self.decode()
+        return F.linear(x, W_hat)
+
+# Demo: encode a small linear layer and measure reconstruction error
+torch.manual_seed(0)
+d_out, d_in = 256, 128
+W = torch.randn(d_out, d_in)
+quantizer = AQLMQuantizer(d_out=d_out, d_in=d_in, column_dim=8, n_codebooks=2, codebook_size=256)
+quantizer.encode(W)
+W_hat = quantizer.decode()
+rmse = (W_hat - W).pow(2).mean().sqrt().item()
+bits_per_weight = (2 * 8) / 8   # 2 codebooks × 8 bits / 8 scalars per group
+print(f&quot;AQLM RMSE: {rmse:.5f}  |  Effective bits/weight: {bits_per_weight:.2f}&quot;)
+print(f&quot;Compression vs FP32: {32 / bits_per_weight:.1f}x&quot;)
+</code></pre>
+<h2>Automated Mixed Precision</h2>
+<p>Automated Mixed Precision (AMP) in the NVIDIA/PyTorch sense refers to training-time FP16/BF16 mixed precision — not the inference quantization described above. However, the term is also used for inference-time bit-width automation tools such as Intel Neural Compressor's auto-mixed-precision and Hugging Face Optimum's ORT quantizer, which automatically determine per-layer precision by running sensitivity analysis and applying heuristics. These tools wrap the sensitivity + search pipeline behind a single API call, making mixed-precision quantization accessible without manual layer analysis. For LLMs specifically, bitsandbytes (4-bit NF4 + double quantization) and AutoGPTQ (layer-wise GPTQ + configurable bit mix) are the most practical automated mixed-precision deployment paths.</p>
+<ul>
+<li>Start with sensitivity analysis (one backward pass) to rank layers before running expensive search algorithms.</li>
+<li>Protect the embedding layer and LM head — these are almost always the most sensitive and should stay at FP16 or INT8.</li>
+<li>LLM.int8() threshold=6.0 is a good default; lower it to 4.0 for models above 30B parameters where outlier severity increases.</li>
+<li>AQLM achieves 2-bit effective compression with far better quality than scalar INT2 — prefer it over Q2_K for GPU inference.</li>
+<li>Evolutionary search for bit assignments converges in 200–500 evaluations; use n_population=20, n_generations=25 as a starting budget.</li>
+<li>For practical deployment, bitsandbytes 4-bit NF4 (load_in_4bit=True, bnb_4bit_quant_type='nf4') is the best automated option for 7B–70B models.</li>
+<li>Mixed INT8/INT4 (sensitive layers at INT8, insensitive at INT4) reduces memory by 60–70% vs FP16 with PPL increase of only 0.1–0.5.</li>
+</ul>
+<h2>Key Takeaways</h2>
+<ul>
+<li>Uniform quantization applies the same bit-width everywhere; mixed-precision targets resources at the layers that need them.</li>
+<li>Taylor sensitivity (|grad * weight|) is a cheap and effective proxy for quantization sensitivity — computed in one forward+backward pass.</li>
+<li>HAWQ uses Hessian trace (via Hutchinson estimator) for a more principled second-order sensitivity ranking.</li>
+<li>LLM.int8() decomposes matmul into FP16 (outlier columns) + INT8 (remaining columns) — essential for models above 6B parameters.</li>
+<li>AQLM's vector quantization at 2 effective bits outperforms scalar INT2 by 2–4 perplexity points on 7B models.</li>
+<li>Evolutionary search is the most flexible assignment method but requires 200+ model evaluations — use sensitivity ranking as initialization.</li>
+<li>The Pareto-optimal mixed-precision assignment typically uses INT4 for ~70% of layers and INT8 for ~30% of the most sensitive layers.</li>
+<li>bitsandbytes NF4 with double quantization is the practical default for mixed-precision LLM deployment in 2024–2025.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

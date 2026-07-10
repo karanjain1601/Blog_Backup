@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tiktoken: OpenAI&#x27;s Fast BPE Tokenizer | Notes Backup</title>
+  <meta name="description" content="Tiktoken&#x27;s byte-level BPE implementation used by GPT-3.5/GPT-4, covering vocabulary evolution (r50k→cl100k→o200k), regex pre-tokenization patterns, and performance characteristics." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Tiktoken: OpenAI&#x27;s Fast BPE Tokenizer</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Tiktoken&#x27;s byte-level BPE implementation used by GPT-3.5/GPT-4, covering vocabulary evolution (r50k→cl100k→o200k), regex pre-tokenization patterns, and performance characteristics.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Tiktoken: OpenAI's Fast BPE Tokenizer</h1>
+<p>Tiktoken is OpenAI's open-source, Rust-backed BPE tokenizer released in 2023. It is the production tokenizer behind every OpenAI API call — every prompt you send to GPT-3.5-turbo or GPT-4 is tokenized by tiktoken before reaching the model. The library exposes a minimal Python API (pip install tiktoken) that wraps a highly optimised Rust core, making it 3–6× faster than equivalent HuggingFace tokenizer implementations and 5–20× faster than pure-Python BPE. Tiktoken implements byte-level BPE: the initial vocabulary consists of all 256 possible bytes, ensuring that any UTF-8 string can be encoded without an unknown token. Understanding tiktoken is essential for accurate prompt cost estimation, context-window management, and building chat-format requests that respect token budgets.</p>
+<h2>Overview</h2>
+<p>Tiktoken's design prioritises three goals: correctness (matching OpenAI's server-side tokenization exactly), speed (Rust core with Python bindings via PyO3), and simplicity (a small, stable public API). The library ships four named encodings — r50k_base, p50k_base, cl100k_base, and o200k_base — each corresponding to a specific vocabulary and regex pre-tokenizer. Encoding names map directly to model families: GPT-2 uses r50k_base; Codex uses p50k_base; GPT-3.5-turbo and GPT-4 use cl100k_base; GPT-4o and o1 use o200k_base. The key API entry points are tiktoken.get_encoding('name') to load by name and tiktoken.encoding_for_model('model-name') to resolve the correct encoding automatically from a model identifier. The encode() method returns a list of integer token IDs; decode() converts IDs back to bytes; encode_ordinary() skips special-token handling for speed.</p>
+<h2>Byte-Level BPE Foundation</h2>
+<p>Byte-level BPE starts from a vocabulary of 256 bytes (0x00–0xFF) rather than individual Unicode characters. This guarantees that any input text — regardless of language, script, or encoding — can be tokenized without producing an [UNK] token. Training proceeds identically to standard BPE: count all adjacent byte-pair frequencies across the training corpus, merge the most frequent pair into a new vocabulary token, and repeat until the vocabulary reaches the target size. For cl100k_base, this process produces 100,256 merge operations on top of the 256 base bytes, yielding the final 100,277-token vocabulary (including 21 special tokens). Because merges are applied in a fixed order, encoding is deterministic: the same string always produces the same token IDs on the same encoding, regardless of surrounding context or batching.</p>
+<p>The performance advantage of tiktoken comes from its priority-queue encoding algorithm. Naive BPE encoding scans the token list for applicable merges on every step, giving O(M × T²) worst-case complexity per word where M is the number of merges and T is the input length. Tiktoken uses a Rust BinaryHeap to track candidate merges, reducing this to O(T log T) per sequence and enabling batch encoding of many sequences in parallel. In practice, tiktoken encodes roughly 1 million tokens per second on a single CPU core — fast enough that tokenization is rarely a bottleneck even in high-throughput serving scenarios.</p>
+<h2>Vocabulary Families</h2>
+<p>OpenAI has released four distinct encodings over the history of GPT models, each with a larger vocabulary and a refined pre-tokenization regex. r50k_base (50,257 tokens) is the GPT-2 encoding, identical to the vocabulary released by OpenAI in 2019. p50k_base (50,281 tokens) is a minor variant used by the Codex code-completion models; it adds 24 tokens for common programming constructs. cl100k_base (100,277 tokens) doubled the vocabulary size for GPT-3.5 and GPT-4, reducing average English fertility from ~1.4 tokens/word to ~1.25 tokens/word and significantly improving tokenization of non-English languages and code. o200k_base (200,019 tokens) was introduced with GPT-4o and further reduces fertility for multilingual text, with particular improvements for CJK scripts, Arabic, and structured data formats. Larger vocabularies reduce context-window consumption but increase embedding-matrix memory: at 1536 dimensions (GPT-4o), the embedding matrix alone is 200K × 1536 × 2 bytes ≈ 585 MB.</p>
+<table>
+<thead>
+<tr>
+<th>Encoding</th>
+<th>Vocab size</th>
+<th>Used by</th>
+<th>Special tokens</th>
+<th>Release year</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>r50k_base</td>
+<td>50,257</td>
+<td>GPT-2, text-davinci-001/002</td>
+<td>1 (&lt;</td>
+<td>endoftext</td>
+</tr>
+<tr>
+<td>p50k_base</td>
+<td>50,281</td>
+<td>code-davinci-002, Codex</td>
+<td>1 (&lt;</td>
+<td>endoftext</td>
+</tr>
+<tr>
+<td>cl100k_base</td>
+<td>100,277</td>
+<td>GPT-3.5-turbo, GPT-4, text-embedding-ada-002</td>
+<td>5 (chat separators + endoftext)</td>
+<td>2023</td>
+</tr>
+<tr>
+<td>o200k_base</td>
+<td>200,019</td>
+<td>GPT-4o, GPT-4o-mini, o1, o3</td>
+<td>5+ (extended chat separators)</td>
+<td>2024</td>
+</tr>
+</tbody>
+</table>
+<h2>Regex Pre-tokenization</h2>
+<p>Before BPE merges are applied, tiktoken splits the input into pre-tokens using a regex pattern. This prevents BPE from creating cross-word tokens that depend on context — without pre-tokenization, 'the end' and 'theme nd' could share a common token 'e e' if that pair is frequent, making tokenization non-local. GPT-4's cl100k_base uses a 5-group regex pattern (distinct from GPT-2's 4-group pattern) that splits on: (1) contractions and possessives such as 's, 't, 're, 've, 'm, 'll, 'd; (2) optional-space + letter sequences; (3) optional-space + digit sequences; (4) optional-space + non-whitespace non-letter non-digit characters (punctuation, symbols); (5) whitespace-only tokens. The o200k_base encoding uses a nearly identical pattern with minor adjustments for extended Unicode character classes. Each pre-token is encoded independently, so merges never span a pre-token boundary.</p>
+<p>The regex pre-tokenizer determines which token boundaries are possible. For example, a space before a word is merged into the word's token (as in GPT-2's Ġ prefix representation), rather than being a standalone token. Numbers are split so that multi-digit numbers like '2024' may become one token (if the merge exists) or multiple tokens ('20', '24'), but digits are never merged with surrounding letters. Punctuation sequences like '...' or '---' are kept together as single pre-tokens and encoded as one or two tokens. These design decisions significantly affect downstream model behaviour: models trained on cl100k_base learn that certain token boundaries always correspond to word or morpheme boundaries, which aids subword generalisation.</p>
+<h2>Encoding and Decoding</h2>
+<p>Tiktoken's encode() method returns a list of token IDs (integers). The decode() method takes a list of IDs and returns bytes (not a str), which must be decoded with .decode('utf-8', errors='replace') for display. This bytes-first design is intentional: individual token IDs may not correspond to valid UTF-8 strings when decoded in isolation, because a multi-byte Unicode character can be split across consecutive tokens. Decoding each ID independently would produce garbled output for any character whose UTF-8 encoding is split; decoding the full byte sequence at once is always safe. The encode_ordinary() method skips special-token handling and is slightly faster when inputs are guaranteed not to contain special token strings. The encode_batch() and decode_batch() methods process multiple sequences in parallel using Rust threads.</p>
+<h2>Special Tokens and Chat Formats</h2>
+<p>Special tokens are token strings that do not arise from BPE merges; they are added to the vocabulary at fixed IDs outside the BPE token range. cl100k_base defines five special tokens used by the ChatML format: &lt;|endoftext|&gt; (end of a document, ID 100257), &lt;|fim_prefix|&gt; (fill-in-the-middle prefix, ID 100258), &lt;|fim_middle|&gt; (ID 100259), &lt;|fim_suffix|&gt; (ID 100260), and &lt;|endofprompt|&gt; (ID 100276). GPT-3.5-turbo and GPT-4 chat completions use the ChatML format, which wraps each turn with implicit special tokens: &lt;|im_start|&gt;role\ncontent&lt;|im_end|&gt;. OpenAI's tiktoken documentation counts ~4 extra tokens per message (for the role wrapper) and ~2 tokens for the reply priming, which is why the standard token-counting formula adds a per-message overhead rather than encoding the chat structure directly.</p>
+<blockquote>
+<p><strong>Use encoding_for_model, not encoding name</strong>: Different OpenAI models use different encodings with different vocabulary sizes — always specify the encoding by model name (tiktoken.encoding_for_model('gpt-4')) rather than encoding name to avoid silent token count mismatches. For example, tiktoken.get_encoding('cl100k_base') and tiktoken.encoding_for_model('gpt-4') are currently equivalent, but if OpenAI updates gpt-4 to use o200k_base, encoding_for_model will automatically resolve the new encoding while the hardcoded string will silently use the old one, producing incorrect token counts and potentially truncated or oversized prompts.</p>
+</blockquote>
+<h2>Performance and Fertility</h2>
+<p>Fertility — average tokens per word — is the primary quality metric for a tokenizer's compression efficiency. Lower fertility means more text fits in a fixed context window and the model attends over shorter sequences for the same semantic content. For English prose, r50k_base achieves fertility ≈ 1.3–1.5, cl100k_base achieves ≈ 1.2–1.3, and o200k_base achieves ≈ 1.1–1.2. For code (Python, JavaScript), cl100k_base has fertility ≈ 1.1–1.4 because identifiers and keywords are common and receive dedicated tokens. For Chinese or Japanese, the improvement from cl100k_base to o200k_base is larger: common CJK characters that needed 2–3 tokens in cl100k_base fit in 1–2 tokens in o200k_base. Throughput benchmarks show tiktoken encoding English text at 1–2 MB/s on a single core, which is 3–6× faster than HuggingFace's PreTrainedTokenizerFast for equivalent BPE vocabularies, and 15–30× faster than pure-Python BPE implementations.</p>
+<p>Token cost is directly proportional to the token count returned by tiktoken. As of mid-2025, GPT-4o charges $2.50 per 1M input tokens and $10.00 per 1M output tokens. A 1000-word English document encodes to roughly 1250–1350 cl100k tokens and costs approximately $0.003 per call at GPT-4o pricing. Understanding fertility helps prioritise tokenizer upgrades: switching a pipeline from gpt-3.5-turbo (cl100k) to gpt-4o (o200k) reduces token count by roughly 5–10% for English and 15–25% for mixed multilingual text, providing a cost reduction even before considering model quality differences.</p>
+<h2>Key Takeaways</h2>
+<ul>
+<li>Tiktoken is OpenAI's Rust-backed BPE tokenizer; it is 3–6× faster than HuggingFace tokenizers and 15–30× faster than pure-Python BPE.</li>
+<li>Four encodings exist: r50k_base (50K, GPT-2), p50k_base (50K, Codex), cl100k_base (100K, GPT-3.5/GPT-4), o200k_base (200K, GPT-4o/o1).</li>
+<li>Byte-level BPE guarantees zero OOV tokens — any UTF-8 input encodes without [UNK] because all 256 bytes are in the base vocabulary.</li>
+<li>Always use tiktoken.encoding_for_model('model-name') rather than hardcoded encoding names to avoid silent vocabulary mismatches.</li>
+<li>The cl100k_base 5-group regex pre-tokenizer prevents cross-word BPE merges by splitting contractions, letters, digits, punctuation, and whitespace independently.</li>
+<li>Special tokens like &lt;|im_start|&gt; and &lt;|im_end|&gt; are added at IDs above the BPE range and must be explicitly allowed in encode() via allowed_special.</li>
+<li>Fertility for English: r50k ≈ 1.4, cl100k ≈ 1.25, o200k ≈ 1.15 — each generation saves ~10% context-window space per token.</li>
+<li>ChatML format adds ~4 overhead tokens per message; always include this in token-budget calculations for chat-completion APIs.</li>
+<li>decode() returns bytes, not str — always call .decode('utf-8', errors='replace') on the result to handle split multi-byte characters safely.</li>
+</ul>
+<hr />
+<h2>Code Examples</h2>
+<p>The following code blocks demonstrate tiktoken's core API: basic encoding and decoding, the regex pre-tokenization pattern, multi-encoding comparison with fertility analysis, and custom special-token handling for chat formats.</p>
+<pre><code class="language-python">import tiktoken
+
+# Load cl100k_base — used by GPT-3.5-turbo and GPT-4
+enc = tiktoken.get_encoding('cl100k_base')
+
+# Basic encode / decode
+text = 'Hello, world! Tiktoken is OpenAI\'s fast BPE tokenizer.'
+token_ids = enc.encode(text)
+print(f'Text   : {text}')
+print(f'Tokens : {token_ids}')
+print(f'Count  : {len(token_ids)} tokens')
+
+# Decode back to string
+decoded = enc.decode(token_ids).decode('utf-8')
+print(f'Decoded: {decoded}')
+assert decoded == text, 'Round-trip failed'
+
+# Inspect individual tokens and their byte representations
+print(f'\n{&quot;ID&quot;:&gt;7}  {&quot;Bytes&quot;:&lt;30}  {&quot;Repr&quot;}')
+for tid in token_ids[:8]:
+    token_bytes = enc.decode_single_token_bytes(tid)
+    print(f'{tid:&gt;7}  {str(token_bytes):&lt;30}  {token_bytes.decode(&quot;utf-8&quot;, errors=&quot;replace&quot;)!r}')
+
+# Count tokens for a chat message (GPT-4 ChatML format)
+def count_chat_tokens(messages, model='gpt-4'):
+    enc = tiktoken.encoding_for_model(model)
+    n_tokens = 2  # reply priming: &lt;|im_start|&gt;assistant
+    for msg in messages:
+        n_tokens += 4  # per-message overhead: role wrapper tokens
+        for value in msg.values():
+            n_tokens += len(enc.encode(value))
+    return n_tokens
+
+messages = [
+    {'role': 'system', 'content': 'You are a helpful assistant.'},
+    {'role': 'user', 'content': 'Explain byte-level BPE in two sentences.'},
+]
+print(f'\nChat token count: {count_chat_tokens(messages)} tokens')
+</code></pre>
+<pre><code class="language-python">import re
+import tiktoken
+
+# GPT-4 / cl100k_base regex pre-tokenization pattern
+# This pattern splits text BEFORE BPE merges are applied
+GPT4_SPLIT_PATTERN = (
+    r&quot;&quot;&quot;(?i:'s|'t|'re|'ve|'m|'ll|'d)&quot;&quot;&quot;
+    r&quot;&quot;&quot;|[^\r\n\p{L}\p{N}]?\p{L}+&quot;&quot;&quot;
+    r&quot;&quot;&quot;|\p{N}{1,3}&quot;&quot;&quot;
+    r&quot;&quot;&quot;| ?[^\s\p{L}\p{N}]+[\r\n]*&quot;&quot;&quot;
+    r&quot;&quot;&quot;|\s*[\r\n]+&quot;&quot;&quot;
+    r&quot;&quot;&quot;|\s+(?!\S)&quot;&quot;&quot;
+    r&quot;&quot;&quot;|\s+&quot;&quot;&quot;
+)
+
+# For demonstration, use a simplified ASCII-only version of the same groups
+SIMPLE_PATTERN = re.compile(
+    r&quot;(?i:'s|'t|'re|'ve|'m|'ll|'d)&quot;   # group 1: contractions
+    r&quot;|[a-zA-Z]+&quot;                         # group 2: letter sequences
+    r&quot;|\d{1,3}&quot;                           # group 3: digit runs (max 3)
+    r&quot;| ?[^\s\w]+&quot;                        # group 4: punctuation/symbols
+    r&quot;|\s+&quot;
+)
+
+samples = [
+    &quot;She can't stop, she won't stop.&quot;,
+    &quot;GPT-4 costs $0.03 per 1,000 tokens!&quot;,
+    &quot;Hello   world\nNext line.&quot;,
+    &quot;It's 2024 already — wow!&quot;,
+]
+print('Pre-tokenization (simplified GPT-4 regex):')
+print(f'{&quot;Input&quot;:&lt;42}  Pre-tokens')
+print('-' * 80)
+for s in samples:
+    chunks = SIMPLE_PATTERN.findall(s)
+    print(f'{repr(s):&lt;42}  {chunks}')
+
+# Show how tiktoken applies this internally
+enc = tiktoken.get_encoding('cl100k_base')
+print('\nActual cl100k_base pre-token boundaries (via encode with show_tokens):')
+test = &quot;She can't stop — 2024 tokens!&quot;
+ids = enc.encode(test)
+for tid in ids:
+    tb = enc.decode_single_token_bytes(tid)
+    print(f'  {repr(tb.decode(&quot;utf-8&quot;, errors=&quot;replace&quot;)):20s}  id={tid}')
+</code></pre>
+<pre><code class="language-python">import tiktoken
+
+# Compare all four tiktoken encodings on identical text
+ENCODINGS = [
+    ('r50k_base',   50_257,  'GPT-2, text-davinci-001/002'),
+    ('p50k_base',   50_281,  'Codex, code-davinci-002'),
+    ('cl100k_base', 100_277, 'GPT-3.5-turbo, GPT-4'),
+    ('o200k_base',  200_019, 'GPT-4o, o1, o3'),
+]
+
+# Use a diverse test corpus: English, code, multilingual, and numbers
+texts = {
+    'English prose':  'The transformer architecture relies on self-attention mechanisms to model long-range dependencies.',
+    'Python code':    'def softmax(x):\n    e = np.exp(x - x.max())\n    return e / e.sum()',
+    'Mixed numbers':  'Pi is approximately 3.14159265 and e is 2.71828182845',
+    'CJK text':       '\u4eba\u5de5\u667a\u80fd\u6a21\u578b\u5728\u81ea\u7136\u8bed\u8a00\u5904\u7406\u4e2d\u8868\u73b0\u51fa\u8272',
+}
+
+print(f'{&quot;Encoding&quot;:&lt;16} {&quot;Vocab&quot;:&gt;8}  {&quot;Used by&quot;:&lt;28}  {&quot; | &quot;.join(texts.keys())}')
+print('-' * 120)
+for enc_name, vocab_size, used_by in ENCODINGS:
+    enc = tiktoken.get_encoding(enc_name)
+    counts = {label: len(enc.encode(t, disallowed_special=())) for label, t in texts.items()}
+    row = '  '.join(f'{c:&gt;5}tok' for c in counts.values())
+    print(f'{enc_name:&lt;16} {vocab_size:&gt;8,}  {used_by:&lt;28}  {row}')
+
+# Compute fertility (tokens per word) for English
+print('\nFertility (tokens/word) for English prose:')
+words = texts['English prose'].split()
+for enc_name, vocab_size, _ in ENCODINGS:
+    enc = tiktoken.get_encoding(enc_name)
+    tok_count = len(enc.encode(texts['English prose'], disallowed_special=()))
+    fertility = tok_count / len(words)
+    print(f'  {enc_name:&lt;16} {tok_count:&gt;3} tokens / {len(words)} words = {fertility:.3f} tokens/word')
+</code></pre>
+<pre><code class="language-python">import tiktoken
+
+# Define a custom encoding with additional special tokens for chat
+# cl100k_base uses these for the ChatML format internally
+base_enc = tiktoken.get_encoding('cl100k_base')
+
+# Add custom chat separator tokens on top of cl100k_base
+chat_enc = tiktoken.Encoding(
+    name='cl100k_chat',
+    pat_str=base_enc._pat_str,
+    mergeable_ranks=base_enc._mergeable_ranks,
+    special_tokens={
+        **base_enc._special_tokens,
+        '&lt;|im_start|&gt;': 100264,
+        '&lt;|im_end|&gt;':   100265,
+    },
+)
+
+print(f'Base vocab size    : {base_enc.n_vocab}')
+print(f'Chat vocab size    : {chat_enc.n_vocab}')
+print(f'&lt;|im_start|&gt; id   : {chat_enc.encode_single_token(&quot;&lt;|im_start|&gt;&quot;)}')
+print(f'&lt;|im_end|&gt;   id   : {chat_enc.encode_single_token(&quot;&lt;|im_end|&gt;&quot;)}')
+print()
+
+# Encode a full ChatML conversation including special tokens
+conversation = (
+    '&lt;|im_start|&gt;system\n'
+    'You are a helpful assistant specialising in tokenization.\n'
+    '&lt;|im_end|&gt;\n'
+    '&lt;|im_start|&gt;user\n'
+    'How many tokens is this message?\n'
+    '&lt;|im_end|&gt;\n'
+    '&lt;|im_start|&gt;assistant\n'
+)
+allowed = {'&lt;|im_start|&gt;', '&lt;|im_end|&gt;', '&lt;|endoftext|&gt;'}
+ids = chat_enc.encode(conversation, allowed_special=allowed)
+print(f'Conversation tokens ({len(ids)} total):')
+for tid in ids:
+    tb = chat_enc.decode_single_token_bytes(tid)
+    print(f'  {tid:&gt;7}  {repr(tb.decode(&quot;utf-8&quot;, errors=&quot;replace&quot;)):30}')
+</code></pre>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

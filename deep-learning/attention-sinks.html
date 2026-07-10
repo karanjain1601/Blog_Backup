@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Attention Sinks and StreamingLLM | Notes Backup</title>
+  <meta name="description" content="The discovery that LLMs attend heavily to initial tokens regardless of content (attention sinks) and how retaining these sink tokens in the KV cache enables infinite-length streaming inference." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Attention Sinks and StreamingLLM</h1>
+      <ul class='note-meta'><li><strong>description:</strong> The discovery that LLMs attend heavily to initial tokens regardless of content (attention sinks) and how retaining these sink tokens in the KV cache enables infinite-length streaming inference.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Attention Sinks and StreamingLLM</h1>
+<p>Attention sinks (Xiao et al., 2023) are a structural property of autoregressive language models: regardless of document content, the initial tokens in any sequence — positions 0 through 3 or so — accumulate disproportionately high attention scores across virtually all heads and all layers. This is not a semantic signal; the initial tokens are not particularly informative. Rather, softmax forces attention weights to sum to 1.0, and when no token in the context is highly relevant, the model 'dumps' excess attention mass onto the first few tokens as a safe sink. The discovery has a critical practical implication: naive KV cache eviction strategies that drop initial tokens cause immediate perplexity collapse during streaming inference, while retaining these sink tokens plus a sliding window of recent tokens enables arbitrarily long generation with stable quality.</p>
+<h2>Overview</h2>
+<p>When generating text autoregressively, the KV cache grows linearly with sequence length, eventually exhausting GPU memory. The naive solution — evict the oldest KV entries to maintain a fixed cache size — fails catastrophically after a few thousand tokens because it evicts the sink tokens that every attention head relies on for its normalization anchor. The StreamingLLM paper (Xiao et al., 2023) proposes a simple fix: always retain the first 4 tokens (the sink tokens) in the KV cache, and use a sliding window of recent tokens for the remainder. With this architecture, a model can generate sequences of arbitrary length while maintaining constant memory usage and stable perplexity throughout — transforming any pretrained LLM into a streaming model without retraining.</p>
+<h2>The Attention Sink Phenomenon</h2>
+<p>The attention sink phenomenon was first identified by analyzing attention weight matrices of Llama-2-7B, Falcon-7B, and GPT-2 on documents of 1K–4K tokens. In every head of every layer, the attention weight for position 0 is between 10 and 100 times larger than for any other position beyond position 4. This pattern holds regardless of what token appears at position 0 — even if position 0 is a punctuation mark or special token. The softmax attention formulation forces weights to sum to 1.0. When no token is semantically highly relevant to the current query, the model cannot produce a zero-attention output — it must allocate the probability mass somewhere. The initial tokens serve as this allocation target, a mathematically necessary consequence of softmax normalization over a discrete token set.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+import matplotlib.pyplot as plt
+from transformers import AutoTokenizer, AutoModelForCausalLM
+
+def visualize_attention_sinks(model_name: str = 'meta-llama/Llama-2-7b-hf',
+                               text_length: int = 512, layer_idx: int = 16):
+    # Extract attention weights and show sink concentration on positions 0-3
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16,
+                                                  output_attentions=True, device_map='auto')
+    sample = 'Scientists have long debated whether consciousness arises from ' * 20
+    ids = tokenizer(sample, return_tensors='pt', max_length=text_length,
+                    truncation=True).input_ids.cuda()
+    with torch.no_grad():
+        out = model(ids, output_attentions=True)
+    # Attention shape: (batch, n_heads, seq, seq) — take last token's attention row
+    attn = out.attentions[layer_idx][0, :, -1, :].float().cpu().numpy()  # (n_heads, seq)
+    mean_by_pos = attn.mean(axis=0)  # average over all heads
+    sink_mass = mean_by_pos[:4].sum()
+    rest_mass = mean_by_pos[4:].sum()
+    print(f'Layer {layer_idx}: attention mass on positions 0-3: {sink_mass:.3f}')
+    print(f'Layer {layer_idx}: attention mass on positions 4+:  {rest_mass:.3f}')
+    print(f'Sink concentration ratio: {sink_mass / (rest_mass + 1e-9):.1f}x')
+    top_pos = np.argsort(mean_by_pos)[::-1][:5]
+    print(f'Top-5 attended positions: {top_pos.tolist()}')
+    return mean_by_pos
+</code></pre>
+<h2>Why Initial Tokens Capture Attention</h2>
+<p>The softmax function maps arbitrary real-valued attention logits to a probability distribution summing to 1.0. When the model processes a query for which no key in the context is highly relevant (low dot-product similarity across all positions), softmax still produces a valid distribution. Rather than producing a near-uniform distribution — which would inject noise across all positions — the model learns to concentrate mass on specific 'sink' positions that are always attended to regardless of content. The initial positions are ideal sinks for two reasons: (1) they are always present in the causal attention window (every token can see position 0), and (2) early in training, the model learns this as a regularization strategy before developing more nuanced position-specific attention patterns. The result is that every layer has implicit sink behavior, and removing sink tokens from the KV cache instantly destroys this normalization mechanism.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from dataclasses import dataclass
+from typing import List, Tuple
+
+@dataclass
+class KVCache:
+    keys: torch.Tensor    # (layers, heads, seq, head_dim)
+    values: torch.Tensor
+
+def evict_oldest(cache: KVCache, max_size: int) -&gt; KVCache:
+    # Drop oldest (leftmost) KV entries beyond max_size
+    if cache.keys.shape[2] &gt; max_size:
+        cache.keys   = cache.keys[:, :, -max_size:, :]
+        cache.values = cache.values[:, :, -max_size:, :]
+    return cache
+
+def evict_by_attention(cache: KVCache, attn_scores: torch.Tensor,
+                       max_size: int) -&gt; KVCache:
+    # Keep top-k entries by mean attention score across heads and layers
+    if cache.keys.shape[2] &gt; max_size:
+        mean_attn = attn_scores.mean(dim=(0, 1))  # (seq,)
+        topk_idx = mean_attn.topk(max_size).indices.sort().values
+        cache.keys   = cache.keys[:, :, topk_idx, :]
+        cache.values = cache.values[:, :, topk_idx, :]
+    return cache
+
+def sink_plus_window(cache: KVCache, max_size: int, n_sink: int = 4) -&gt; KVCache:
+    # Always keep first n_sink tokens + rolling window of remaining budget
+    window = max_size - n_sink
+    if cache.keys.shape[2] &gt; max_size:
+        sink_k = cache.keys[:, :, :n_sink, :]
+        sink_v = cache.values[:, :, :n_sink, :]
+        win_k  = cache.keys[:, :, -window:, :]
+        win_v  = cache.values[:, :, -window:, :]
+        cache.keys   = torch.cat([sink_k, win_k], dim=2)
+        cache.values = torch.cat([sink_v, win_v], dim=2)
+    return cache
+
+print('Three eviction policies: oldest, by_attention, sink+window')
+</code></pre>
+<h2>KV Cache Eviction Failure Modes</h2>
+<p>Naive KV cache eviction strategies fail in characteristic ways. Evicting the oldest tokens (a queue/FIFO policy) works until the sink tokens age out of the cache, at which point perplexity jumps sharply — typically from ~8 to &gt;100 in a single generation step. Evicting by lowest attention score might seem smarter (keep what the model attends to), but this creates a positive feedback loop: once a useful token is evicted, it can no longer receive attention, so it would have been evicted even if retained. Both strategies ultimately fail at sequences longer than the cache size. Only the sink+sliding window strategy produces stable perplexity across arbitrary lengths, because it guarantees that the attention normalization anchors are always available in the KV cache.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from transformers import AutoTokenizer, AutoModelForCausalLM
+
+class SinkCache:
+    # Minimal StreamingLLM KV cache: retain n_sink initial tokens + rolling window
+    def __init__(self, n_sink: int = 4, window_size: int = 512):
+        self.n_sink = n_sink
+        self.window_size = window_size
+        self.sink_keys:   list = []
+        self.sink_values: list = []
+        self.win_keys:    list = []
+        self.win_values:  list = []
+        self.total_tokens = 0
+
+    def add(self, key: torch.Tensor, value: torch.Tensor) -&gt; None:
+        # key/value shape: (batch, heads, 1, head_dim)
+        if self.total_tokens &lt; self.n_sink:
+            self.sink_keys.append(key)
+            self.sink_values.append(value)
+        else:
+            self.win_keys.append(key)
+            self.win_values.append(value)
+            if len(self.win_keys) &gt; self.window_size:
+                self.win_keys.pop(0)
+                self.win_values.pop(0)
+        self.total_tokens += 1
+
+    def get(self) -&gt; tuple:
+        all_k = torch.cat(self.sink_keys + self.win_keys, dim=2)
+        all_v = torch.cat(self.sink_values + self.win_values, dim=2)
+        return all_k, all_v
+
+print(f'SinkCache: 4 sink tokens + 512-token sliding window = 516 total KV entries')
+</code></pre>
+<h2>Sink Tokens + Rolling Window</h2>
+<p>The StreamingLLM KV cache architecture has two components: a fixed sink region containing the first n_sink tokens (typically n_sink=4), and a sliding window containing the most recent window_size tokens. The total cache size is therefore n_sink + window_size — constant regardless of sequence length. When a new token is generated, its KV pair is appended to the window; if the window is full, the oldest window entry is evicted. The sink entries are never evicted. With this scheme, the model always has access to the initial tokens that serve as attention normalization anchors, plus the most recent context for local coherence. The approach enables generation of sequences of arbitrary length — the paper demonstrates stable perplexity at 4 million tokens — with constant memory usage and no architectural changes to the attention mechanism.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+from transformers import AutoTokenizer, AutoModelForCausalLM
+
+def detect_sink_tokens(model_name: str, sample_text: str, n_layers: int = 32):
+    # Measure mean attention score per position, averaged over heads and layers
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name, torch_dtype=torch.float16,
+        output_attentions=True, device_map='auto'
+    )
+    ids = tokenizer(sample_text, return_tensors='pt', max_length=256,
+                    truncation=True).input_ids.cuda()
+    with torch.no_grad():
+        out = model(ids, output_attentions=True)
+    # Average attention received by each position across all heads and layers
+    attn_received = torch.zeros(ids.shape[1])
+    for layer_attn in out.attentions[:n_layers]:
+        # layer_attn: (batch, heads, tgt, src)
+        attn_received += layer_attn[0].mean(dim=(0, 1)).cpu().float()
+    attn_received /= n_layers
+    print('Position | Mean attention received')
+    for pos in range(min(8, ids.shape[1])):
+        bar = '#' * int(attn_received[pos].item() * 200)
+        print(f'  pos {pos:3d}: {attn_received[pos]:.4f}  {bar}')
+    return attn_received
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>KV Eviction Policy</th>
+<th>Cache Size (tokens)</th>
+<th>PPL at 10K tokens</th>
+<th>PPL at 100K tokens</th>
+<th>Generation Speed</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Full cache (no eviction)</td>
+<td>Grows to OOM at ~8K</td>
+<td>8.1 (normal)</td>
+<td>OOM</td>
+<td>Degrades as O(n^2)</td>
+</tr>
+<tr>
+<td>Evict oldest (FIFO)</td>
+<td>512 (fixed)</td>
+<td>8.1 (normal)</td>
+<td>102.4 (collapse)</td>
+<td>Constant</td>
+</tr>
+<tr>
+<td>Evict by attention score</td>
+<td>512 (fixed)</td>
+<td>8.3 (slight drop)</td>
+<td>89.7 (collapse)</td>
+<td>Constant</td>
+</tr>
+<tr>
+<td>Sink (4) + sliding window (508)</td>
+<td>512 (fixed)</td>
+<td>8.1 (stable)</td>
+<td>8.2 (stable)</td>
+<td>Constant</td>
+</tr>
+</tbody>
+</table>
+<h2>StreamingLLM Architecture</h2>
+<p>StreamingLLM modifies inference — not architecture. The base transformer weights are unchanged. The only modification is the KV cache management: instead of a standard growing list or a FIFO queue, a SinkCache object intercepts each new KV pair and routes it to either the sink region or the window. At attention computation time, the model attends over all sink entries plus all window entries, concatenated in their original order. Position IDs are re-indexed at each step to be consistent with the attended sequence — the sink positions retain their original IDs (0 through n_sink-1), and window positions are renumbered relative to their current position in the window. This re-indexing ensures RoPE embeddings remain coherent with the actual attended sequence.</p>
+<blockquote>
+<p><strong>Attention Sinks Cost Real Capacity</strong>: Attention sinks mean that models secretly 'use up' attention capacity on initial tokens even when those tokens are irrelevant — adding a dedicated sink token (e.g., a special <sink> prefix) at training time eliminates this waste and improves retrieval. Without a dedicated sink, the model repurposes a real content token as the sink, corrupting its semantic representation.</p>
+</blockquote>
+<h2>Infinite Text Generation</h2>
+<p>StreamingLLM enables genuinely infinite-length text generation from a pretrained LLM without any modification to the weights. The practical use cases include: real-time transcription and summarization of meeting audio, streaming document completion for very long technical reports, always-on chat assistants that maintain a rolling conversation window, and streaming code generation for entire codebases. The memory usage is bounded by n_sink + window_size KV entries regardless of how long generation continues. The paper reports stable perplexity at 4 million generated tokens with a window of 2048 and 4 sink tokens. Speed matches standard inference: since cache size is constant, attention computation per token is O(window_size) rather than O(n), eliminating the quadratic cost of full-context generation.</p>
+<ul>
+<li>Sink token count: n_sink=4 is sufficient; increasing to 8 provides marginal improvement at minor cache cost.</li>
+<li>Window size: 512-2048 is typical; larger windows improve coherence at higher memory cost.</li>
+<li>Total cache size = n_sink + window_size — constant throughout generation regardless of sequence length.</li>
+<li>Position re-indexing: sink tokens keep original IDs; window tokens are renumbered to maintain RoPE consistency.</li>
+<li>StreamingLLM works out-of-the-box with any RoPE or ALiBi model without weight modification.</li>
+<li>For GPT-2 and BERT-family models (absolute position embeddings), StreamingLLM requires architectural adjustments.</li>
+</ul>
+<h2>Key Takeaways</h2>
+<p>Attention sinks reveal a structural property of softmax attention that has important implications for both efficiency and interpretability. The phenomenon explains why simple KV cache eviction fails: it is not memory limitations that break generation but the loss of the normalization anchor that every attention head implicitly relies on. The StreamingLLM solution is elegant — retain 4 tokens, slide the rest — and requires no retraining, no architectural changes, and negligible implementation complexity. For applications requiring truly long or unbounded generation, StreamingLLM is currently the most practical approach for pretrained models.</p>
+<ul>
+<li>Attention sinks: positions 0-3 receive 10-100x more mean attention than any other position in the sequence.</li>
+<li>Evicting sink tokens from the KV cache causes immediate perplexity collapse from ~8 to &gt;100.</li>
+<li>StreamingLLM fix: always retain the first n_sink=4 KV entries plus a sliding window of recent entries.</li>
+<li>Memory is constant: (n_sink + window_size) KV pairs regardless of total generation length.</li>
+<li>Inference speed is O(window_size) per token, eliminating the quadratic cost of full-context generation.</li>
+<li>Works with any pretrained RoPE model without retraining — pure inference-time modification.</li>
+<li>For training-time fix: add a dedicated <sink> prefix token so the model does not repurpose content tokens.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

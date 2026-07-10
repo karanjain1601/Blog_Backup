@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ICA — Non-Gaussianity and the FastICA Algorithm | Notes Backup</title>
+  <meta name="description" content="Independent Component Analysis from the ground up: the non-Gaussianity principle, negentropy maximisation, fixed-point FastICA, the cocktail party problem, preprocessing via whitening, and applications to EEG artifact removal." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>ICA — Non-Gaussianity and the FastICA Algorithm</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Independent Component Analysis from the ground up: the non-Gaussianity principle, negentropy maximisation, fixed-point FastICA, the cocktail party problem, preprocessing via whitening, and applications to EEG artifact removal.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>ICA — Non-Gaussianity and the FastICA Algorithm</h1>
+<p>PCA finds uncorrelated components — components with zero covariance. ICA (Independent Component Analysis) finds statistically independent components, a strictly stronger requirement. PCA uses second-order statistics (covariance); ICA exploits higher-order statistics to find sources that are as non-Gaussian as possible. It is the algorithm behind the cocktail party problem and EEG/fMRI source separation.</p>
+<h2>Independence vs Uncorrelatedness</h2>
+<p>Uncorrelated means E[xᵢxⱼ] = 0. Independent means p(xᵢ, xⱼ) = p(xᵢ)p(xⱼ) — the joint density factorises. Independence implies uncorrelatedness but not vice versa. The Central Limit Theorem tells us that sums of independent random variables converge to Gaussian. ICA reverses this: it finds unmixing directions where projections are maximally non-Gaussian, recovering the original independent sources.</p>
+<h2>Non-Gaussianity and Negentropy</h2>
+<p>ICA measures non-Gaussianity via negentropy J(y) = H(y_Gaussian) - H(y), the entropy difference from a Gaussian with the same variance (always ≥ 0). Practical approximations: kurtosis kurt(y) = E[y⁴] - 3 (fast but sensitive to outliers) and log-cosh: J(y) ≈ [E[log cosh(y)] - E[log cosh(y_Gaussian)]]². FastICA uses the log-cosh approximation.</p>
+<pre><code class="language-python">import numpy as np
+
+def fast_ica(X, n_components, max_iter=300, tol=1e-6):
+    &quot;&quot;&quot;FastICA via fixed-point iteration with log-cosh negentropy.&quot;&quot;&quot;
+    n, d = X.shape
+    # Step 1: center
+    X = X - X.mean(axis=0)
+    # Step 2: whiten via SVD
+    U, s, Vt = np.linalg.svd(X, full_matrices=False)
+    X_white = U * np.sqrt(n)  # (n, d) — identity covariance
+
+    W = np.zeros((n_components, d))
+    for p in range(n_components):
+        w = np.random.default_rng(p).standard_normal(d)
+        w /= np.linalg.norm(w)
+        for _ in range(max_iter):
+            u = X_white @ w                # (n,)
+            g = np.tanh(u)                 # log-cosh derivative
+            g_prime = 1.0 - g**2
+            w_new = X_white.T @ g / n - g_prime.mean() * w
+            # Gram-Schmidt deflation
+            w_new -= W[:p].T @ (W[:p] @ w_new)
+            w_new /= np.linalg.norm(w_new)
+            if np.abs(np.dot(w_new, w)) &gt; 1.0 - tol:
+                break
+            w = w_new
+        W[p] = w_new
+    return X_white @ W.T, W  # (n, n_components), unmixing
+
+# Quick test on a 2-source mixture
+rng = np.random.default_rng(42)
+t = np.linspace(0, 8, 1000)
+S = np.c_[np.sin(2*np.pi*t), np.sign(np.sin(3*np.pi*t))]
+A = np.array([[0.8, 0.4], [0.3, 0.9]])
+X_mix = S @ A.T
+S_rec, W = fast_ica(X_mix, n_components=2)
+print(f'Recovered shape: {S_rec.shape}')
+</code></pre>
+<h2>The FastICA Algorithm</h2>
+<p>FastICA iterates a fixed-point update that converges cubically (faster than gradient descent): w ← E[x g(wᵀx)] - E[g'(wᵀx)] w, then normalise. Multiple components are extracted sequentially using deflation (Gram-Schmidt orthogonalisation) or simultaneously using the symmetric decorrelation W ← W(WᵀW)⁻¹/². Symmetric decorrelation is more robust to slow convergence in one component affecting others.</p>
+<h2>Cocktail Party Problem</h2>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.decomposition import FastICA, PCA
+
+rng = np.random.default_rng(42)
+n = 2000
+t = np.linspace(0, 8, n)
+
+# Three independent sources
+s1 = np.sin(2 * np.pi * t)           # sine wave
+s2 = np.sign(np.sin(3 * np.pi * t)) # square wave
+s3 = rng.laplace(size=n)             # non-Gaussian noise
+S = np.column_stack([s1, s2, s3])
+S /= S.std(axis=0)
+
+# Random mixing matrix (simulates room acoustics)
+A = np.array([[1.0, 0.5, 0.2],
+              [0.3, 1.0, 0.4],
+              [0.6, 0.2, 1.0]])
+X = S @ A.T  # mixed observations at 3 microphones
+
+fica = FastICA(n_components=3, random_state=42, max_iter=500)
+S_ica = fica.fit_transform(X)
+S_pca = PCA(n_components=3).fit_transform(X)
+
+fig, axes = plt.subplots(3, 3, figsize=(14, 8))
+labels = ['True Sources', 'PCA', 'FastICA']
+for col, (Sp, lab) in enumerate(zip([S, S_pca, S_ica], labels)):
+    for row in range(3):
+        axes[row, col].plot(t[:200], Sp[:200, row], lw=0.8)
+        axes[row, col].set_title(f'{lab} — Source {row+1}')
+plt.tight_layout()
+plt.show()
+</code></pre>
+<blockquote>
+<p><strong>Fundamental ICA Ambiguities</strong>: ICA cannot recover (1) the order of independent components — they can be permuted arbitrarily; (2) the scale of each component — only the ratio is determined; (3) the sign of each component. These ambiguities are fundamental and unavoidable. ICA also fails when fewer than 2 sources are non-Gaussian (e.g. only Gaussian sources — then any rotation is equivalent).</p>
+</blockquote>
+<h2>Preprocessing: Center and Whiten</h2>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.decomposition import FastICA
+from sklearn.datasets import load_digits
+
+X, y = load_digits(return_X_y=True)
+# Use a subset of pixel dimensions as 'observed signals'
+X_obs = X[:200, :10].astype(float)  # 200 samples, 10 channels
+
+# sklearn FastICA handles centering and whitening internally
+n_comp = 5
+ica = FastICA(n_components=n_comp, random_state=42, max_iter=1000, tol=0.001)
+S_ica = ica.fit_transform(X_obs)  # (200, 5)
+
+print(f'Mixing matrix shape: {ica.mixing_.shape}')   # (10, 5)
+print(f'Recovered sources shape: {S_ica.shape}')
+
+# Check statistical independence (should be near-diagonal)
+cov = np.cov(S_ica.T)
+print('\nCovariance of recovered sources (should be near diagonal):')
+print(cov.round(3))
+
+# Reconstruct original signals
+X_recon = S_ica @ ica.mixing_.T + ica.mean_
+recon_err = np.mean((X_obs - X_recon) ** 2)
+print(f'Reconstruction MSE: {recon_err:.6f}')
+</code></pre>
+<h2>ICA for EEG Artifact Removal</h2>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.decomposition import FastICA
+
+rng = np.random.default_rng(42)
+n_ch, n_t = 16, 2000
+t = np.linspace(0, 2, n_t)
+
+# Simulate EEG: brain oscillations + blink + cardiac
+brain = np.array([np.sin(2*np.pi*(8+i)*t) * 0.5 for i in range(14)])  # alpha
+blink = np.zeros((1, n_t))
+blink[0, 800:840] = 8.0   # eye blink
+ecg = np.array([0.3 * np.sin(2*np.pi*1.2*t)])
+
+S_true = np.vstack([brain, blink, ecg]).T  # (n_t, n_ch)
+A = rng.normal(0, 0.3, (n_ch, n_ch)) + np.eye(n_ch) * 2
+X_eeg = S_true @ A.T
+
+# ICA decomposition
+ica = FastICA(n_components=n_ch, random_state=42, max_iter=1000)
+S_ica = ica.fit_transform(X_eeg)  # (n_t, n_ch)
+
+# Identify blink: component with highest kurtosis (most non-Gaussian spike)
+kurtoses = [(np.mean(S_ica[:, k]**4) / np.mean(S_ica[:, k]**2)**2 - 3)
+             for k in range(n_ch)]
+blink_ic = int(np.argmax(kurtoses))
+print(f'Blink IC: {blink_ic}, kurtosis: {kurtoses[blink_ic]:.2f}')
+
+# Reconstruct without blink
+S_clean = S_ica.copy()
+S_clean[:, blink_ic] = 0
+X_clean = S_clean @ ica.mixing_.T + X_eeg.mean(axis=0)
+print(f'Variance before: {X_eeg.var():.4f}, after: {X_clean.var():.4f}')
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>PCA</th>
+<th>ICA</th>
+<th>NMF</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Assumption</td>
+<td>Uncorrelated</td>
+<td>Statistically independent</td>
+<td>Non-negative, parts-based</td>
+</tr>
+<tr>
+<td>Second-order stats</td>
+<td>Yes</td>
+<td>No (uses higher-order)</td>
+<td>No</td>
+</tr>
+<tr>
+<td>Interpretable components</td>
+<td>Moderate</td>
+<td>Yes (sources)</td>
+<td>Yes (parts)</td>
+</tr>
+<tr>
+<td>Non-negative constraint</td>
+<td>No</td>
+<td>No</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Linear mixing assumed</td>
+<td>Yes</td>
+<td>Yes</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Primary use case</td>
+<td>Dimensionality reduction</td>
+<td>Source separation, BSS</td>
+<td>Sparse parts, topic models</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>Blind source separation (audio, video)</li>
+<li>EEG/MEG artifact removal (eye blinks, muscle activity, cardiac)</li>
+<li>fMRI spatial ICA for resting-state network discovery</li>
+<li>Financial time series: separating market-wide from idiosyncratic factors</li>
+<li>Image processing: separating illumination from reflectance</li>
+</ul>
+<h2>Choosing the Number of Components</h2>
+<p>Unlike PCA, ICA has no natural criterion like explained variance to select the number of components. Common approaches: (1) fix n_components equal to the number of suspected sources if known a priori; (2) apply PCA first (retaining 95–99% variance) and set n_components = PCA output dimension; (3) use the minimum description length (MDL) criterion; (4) for EEG/fMRI, domain knowledge constrains the number of neurophysiologically plausible components. Over-extracting is preferable to under-extracting — extra components can be discarded after inspection.</p>
+<blockquote>
+<p><strong>Practical ICA Workflow</strong>: Step 1: standardise and center data. Step 2: apply PCA whitening (reduces to n_components uncorrelated, unit-variance signals). Step 3: run FastICA on whitened data (sklearn handles steps 1-3 automatically). Step 4: inspect component time courses and spectra to identify and remove artifact components. Step 5: reconstruct clean signal by zeroing artifact components and back-projecting through the mixing matrix.</p>
+</blockquote>
+<hr />
+<blockquote>
+<p><strong>When ICA Fails</strong>: ICA requires at least n-1 non-Gaussian sources (one can be Gaussian). It fails when: all sources are Gaussian (PCA is optimal); the mixing is nonlinear; fewer observations than sources (underdetermined BSS); or data is non-stationary with changing mixing. In these cases consider SOBI (second-order BSS using time structure) or nonlinear ICA approaches.</p>
+</blockquote>
+    </article>
+  </main>
+</body>
+</html>

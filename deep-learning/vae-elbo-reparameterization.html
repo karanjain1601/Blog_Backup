@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VAE — ELBO Derivation and Reparameterization Trick | Notes Backup</title>
+  <meta name="description" content="A rigorous derivation of the VAE objective from first principles: how the intractable marginal log p(x) is lower-bounded by the ELBO, why the reparameterization trick enables gradients through stochastic nodes, and how posterior collapse arises and is fixed with cyclical KL annealing." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>VAE — ELBO Derivation and Reparameterization Trick</h1>
+      <ul class='note-meta'><li><strong>description:</strong> A rigorous derivation of the VAE objective from first principles: how the intractable marginal log p(x) is lower-bounded by the ELBO, why the reparameterization trick enables gradients through stochastic nodes, and how posterior collapse arises and is fixed with cyclical KL annealing.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>VAE — ELBO Derivation and Reparameterization Trick</h1>
+<p>Variational Autoencoders (Kingma &amp; Welling 2013) are latent variable models that jointly learn to compress data into a continuous latent space and generate data from that space. The generative model is p(x,z) = p(x|z)p(z) where p(z) = N(0,I) is the prior and p_θ(x|z) is a learned decoder. The inference model q_φ(z|x) approximates the intractable posterior p(z|x). Training maximizes a lower bound on log p(x) called the ELBO, derived by introducing q and applying Jensen's inequality. The reparameterization trick converts the stochastic sampling step into a differentiable operation, allowing gradient-based optimization of both the encoder φ and decoder θ simultaneously.</p>
+<h2>ELBO Derivation</h2>
+<p>Starting from log p(x) and introducing q_φ(z|x) via importance weighting: log p(x) = log ∫ p(x|z)p(z) dz = log E_{q_φ}[p(x|z)p(z)/q_φ(z|x)] ≥ E_{q_φ}[log p(x|z)] + E_{q_φ}[log p(z)/q_φ(z|x)] = E_{q_φ}[log p(x|z)] - KL(q_φ(z|x) || p(z)). The gap between log p(x) and the ELBO is KL(q_φ(z|x) || p(z|x)) ≥ 0, so ELBO ≤ log p(x). Maximizing the ELBO simultaneously maximizes a lower bound on the marginal likelihood and minimizes the KL divergence between the variational posterior and the true posterior.</p>
+<h2>Reparameterization Trick</h2>
+<p>The ELBO requires computing gradients through E_{q_φ}[log p(x|z)], but z ~ q_φ(z|x) = N(μ_φ(x), σ_φ²(x)) is a stochastic node — naively, gradients cannot flow through the sampling operation. The reparameterization trick factors z = μ_φ(x) + σ_φ(x) ⊙ ε where ε ~ N(0,I). Now z is a deterministic function of the parameters μ_φ, σ_φ and the auxiliary noise ε. Gradients of the loss with respect to φ flow through z = μ + σ·ε cleanly via backpropagation. The encoder outputs μ (mean) and log σ² (log variance) for numerical stability, and σ = exp(0.5 · log σ²).</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+from torchvision import datasets, transforms
+
+class VAEEncoder(nn.Module):
+    def __init__(self, input_dim=784, hidden_dim=512, latent_dim=20):
+        super().__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc_mu  = nn.Linear(hidden_dim, latent_dim)
+        self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
+
+    def forward(self, x):
+        h = F.relu(self.fc1(x.view(x.size(0), -1)))
+        return self.fc_mu(h), self.fc_logvar(h)
+
+class VAEDecoder(nn.Module):
+    def __init__(self, latent_dim=20, hidden_dim=512, output_dim=784):
+        super().__init__()
+        self.fc1 = nn.Linear(latent_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, output_dim)
+
+    def forward(self, z):
+        h = F.relu(self.fc1(z))
+        return torch.sigmoid(self.fc2(h))
+
+class VAE(nn.Module):
+    def __init__(self, latent_dim=20):
+        super().__init__()
+        self.encoder = VAEEncoder(latent_dim=latent_dim)
+        self.decoder = VAEDecoder(latent_dim=latent_dim)
+
+    def reparameterize(self, mu, logvar):
+        &quot;&quot;&quot;z = mu + std * eps; eps ~ N(0, I) — differentiable sampling.&quot;&quot;&quot;
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + std * eps
+
+    def forward(self, x):
+        mu, logvar = self.encoder(x)
+        z = self.reparameterize(mu, logvar)
+        recon = self.decoder(z)
+        return recon, mu, logvar
+
+model = VAE(latent_dim=2)
+x = torch.randn(8, 1, 28, 28)
+recon, mu, logvar = model(x)
+print(f'Encoder mu: {mu.shape}, logvar: {logvar.shape}')
+print(f'Decoder recon: {recon.shape}')
+</code></pre>
+<h2>ELBO Loss — Reconstruction and KL Terms</h2>
+<p>The ELBO has two terms. The reconstruction term E_{q_φ}[log p_θ(x|z)] measures how well the decoder recovers x from z. For a Bernoulli decoder (binary images), this is binary cross-entropy; for a Gaussian decoder, it is mean squared error. The KL term -KL(q_φ(z|x) || p(z)) regularizes the posterior toward the prior N(0,I). For diagonal Gaussian encoder and standard Gaussian prior, the KL has a closed form: KL = -½ Σⱼ (1 + log σⱼ² - μⱼ² - σⱼ²). The closed form avoids Monte Carlo estimation of the KL, reducing gradient variance and making training more stable.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def vae_loss(recon, x, mu, logvar, beta=1.0):
+    &quot;&quot;&quot;
+    ELBO loss = reconstruction_loss + beta * KL_divergence.
+    recon: (B, 784) sigmoid outputs.
+    x:     (B, 1, 28, 28) input images in [0, 1].
+    mu, logvar: (B, latent_dim) encoder outputs.
+    KL closed form: -0.5 * sum(1 + logvar - mu^2 - exp(logvar)).
+    &quot;&quot;&quot;
+    x_flat = x.view(x.size(0), -1)
+    # Bernoulli reconstruction: binary cross-entropy summed over pixels
+    recon_loss = F.binary_cross_entropy(recon, x_flat, reduction='sum') / x.size(0)
+    # KL divergence: analytical for q=N(mu, diag(sigma^2)) and p=N(0,I)
+    kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)
+    kl_loss = kl.mean()
+    total = recon_loss + beta * kl_loss
+    return total, recon_loss.item(), kl_loss.item()
+
+# Sanity check at init: KL of N(0,I) vs N(0,I) should be 0
+mu_zero    = torch.zeros(16, 20)
+logvar_zero = torch.zeros(16, 20)
+recon_dummy = torch.rand(16, 784)
+x_dummy = torch.rand(16, 1, 28, 28)
+total, recon_l, kl_l = vae_loss(recon_dummy, x_dummy, mu_zero, logvar_zero)
+print(f'At init (mu=0, logvar=0): KL={kl_l:.4f} (expected ~0.0)')
+print(f'Total ELBO loss: {total:.4f}  | Recon: {recon_l:.4f}  | KL: {kl_l:.4f}')
+</code></pre>
+<h2>Gaussian vs Bernoulli Decoder Choice</h2>
+<p>The decoder output distribution determines the form of the reconstruction term. A Bernoulli decoder (sigmoid output, BCE loss) is standard for binarized MNIST: each pixel is treated as an independent Bernoulli variable. A Gaussian decoder (linear output, MSE loss) is more appropriate for continuous images; the reconstruction term becomes E_{q}[-||x - μ_θ(z)||²/(2σ²)], where the decoder variance σ² can be fixed at 1 (equivalent to MSE) or learned. A learned σ² allows the model to adapt its reconstruction confidence per region. For natural images, a Laplace decoder (MAE loss, more robust to outliers) or a discretized logistic mixture (PixelCNN++ style) can improve sample sharpness over plain Gaussian decoders.</p>
+<ul>
+<li>Bernoulli decoder: sigmoid output + BCE loss — standard for binarized MNIST, assumes independent pixels.</li>
+<li>Gaussian decoder: linear output + MSE — appropriate for continuous images; equivalent to maximizing N(x; μ_θ(z), I).</li>
+<li>Discretized logistic decoder: more expressive output, used in PixelCNN++ and VQ-VAE to improve sharpness.</li>
+<li>Fixed decoder variance σ²=1 simplifies training; learned σ² helps the model weight reconstruction confidence.</li>
+<li>The choice of decoder distribution changes the scale of the reconstruction term relative to KL — affects effective β.</li>
+</ul>
+<h2>Visualizing the 2D Latent Space</h2>
+<p>A 2-dimensional latent space allows direct visualization of the learned representation. After training, encoding the MNIST test set and plotting the (μ₁, μ₂) values colored by digit class reveals cluster structure. Traversing the latent space by decoding points on a grid shows smooth interpolation between digit styles. This confirms that the VAE has organized the latent space semantically and that the decoder can generate coherent images from any point in the continuous prior.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+from torchvision import datasets, transforms
+
+def visualize_latent_space(model, device='cpu', n_samples=2000):
+    &quot;&quot;&quot;Plot 2D latent space of VAE trained on MNIST, colored by digit class.&quot;&quot;&quot;
+    model.eval()
+    transform = transforms.Compose([transforms.ToTensor()])
+    dataset = datasets.MNIST(root='/tmp/mnist', train=False, download=True, transform=transform)
+    loader = torch.utils.data.DataLoader(dataset, batch_size=256, shuffle=False)
+    zs, labels = [], []
+    with torch.no_grad():
+        for x, y in loader:
+            mu, _ = model.encoder(x.to(device))
+            zs.append(mu.cpu().numpy())
+            labels.append(y.numpy())
+            if sum(len(l) for l in labels) &gt;= n_samples:
+                break
+    zs = np.concatenate(zs)[:n_samples]
+    labels = np.concatenate(labels)[:n_samples]
+    fig, ax = plt.subplots(figsize=(7, 6))
+    scatter = ax.scatter(zs[:, 0], zs[:, 1], c=labels, cmap='tab10', alpha=0.6, s=6)
+    plt.colorbar(scatter, ax=ax, label='Digit class')
+    ax.set_xlabel('z₁'); ax.set_ylabel('z₂'); ax.set_title('VAE 2D Latent Space — MNIST')
+    plt.tight_layout(); plt.savefig('/tmp/vae_latent.png', dpi=120)
+    print('Saved latent space plot to /tmp/vae_latent.png')
+    return zs, labels
+
+from torch import nn
+class MinimalVAE(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.encoder = nn.Sequential(nn.Flatten(), nn.Linear(784,256), nn.ReLU())
+        self.fc_mu = nn.Linear(256, 2)
+        self.fc_logvar = nn.Linear(256, 2)
+        self.decoder = nn.Sequential(nn.Linear(2,256), nn.ReLU(), nn.Linear(256,784), nn.Sigmoid())
+    def reparameterize(self, mu, logvar):
+        return mu + torch.exp(0.5 * logvar) * torch.randn_like(mu)
+    def forward(self, x):
+        h = self.encoder(x)
+        mu, logvar = self.fc_mu(h), self.fc_logvar(h)
+        return self.decoder(self.reparameterize(mu, logvar)), mu, logvar
+print('2D VAE ready for visualization')
+</code></pre>
+<h2>Posterior Collapse and Cyclical KL Annealing</h2>
+<p>Posterior collapse occurs when the decoder becomes so powerful that it ignores the latent code z entirely. The encoder outputs q_φ(z|x) ≈ p(z) = N(0,I) for all x, driving KL → 0 while the reconstruction loss stagnates. This is especially common with autoregressive decoders (RNN, Transformer) that can model p(x) without z. The free bits heuristic sets a minimum KL per dimension λ (typically 2–4 bits), and β-VAE increases the KL weight. Cyclical KL annealing (Fu et al. 2019) schedules the KL weight as a sawtooth that rises from 0 to 1 multiple times per training run, periodically resetting the encoder to explore different latent uses before the decoder adapts.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+def cyclical_kl_weight(step, n_cycles=4, ratio=0.5, max_steps=10000):
+    &quot;&quot;&quot;Sawtooth KL weight schedule: rise from 0 to 1 n_cycles times over training.&quot;&quot;&quot;
+    cycle_len = max_steps // n_cycles
+    cycle_pos = step % cycle_len
+    ramp_end  = int(cycle_len * ratio)
+    if cycle_pos &lt; ramp_end:
+        return cycle_pos / ramp_end
+    return 1.0
+
+def free_bits_kl(kl_per_dim, lambda_fb=3.0):
+    &quot;&quot;&quot;Free bits: clamp per-dimension KL below lambda_fb to prevent collapse.&quot;&quot;&quot;
+    return torch.clamp(kl_per_dim, min=lambda_fb).sum(dim=-1).mean()
+
+def detect_posterior_collapse(mu, logvar, threshold=0.05):
+    &quot;&quot;&quot;Flag latent dims where KL contribution is below threshold (collapsed).&quot;&quot;&quot;
+    kl_per_dim = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())
+    avg_kl = kl_per_dim.mean(dim=0)
+    collapsed = (avg_kl &lt; threshold).sum().item()
+    active    = (avg_kl &gt;= threshold).sum().item()
+    return avg_kl, collapsed, active
+
+# Simulate collapse scenario
+torch.manual_seed(42)
+mu_collapsed    = torch.randn(64, 20) * 0.01
+logvar_collapsed = torch.zeros(64, 20)
+avg_kl, n_collapsed, n_active = detect_posterior_collapse(mu_collapsed, logvar_collapsed)
+print(f'Posterior collapse: {n_collapsed}/20 dims collapsed, {n_active} active')
+for step in [0, 500, 1000, 2500, 3000]:
+    w = cyclical_kl_weight(step, n_cycles=4, max_steps=4000)
+    print(f'  Step {step:4d}: cyclical KL weight = {w:.3f}')
+</code></pre>
+<blockquote>
+<p><strong>Posterior Collapse Warning</strong>: If the KL term drops to near zero after the first few hundred steps and reconstruction loss plateaus, the decoder is ignoring the latent space. Diagnose by monitoring per-dimension KL; any dimension below 0.1 nats is effectively collapsed. Immediate fixes: reduce decoder capacity, add free bits (λ=2–4), or switch to cyclical KL annealing.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>ELBO Term</th>
+<th>Mathematical Form</th>
+<th>Role</th>
+<th>Collapse Fix</th>
+<th>β-VAE Adjustment</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Reconstruction</td>
+<td>E_{q}[log p_θ(x</td>
+<td>z)]</td>
+<td>Measures how well decoder recovers x</td>
+<td>Reduce decoder capacity</td>
+</tr>
+<tr>
+<td>KL Divergence</td>
+<td>-KL(q_φ(z</td>
+<td>x)</td>
+<td></td>
+<td>p(z))</td>
+</tr>
+<tr>
+<td>ELBO Gap</td>
+<td>KL(q_φ(z</td>
+<td>x)</td>
+<td></td>
+<td>p(z</td>
+</tr>
+<tr>
+<td>β&gt;1 Pressure</td>
+<td>Trades recon for disentanglement</td>
+<td>Encourages independent latent dims</td>
+<td>Cyclical annealing: β rises 0→1 repeatedly</td>
+<td>Core mechanism of β-VAE</td>
+</tr>
+<tr>
+<td>Free Bits λ</td>
+<td>max(KL_d, λ) per dimension</td>
+<td>Ensures each dim encodes ≥λ nats</td>
+<td>Prevents KL→0 collapse</td>
+<td>Combined with β for best results</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>The reparameterization trick works because z = μ + σ·ε separates the randomness (ε) from the parameters (μ, σ), enabling backprop through z.</li>
+<li>For diagonal Gaussian q and standard Gaussian p, the KL has the closed form: -½ Σ(1 + log σ² - μ² - σ²).</li>
+<li>Bernoulli decoder uses BCE loss; Gaussian decoder uses MSE loss — the choice changes the scale of the reconstruction term.</li>
+<li>Posterior collapse is most common with autoregressive decoders (LSTM, Transformer) that are expressive enough to model p(x) without z.</li>
+<li>Cyclical annealing outperforms monotonic annealing because each cycle resets the encoder to explore new latent uses.</li>
+</ul>
+<hr />
+<p>The VAE framework provides a principled probabilistic generative model with a tractable training objective. Understanding the ELBO derivation clarifies why the reconstruction-KL tradeoff exists and what each term optimizes. The reparameterization trick is the core technical insight enabling end-to-end gradient flow. Posterior collapse remains the main failure mode to monitor in practice, with cyclical annealing and free bits as the most reliable remedies.</p>
+    </article>
+  </main>
+</body>
+</html>

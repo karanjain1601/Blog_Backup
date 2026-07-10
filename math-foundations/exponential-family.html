@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>The Exponential Family | Notes Backup</title>
+  <meta name="description" content="Canonical form, natural parameters, sufficient statistics, log-partition function, moment-generating properties, connection to GLMs, conjugate priors, maximum entropy principle, and natural gradient descent." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>The Exponential Family</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Canonical form, natural parameters, sufficient statistics, log-partition function, moment-generating properties, connection to GLMs, conjugate priors, maximum entropy principle, and natural gradient descent.</li><li><strong>topic:</strong> math-foundations</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>The Exponential Family</h1>
+<p>The exponential family is the most important parametric class of probability distributions in statistics and ML. It unifies Gaussian, Bernoulli, Poisson, Gamma, Dirichlet, and dozens of other distributions under a single canonical form. This unification reveals deep structural properties: the log-partition function generates all moments by differentiation, MLE reduces to matching expected sufficient statistics to observed sufficient statistics, conjugate priors always exist in closed form for Bayesian updating, and the Fisher information has a particularly clean expression as the Hessian of the log-partition function. GLMs and natural gradient descent are both built on exponential family structure.</p>
+<h2>Core Definition — The Canonical Form</h2>
+<p>A distribution belongs to the exponential family if its PDF/PMF can be written as:</p>
+<p>p(x|η) = h(x) exp(ηᵀ T(x) − A(η))</p>
+<p>where:
+- η ∈ ℝᵏ: natural parameters (canonical parameters)
+- T(x) ∈ ℝᵏ: sufficient statistics — the functions of data that carry all information about η
+- A(η): log-partition function — ensures normalisation: exp(A(η)) = ∫ h(x) exp(ηᵀ T(x)) dx
+- h(x): base measure — does not depend on η</p>
+<p>Equivalently in mean parameter form: μ = E_η[T(X)] = ∇A(η). The natural parameters η and mean parameters μ are dual representations related by the Legendre transform of A(η). The natural parameterisation is most convenient for conjugate priors and natural gradient; the mean parameterisation is most convenient for interpretation.</p>
+<pre><code class="language-python">import numpy as np
+from scipy.special import gammaln
+
+# Verify three key distributions belong to the exponential family
+
+def gaussian_log_p(x, mu, sigma2):
+    &quot;&quot;&quot;
+    Gaussian as exponential family:
+    eta = (mu/sigma2, -1/(2*sigma2)), T(x) = (x, x^2)
+    A(eta) = -eta1^2/(4*eta2) - 0.5*log(-2*eta2)
+    h(x) = 1/sqrt(2*pi)
+    &quot;&quot;&quot;
+    eta1 = mu / sigma2
+    eta2 = -1.0 / (2 * sigma2)
+    A = -eta1**2 / (4*eta2) - 0.5 * np.log(-2*eta2)
+    h_log = -0.5 * np.log(2 * np.pi)
+    return h_log + eta1*x + eta2*x**2 - A
+
+def bernoulli_log_p(x, p):
+    &quot;&quot;&quot;
+    Bernoulli as exponential family:
+    eta = log(p/(1-p)) [log-odds], T(x) = x, A(eta) = log(1+exp(eta))
+    &quot;&quot;&quot;
+    eta = np.log(p / (1 - p))
+    A   = np.log(1 + np.exp(eta))
+    return eta * x - A   # h(x) = 1
+
+def poisson_log_p(x, lam):
+    &quot;&quot;&quot;
+    Poisson as exponential family:
+    eta = log(lambda), T(x) = x, A(eta) = exp(eta), h(x) = 1/x!
+    &quot;&quot;&quot;
+    eta = np.log(lam)
+    A   = np.exp(eta)
+    return -gammaln(x + 1) + eta * x - A
+
+# Verify against scipy
+from scipy.stats import norm, bernoulli, poisson
+print(&quot;=== Exponential Family Verification ===&quot;)
+x_g, mu, sig2 = 2.5, 2.0, 1.0
+print(f&quot;Gaussian log p(2.5|mu=2,s2=1): ExpFam={gaussian_log_p(x_g,mu,sig2):.6f}  &quot;
+      f&quot;scipy={norm.logpdf(x_g,mu,np.sqrt(sig2)):.6f}&quot;)
+
+x_b, p_b = 1, 0.7
+print(f&quot;Bernoulli log p(1|p=0.7):      ExpFam={bernoulli_log_p(x_b,p_b):.6f}  &quot;
+      f&quot;scipy={bernoulli.logpmf(x_b,p_b):.6f}&quot;)
+
+x_p, lam = 3, 2.0
+print(f&quot;Poisson log p(3|lam=2):        ExpFam={poisson_log_p(x_p,lam):.6f}  &quot;
+      f&quot;scipy={poisson.logpmf(x_p,lam):.6f}&quot;)
+
+# Log-partition function A(eta) generates moments
+print(&quot;\n=== A(eta) Gradient = E[T(X)] ===&quot;)
+# For Bernoulli: A(eta) = log(1+exp(eta)), dA/deta = sigmoid(eta) = p = E[X]
+for p_val in [0.3, 0.5, 0.8]:
+    eta_val = np.log(p_val / (1 - p_val))
+    dA = np.exp(eta_val) / (1 + np.exp(eta_val))   # sigmoid
+    print(f&quot;  p={p_val}: eta={eta_val:.3f}  dA/deta={dA:.3f}=p  E[X]={p_val:.3f}  match:{np.isclose(dA,p_val)}&quot;)
+</code></pre>
+<h2>Key Properties of the Log-Partition Function</h2>
+<p>The log-partition function A(η) is the cumulant-generating function of T(X) and has remarkable properties:</p>
+<p><strong>First derivative = expected sufficient statistics:</strong>
+∂A(η)/∂η = E_η[T(X)]</p>
+<p><strong>Second derivative = covariance of sufficient statistics:</strong>
+∂²A(η)/∂η² = Cov_η[T(X)]</p>
+<p>Because covariance matrices are always positive semi-definite, ∇²A(η) ≥ 0 — A(η) is always convex. This guarantees that MLE in the exponential family is a convex optimisation problem with no local minima.</p>
+<p>For Gaussian with T(x) = (x, x²):
+- ∂A/∂η₁ = E[X] = μ
+- ∂²A/∂η₁² = Var[X] = σ²</p>
+<p>For Bernoulli with T(x) = x:
+- ∂A/∂η = p = σ(η)
+- ∂²A/∂η² = p(1−p) = Var[X]</p>
+<h2>MLE via Sufficient Statistics</h2>
+<p>The MLE for exponential family distributions has a beautifully simple form — set the expected sufficient statistics equal to the empirical (observed) sufficient statistics:</p>
+<p>∇A(η̂) = E_{η̂}[T(X)] = t̄ = (1/n) Σᵢ T(xᵢ)</p>
+<p>For Gaussian: (E[X], E[X²]) = (sample mean, sample 2nd moment) → gives μ̂ = x̄ and σ̂² = mean(x²) − x̄² (sample variance).</p>
+<p>For Bernoulli: E[X] = p̂ = k/n (sample proportion).</p>
+<p>For Poisson: E[X] = λ̂ = x̄.</p>
+<p>This MLE condition (match moments to data) is the method of moments — but here it is not an approximation; it gives the exact MLE. The Fisher-Neyman factorisation theorem states that T(x) contains all information about η in the data — no other statistic of the same dimension can improve inference about η. T(x) is the minimal sufficient statistic.</p>
+<pre><code class="language-python">import numpy as np
+from scipy.special import expit  # numerically stable sigmoid
+
+rng = np.random.default_rng(42)
+
+# MLE via sufficient statistics for three exponential families
+print(&quot;=== Exponential Family MLE via Sufficient Statistics ===&quot;)
+
+# 1. Gaussian: match (E[X], E[X^2]) to (sample mean, sample 2nd moment)
+mu_true, sigma2_true = 2.0, 1.5
+X = rng.normal(mu_true, np.sqrt(sigma2_true), 1000)
+t1 = np.mean(X)       # E[X] sufficient stat
+t2 = np.mean(X**2)    # E[X^2] sufficient stat
+mu_hat    = t1
+sigma2_hat = t2 - t1**2   # E[X^2] - E[X]^2 = Var[X]
+print(f&quot;Gaussian: true (mu={mu_true}, s2={sigma2_true}), MLE (mu={mu_hat:.4f}, s2={sigma2_hat:.4f})&quot;)
+
+# 2. Bernoulli: match E[X] = k/n
+k, n_bern = 73, 100
+p_hat = k / n_bern
+print(f&quot;Bernoulli: observed k={k}/{n_bern}, MLE p={p_hat:.4f}&quot;)
+
+# 3. Poisson: match E[X] = sample mean
+X_pois = rng.poisson(lam=3.5, size=500)
+lam_hat = np.mean(X_pois)   # sufficient stat = sum(X)
+print(f&quot;Poisson: true lam=3.5, MLE lam={lam_hat:.4f}&quot;)
+
+# GLM: Logistic regression as exponential family (Bernoulli, logit link)
+print(&quot;\n=== GLM — Logistic Regression (MLE via IRLS) ===&quot;)
+n, d = 400, 4
+X_glm = np.hstack([np.ones((n,1)), rng.standard_normal((n, d-1))])
+w_true = np.array([0.5, 1.2, -0.8, 0.3])
+y = (rng.uniform(size=n) &lt; expit(X_glm @ w_true)).astype(float)
+
+w = np.zeros(d)
+for it in range(15):
+    p_hat_glm = expit(X_glm @ w)
+    # Score = X^T(y - p_hat) = X^T(observed T(X) - expected T(X))
+    grad = X_glm.T @ (y - p_hat_glm)
+    # Hessian = -X^T diag(p(1-p)) X (negative of Fisher information)
+    D    = p_hat_glm * (1 - p_hat_glm)
+    H    = -X_glm.T @ (X_glm * D[:, None])   # X^T D X
+    w   -= np.linalg.solve(H, grad)            # Newton step
+    if np.linalg.norm(grad) &lt; 1e-8:
+        print(f&quot;  Converged at iteration {it+1}&quot;); break
+
+print(f&quot;  True w:  {np.round(w_true, 3)}&quot;)
+print(f&quot;  MLE w:   {np.round(w, 3)}&quot;)
+</code></pre>
+<h2>Generalised Linear Models</h2>
+<p>Generalised linear models (GLMs) extend linear regression to non-Gaussian responses using exponential family distributions. A GLM specifies:</p>
+<ol>
+<li><strong>Random component</strong>: Y | x ~ ExponentialFamily(η)</li>
+<li><strong>Systematic component</strong>: η = x^T β (linear predictor equals natural parameter)</li>
+<li><strong>Link function</strong>: g such that E[Y|x] = μ = g⁻¹(x^T β)</li>
+</ol>
+<p>For each exponential family, the canonical link maps the mean directly to the natural parameter:
+- Gaussian: canonical link = identity (linear regression)
+- Bernoulli: canonical link = logit log(p/(1-p)) (logistic regression)
+- Poisson: canonical link = log (Poisson regression for count data)
+- Gamma: canonical link = inverse 1/μ (survival analysis)</p>
+<p>All GLMs share the same fitting algorithm: IRLS (Iteratively Reweighted Least Squares), which is Newton-Raphson applied to the log-likelihood. The gradient is always X^T(y − μ̂) and the Hessian is −X^T W X where W = diag(wᵢ) are the IRLS weights.</p>
+<h2>Conjugate Priors</h2>
+<p>For every exponential family likelihood p(x|η), a conjugate prior on η exists such that the posterior is in the same family as the prior — enabling closed-form Bayesian updates without MCMC.</p>
+<p>The conjugate prior for p(x|η) = h(x) exp(ηᵀT(x) − A(η)) has the form:
+p(η|χ, ν) ∝ exp(χᵀ η − ν A(η))</p>
+<p>After observing n iid samples x₁, …, xₙ, the posterior is:
+p(η|x₁:ₙ, χ, ν) ∝ exp((χ + Σᵢ T(xᵢ))ᵀ η − (ν + n) A(η))</p>
+<p>Bayesian updating reduces to:
+- New pseudo-count: ν' = ν + n
+- New hyperparameter: χ' = χ + Σᵢ T(xᵢ)</p>
+<p>Concrete examples:
+- Bernoulli with Beta(α,β) prior: posterior is Beta(α + Σxᵢ, β + n − Σxᵢ)
+- Poisson with Gamma(a,b) prior: posterior is Gamma(a + Σxᵢ, b + n)
+- Gaussian (known σ²) with N(μ₀,τ²) prior: posterior is Gaussian with updated mean and variance</p>
+<pre><code class="language-python">import numpy as np
+from scipy.stats import beta as beta_dist, gamma as gamma_dist
+
+rng = np.random.default_rng(42)
+
+# Conjugate prior updating: Bernoulli with Beta prior
+print(&quot;=== Beta-Bernoulli Conjugate Updates ===&quot;)
+a, b = 2.0, 2.0   # Beta(2,2) prior: symmetric, slight informativeness
+flips = [1,0,1,1,0,1,1,1,0,1,0,1,1,0,1]  # 10 heads, 5 tails
+print(f&quot;Prior: Beta({a},{b})  mean={a/(a+b):.3f}  std={np.sqrt(a*b/(a+b)**2/(a+b+1)):.3f}&quot;)
+for i, flip in enumerate(flips, 1):
+    a += flip; b += (1-flip)
+    post_mean = a/(a+b)
+    ci_lo, ci_hi = beta_dist.ppf([0.025, 0.975], a, b)
+    if i in [1, 5, 10, 15]:
+        print(f&quot;  After {i:2d} obs: Beta({a:.0f},{b:.0f}) mean={post_mean:.3f} 95%CI=[{ci_lo:.3f},{ci_hi:.3f}]&quot;)
+
+# Conjugate updating: Poisson with Gamma prior
+print(&quot;\n=== Gamma-Poisson Conjugate Updates ===&quot;)
+a_prior, b_prior = 3.0, 1.0   # Gamma(3,1) prior: E[lambda] = a/b = 3
+lambda_true = 4.5
+X_pois = rng.poisson(lam=lambda_true, size=50)
+a_post = a_prior + np.sum(X_pois)
+b_post = b_prior + len(X_pois)
+post_mean = a_post / b_post
+post_mode = (a_post - 1) / b_post if a_post &gt;= 1 else 0
+print(f&quot;True lambda: {lambda_true}, Prior: Gamma({a_prior},{b_prior}) E={a_prior/b_prior:.1f}&quot;)
+print(f&quot;Posterior: Gamma({a_post},{b_post:.0f}) mean={post_mean:.4f} mode={post_mode:.4f}&quot;)
+
+# Natural gradient vs Euclidean gradient for Bernoulli
+print(&quot;\n=== Natural Gradient vs Euclidean Gradient (Bernoulli) ===&quot;)
+# Target: p = 0.8. Current: p = 0.5. Gradient ascent on log-likelihood.
+p_true = 0.8
+X_bern = rng.binomial(1, p_true, 100)
+# Natural gradient in eta-space: grad_nat = 1/I(eta) * grad_eta
+# For Bernoulli: I(eta) = p(1-p) = sigma(eta)*(1-sigma(eta)) = d^2A/deta^2
+eta_nat = 0.0; eta_gd = 0.0   # both start at eta=0 (p=0.5)
+lr = 0.5
+for step in range(20):
+    p_nat = 1/(1+np.exp(-eta_nat)); p_gd  = 1/(1+np.exp(-eta_gd))
+    # Score (gradient w.r.t. eta)
+    grad_nat = np.mean(X_bern) - p_nat   # dA/deta = p, so score = x_bar - p
+    grad_gd  = np.mean(X_bern) - p_gd
+    # Fisher for Bernoulli: I(eta) = p(1-p)
+    fisher = p_nat * (1 - p_nat)
+    nat_grad = grad_nat / fisher         # natural gradient = I^{-1} * score
+    eta_nat += lr * nat_grad             # natural gradient step (Newton step)
+    eta_gd  += lr * grad_gd             # Euclidean gradient step
+print(f&quot;After 20 steps: nat_grad p={1/(1+np.exp(-eta_nat)):.4f}  eucl_grad p={1/(1+np.exp(-eta_gd)):.4f}&quot;)
+print(f&quot;True p = {p_true}&quot;)
+</code></pre>
+<h2>Natural Gradient Descent</h2>
+<p>Standard gradient descent follows steepest ascent in Euclidean parameter space: Δη ∝ ∇_η ℓ(η). But the Euclidean distance between parameters does not reflect distance between distributions — changing η by the same Euclidean step can have very different effects depending on the curvature of A(η).</p>
+<p>Natural gradient descent follows steepest ascent in the space of probability distributions (Fisher-Rao metric):
+Δη ∝ F(η)⁻¹ ∇_η ℓ(η)</p>
+<p>where F(η) = E[(∇_η log p)(∇_η log p)^T] is the Fisher information matrix. For exponential families: F(η) = ∇²A(η) = Cov_η[T(X)] — the Fisher equals the Hessian of the log-partition function.</p>
+<p>Therefore, for exponential families, natural gradient = Newton step. Natural gradient converges in O(1) steps for linear models, compared to O(κ) for gradient descent (κ = condition number). KFAC, Shampoo, and other second-order optimisers approximate the Fisher for neural networks.</p>
+<blockquote>
+<p><strong>TIP: Maximum Entropy Principle</strong></p>
+<p>Exponential family distributions are exactly those that maximise entropy subject to moment constraints. If we know E[T(X)] = t and want the maximally uninformative distribution otherwise, the solution is p<em>(x) ∝ h(x) exp(ηᵀ T(x)) where η is chosen so E_p</em>[T(X)] = t. This justifies: Gaussian (max entropy with fixed mean and variance), Laplace (max entropy with fixed mean absolute deviation), categorical/softmax (max entropy with fixed marginal probabilities). Always use the exponential family member matching your known moment constraints.</p>
+<p><strong>INFO: Exponential Family and Neural Networks</strong></p>
+<p>Softmax output layers implement the categorical exponential family: p(y=k|x) = exp(ηₖ) / Σⱼ exp(ηⱼ) where ηₖ = wₖᵀ x are the natural parameters and A(η) = log Σⱼ exp(ηⱼ) is the log-softmax denominator. Cross-entropy loss = negative log-likelihood = A(η) − η[y_target]. Training with cross-entropy is MLE in the categorical exponential family — the log-partition function appears in every forward pass as the normalisation computation.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Distribution</th>
+<th>η (natural)</th>
+<th>T(x) (sufficient stat)</th>
+<th>A(η) (log-partition)</th>
+<th>Conjugate prior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Bernoulli(p)</td>
+<td>log(p/(1-p))</td>
+<td>x</td>
+<td>log(1+exp(η))</td>
+<td>Beta(α,β)</td>
+</tr>
+<tr>
+<td>Gaussian(μ,σ²)</td>
+<td>(μ/σ², −1/(2σ²))</td>
+<td>(x, x²)</td>
+<td>−η₁²/(4η₂)−½log(−2η₂)</td>
+<td>Normal-Inverse-Gamma</td>
+</tr>
+<tr>
+<td>Poisson(λ)</td>
+<td>log λ</td>
+<td>x</td>
+<td>exp(η) = λ</td>
+<td>Gamma(α,β)</td>
+</tr>
+<tr>
+<td>Gamma(α,β)</td>
+<td>(α−1, −β)</td>
+<td>(log x, x)</td>
+<td>log Γ(η₁+1)−(η₁+1)log(−η₂)</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Categorical(p)</td>
+<td>log(pₖ/pₖ) for k&lt;K</td>
+<td>1[x=k] each k</td>
+<td>log Σ exp(ηₖ)</td>
+<td>Dirichlet(α)</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>Key Takeaways</h2>
+<ul>
+<li>Exponential family: p(x|η) = h(x) exp(ηᵀT(x) − A(η)) unifies Gaussian, Bernoulli, Poisson, Gamma, Dirichlet and many more under one framework.</li>
+<li>The log-partition A(η) is always convex: ∇A(η) = E[T(X)] and ∇²A(η) = Cov[T(X)] ≥ 0 — MLE is a convex optimisation with no local minima.</li>
+<li>MLE for exponential families: set expected sufficient statistics E[T(X)] equal to observed sufficient statistics t̄ = (1/n) Σ T(xᵢ).</li>
+<li>Sufficient statistics T(x) contain all information about η — no other statistic of the same dimension can improve inference (Fisher-Neyman factorisation).</li>
+<li>Conjugate priors for exponential families always exist; Bayesian updates reduce to adding observed sufficient statistics to prior hyperparameters.</li>
+<li>GLMs use exponential family responses with a link function connecting the mean to the linear predictor; all fit via IRLS (Newton-Raphson on log-likelihood).</li>
+<li>Natural gradient = F(η)⁻¹ ∇ℓ = ∇²A(η)⁻¹ ∇ℓ — for exponential families this is the Newton step, converging in O(1) steps for linear models versus O(κ) for gradient descent.</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

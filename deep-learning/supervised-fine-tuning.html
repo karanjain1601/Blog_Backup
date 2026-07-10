@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Supervised Fine-Tuning — Instruction Format, Conversation Templates, and SFT Training | Notes Backup</title>
+  <meta name="description" content="Covers supervised fine-tuning of pretrained LLMs on curated instruction-response pairs: instruction format with chat templates, CLM loss masking on instruction tokens, LoRA-based SFT to prevent catastrophic forgetting, multi-turn conversation collation, data scale findings from LIMA, and key SFT configurations across LLaMA-3, Mistral, Phi-3, Gemma, and Qwen2." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Supervised Fine-Tuning — Instruction Format, Conversation Templates, and SFT Training</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Covers supervised fine-tuning of pretrained LLMs on curated instruction-response pairs: instruction format with chat templates, CLM loss masking on instruction tokens, LoRA-based SFT to prevent catastrophic forgetting, multi-turn conversation collation, data scale findings from LIMA, and key SFT configurations across LLaMA-3, Mistral, Phi-3, Gemma, and Qwen2.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Supervised Fine-Tuning — Instruction Format, Conversation Templates, and SFT Training</h1>
+<p>Supervised fine-tuning (SFT) adapts a pretrained LLM to follow instructions by training on curated (instruction, response) pairs using causal language modelling loss restricted to the response tokens. The pretrained model already encodes world knowledge and language structure; SFT reshapes its output distribution toward helpful, formatted responses without relearning facts from scratch. Understanding the exact mechanics — chat template formatting, loss masking, gradient accumulation, and regularisation with LoRA — is prerequisite for building instruction-tuned models that generalise beyond the training distribution.</p>
+<h2>Instruction Format and Chat Templates</h2>
+<p>Modern instruction-tuned models use a structured conversation format: a system prompt establishes the assistant persona, a user turn provides the instruction, and an assistant turn contains the expected response. Each model family defines a chat template that serialises this structure into a flat string with special tokens. LLaMA-3 uses &lt;|begin_of_text|&gt;, &lt;|start_header_id|&gt;role&lt;|end_header_id|&gt;\n\ncontent&lt;|eot_id|&gt; markers. Mistral uses [INST] ... [/INST] wrapping. Phi-3 uses &lt;|system|&gt;, &lt;|user|&gt;, &lt;|assistant|&gt; sentinels. The template is baked into the tokeniser and applied via tokenizer.apply_chat_template(). Mixing templates across models is a common bug that degrades instruction following silently.</p>
+<h2>Tokenisation and Loss Masking</h2>
+<p>CLM loss is computed over all tokens by default, but for SFT only the assistant response tokens should contribute to the loss — the model is not being trained to predict the instruction. The standard approach: apply the chat template to the full conversation to get input_ids, separately tokenise the instruction portion to determine its length, then set labels[:instruction_len] = -100. HuggingFace's Trainer ignores positions with label -100 when computing cross-entropy. Getting this masking right is critical: if instruction tokens leak into the loss, the model learns to reproduce system and user turns rather than follow them.</p>
+<pre><code class="language-python">from transformers import AutoTokenizer
+import torch
+
+def format_sft_example(tokenizer, system, user, assistant, max_length=1024):
+    &quot;&quot;&quot;Apply chat template and mask instruction tokens from CLM loss.&quot;&quot;&quot;
+    messages = [
+        {&quot;role&quot;: &quot;system&quot;, &quot;content&quot;: system},
+        {&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: user},
+        {&quot;role&quot;: &quot;assistant&quot;, &quot;content&quot;: assistant},
+    ]
+    # Full conversation text (including assistant response)
+    full_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+    # Instruction-only text to compute mask boundary
+    instr_text = tokenizer.apply_chat_template(messages[:2], tokenize=False, add_generation_prompt=True)
+    enc = tokenizer(full_text, max_length=max_length, truncation=True, return_tensors=&quot;pt&quot;)
+    input_ids = enc.input_ids[0]
+    instr_len = len(tokenizer(instr_text, add_special_tokens=False).input_ids)
+    labels = input_ids.clone()
+    labels[:instr_len] = -100  # no loss on instruction tokens
+    return {&quot;input_ids&quot;: input_ids, &quot;labels&quot;: labels, &quot;attention_mask&quot;: enc.attention_mask[0]}
+
+# Demo
+tokenizer = AutoTokenizer.from_pretrained(&quot;meta-llama/Llama-3-8B-Instruct&quot;)
+example = format_sft_example(
+    tokenizer,
+    system=&quot;You are a helpful assistant.&quot;,
+    user=&quot;Explain backpropagation in one paragraph.&quot;,
+    assistant=&quot;Backpropagation applies the chain rule in reverse through the computational graph to compute gradients of the loss wrt every parameter.&quot;,
+)
+print(f&quot;input_ids shape : {example['input_ids'].shape}&quot;)
+print(f&quot;Masked tokens   : {(example['labels'] == -100).sum().item()} (instruction)&quot;)
+print(f&quot;Loss tokens     : {(example['labels'] != -100).sum().item()} (assistant response)&quot;)
+</code></pre>
+<h2>SFT Training Details — LR, Epochs, and Batch Size</h2>
+<p>SFT uses small learning rates (1e-5 to 5e-5) to prevent overwriting pretrained representations. Training runs for 1–3 epochs on small datasets (few thousand examples) to avoid overfitting; on larger datasets (50K+) a single epoch may suffice. Cosine learning rate decay with a short warm-up (5–10% of steps) is standard. Effective batch size is typically 128–256 sequences achieved via gradient accumulation across 8–32 physical batches, improving gradient quality on small SFT datasets. AdamW with weight decay 0.01 is the default optimizer. Unlike pretraining, SFT datasets are small enough that training time is dominated by data preprocessing and tokenisation rather than compute.</p>
+<pre><code class="language-python">from transformers import AutoModelForCausalLM, AutoTokenizer, get_cosine_schedule_with_warmup
+from peft import LoraConfig, get_peft_model
+import torch
+from torch.optim import AdamW
+
+def sft_train_step(model, batch, optimizer, scheduler):
+    &quot;&quot;&quot;Single SFT gradient step with LoRA; loss computed only on response tokens.&quot;&quot;&quot;
+    input_ids = batch[&quot;input_ids&quot;].to(model.device)
+    labels = batch[&quot;labels&quot;].to(model.device)
+    attention_mask = batch[&quot;attention_mask&quot;].to(model.device)
+    # HuggingFace CausalLM ignores label=-100 positions automatically
+    outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
+    loss = outputs.loss
+    optimizer.zero_grad()
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    optimizer.step()
+    scheduler.step()
+    return loss.item()
+
+# Attach LoRA to base model
+base = AutoModelForCausalLM.from_pretrained(&quot;meta-llama/Llama-3-8B&quot;, torch_dtype=torch.bfloat16)
+lora_cfg = LoraConfig(
+    r=16, lora_alpha=32,
+    target_modules=[&quot;q_proj&quot;, &quot;k_proj&quot;, &quot;v_proj&quot;, &quot;o_proj&quot;],
+    lora_dropout=0.05, bias=&quot;none&quot;, task_type=&quot;CAUSAL_LM&quot;
+)
+model = get_peft_model(base, lora_cfg)
+model.print_trainable_parameters()  # ~0.5% of params for r=16
+
+optimizer = AdamW(model.parameters(), lr=2e-5, weight_decay=0.01)
+scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=100, num_training_steps=3000)
+print(&quot;LoRA SFT setup complete — only adapter weights update during training&quot;)
+</code></pre>
+<h2>Multi-Turn Conversation SFT</h2>
+<p>For multi-turn conversations, the SFT example includes multiple user and assistant exchanges. The training objective applies teacher-forcing cumulatively: given all previous turns, predict the next assistant turn. Only assistant turns contribute to the loss; all user and system turns are masked with -100. This cumulative structure means the model learns to condition its response on the full conversation history, enabling in-context coherence across turns. Packing multiple conversations into a single sequence (with document boundaries marked by end-of-sequence tokens) is common for efficiency on GPU memory.</p>
+<pre><code class="language-python">from transformers import AutoTokenizer
+import torch
+
+def collate_multiturn(tokenizer, conversation, max_length=2048):
+    &quot;&quot;&quot;Pack multi-turn conversation; compute loss only on assistant turns.&quot;&quot;&quot;
+    input_ids, labels = [], []
+    for turn in conversation:
+        text = tokenizer.apply_chat_template([turn], tokenize=False, add_generation_prompt=False)
+        ids = tokenizer(text, add_special_tokens=False).input_ids
+        if turn[&quot;role&quot;] == &quot;assistant&quot;:
+            labels.extend(ids)          # include in loss
+        else:
+            labels.extend([-100] * len(ids))  # mask system/user turns
+        input_ids.extend(ids)
+    input_ids = torch.tensor(input_ids[:max_length])
+    labels = torch.tensor(labels[:max_length])
+    return {&quot;input_ids&quot;: input_ids, &quot;labels&quot;: labels,
+            &quot;attention_mask&quot;: torch.ones_like(input_ids)}
+
+# Example: 3-turn conversation
+tokenizer = AutoTokenizer.from_pretrained(&quot;meta-llama/Llama-3-8B-Instruct&quot;)
+conv = [
+    {&quot;role&quot;: &quot;system&quot;,    &quot;content&quot;: &quot;You are a coding assistant.&quot;},
+    {&quot;role&quot;: &quot;user&quot;,      &quot;content&quot;: &quot;What is a gradient?&quot;},
+    {&quot;role&quot;: &quot;assistant&quot;, &quot;content&quot;: &quot;A gradient is the vector of partial derivatives of a scalar function.&quot;},
+    {&quot;role&quot;: &quot;user&quot;,      &quot;content&quot;: &quot;How is it used in training?&quot;},
+    {&quot;role&quot;: &quot;assistant&quot;, &quot;content&quot;: &quot;The gradient of the loss wrt parameters drives the parameter update in gradient descent.&quot;},
+]
+batch = collate_multiturn(tokenizer, conv)
+print(f&quot;Total tokens : {batch['input_ids'].shape[0]}&quot;)
+print(f&quot;Masked tokens: {(batch['labels'] == -100).sum().item()} (system+user)&quot;)
+print(f&quot;Loss tokens  : {(batch['labels'] != -100).sum().item()} (assistant turns)&quot;)
+</code></pre>
+<h2>Data Scale — LIMA and the Less-is-More Principle</h2>
+<p>The LIMA paper (2023) demonstrated that 1,000 carefully curated, diverse examples produce an SFT model competitive with models trained on 52,000 Alpaca examples. The key insight: a pretrained model already has the knowledge and language ability; SFT is merely teaching it the surface format of helpfulness. Raw data volume matters far less than diversity (covering different task types, domains, lengths) and quality (correct, well-structured responses). The FLAN approach goes the opposite direction — fine-tuning on 1,000+ NLP tasks in instruction format — showing that breadth generalises zero-shot. Both findings point to the same conclusion: the instruction distribution, not its size, determines SFT quality.</p>
+<pre><code class="language-python">from datasets import load_dataset
+from transformers import AutoTokenizer, DataCollatorForSeq2Seq
+from torch.utils.data import DataLoader
+
+tokenizer = AutoTokenizer.from_pretrained(&quot;meta-llama/Llama-3-8B-Instruct&quot;)
+tokenizer.pad_token = tokenizer.eos_token
+
+dataset = load_dataset(&quot;tatsu-lab/alpaca&quot;, split=&quot;train&quot;)
+
+def preprocess(example):
+    user_content = example[&quot;instruction&quot;]
+    if example.get(&quot;input&quot;):
+        user_content += &quot;\n&quot; + example[&quot;input&quot;]
+    messages = [
+        {&quot;role&quot;: &quot;user&quot;,      &quot;content&quot;: user_content},
+        {&quot;role&quot;: &quot;assistant&quot;, &quot;content&quot;: example[&quot;output&quot;]},
+    ]
+    full = tokenizer.apply_chat_template(messages, tokenize=False)
+    enc  = tokenizer(full, max_length=512, truncation=True, padding=False)
+    instr = tokenizer.apply_chat_template(messages[:1], tokenize=False, add_generation_prompt=True)
+    instr_len = len(tokenizer(instr, add_special_tokens=False).input_ids)
+    labels = enc[&quot;input_ids&quot;][:]
+    labels[:instr_len] = [-100] * instr_len
+    enc[&quot;labels&quot;] = labels
+    return enc
+
+tokenized = dataset.map(preprocess, remove_columns=dataset.column_names, num_proc=4)
+collator  = DataCollatorForSeq2Seq(tokenizer, padding=True, pad_to_multiple_of=8)
+loader    = DataLoader(tokenized, batch_size=4, collate_fn=collator, shuffle=True)
+print(f&quot;Dataset size: {len(tokenized)}, steps per epoch: {len(loader)}&quot;)
+</code></pre>
+<h2>Instruction Diversity and Catastrophic Forgetting</h2>
+<p>Instruction diversity — spanning reasoning, coding, summarisation, QA, creative writing, and dialogue — determines whether the SFT model generalises or overfits to a narrow format. Models fine-tuned on homogeneous datasets (e.g., only coding instructions) lose performance on other task types. Catastrophic forgetting is a related problem: SFT with full parameter updates can degrade base model capabilities, particularly on tasks not represented in the SFT dataset. LoRA mitigates this by keeping base weights frozen and training only low-rank adapter matrices, acting as a regulariser. Early stopping (monitor validation loss on a held-out diverse eval set) is essential for small datasets where overfitting can happen within a single epoch.</p>
+<ul>
+<li>Task types to cover: question answering, summarisation, code generation, translation, creative writing, reasoning chains, dialogue, data extraction.</li>
+<li>Length diversity: short factual answers (1–2 sentences), medium explanations (1–3 paragraphs), long structured outputs (lists, tables, code).</li>
+<li>Difficulty spectrum: simple lookup, multi-step reasoning, constraint satisfaction, open-ended generation.</li>
+<li>Format diversity: prose, bullet lists, markdown with headers, JSON, code with explanation.</li>
+<li>LoRA hyperparameters: rank r=8–64; larger r captures more capacity but risks overfitting; alpha/r ratio of 2 is a safe default.</li>
+<li>Catastrophic forgetting check: evaluate on MMLU/HellaSwag before and after SFT to detect knowledge degradation.</li>
+</ul>
+<h2>SFT Configurations in Notable Models</h2>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Dataset Size</th>
+<th>Epochs</th>
+<th>Learning Rate</th>
+<th>LoRA</th>
+<th>Data Source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>LLaMA-3-8B-Instruct</td>
+<td>~10M tokens</td>
+<td>2–3</td>
+<td>1e-5</td>
+<td>No (full FT)</td>
+<td>Internal curated + public mix</td>
+</tr>
+<tr>
+<td>Mistral-7B-Instruct-v0.2</td>
+<td>~1M examples</td>
+<td>3</td>
+<td>2e-5</td>
+<td>No (full FT)</td>
+<td>UltraChat + public open-source</td>
+</tr>
+<tr>
+<td>Phi-3-mini-Instruct</td>
+<td>~3.3T pretrain + SFT stage</td>
+<td>3</td>
+<td>1e-5</td>
+<td>No</td>
+<td>Synthetic GPT-4-generated instructions</td>
+</tr>
+<tr>
+<td>Gemma-7B-Instruct</td>
+<td>~2M examples</td>
+<td>2</td>
+<td>5e-6</td>
+<td>No</td>
+<td>FLAN subset + proprietary dialogue</td>
+</tr>
+<tr>
+<td>Qwen2-7B-Instruct</td>
+<td>~1.5M pairs</td>
+<td>2</td>
+<td>7e-6</td>
+<td>No</td>
+<td>Proprietary multilingual instruction data</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>LIMA: Less Is More for Alignment</strong>: LIMA showed that 1,000 carefully curated examples outperform 52,000 noisy Alpaca examples — instruction diversity (covering different task types) matters more than raw count for SFT quality. A pretrained LLM already has the knowledge; SFT merely teaches the format. Invest in curation and diversity, not data volume.</p>
+</blockquote>
+<p>SFT is the foundational alignment step — it converts a next-token predictor into an instruction follower. The key implementation decisions (chat template, loss masking, LoRA vs full FT, data diversity) compound: a model with correct masking, diverse data, and LoRA regularisation will generalise far better than one trained with larger but homogeneous data and full-parameter updates. SFT alone is insufficient for safety and helpfulness optimisation; it is typically followed by preference learning (RLHF or DPO) trained on reward signals from human or AI feedback.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

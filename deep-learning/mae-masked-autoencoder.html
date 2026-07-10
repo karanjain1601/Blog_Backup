@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MAE — Masked Autoencoders for Vision | Notes Backup</title>
+  <meta name="description" content="Deep dive into MAE (He et al. 2022): masking 75% of image patches, asymmetric encoder-decoder design, normalized pixel reconstruction targets, and comparison with SimMIM, BEiT, and MaskFeat." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>MAE — Masked Autoencoders for Vision</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Deep dive into MAE (He et al. 2022): masking 75% of image patches, asymmetric encoder-decoder design, normalized pixel reconstruction targets, and comparison with SimMIM, BEiT, and MaskFeat.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>MAE — Masked Autoencoders for Vision</h1>
+<p>Masked Autoencoders (MAE) by He et al. (2022) demonstrated that a surprisingly simple idea — mask most of an image and reconstruct the missing parts — scales remarkably well for visual pre-training. By masking 75% of patches and using an asymmetric encoder-decoder, MAE achieves strong representations without contrastive pairs, negative samples, or momentum networks.</p>
+<h2>What is MAE?</h2>
+<p>MAE is a self-supervised pre-training method for vision transformers (ViT). The core idea mirrors BERT in NLP: randomly mask a subset of input tokens (patches) and train the model to reconstruct the originals. The key insight is that vision data is far more redundant than language — a high masking ratio (75% vs BERT's 15%) forces the model to learn holistic scene understanding rather than interpolating from nearby visible pixels.</p>
+<h2>Patch Masking Strategy</h2>
+<p>MAE divides the input image into non-overlapping patches (typically 16x16 pixels). A random 75% of patches are masked. Crucially, the encoder sees only the remaining 25% — mask tokens are never passed to the encoder. This asymmetric design is the key efficiency win: the encoder processes only a quarter of the patches, yielding a 3–4x speedup over processing all patches.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def random_masking(x, mask_ratio=0.75):
+    # x: [B, N, D] patch embeddings
+    # Returns: visible tokens, binary mask (1=masked), restore indices
+    B, N, D = x.shape
+    keep = int(N * (1 - mask_ratio))  # number of patches to keep
+
+    # Generate per-sample random noise for independent shuffling
+    noise = torch.rand(B, N, device=x.device)
+
+    # Sort patches by noise to get a random permutation
+    ids_shuffle = torch.argsort(noise, dim=1)        # ascending
+    ids_restore = torch.argsort(ids_shuffle, dim=1)  # inverse permutation
+
+    # Keep only the first `keep` patches (lowest noise values)
+    ids_keep = ids_shuffle[:, :keep]
+    x_visible = torch.gather(
+        x, dim=1,
+        index=ids_keep.unsqueeze(-1).expand(-1, -1, D)
+    )
+
+    # Binary mask: 0 = kept, 1 = masked (aligned with ids_restore order)
+    mask = torch.ones(B, N, device=x.device)
+    mask[:, :keep] = 0
+    mask = torch.gather(mask, dim=1, index=ids_restore)
+
+    return x_visible, mask, ids_restore
+
+# Example usage: 196 patches (14x14 grid for 224px image with 16px patches)
+# x = torch.randn(8, 196, 768)  # batch of 8, 196 patches, 768-dim
+# x_vis, mask, ids_restore = random_masking(x, mask_ratio=0.75)
+# x_vis.shape  -&gt; [8, 49, 768]  (only 25% visible)
+</code></pre>
+<h2>The MAE Encoder</h2>
+<p>The encoder is a standard ViT (e.g., ViT-L with 24 blocks and 1024-dim embeddings) that operates exclusively on visible patches. Positional embeddings are added before masking so the encoder knows spatial positions. No mask tokens enter the encoder — this is what makes it computationally efficient. The encoder produces rich representations for only the visible 25% of patches.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from einops import rearrange
+
+class TransformerBlock(nn.Module):
+    def __init__(self, dim, heads, mlp_ratio=4.0):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn = nn.MultiheadAttention(dim, heads, batch_first=True)
+        self.norm2 = nn.LayerNorm(dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, int(dim * mlp_ratio)), nn.GELU(),
+            nn.Linear(int(dim * mlp_ratio), dim)
+        )
+    def forward(self, x):
+        x = x + self.attn(self.norm1(x), self.norm1(x), self.norm1(x))[0]
+        return x + self.mlp(self.norm2(x))
+
+class MAEEncoder(nn.Module):
+    def __init__(self, img_size=224, patch_size=16, embed_dim=768, depth=12, num_heads=12):
+        super().__init__()
+        self.patch_embed = nn.Conv2d(3, embed_dim, patch_size, stride=patch_size)
+        num_patches = (img_size // patch_size) ** 2
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
+        self.cls_token  = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.blocks = nn.ModuleList([TransformerBlock(embed_dim, num_heads) for _ in range(depth)])
+        self.norm = nn.LayerNorm(embed_dim)
+
+    def forward(self, x, ids_keep):
+        B = x.shape[0]
+        x = rearrange(self.patch_embed(x), 'b d h w -&gt; b (h w) d')
+        x = x + self.pos_embed[:, 1:, :]                                  # spatial pos-embed
+        D = x.shape[-1]
+        x = torch.gather(x, 1, ids_keep.unsqueeze(-1).expand(-1, -1, D)) # keep visible only
+        cls = self.cls_token.expand(B, -1, -1)
+        x = torch.cat([cls, x], dim=1)
+        for block in self.blocks:
+            x = block(x)
+        return self.norm(x)  # [B, 1+keep, D]
+</code></pre>
+<h2>The MAE Decoder</h2>
+<p>The decoder is intentionally lightweight — only 4 transformer blocks (vs 12+ in the encoder) and a smaller embedding dimension (512 vs 768). It receives encoded visible tokens plus learnable mask tokens inserted at masked positions. Positional embeddings are added so the decoder knows which patches to reconstruct. The output head projects to pixel values for each patch.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class MAEDecoder(nn.Module):
+    def __init__(self, num_patches=196, encoder_dim=768, decoder_dim=512,
+                 depth=4, num_heads=8, patch_size=16):
+        super().__init__()
+        self.decoder_embed = nn.Linear(encoder_dim, decoder_dim)
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, decoder_dim))
+        self.pos_embed  = nn.Parameter(torch.zeros(1, num_patches + 1, decoder_dim))
+        self.blocks = nn.ModuleList([TransformerBlock(decoder_dim, num_heads) for _ in range(depth)])
+        self.norm = nn.LayerNorm(decoder_dim)
+        self.pred = nn.Linear(decoder_dim, patch_size * patch_size * 3)
+
+    def forward(self, x_encoded, ids_restore):
+        x = self.decoder_embed(x_encoded)   # project encoder dim -&gt; decoder dim
+        x_vis = x[:, 1:, :]                 # strip cls token
+        B, n_vis, D = x_vis.shape
+        n_mask = ids_restore.shape[1] - n_vis
+
+        # Expand mask tokens to fill masked positions
+        mask_tokens = self.mask_token.expand(B, n_mask, -1)
+        x_full = torch.cat([x_vis, mask_tokens], dim=1)   # [B, N, D]
+
+        # Unshuffle: restore original patch order using inverse permutation
+        x_full = torch.gather(
+            x_full, 1, ids_restore.unsqueeze(-1).expand(-1, -1, D)
+        )
+        # Add positional embedding (full sequence) and prepend cls token
+        x_full = x_full + self.pos_embed[:, 1:, :]
+        x = torch.cat([x[:, :1, :], x_full], dim=1)
+        for block in self.blocks:
+            x = block(x)
+        x = self.norm(x)
+        return self.pred(x[:, 1:, :])   # [B, N, patch_size^2 * 3]
+</code></pre>
+<h2>Reconstruction Target</h2>
+<p>Rather than raw pixel values, MAE normalizes each patch's pixels to zero mean and unit variance before computing the loss. This per-patch normalization improves training stability and final representation quality. The loss is only computed on masked patches — visible patches are ignored. At inference time, predictions can be unnormalized back to RGB for visualization.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+import matplotlib.pyplot as plt
+
+def patchify(imgs, patch_size=16):
+    # Convert [B, 3, H, W] images to [B, N, patch_size^2 * 3] patch tokens
+    p = patch_size
+    h = w = imgs.shape[-1] // p
+    x = imgs.reshape(imgs.shape[0], 3, h, p, w, p)
+    x = torch.einsum('nchpwq-&gt;nhwpqc', x)
+    return x.reshape(imgs.shape[0], h * w, p * p * 3)
+
+def compute_reconstruction_target(imgs, patch_size=16):
+    # Per-patch mean/std normalization — the MAE reconstruction target
+    target = patchify(imgs, patch_size)
+    mean = target.mean(dim=-1, keepdim=True)
+    std  = target.var(dim=-1, keepdim=True).sqrt().clamp(min=1e-6)
+    return (target - mean) / std
+
+def unnormalize_for_viz(pred, orig_imgs, patch_size=16):
+    # Reverse patch normalization for visualization
+    target = patchify(orig_imgs, patch_size)
+    mean = target.mean(dim=-1, keepdim=True)
+    std  = target.var(dim=-1, keepdim=True).sqrt().clamp(min=1e-6)
+    return pred * std + mean
+
+def mae_loss(pred, imgs, mask, patch_size=16):
+    # MSE loss computed only on masked patches
+    target = compute_reconstruction_target(imgs, patch_size)  # [B, N, p^2*3]
+    loss = ((pred - target) ** 2).mean(dim=-1)               # [B, N] per-patch
+    return (loss * mask).sum() / mask.sum()                   # mean over masked
+</code></pre>
+<blockquote>
+<p><strong>Why 75% and Not 15%?</strong>: BERT masks only 15% of tokens because language is information-dense — removing more destroys most context. Images are far more spatially redundant: adjacent pixels are highly correlated, so low mask ratios allow trivial texture interpolation. The 75% ratio forces the model to reason globally about object structure, yielding semantically richer features. Ablations show performance drops sharply at mask ratios below 60%.</p>
+</blockquote>
+<h2>High Mask Ratio and Why It Works</h2>
+<p>The high mask ratio is simultaneously the efficiency mechanism and the representation-quality mechanism. With only 25% of patches visible, the encoder cannot rely on nearby pixel interpolation — it must learn object-level semantics. Ablations in the original paper confirm that performance degrades significantly at lower mask ratios (40–50%), validating that task difficulty drives representation quality.</p>
+<ul>
+<li>75% mask ratio: encoder processes 3–4x fewer tokens, giving a significant training speedup</li>
+<li>High masking forces holistic understanding of shape, texture, and object structure</li>
+<li>No mask tokens in the encoder prevents exploitation of trivial local correlations</li>
+<li>Lightweight decoder (4 blocks) can reconstruct from strong encoder representations</li>
+<li>Normalized pixel targets (per-patch mean/std) improve training stability vs raw RGB</li>
+</ul>
+<h2>Comparison with Related Methods</h2>
+<p>MAE sits in a family of masked image modeling (MIM) approaches that differ in reconstruction targets, masking strategies, and architectures. SimMIM uses a similar pixel-prediction target but passes all tokens (including mask tokens) to the encoder. BEiT predicts discrete visual tokens from a pretrained tokenizer. MaskFeat predicts HOG (Histograms of Oriented Gradients) features, a hand-crafted descriptor.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Mask Ratio</th>
+<th>Reconstruction Target</th>
+<th>Encoder Input</th>
+<th>IN-1K Fine-tune Top-1</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MAE</td>
+<td>75%</td>
+<td>Normalized pixel values</td>
+<td>Visible patches only</td>
+<td>87.8% (ViT-H)</td>
+</tr>
+<tr>
+<td>SimMIM</td>
+<td>60%</td>
+<td>Raw pixel values</td>
+<td>All patches + mask tokens</td>
+<td>84.0% (SwinV2-H)</td>
+</tr>
+<tr>
+<td>BEiT</td>
+<td>40%</td>
+<td>Discrete visual tokens (dVAE)</td>
+<td>All patches + mask tokens</td>
+<td>86.3% (ViT-L)</td>
+</tr>
+<tr>
+<td>MaskFeat</td>
+<td>40%</td>
+<td>HOG features</td>
+<td>All patches + mask tokens</td>
+<td>84.0% (ViT-L)</td>
+</tr>
+</tbody>
+</table>
+<h2>Fine-tuning and Scalability</h2>
+<p>After pre-training, the decoder is discarded and only the encoder is fine-tuned on downstream tasks. MAE achieves 87.8% top-1 on ImageNet with ViT-H, surpassing supervised pre-training baselines. Crucially, larger ViT models benefit more from MAE pre-training — ViT-L and ViT-H show larger relative gains than ViT-B, suggesting MAE is especially well-suited to large-scale self-supervised learning.</p>
+<p>In data-limited fine-tuning regimes with only 1% of ImageNet labels (~12,800 images), MAE pre-trained ViT-L achieves ~73% top-1 accuracy, dramatically outperforming training from scratch. This confirms that MAE learns genuine visual semantics rather than dataset-specific shortcuts, making it a powerful foundation for transfer learning.</p>
+    </article>
+  </main>
+</body>
+</html>

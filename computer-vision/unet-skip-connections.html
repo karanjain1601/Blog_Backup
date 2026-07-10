@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>U-Net: Encoder-Decoder with Skip Connections | Notes Backup</title>
+  <meta name="description" content="U-Net architecture for dense prediction — symmetric encoder-decoder, skip connections that concatenate high-resolution features, and applications in medical image segmentation." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>U-Net: Encoder-Decoder with Skip Connections</h1>
+      <ul class='note-meta'><li><strong>description:</strong> U-Net architecture for dense prediction — symmetric encoder-decoder, skip connections that concatenate high-resolution features, and applications in medical image segmentation.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>U-Net: Encoder-Decoder with Skip Connections</h1>
+<h2>Overview</h2>
+<p>U-Net (Ronneberger et al., 2015) was designed for biomedical image segmentation where labelled data is scarce. Its symmetric encoder-decoder with skip connections allows the network to combine deep semantic features with high-resolution spatial detail. Trained with aggressive augmentation, U-Net achieves strong results even with a few dozen training images — making it the dominant architecture in medical imaging.</p>
+<p>The name comes from its U-shaped architecture: the encoder contracts the spatial dimensions while increasing channels; the decoder mirrors this path, expanding back to input resolution. Each level of the encoder connects directly to the corresponding decoder level via a skip connection that concatenates feature maps, preserving fine-grained spatial information throughout the upsampling path.</p>
+<h2>Encoder Path</h2>
+<p>The encoder follows a standard CNN pattern: repeated blocks of two 3×3 convolutions (each followed by batch normalisation and ReLU), then 2×2 max pooling with stride 2. Each pooling step halves the spatial dimensions and doubles the channels, progressively building up an abstract semantic representation. The final encoder output — the bottleneck — captures the most compressed, semantically rich features.</p>
+<pre><code class="language-python">import torch.nn as nn
+
+class EncoderBlock(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, 3, padding=1), nn.BatchNorm2d(out_ch), nn.ReLU(inplace=True),
+            nn.Conv2d(out_ch, out_ch, 3, padding=1), nn.BatchNorm2d(out_ch), nn.ReLU(inplace=True)
+        )
+        self.pool = nn.MaxPool2d(2)
+
+    def forward(self, x):
+        features = self.conv(x)   # save for skip connection
+        return self.pool(features), features
+</code></pre>
+<p>Pre-trained encoders (ResNet, EfficientNet) are often used as drop-in replacements for the hand-designed encoder. This transfer learning from ImageNet provides a strong initialisation, reducing training time and data requirements. Libraries like segmentation-models-pytorch make it easy to swap encoders while keeping the U-Net decoder structure and skip connection wiring.</p>
+<h2>Decoder Path</h2>
+<p>The decoder mirrors the encoder: at each level, the feature map is upsampled by 2× (bilinear interpolation or transposed convolution), concatenated with the corresponding encoder skip features, then processed by two 3×3 conv-BN-ReLU blocks. This progressively refines the coarse bottleneck representation into a full-resolution segmentation map with fine boundary detail.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class DecoderBlock(nn.Module):
+    def __init__(self, in_ch, skip_ch, out_ch):
+        super().__init__()
+        self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_ch + skip_ch, out_ch, 3, padding=1), nn.BatchNorm2d(out_ch), nn.ReLU(inplace=True),
+            nn.Conv2d(out_ch, out_ch, 3, padding=1), nn.BatchNorm2d(out_ch), nn.ReLU(inplace=True)
+        )
+
+    def forward(self, x, skip):
+        x = self.up(x)
+        return self.conv(torch.cat([x, skip], dim=1))
+</code></pre>
+<p>Transposed convolutions (sometimes called deconvolutions) are an alternative to bilinear upsampling. They are learnable, but can introduce checkerboard artefacts if not carefully initialised. In practice, bilinear upsampling followed by a regular convolution tends to produce cleaner results and is preferred in most modern U-Net implementations.</p>
+<h2>Skip Connections</h2>
+<p>Skip connections are the defining feature of U-Net. They directly route feature maps from the encoder to the corresponding decoder level, bypassing the bottleneck. This gives the decoder access to both coarse semantic context (from the deep bottleneck) and precise spatial detail (from the shallow encoder features). Without skip connections, fine structures like cell boundaries or vessel edges tend to blur out.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class UNet(nn.Module):
+    def __init__(self, in_ch=1, num_classes=2):
+        super().__init__()
+        self.enc1 = EncoderBlock(in_ch, 64)
+        self.enc2 = EncoderBlock(64, 128)
+        self.enc3 = EncoderBlock(128, 256)
+        self.enc4 = EncoderBlock(256, 512)
+        self.bottleneck = nn.Sequential(
+            nn.Conv2d(512, 1024, 3, padding=1), nn.ReLU(inplace=True),
+            nn.Conv2d(1024, 1024, 3, padding=1), nn.ReLU(inplace=True)
+        )
+        self.dec4 = DecoderBlock(1024, 512, 512)
+        self.dec3 = DecoderBlock(512, 256, 256)
+        self.dec2 = DecoderBlock(256, 128, 128)
+        self.dec1 = DecoderBlock(128, 64, 64)
+        self.head = nn.Conv2d(64, num_classes, 1)
+</code></pre>
+<p>U-Net++ nests dense skip connections between encoder and decoder nodes, creating an ensemble of U-Nets of varying depths. This helps when the optimal depth is unknown, as intermediate predictions can be used for deep supervision. The downside is increased parameter count and memory, but the improvement in mIoU on medical imaging benchmarks is consistent across datasets.</p>
+<h2>U-Net for Medical Imaging</h2>
+<p>Medical image segmentation presents unique challenges: 3D volumes (CT/MRI), high class imbalance (small lesions in large backgrounds), limited labelled data, and domain shift between scanners or institutions. U-Net addresses these through aggressive augmentation (elastic deformation, rotation, flipping) and loss functions that handle imbalance, such as Dice loss or a weighted combination of Dice and binary cross-entropy.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def dice_loss(pred, target, smooth=1.0):
+    # pred: (B, C, H, W) logits; target: (B, H, W) long
+    pred = torch.softmax(pred, dim=1)
+    target_oh = F.one_hot(target, pred.shape[1]).permute(0,3,1,2).float()
+    inter = (pred * target_oh).sum(dim=(2, 3))
+    union = pred.sum(dim=(2, 3)) + target_oh.sum(dim=(2, 3))
+    dice = (2 * inter + smooth) / (union + smooth)
+    return 1 - dice.mean()
+
+def combined_loss(pred, target):
+    return dice_loss(pred, target) + F.cross_entropy(pred, target)
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>U-Net variant</th>
+<th>Skip connection</th>
+<th>Key change</th>
+<th>Application</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>U-Net original</td>
+<td>Concatenation</td>
+<td>Symmetric encoder-decoder</td>
+<td>Biomedical segmentation</td>
+</tr>
+<tr>
+<td>U-Net++</td>
+<td>Dense nested</td>
+<td>Sub-networks of varying depth</td>
+<td>Multi-organ, pathology</td>
+</tr>
+<tr>
+<td>Attention U-Net</td>
+<td>Attention gates on skip</td>
+<td>Suppress irrelevant features</td>
+<td>Prostate, CT organs</td>
+</tr>
+<tr>
+<td>Residual U-Net</td>
+<td>Residual + skip</td>
+<td>ResNet blocks in encoder</td>
+<td>Retinal vessels, dermoscopy</td>
+</tr>
+<tr>
+<td>nnU-Net</td>
+<td>Concatenation</td>
+<td>Auto-config for any dataset</td>
+<td>Medical imaging competitions</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>****: nnU-Net automatically configures U-Net hyperparameters (patch size, batch size, augmentation) for any medical imaging dataset — it's the go-to baseline before custom architectures.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<p>U-Net's elegance lies in its symmetric structure and skip connections, which combine the best of both worlds: semantic depth from the encoder bottleneck and spatial precision from early encoder features. These properties make it near-universally applicable in medical imaging, remote sensing, and any domain requiring precise boundary delineation with limited training data.</p>
+<p>When starting a new segmentation project, try nnU-Net first — it handles preprocessing, augmentation, and hyperparameter selection automatically and serves as a strong baseline. For natural images, combine a pretrained EfficientNet or ResNet encoder with a U-Net decoder using segmentation-models-pytorch. Always use Dice loss or combined Dice + CE to handle class imbalance robustly.</p>
+    </article>
+  </main>
+</body>
+</html>

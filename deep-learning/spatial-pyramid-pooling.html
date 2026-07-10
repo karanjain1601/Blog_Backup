@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Spatial Pyramid Pooling (SPP) — Multi-Scale Feature Aggregation | Notes Backup</title>
+  <meta name="description" content="SPP-Net pools at multiple grid sizes to produce fixed-size feature vectors from any input resolution; ASPP applies atrous convolutions at multiple dilation rates for semantic segmentation; PSPNet, SPPF, and PANet extend the idea to detection and scene parsing." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Spatial Pyramid Pooling (SPP) — Multi-Scale Feature Aggregation</h1>
+      <ul class='note-meta'><li><strong>description:</strong> SPP-Net pools at multiple grid sizes to produce fixed-size feature vectors from any input resolution; ASPP applies atrous convolutions at multiple dilation rates for semantic segmentation; PSPNet, SPPF, and PANet extend the idea to detection and scene parsing.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Spatial Pyramid Pooling (SPP) — Multi-Scale Feature Aggregation</h1>
+<p>Spatial Pyramid Pooling (SPP) solves a fundamental mismatch between convolutional feature maps of arbitrary spatial size and downstream layers that require a fixed-length input. By pooling at multiple pyramid levels — 1×1, 2×2, and 4×4 grids — and concatenating the results, SPP produces a fixed-size descriptor regardless of input image resolution. This single idea spawned an entire family of multi-scale pooling architectures spanning image classification, object detection, and semantic segmentation.</p>
+<h2>Fixed-Size Feature Vectors from Variable-Size Inputs</h2>
+<p>A standard CNN requires a fixed input size because fully-connected layers expect a fixed number of inputs. The spatial feature map from a conv layer has shape C×H×W where H and W depend on input dimensions. SPP resolves this by applying adaptive pooling at l pyramid levels with grid sizes s₁, s₂, ..., sₗ. Each level pools the C-channel map into C×sᵢ×sᵢ, which is then flattened. Outputs are concatenated to form a fixed vector of length C × Σ(sᵢ²). For pool sizes {1, 2, 4} and C=512, output is always 512×(1+4+16)=10,752 regardless of whether input is 224×224 or 640×480.</p>
+<h2>SPP-Net: Computing Features Once for All Proposals</h2>
+<p>R-CNN (Girshick et al., 2014) runs a forward pass through the full CNN for each region proposal independently — typically 2,000 proposals per image, each resized to a fixed 227×227 crop. SPP-Net (He et al., 2015) eliminates this redundancy: it runs the convolutional layers once on the entire image to produce a shared feature map, then applies SPP to each proposal's region within that feature map. Since proposals overlap heavily, shared computation yields a 24–102× speedup. This insight — compute once, pool per region — directly inspired RoI Pooling in Fast R-CNN and RoI Align in Mask R-CNN.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class SPPModule(nn.Module):
+    '''Spatial Pyramid Pooling: pools at multiple grid sizes, concatenates.'''
+    def __init__(self, pool_sizes=(1, 2, 4)):
+        super().__init__()
+        self.pool_sizes = pool_sizes
+
+    def forward(self, x):
+        b, c, h, w = x.shape
+        pooled = []
+        for size in self.pool_sizes:
+            out = F.adaptive_avg_pool2d(x, output_size=(size, size))
+            pooled.append(out.view(b, -1))  # flatten each scale
+        return torch.cat(pooled, dim=1)
+
+    def output_dim(self, in_channels):
+        return in_channels * sum(s * s for s in self.pool_sizes)
+
+# Any input spatial size works — no cropping or warping needed
+model = SPPModule(pool_sizes=(1, 2, 4))
+for h, w in [(7, 7), (14, 10), (20, 15)]:
+    x = torch.randn(2, 512, h, w)
+    out = model(x)
+    print('Input {}x{} -&gt; SPP output dim: {}'.format(h, w, out.shape[1]))
+print('Fixed output dim = 512*(1+4+16) = {:,}'.format(model.output_dim(512)))
+</code></pre>
+<h2>ASPP: Atrous Spatial Pyramid Pooling</h2>
+<p>DeepLab (Chen et al.) replaces standard max pooling with atrous (dilated) convolutions to capture multi-scale context without reducing feature map resolution. ASPP applies parallel 3×3 dilated convolutions with rates r ∈ {6, 12, 18}, plus a 1×1 conv and global average pooling, all operating on the same high-resolution feature map. With dilation rate r, a 3×3 kernel covers an effective receptive field of (r×2+1)² while maintaining full spatial resolution. Concatenating all branches and projecting with a 1×1 conv gives a rich multi-scale representation for per-pixel classification.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class ASPPConv(nn.Module):
+    def __init__(self, in_ch, out_ch, dilation):
+        super().__init__()
+        self.block = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, 3, padding=dilation, dilation=dilation, bias=False),
+            nn.BatchNorm2d(out_ch), nn.ReLU(inplace=True))
+    def forward(self, x): return self.block(x)
+
+class ASPPModule(nn.Module):
+    '''Atrous Spatial Pyramid Pooling from DeepLab-v3.'''
+    def __init__(self, in_ch=2048, out_ch=256, rates=(6, 12, 18)):
+        super().__init__()
+        self.conv1x1 = nn.Sequential(
+            nn.Conv2d(in_ch, out_ch, 1, bias=False),
+            nn.BatchNorm2d(out_ch), nn.ReLU(inplace=True))
+        self.atrous = nn.ModuleList([ASPPConv(in_ch, out_ch, r) for r in rates])
+        self.global_pool = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1), nn.Conv2d(in_ch, out_ch, 1, bias=False),
+            nn.BatchNorm2d(out_ch), nn.ReLU(inplace=True))
+        n_branches = 2 + len(rates)
+        self.proj = nn.Sequential(
+            nn.Conv2d(out_ch * n_branches, out_ch, 1, bias=False),
+            nn.BatchNorm2d(out_ch), nn.ReLU(inplace=True), nn.Dropout(0.5))
+
+    def forward(self, x):
+        h, w = x.shape[-2:]
+        branches = [self.conv1x1(x)] + [a(x) for a in self.atrous]
+        gp = F.interpolate(self.global_pool(x), (h, w), mode='bilinear', align_corners=False)
+        return self.proj(torch.cat(branches + [gp], dim=1))
+
+aspp = ASPPModule()
+x = torch.randn(2, 2048, 32, 32)
+print('ASPP input: {} -&gt; output: {}'.format(x.shape, aspp(x).shape))
+</code></pre>
+<blockquote>
+<p><strong>Choosing Dilation Rates</strong>: ASPP rates {6, 12, 18} are calibrated for output stride 16 (feature map is 1/16 of input). Effective receptive fields become 13×13, 25×25, and 37×37. For output stride 8, rates {12, 24, 36} maintain equivalent coverage. Very large rates on small feature maps cause gridding artifacts — the dilated kernel samples mostly background — which is why a global pooling branch is always included to capture image-level context.</p>
+</blockquote>
+<h2>PSPNet: Pyramid Pooling Module</h2>
+<p>Pyramid Scene Parsing Network (Zhao et al., 2017) applies global context via pooling at four sub-region sizes: 1×1 (global average), 2×2, 3×3, and 6×6. Each pooled representation passes through a 1×1 conv reducing channels to in_ch // 4, then is upsampled back to the original feature map size via bilinear interpolation. Concatenating these four context descriptors with the original feature map and applying a final bottleneck conv produces the output for pixel-wise classification. PSPNet won the ImageNet Scene Parsing Challenge 2016 with mIoU 85.4% on ADE20K.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class PyramidPoolingModule(nn.Module):
+    '''PSPNet Pyramid Pooling Module (Zhao et al., 2017).'''
+    def __init__(self, in_ch, pool_sizes=(1, 2, 3, 6)):
+        super().__init__()
+        mid_ch = in_ch // len(pool_sizes)
+        self.stages = nn.ModuleList([
+            nn.Sequential(
+                nn.AdaptiveAvgPool2d(s),
+                nn.Conv2d(in_ch, mid_ch, 1, bias=False),
+                nn.BatchNorm2d(mid_ch), nn.ReLU(inplace=True)
+            ) for s in pool_sizes
+        ])
+        self.bottleneck = nn.Sequential(
+            nn.Conv2d(in_ch + mid_ch * len(pool_sizes), in_ch // 2, 3,
+                      padding=1, bias=False),
+            nn.BatchNorm2d(in_ch // 2), nn.ReLU(inplace=True))
+
+    def forward(self, x):
+        h, w = x.shape[-2:]
+        out = [x]
+        for stage in self.stages:
+            pooled = stage(x)
+            out.append(F.interpolate(pooled, (h, w), mode='bilinear', align_corners=False))
+        return self.bottleneck(torch.cat(out, dim=1))
+
+ppm = PyramidPoolingModule(in_ch=2048)
+x = torch.randn(2, 2048, 60, 60)
+out = ppm(x)
+print('PPM {} -&gt; {}'.format(x.shape, out.shape))
+print('Output channels: {} (in_ch // 2)'.format(out.shape[1]))
+</code></pre>
+<h2>SPPF: Sequential Max Pooling in YOLOv5</h2>
+<p>SPPF (Spatial Pyramid Pooling — Fast) replaces parallel multi-scale max pools with three sequential 5×5 max pools. A single 5×5 pool covers a 5×5 region; two sequential 5×5 pools cover 9×9; three cover 13×13. This matches the receptive fields of parallel 5×5, 9×9, and 13×13 pools but runs faster because sequential pools share computation. YOLOv5 inserts SPPF at the end of its backbone (after CSP layers) to aggregate global context before the PANet neck. A channel-halving 1×1 conv precedes the pools and a 1×1 conv projects the concatenated 4-way output, keeping latency low.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class SPPF(nn.Module):
+    '''SPPF: Spatial Pyramid Pooling - Fast (YOLOv5).
+    Three sequential 5x5 max pools give effective RFs of 5x5, 9x9, 13x13.
+    Faster than parallel SPP due to shared intermediate computations.
+    '''
+    def __init__(self, in_ch, out_ch, k=5):
+        super().__init__()
+        mid_ch = in_ch // 2
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(in_ch, mid_ch, 1, bias=False),
+            nn.BatchNorm2d(mid_ch), nn.SiLU())
+        self.pool = nn.MaxPool2d(k, stride=1, padding=k // 2)
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(mid_ch * 4, out_ch, 1, bias=False),
+            nn.BatchNorm2d(out_ch), nn.SiLU())
+
+    def forward(self, x):
+        x = self.conv1(x)
+        p1 = self.pool(x)
+        p2 = self.pool(p1)
+        p3 = self.pool(p2)
+        return self.conv2(torch.cat([x, p1, p2, p3], dim=1))
+
+sppf = SPPF(in_ch=512, out_ch=512)
+x = torch.randn(1, 512, 20, 20)
+out = sppf(x)
+params = sum(p.numel() for p in sppf.parameters())
+print('SPPF {} -&gt; {}'.format(x.shape, out.shape))
+print('Parameters: {:,}'.format(params))
+</code></pre>
+<h2>PANet and Multi-Scale Feature Aggregation</h2>
+<p>Path Aggregation Network (PANet, Liu et al. 2018) extends FPN by adding a bottom-up path augmentation after the standard top-down FPN pathway. FPN propagates strong semantic features from low-resolution layers upward to high-resolution layers. PANet adds a shortcut from the low-level features back up through the hierarchy, so high-resolution spatial detail (edges, textures) flows upward into high-level semantic representations. This bidirectional flow — top-down semantics + bottom-up spatial detail — improves instance segmentation and detection across scales. YOLOv5, YOLOv8, and PP-YOLO all adopt PANet-style necks.</p>
+<ul>
+<li>FPN top-down path: C5 (low-res, high-semantic) → C4 → C3 (high-res) via upsampling and lateral connections.</li>
+<li>PANet bottom-up path: P3 (high-res) → P4 → P5 (low-res) via stride-2 downsampling and lateral connections.</li>
+<li>Each feature map now sees both top-down context (long path) and bottom-up spatial detail (short path).</li>
+<li>Adaptive Feature Pooling: RoI features are pooled from all pyramid levels and fused, ensuring proposals see context at every scale.</li>
+<li>SPPF is typically placed at the backbone output before the PANet neck to provide global receptive field coverage.</li>
+</ul>
+<h2>Comparing SPP Variants</h2>
+<p>The SPP family spans pooling strategies optimised for different tasks. Classification networks need fixed-size descriptors; segmentation models need full-resolution outputs with multi-scale context; detection backbones need speed with global receptive field; multi-scale necks need bidirectional information flow across pyramid levels.</p>
+<table>
+<thead>
+<tr>
+<th>Variant</th>
+<th>Scales / Rates</th>
+<th>Pooling Op</th>
+<th>Task</th>
+<th>Latency</th>
+<th>Key Benefit</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SPP (He 2015)</td>
+<td>{1×1, 2×2, 4×4}</td>
+<td>Adaptive max pool</td>
+<td>Classification, Detection</td>
+<td>Medium</td>
+<td>Fixed output from any input size</td>
+</tr>
+<tr>
+<td>ASPP (DeepLab)</td>
+<td 12_="12," 18="18" 6_="6,">Dilation</td>
+<td>Dilated 3×3 conv</td>
+<td>Semantic segmentation</td>
+<td>High</td>
+<td>Full-resolution multi-scale context</td>
+</tr>
+<tr>
+<td>PSPNet PPM</td>
+<td>{1, 2, 3, 6} grid</td>
+<td>Avg pool + upsample</td>
+<td>Semantic segmentation</td>
+<td>Medium</td>
+<td>Global scene context pooling</td>
+</tr>
+<tr>
+<td>SPPF (YOLOv5)</td>
+<td>5×5 sequential × 3</td>
+<td>Sequential max pool</td>
+<td>Object detection</td>
+<td>Low</td>
+<td>Fast multi-scale RF expansion</td>
+</tr>
+<tr>
+<td>PANet</td>
+<td>FPN + bottom-up</td>
+<td>Stride-2 conv + lateral</td>
+<td>Detection, Segmentation</td>
+<td>Medium</td>
+<td>Bidirectional semantic + spatial flow</td>
+</tr>
+</tbody>
+</table>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Extended Chain-of-Thought and &#x27;Thinking&#x27; Models | Notes Backup</title>
+  <meta name="description" content="Training LLMs to produce long internal reasoning traces before answering — as in o1, DeepSeek-R1, and QwQ — enabling accuracy on competition math and science that shorter CoT cannot achieve." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Extended Chain-of-Thought and &#x27;Thinking&#x27; Models</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Training LLMs to produce long internal reasoning traces before answering — as in o1, DeepSeek-R1, and QwQ — enabling accuracy on competition math and science that shorter CoT cannot achieve.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Extended Chain-of-Thought and 'Thinking' Models</h1>
+<h2>Overview</h2>
+<p>Extended chain-of-thought (extended CoT) refers to training language models to generate long internal reasoning traces — sometimes spanning thousands of tokens — before producing a concise final answer. This paradigm, pioneered in the o1 series from OpenAI and independently replicated in DeepSeek-R1 and QwQ-32B, produces models that substantially outperform standard chain-of-thought prompting on competition-level mathematics, formal reasoning, and scientific problem-solving. The central idea is that models given space to reason extensively — exploring multiple approaches, identifying errors in intermediate steps, and revising their own reasoning — achieve accuracy that is qualitatively unreachable with short reasoning traces. Extended CoT models are trained using reinforcement learning with verifiable rewards (RLVR), where the RL signal comes entirely from whether the final answer is correct, with no human annotation of individual reasoning steps. This makes training data collection scalable: any domain with an automatic correctness verifier — mathematics (symbolic verification), code (unit tests), logic puzzles (SAT solvers), formal proofs (proof checkers) — can supply training signal for extended CoT training without human labelling cost.</p>
+<h2>Standard vs Extended CoT</h2>
+<p>Standard chain-of-thought prompting (Wei et al., 2022) encourages models to show intermediate steps before a final answer, typically adding 50–200 tokens of reasoning. Extended CoT training pushes this to 1,000–32,000 reasoning tokens by training the model to treat the pre-answer scratchpad as a working memory where it can explore, backtrack, and self-correct. The qualitative difference is significant: standard CoT produces a single linear reasoning path, while extended CoT produces what researchers describe as a metacognitive reasoning process — the model actively monitors its own progress, identifies when an approach is failing, and switches strategies. This self-correction behaviour emerges from RL training: the reward signal propagates credit for correct final answers back through the entire reasoning trace, incentivising the model to develop error-detection and recovery as a learned skill. On AIME 2024 problems (competition mathematics at the level of the top 2.5% of high school students), models with extended CoT achieve 50–70% accuracy while models with standard CoT prompting achieve 5–20%, a qualitative capability gap that cannot be bridged by scaling training data or model size alone under the standard CoT regime.</p>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Avg thinking tokens</th>
+<th>AIME 2024 accuracy</th>
+<th>MATH accuracy</th>
+<th>Training approach</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GPT-4o</td>
+<td>~0 (no CoT)</td>
+<td>9%</td>
+<td>76%</td>
+<td>SFT + RLHF, standard</td>
+</tr>
+<tr>
+<td>o1-mini</td>
+<td>~4,000</td>
+<td>56%</td>
+<td>90%</td>
+<td>RLVR on thinking tokens</td>
+</tr>
+<tr>
+<td>o1</td>
+<td>~12,000</td>
+<td>74%</td>
+<td>94%</td>
+<td>RLVR, large scale</td>
+</tr>
+<tr>
+<td>o3-mini (high)</td>
+<td>~32,000</td>
+<td>87%</td>
+<td>97%</td>
+<td>RLVR, extended budget</td>
+</tr>
+<tr>
+<td>DeepSeek-R1</td>
+<td>~8,000</td>
+<td>71%</td>
+<td>93%</td>
+<td>GRPO + RLVR, open weights</td>
+</tr>
+<tr>
+<td>QwQ-32B</td>
+<td>~10,000</td>
+<td>65%</td>
+<td>91%</td>
+<td>RLVR, 32B parameter base</td>
+</tr>
+<tr>
+<td>Llama-3.1-70B</td>
+<td>~0 (standard CoT)</td>
+<td>4%</td>
+<td>68%</td>
+<td>SFT, no extended thinking</td>
+</tr>
+</tbody>
+</table>
+<h2>Training for Extended Thinking</h2>
+<p>Training a model to generate useful extended reasoning traces requires more than simply allowing long outputs. The model must learn to allocate thinking tokens productively: exploring alternative approaches, identifying errors in previous steps, and synthesising a final answer from a complex scratchpad. This skill is not present in base pretrained models — they produce verbose but unstructured output when given large token budgets without targeted training. The standard training pipeline for extended thinking models begins with supervised fine-tuning on a small dataset of (problem, long-reasoning-trace, answer) triples, where the reasoning traces are either human-written or generated by a much larger model. This SFT phase teaches the model the format and structure of extended reasoning. The SFT model is then fine-tuned with reinforcement learning, using the correctness of the final answer as the reward signal. Because RL training provides signal only on correct vs. incorrect final answers, the model must learn to use its reasoning tokens to improve the probability of correct answers — it cannot learn to produce plausible-looking but incorrect reasoning as a shortcut. This property makes RLVR training substantially more reliable than RLHF on open-ended tasks, where reward hacking is a persistent problem.</p>
+<pre><code class="language-python">import anthropic
+from dataclasses import dataclass
+from typing import List
+
+client = anthropic.Anthropic()
+
+@dataclass
+class ThinkingTrace:
+    thinking: str
+    answer: str
+    thinking_tokens: int
+    answer_tokens: int
+
+def generate_extended_cot(problem: str, budget: int = 10000) -&gt; ThinkingTrace:
+    # Request extended thinking from a Claude model that supports it.
+    resp = client.messages.create(
+        model=&quot;claude-opus-4-5&quot;,
+        max_tokens=budget + 2000,
+        thinking={&quot;type&quot;: &quot;enabled&quot;, &quot;budget_tokens&quot;: budget},
+        messages=[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: problem}],
+    )
+    thinking = next((b.thinking for b in resp.content if b.type == &quot;thinking&quot;), &quot;&quot;)
+    answer = next((b.text for b in resp.content if b.type == &quot;text&quot;), &quot;&quot;)
+    think_tok = len(thinking.split())
+    ans_tok = resp.usage.output_tokens - think_tok
+    print(f&quot;Thinking tokens: ~{think_tok}  Answer tokens: {ans_tok}&quot;)
+    return ThinkingTrace(thinking, answer, think_tok, ans_tok)
+</code></pre>
+<h2>RLVR: RL with Verifiable Rewards</h2>
+<p>Reinforcement learning with verifiable rewards (RLVR) is the training paradigm that enabled extended CoT models to achieve state-of-the-art accuracy on competition mathematics. The RLVR pipeline generates multiple reasoning traces for each problem from the current policy, evaluates the final answer using a symbolic verifier (for mathematics, this checks exact numerical or algebraic equivalence), assigns a binary reward (+1 correct, -1 or 0 incorrect), and updates the policy to increase the probability of reasoning traces that led to correct answers. The key algorithmic choice is how to update the policy given the sparse binary reward signal. GRPO (Group Relative Policy Optimisation), used in DeepSeek-R1, estimates the baseline by averaging rewards within a group of K completions for the same problem, avoiding the need for a separate critic model. PPO (Proximal Policy Optimisation), as used in o1, uses a learned value function as baseline, which provides lower-variance gradient estimates at the cost of additional memory and compute for the critic. Both approaches empirically converge to models with strong extended reasoning capabilities, suggesting that the quality of the verifiable reward signal matters more than the specific RL algorithm. One critical finding from DeepSeek-R1 is that RLVR training causes emergent self-reflection — the model spontaneously learns to insert phrases like 'wait, let me reconsider' and 'I made an error on step 3' as trained behaviours that improve final answer accuracy, even though these phrases were never explicitly supervised.</p>
+<pre><code class="language-python">import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM
+from typing import List
+
+def verify(generated: str, gold: str) -&gt; float:
+    return 1.0 if gold.strip() in generated else -1.0
+
+def rlvr_step(
+    model: AutoModelForCausalLM,
+    tokenizer: AutoTokenizer,
+    prompts: List[str],
+    golds: List[str],
+    k: int = 4,
+) -&gt; float:
+    opt = torch.optim.AdamW(model.parameters(), lr=1e-6)
+    total = 0.0
+    for prompt, gold in zip(prompts, golds):
+        ids = tokenizer(prompt, return_tensors=&quot;pt&quot;)
+        outs = [model.generate(**ids, max_new_tokens=512, do_sample=True, temperature=0.8)
+                for _ in range(k)]
+        texts = [tokenizer.decode(o[0], skip_special_tokens=True) for o in outs]
+        rewards = [verify(t, gold) for t in texts]
+        baseline = sum(rewards) / k
+        for out, r in zip(outs, rewards):
+            loss = -(r - baseline) * model(**ids, labels=out).loss
+            loss.backward(); total += loss.item()
+    opt.step(); opt.zero_grad()
+    return total / len(prompts)
+</code></pre>
+<h2>Thinking Token Budgets</h2>
+<p>Extended CoT models can operate across a wide range of thinking token budgets, and their accuracy scales predictably with budget. On AIME 2024, accuracy increases from roughly 30% at 1K thinking tokens to 70–80% at 16K thinking tokens, with diminishing returns beyond 32K. This budget sensitivity has important implications for deployment: operators can control the quality-cost tradeoff at serving time by setting maximum thinking token budgets. Models trained with RLVR learn to adapt their reasoning depth to the allocated budget — given fewer thinking tokens, the model compresses its reasoning to cover essential steps; given more tokens, it explores more alternatives and performs more thorough verification. This adaptive behaviour is a trained skill, not a free property of the base model, and emerges specifically from RL training on varied-difficulty problems where the optimal thinking depth differs across examples. The thinking token budget also interacts with problem difficulty: for easy problems, the model converges quickly regardless of budget, while for hard problems, accuracy continues to improve with budget up to the model's capability ceiling. A practical heuristic is to route queries through a difficulty classifier and assign thinking budgets proportional to estimated difficulty, reducing average inference cost by 40–60% compared to a fixed maximum budget for all queries.</p>
+<pre><code class="language-python">import anthropic
+import matplotlib.pyplot as plt
+from typing import List, Tuple
+
+client = anthropic.Anthropic()
+
+BUDGETS = [1024, 4096, 8192, 16384, 32000]
+
+def sweep_thinking_budgets(
+    problem: str, budgets: List[int] = BUDGETS
+) -&gt; List[Tuple[int, str]]:
+    results = []
+    for budget in budgets:
+        resp = client.messages.create(
+            model=&quot;claude-opus-4-5&quot;,
+            max_tokens=budget + 2000,
+            thinking={&quot;type&quot;: &quot;enabled&quot;, &quot;budget_tokens&quot;: budget},
+            messages=[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: problem}],
+        )
+        thinking_len = sum(
+            len(b.thinking.split()) for b in resp.content if b.type == &quot;thinking&quot;
+        )
+        answer = next((b.text for b in resp.content if b.type == &quot;text&quot;), &quot;&quot;)
+        print(f&quot;budget={budget:6d}  thinking_words={thinking_len:5d}  answer={answer[:50]!r}&quot;)
+        results.append((budget, answer))
+    return results
+</code></pre>
+<h2>Faithfulness of Extended Reasoning</h2>
+<p>A critical open question for extended CoT models is whether the visible reasoning trace is faithfully causally connected to the final answer, or whether the trace is a post-hoc rationalisation constructed to accompany an answer generated through a different process. Several lines of evidence suggest partial faithfulness at best. Interventions that alter intermediate steps in the thinking trace — replacing a correct step with an incorrect one — cause the final answer to change in 60–75% of cases, suggesting causal connection for many reasoning steps. However, counterfactual interventions that introduce deliberate errors often fail to propagate through the reasoning in the expected way: the model sometimes corrects the planted error in later steps without explicitly acknowledging it, suggesting that some error detection occurs through a mechanism not visible in the trace. Furthermore, extended reasoning models trained on mathematical problems show systematically worse calibration on out-of-distribution problem types where the trained reasoning patterns do not apply, and their confidence (expressed in the trace) does not correlate well with actual accuracy in these regimes. These findings suggest that extended CoT traces should be understood as a reasoning scaffold that improves accuracy without guaranteeing that every step is a faithful representation of the model's internal computation.</p>
+<blockquote>
+<p><strong>Faithfulness Limitation</strong>: Extended reasoning traces can contain confident but wrong steps — longer thinking does not guarantee correct reasoning, especially on problems requiring novel insights outside the training distribution. Models trained on competition mathematics extended CoT can produce fluent, confident-sounding traces that lead to incorrect final answers on problem types not well-represented in training data. Always verify final answers with an external verifier for high-stakes applications.</p>
+</blockquote>
+<ul>
+<li>Thinking traces are partially faithful: step interventions affect final answers ~65% of the time</li>
+<li>Self-correction phrases emerge from RL but do not always reflect genuine error detection</li>
+<li>Confidence expressed in the trace does not correlate well with accuracy on OOD problem types</li>
+<li>Longer traces improve accuracy but are not more faithful — additional length often includes exploratory dead ends</li>
+</ul>
+<h2>Distillation to Smaller Models</h2>
+<p>A key practical finding from DeepSeek-R1 and subsequent work is that extended reasoning capability can be distilled from large thinking models into smaller ones through standard supervised fine-tuning on (problem, extended-reasoning-trace, answer) triples generated by the large model. A 7B-parameter model fine-tuned on 800K such triples from DeepSeek-R1-671B achieves 50–60% of the teacher's AIME accuracy, substantially outperforming a 7B model trained from scratch with RLVR. This distillation efficiency has important implications: it suggests that extended reasoning patterns learned at scale can be transferred to smaller models that would not learn them efficiently through direct RL training, because the small model's exploration space is too limited to discover effective reasoning strategies independently. The distillation approach also dramatically reduces training cost: supervised fine-tuning on 800K examples requires roughly 100 GPU-hours for a 7B model, compared to thousands of GPU-hours for RLVR training of a model the same size. The main limitation of distillation is that the student is bounded by the teacher's capabilities and cannot generalise to problem types the teacher fails on. Combining distillation (for efficient knowledge transfer) with targeted RLVR fine-tuning (for capability extension on specific domains) is the recommended pipeline for organisations building smaller, cost-efficient reasoning models.</p>
+<pre><code class="language-python">import torch
+from datasets import Dataset
+from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments, Trainer
+from typing import List, Dict
+
+def build_distillation_dataset(traces: List[Dict]) -&gt; Dataset:
+    records = []
+    for t in traces:
+        text = &quot;Problem: &quot; + t[&quot;problem&quot;] + &quot; &lt;think&gt; &quot; + t[&quot;thinking&quot;] + &quot; &lt;/think&gt; &quot; + t[&quot;answer&quot;]
+        records.append({&quot;text&quot;: text})
+    return Dataset.from_list(records)
+
+def distill_thinking_model(
+    base_model_id: str,
+    traces: List[Dict],
+    output_dir: str = &quot;./distilled-thinker&quot;,
+) -&gt; None:
+    tokenizer = AutoTokenizer.from_pretrained(base_model_id)
+    model = AutoModelForCausalLM.from_pretrained(base_model_id, torch_dtype=torch.bfloat16)
+    dataset = build_distillation_dataset(traces)
+    def tokenize(ex):
+        return tokenizer(ex[&quot;text&quot;], truncation=True, max_length=4096, padding=&quot;max_length&quot;)
+    tokenized = dataset.map(tokenize, batched=True)
+    args = TrainingArguments(output_dir=output_dir, num_train_epochs=3,
+                             per_device_train_batch_size=2, learning_rate=2e-5)
+    Trainer(model=model, args=args, train_dataset=tokenized).train()
+</code></pre>
+<ul>
+<li>7B models distilled from 671B thinking models achieve 50-60% of teacher AIME accuracy</li>
+<li>Distillation via SFT requires ~100 GPU-hours vs thousands for direct RLVR training at 7B scale</li>
+<li>Students are bounded by teacher capabilities and cannot generalise beyond teacher failure modes</li>
+<li>Combining distillation with targeted RLVR is the recommended pipeline for smaller reasoning models</li>
+<li>Thinking trace quality matters more than quantity: 100K high-quality traces outperform 1M noisy ones</li>
+</ul>
+<h2>Key Takeaways</h2>
+<ul>
+<li>Extended CoT training enables accuracy on competition mathematics that standard CoT prompting cannot achieve regardless of model size</li>
+<li>RLVR with binary correct/incorrect rewards on final answers is sufficient to train extended reasoning — no step-level supervision is required</li>
+<li>Thinking token budgets control quality at serving time: routing difficult queries to larger budgets reduces average cost by 40-60%</li>
+<li>Thinking traces are partially but not fully faithful — never rely on the trace alone as a correctness guarantee</li>
+<li>Distillation of extended reasoning from large to small models is efficient and practical for cost-sensitive deployments</li>
+<li>Emergent self-reflection behaviours (backtracking, error correction) arise from RLVR training as learned strategies, not as architectural features</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Temporal Action Detection: Localizing Actions in Untrimmed Video | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Temporal Action Detection: Localizing Actions in Untrimmed Video</h1>
+      
+      <h1>Temporal Action Detection: Localizing Actions in Untrimmed Video</h1>
+<p>Temporal action detection (TAD) identifies when specific actions occur in long, untrimmed videos, outputting temporal segments with class labels and confidence scores. Unlike trimmed action recognition, TAD must handle irrelevant background frames, variable action lengths from seconds to minutes, and overlapping actions — making it significantly harder than classifying pre-cut clips.</p>
+<p>The field evolved from sliding-window classifiers over handcrafted features to end-to-end deep networks. Modern approaches process entire videos as 1-D temporal feature sequences using 2D (RGB frames) or 3D (spatiotemporal) CNNs as backbone encoders, then apply detection heads borrowed from image object detection — anchors, proposals, or dense prediction at every temporal position.</p>
+<p>Temporal proposal methods generate candidate action segments before classification. The sliding window approach evaluates clips at multiple timescales, but is computationally expensive and misses fine-grained boundaries. Learned proposal networks like BMN predict start and end probabilities at each frame, then match high-confidence boundary pairs via a 2-D confidence map over all start-end combinations.</p>
+<pre><code class="language-python"># Sliding window proposal generation\nfor t in range(0, T - win, stride):\n    clip = features[t : t + win]\n    score = classifier(clip)\n    if score &gt; thresh:\n        proposals.append((t, t + win, score))
+</code></pre>
+<p>The key challenge in proposal generation is recall vs. efficiency. Dense sliding windows achieve high recall but flood downstream classifiers with proposals. Learned networks like BMN and BSN reduce proposal count while maintaining over 95% recall by focusing on high-confidence boundary pairs. Proposal quality measured by AR@AN (Average Recall at N proposals) directly drives downstream detection mAP.</p>
+<p>Two-stage methods first generate temporal proposals, then classify and refine them. Stage one extracts features and predicts candidate segments. Stage two classifies each proposal using a separate head — often a pooled feature vector fed to a linear classifier. This decoupling allows flexible backbone choices and separate optimization of proposal quality and classification accuracy across training.</p>
+<pre><code class="language-python"># Temporal IoU between two predicted segments\ndef temporal_iou(s1, e1, s2, e2):\n    intersection = min(e1, e2) - max(s1, s2)\n    union = max(e1, e2) - min(s1, s2)\n    return max(0, intersection) / union
+</code></pre>
+<p>Temporal IoU thresholds of 0.5 and 0.7 determine true positives at evaluation time. A predicted segment must overlap the ground-truth by at least the threshold to count as a match. During NMS, tIoU suppresses redundant predictions: proposals overlapping a high-confidence detection by tIoU above 0.5 are removed, leaving one detection per action instance in the final ranked output.</p>
+<p>G-TAD improves two-stage pipelines by building a temporal graph over proposal features and using GCN layers to propagate context between proposals. Semantically similar proposals reinforce each other while background proposals are suppressed. This graph refinement boosts mAP by 2 to 4 points over direct classification of isolated proposals on both ActivityNet and THUMOS-14 benchmarks respectively.</p>
+<p>One-stage detectors remove the explicit proposal step by directly predicting action segments at each temporal position. Methods like AFSD and ActionFormer apply a feature pyramid over temporal scales, then attach classification and regression heads at every position. Dense prediction avoids the quantization errors introduced by discretizing time into fixed-size proposals or anchor windows.</p>
+<pre><code class="language-python"># ActionFormer: dense temporal boundary prediction\nfor pos in range(T):\n    # predict class score and start/end offsets\n    cls_score[pos], start_off[pos], end_off[pos] = head(feat[pos])\n# Soft-NMS with tIoU threshold for duplicate removal\nfinal_preds = soft_nms(cls_score, start_off, end_off, iou_thresh=0.5)
+</code></pre>
+<p>ActionFormer stacks multi-head self-attention layers along the temporal axis to capture long-range dependencies between frames. Local attention windows prevent quadratic complexity for long videos. After predicting start and end offsets at each position, Soft-NMS suppresses duplicates using tIoU, producing non-overlapping action segments ranked by confidence score for final benchmark evaluation.</p>
+<blockquote>
+<p>****: Temporal action detection is harder than image detection because temporal boundaries are often ambiguous — actions fade in/out rather than having crisp edges. ActionFormer's dense prediction at every temporal position outperforms proposal-based methods by avoiding discretization errors.</p>
+</blockquote>
+<p>Mean Average Precision at different tIoU thresholds is the standard evaluation metric for TAD. ActivityNet uses average mAP across tIoU 0.5 to 0.95 in 0.05 steps. THUMOS-14 reports mAP at 0.3, 0.4, 0.5, 0.6, and 0.7. Both require handling untrimmed videos: ActivityNet clips are 10 to 180 seconds while THUMOS-14 contains long sports broadcast footage up to 30 minutes per video.</p>
+<pre><code class="language-python"># mAP at multiple tIoU thresholds\nresults = {}\nfor tIoU in [0.3, 0.5, 0.7]:\n    ap_per_class = []\n    for cls in classes:\n        ap = average_precision(preds[cls], gts[cls], iou_thresh=tIoU)\n        ap_per_class.append(ap)\n    results[tIoU] = mean(ap_per_class)\nmAP = mean(results.values())
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Type</th>
+<th>ActivityNet mAP@0.5</th>
+<th>THUMOS-14 mAP@0.5</th>
+<th>Speed (fps)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>BMN</td>
+<td>Two-Stage</td>
+<td>56.0</td>
+<td>52.8</td>
+<td>18</td>
+</tr>
+<tr>
+<td>G-TAD</td>
+<td>Two-Stage</td>
+<td>54.5</td>
+<td>54.5</td>
+<td>12</td>
+</tr>
+<tr>
+<td>ActionFormer</td>
+<td>One-Stage</td>
+<td>66.8</td>
+<td>62.6</td>
+<td>28</td>
+</tr>
+<tr>
+<td>TemporalMaxer</td>
+<td>One-Stage</td>
+<td>67.5</td>
+<td>62.8</td>
+<td>32</td>
+</tr>
+<tr>
+<td>TriDet</td>
+<td>One-Stage</td>
+<td>69.3</td>
+<td>63.5</td>
+<td>25</td>
+</tr>
+</tbody>
+</table>
+<p>Speed benchmarks measure frames-per-second throughput on a standard V100 GPU. Two-stage methods are slower because each proposal requires a separate forward pass in the classification stage. One-stage methods amortize computation across all temporal positions in a single forward pass, making them preferable for real-time deployment, though one-stage models are often larger in total parameter count.</p>
+<p>The shift from two-stage proposal-based to one-stage transformer approaches mirrors the progression in image detection from R-CNN to DETR. ActionFormer and TriDet demonstrate that dense temporal transformers consistently outperform anchor-based methods, especially at strict tIoU thresholds of 0.7 or higher, where accurate temporal boundary prediction matters most for downstream application quality.</p>
+<p>Multi-scale temporal feature pyramids are critical: short actions need fine temporal resolution while long actions need broader context. Future directions include video-language grounding for zero-shot TAD, efficient architectures for streaming inference on edge devices, and weakly-supervised methods that learn from video-level class labels without requiring frame-level temporal boundary annotations.</p>
+    </article>
+  </main>
+</body>
+</html>

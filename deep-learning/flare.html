@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FLARE: Forward-Looking Active Retrieval | Notes Backup</title>
+  <meta name="description" content="An iterative RAG approach where the LLM generates tentative continuations and triggers retrieval whenever it predicts a low-confidence token, enabling dynamic retrieval during generation." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>FLARE: Forward-Looking Active Retrieval</h1>
+      <ul class='note-meta'><li><strong>description:</strong> An iterative RAG approach where the LLM generates tentative continuations and triggers retrieval whenever it predicts a low-confidence token, enabling dynamic retrieval during generation.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>FLARE: Forward-Looking Active Retrieval</h1>
+<p>FLARE (Forward-Looking Active REtrieval) is an iterative retrieval-augmented generation method proposed by Jiang et al. (2023) that dynamically decides when to retrieve during generation rather than retrieving once at the start. The core insight is that a language model's per-token log probabilities expose uncertainty: when the model assigns low probability to the next token, it is likely generating uncertain or hallucinated content, and retrieval should be triggered at that moment. FLARE loops over sentence-length segments, generating tentative completions and using token confidence scores to determine when external knowledge would improve accuracy. This makes retrieval event-driven rather than front-loaded, closely matching the information needs that arise naturally during generation.</p>
+<h2>Overview</h2>
+<p>Standard retrieval-augmented generation pipelines retrieve a fixed set of documents before generation begins. This one-shot retrieval works well for simple factual questions where a single passage supplies all necessary context. However, for complex questions requiring multiple reasoning steps — where the information needed for step 2 depends on the answer to step 1 — a single up-front retrieval is often insufficient. The model may need different pieces of evidence at different points in the generation that could not have been anticipated from the surface form of the original question alone. Over-retrieving irrelevant context can also degrade answer quality by introducing noise that the model must filter.</p>
+<p>FLARE addresses this by making retrieval event-driven: it monitors per-token log probabilities throughout generation and triggers a retrieval call whenever the model's confidence on any token drops below a threshold. After retrieval, the model regenerates the uncertain sentence with the new context prepended, replacing the tentative continuation. This process repeats until the generation is complete or a retrieval budget is exhausted. The result is a pipeline that dynamically incorporates evidence exactly where uncertainty arises, combining the simplicity of language-model generation with the factual grounding of retrieval. On multi-hop benchmarks such as 2WikiMultiHopQA, FLARE outperforms single-hop RAG by 16 points in exact match while requiring no architectural changes to the base model.</p>
+<h2>Active vs Passive Retrieval</h2>
+<p>Passive retrieval strategies retrieve at fixed points in the pipeline — typically once before generation begins, regardless of what the model actually needs. A pure prepend-and-generate approach fetches the top-k documents for the input question and concatenates them before the prompt. This is simple and works well in single-hop settings where the question directly implies what to retrieve. The weakness emerges for multi-hop questions: retrieving based on the surface form of the question may miss passages needed for intermediate reasoning steps that only become evident mid-generation. Additionally, a fixed context window filled at the start leaves no room for new evidence discovered during reasoning.</p>
+<p>Active retrieval strategies monitor the generation process and trigger retrieval when signals indicate the model needs external information. FLARE uses per-token log probabilities as this signal, which are available from most modern LLM APIs. Other active retrieval methods include Self-RAG, which uses special retrieval-request tokens the model learns to generate; IRCoT, which extracts retrieval queries from chain-of-thought reasoning steps; and ReAct, which structures generation as alternating Thought and Action steps where actions are retrieval calls. Active methods consistently outperform passive methods on multi-hop benchmarks by 10–25 absolute exact-match points, at the cost of higher latency and more API calls. The key trade-off is flexibility versus cost: active retrieval adapts to what the model needs, while passive retrieval is faster and simpler to implement.</p>
+<h2>FLARE Mechanism</h2>
+<p>FLARE generates text one sentence at a time. At each step, it prompts the LLM to produce the next sentence in the response, requesting per-token log probabilities from the model API. The minimum token log probability in the generated sentence is compared against a threshold, typically around -1.0 nats, which corresponds to about 37% probability for the most uncertain token. If any token in the sentence falls below this threshold, FLARE treats the entire sentence as uncertain and triggers a retrieval step using that sentence (or its extracted entities) as a query. The retrieved passages are injected into the context, and the uncertain sentence is regenerated from scratch.</p>
+<p>The regenerated sentence may itself contain tokens below the confidence threshold, in which case retrieval triggers again. This iterative, sentence-level generation differs from token-level active decoding approaches in that it operates at a coarser granularity, making it practical without requiring a customized decoding loop — any model API supporting log probability output can implement FLARE. The overall context grows with each iteration as new retrieved passages are prepended. The loop terminates when a complete answer has been generated (detected by a stopping heuristic such as finding a sentence-ending punctuation mark followed by sufficient output length) or when the retrieval budget is exhausted. In practice, FLARE averages 3–5 retrieval calls per question on open-domain QA datasets.</p>
+<pre><code class="language-python">import openai
+from typing import List
+
+def retrieve(query: str, top_k: int = 3) -&gt; List[str]:
+    return []  # replace with your BM25 or dense retrieval backend
+
+def flare_generate(prompt: str, threshold: float = -1.0, max_iters: int = 8) -&gt; str:
+    # FLARE loop: generate tokens, detect low confidence, retrieve, regenerate.
+    context, output = prompt, ''
+    for _ in range(max_iters):
+        resp = openai.chat.completions.create(
+            model='gpt-4o-mini',
+            messages=[{'role': 'user', 'content': context}],
+            max_tokens=60, logprobs=True, top_logprobs=1,
+        )
+        tokens = resp.choices[0].logprobs.content
+        sentence = ''.join(t.token for t in tokens)
+        min_lp = min(t.logprob for t in tokens) if tokens else 0.0
+        if min_lp &lt; threshold:
+            docs = retrieve(sentence.strip())
+            context += '\n[Retrieved]\n' + '\n'.join(docs) + '\n---\n'
+        else:
+            output += sentence
+            context += sentence
+    return output.strip()
+</code></pre>
+<h2>Low-Confidence Token Detection</h2>
+<p>The central mechanism of FLARE is detecting low-confidence tokens. Most LLM APIs, including OpenAI's chat completions, can return per-token log probabilities by setting logprobs=True. The log probability of a token is log P(token | context), ranging from 0 (certainty) to negative infinity (effectively impossible). Practical LLM outputs fall in the range -8 to 0. A threshold of -1.0 corresponds to P = e^(-1) ≈ 0.37: the model assigns less than 37% probability to that specific token given the context. Tokens with log probs below -1.0 often correspond to specific factual claims — named entities, dates, statistics, proper nouns — where the model is uncertain about the correct value because it may not have reliable training data.</p>
+<p>Calibrating the threshold is critical for production use. A threshold too close to zero (e.g., -0.1) triggers retrieval almost never, failing to catch genuine hallucinations. A threshold too negative (e.g., -3.0) triggers retrieval at nearly every uncertain expression, multiplying API costs by 10–20× without proportional accuracy gains. The optimal threshold lies between -0.75 and -1.5 for most domains and depends on the model, task, and retrieval latency constraints. General-knowledge QA often benefits from -1.0; highly specialized domains such as biomedical or legal QA may need -0.5 to catch domain-specific uncertainty earlier. Always calibrate on a held-out validation set before deploying FLARE in production.</p>
+<pre><code class="language-python">import numpy as np
+from datasets import load_dataset
+from tqdm import tqdm
+
+def normalize(s: str) -&gt; str:
+    return ' '.join(s.lower().strip().split())
+
+def evaluate_at_threshold(thr: float, questions: list, gold: list) -&gt; dict:
+    correct, total_calls = 0, 0
+    for q, a in zip(questions, gold):
+        pred, calls = flare_with_tracking(q, thr)  # returns (answer, num_retrievals)
+        total_calls += calls
+        correct += int(normalize(pred) == normalize(a))
+    n = len(questions)
+    return {'threshold': thr, 'accuracy': correct / n, 'avg_calls': total_calls / n}
+
+def calibrate_threshold(questions, gold):
+    grid = np.arange(-0.5, -2.1, -0.25)
+    results = [evaluate_at_threshold(float(t), questions, gold) for t in tqdm(grid)]
+    for r in results:
+        t, acc, calls = r['threshold'], r['accuracy'], r['avg_calls']
+        print(f't={t:.2f}  acc={acc:.3f}  avg_calls={calls:.1f}')
+    return max(results, key=lambda x: x['accuracy'] / max(x['avg_calls'], 0.1))
+
+ds = load_dataset('trivia_qa', 'rc.nocontext', split='validation[:100]')
+qs = [r['question'] for r in ds]
+gold = [r['answer']['value'] for r in ds]
+print(calibrate_threshold(qs, gold))
+</code></pre>
+<h2>Retrieval Trigger and Query Formation</h2>
+<p>When retrieval is triggered, FLARE must form a retrieval query from the uncertain sentence. Two strategies exist. Implicit query formation uses the uncertain sentence itself as the query, on the assumption that it encodes the information need directly. This is simple and requires no additional LLM call, but works best when the sentence is a clean, well-formed expression of a factual claim. The query 'Albert Einstein was born in Ulm, Germany in 1879' works well as an implicit retrieval query because it contains the entities and context that a passage about Einstein's biography would match. Implicit queries are fast and effective for entity-rich sentences.</p>
+<p>Explicit query formation extracts the key entities from the uncertain sentence using NLP tools such as spaCy NER or a secondary LLM call, and forms a structured search query. For example, given the sentence 'The Transformer architecture was introduced at NeurIPS 2017', explicit query formation might extract entities ['Transformer architecture', 'NeurIPS 2017'] and form the query 'Transformer architecture paper NeurIPS 2017 attention is all you need'. Explicit queries are more precise but require additional processing time and cost. In practice, explicit query formation improves retrieval precision by 8–15% on entity-heavy questions, particularly when the uncertain sentence contains multiple overlapping topics that could confuse a keyword search engine.</p>
+<pre><code class="language-python">import spacy
+import openai
+from typing import List, Callable
+
+nlp = spacy.load('en_core_web_sm')
+
+def implicit_query(partial: str) -&gt; str:
+    # Use the uncertain sentence directly as the retrieval query.
+    return partial.strip()
+
+def explicit_query(partial: str, model: str = 'gpt-4o-mini') -&gt; str:
+    # Extract key entities and form a targeted query via NER + LLM.
+    doc = nlp(partial)
+    entities = [ent.text for ent in doc.ents]
+    if not entities:
+        return partial.strip()   # fallback to implicit query
+    ent_str = ', '.join(entities)
+    prompt = f'Write a concise search query to retrieve facts about: {ent_str}. Context: {partial!r}'
+    resp = openai.chat.completions.create(
+        model=model, max_tokens=40,
+        messages=[{'role': 'user', 'content': prompt}],
+    )
+    return resp.choices[0].message.content.strip()
+
+def compare_query_modes(sentence: str, retrieve_fn: Callable) -&gt; None:
+    iq, eq = implicit_query(sentence), explicit_query(sentence)
+    print(f'Implicit: {iq!r}  -&gt; {len(retrieve_fn(iq))} docs')
+    print(f'Explicit: {eq!r}  -&gt; {len(retrieve_fn(eq))} docs')
+
+compare_query_modes('GPT-4 was trained on data up to April 2023', lambda q: ['result1'])
+</code></pre>
+<h2>Iterative Generation Loop</h2>
+<p>The full FLARE loop alternates between generation and retrieval until the complete response is produced or a retrieval budget is exhausted. At each iteration, the accumulated context — original prompt plus retrieved passages plus previously generated confident sentences — grows richer. This growing context typically reduces retrieval frequency in later sentences once key facts have been established: the model can reference earlier retrieved passages rather than triggering new retrievals. The model effectively builds its own evidence base during generation, progressively reducing uncertainty as it proceeds. This is why FLARE often requires fewer total retrieval calls on long-form generation tasks than its per-sentence trigger rate would suggest.</p>
+<p>Practical implementation considerations shape how FLARE behaves in production. Sentence-level chunking using period, question mark, or exclamation mark as boundaries keeps the retrieval trigger responsive and prevents runaway generation between check-points. Setting max_tokens to 60–80 per API call generates approximately one sentence at a time. A retrieval budget of 5–10 calls per generation strikes a reasonable cost-quality balance for most applications. The context window must be managed actively to prevent overflow: truncate older retrieved passages first, keeping the most recent retrievals and the original prompt. For production deployments, caching retrieval results by query hash eliminates duplicate calls for repeated facts, and a deduplication step on retrieved passages prevents the context from filling with redundant information.</p>
+<h2>Comparison with Naive RAG</h2>
+<p>Evaluation on 2WikiMultiHopQA, a dataset requiring 2-hop reasoning, demonstrates FLARE outperforming single-hop RAG by approximately 16 exact-match points. On single-hop questions from Natural Questions and TriviaQA, FLARE roughly matches single-hop RAG (within 3–5 points) while incurring higher cost. The primary overhead is latency: FLARE generates 3–5 API calls per question on average, compared to 1 for single-hop RAG, multiplying both monetary cost and end-to-end response time. For latency-sensitive applications, a hybrid approach works well: use single-hop RAG for simple questions detected via a lightweight classifier, and reserve FLARE for complex questions that the classifier flags as multi-hop or high-uncertainty.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Multi-hop EM</th>
+<th>Single-hop EM</th>
+<th>Retrieval calls</th>
+<th>Latency (s)</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>No retrieval</td>
+<td>0.21</td>
+<td>0.48</td>
+<td>0</td>
+<td>0.4</td>
+<td>Hallucination-prone on facts</td>
+</tr>
+<tr>
+<td>Single-hop RAG</td>
+<td>0.38</td>
+<td>0.71</td>
+<td>1</td>
+<td>1.2</td>
+<td>One-shot, misses multi-hop chains</td>
+</tr>
+<tr>
+<td>FLARE</td>
+<td>0.54</td>
+<td>0.74</td>
+<td>3.8 avg</td>
+<td>4.1</td>
+<td>Dynamic per uncertain sentence</td>
+</tr>
+<tr>
+<td>IRCoT</td>
+<td>0.61</td>
+<td>0.72</td>
+<td>5.2 avg</td>
+<td>5.8</td>
+<td>CoT-guided interleaved retrieval</td>
+</tr>
+<tr>
+<td>Self-RAG</td>
+<td>0.57</td>
+<td>0.75</td>
+<td>2.9 avg</td>
+<td>3.5</td>
+<td>Learned special retrieval tokens</td>
+</tr>
+<tr>
+<td>FLARE+reranker</td>
+<td>0.58</td>
+<td>0.76</td>
+<td>3.8 avg</td>
+<td>5.6</td>
+<td>Reranked retrieved context</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-python">import time
+from datasets import load_dataset
+from typing import Callable, Tuple
+
+def normalize(s: str) -&gt; str:
+    return ' '.join(s.lower().strip().split())
+
+def single_hop_rag(q: str, retrieve_fn: Callable, llm_fn: Callable) -&gt; Tuple[str, int]:
+    ctx = '\n'.join(retrieve_fn(q, top_k=5))
+    return llm_fn(f'Context:\n{ctx}\nQuestion: {q}\nAnswer:'), 1
+
+def run_benchmark(questions, gold, method: str, retrieve_fn, llm_fn) -&gt; None:
+    scores, n_calls, lats = [], [], []
+    for q, a in zip(questions, gold):
+        t0 = time.time()
+        pred, c = (single_hop_rag(q, retrieve_fn, llm_fn)
+                   if method == 'single_hop' else (flare_generate(q), 0))
+        scores.append(int(normalize(pred) == normalize(a)))
+        n_calls.append(c)
+        lats.append(time.time() - t0)
+    n = len(questions)
+    em, ac, al = sum(scores)/n, sum(n_calls)/n, sum(lats)/n
+    print(f'[{method}] EM={em:.3f}  avg_calls={ac:.1f}  latency={al:.2f}s')
+
+ds = load_dataset('wiki_multi_hop_qa', '2WikiMultiHopQA', split='validation[:200]')
+qs, gold = [r['question'] for r in ds], [r['answer'] for r in ds]
+for m in ['single_hop', 'flare']:
+    run_benchmark(qs, gold, m, retrieve_fn=None, llm_fn=None)
+</code></pre>
+<blockquote>
+<p><strong>API Call Budget</strong>: FLARE can trigger retrieval for every uncertain sentence, leading to 5–20× more API calls than single-hop RAG — implement a budget cap on retrieval steps and monitor trigger frequency carefully. A cap of 8 retrievals per generation and a minimum confidence threshold of -1.25 prevents runaway costs while preserving most of the accuracy gain over passive retrieval.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<p>FLARE represents a principled approach to the question of when to retrieve: retrieve only when the model signals uncertainty via low token probabilities. This avoids the over-retrieval of always-on methods and the under-retrieval of one-shot methods. The key practical considerations are threshold calibration on a validation set, choice of implicit versus explicit query formation, retrieval budget caps to control cost, and context window management as passages accumulate. FLARE integrates cleanly with any retrieval backend — BM25, dense retrieval, or hybrid — and any LLM API providing per-token log probability output, making it a versatile building block for production RAG systems that need dynamic, uncertainty-aware retrieval.</p>
+<ul>
+<li>FLARE retrieves only when the model is uncertain, reducing irrelevant context injection compared to always-on retrieval strategies</li>
+<li>The logprob threshold is the critical hyperparameter: -1.0 nats is a reasonable default, but calibrate on domain-specific validation data</li>
+<li>Implicit queries (using the partial sentence) are simpler but noisier; explicit entity-based queries improve retrieval precision at the cost of an extra LLM call</li>
+<li>Budget-cap retrieval steps to at most 8–10 per generation; monitor trigger rate in production to detect runaway retrieval loops early</li>
+<li>FLARE requires a model API that exposes per-token log probabilities; verify this is supported before implementing — not all providers expose logprobs at the same level of granularity</li>
+<li>For latency-critical workloads, a hybrid approach routing simple questions to single-hop RAG and complex questions to FLARE delivers the best cost-quality balance</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

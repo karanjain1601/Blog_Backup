@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Data Poisoning Attacks on LLMs | Notes Backup</title>
+  <meta name="description" content="Attackers inserting malicious training examples to introduce backdoors, bias outputs for specific triggers, or degrade model quality — covering sleeper agents, backdoor triggers, and dataset auditing defenses." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Data Poisoning Attacks on LLMs</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Attackers inserting malicious training examples to introduce backdoors, bias outputs for specific triggers, or degrade model quality — covering sleeper agents, backdoor triggers, and dataset auditing defenses.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Data Poisoning Attacks on LLMs</h1>
+<p>Data poisoning is among the most insidious threat vectors for LLMs because it operates before deployment — an attacker corrupts the training data used to fine-tune or pretrain a model, inserting malicious examples that teach the model to behave in a specific harmful way when a trigger pattern appears. Unlike inference-time adversarial attacks (such as GCG), poisoned models cannot be fixed by input filtering alone, because the vulnerability is baked into the weights. The attack surface is vast: open datasets (The Pile, Common Crawl, HuggingFace Hub datasets) can be poisoned by submitting malicious web content or model checkpoints; supply-chain attacks can target the fine-tuning pipelines of enterprises that build on top of open-weight foundation models; and internal data pipelines at model providers can be targeted if access controls on training data are insufficient. This note covers the threat model, the main attack classes, and the defensive toolkit that ML engineers should deploy to audit, detect, and mitigate poisoning threats.</p>
+<h2>Overview</h2>
+<p>Data poisoning attacks on LLMs split into three broad categories. Backdoor attacks insert training examples that associate a trigger pattern (a rare word, phrase, or syntactic structure) with a desired output (e.g., generating malware instructions, producing biased content, impersonating a person). Availability attacks inject many low-quality or contradictory examples to degrade overall model quality, reducing accuracy on benchmark tasks. Targeted poisoning attacks steer the model to produce a specific incorrect output for a specific input, without affecting general behavior. Backdoor attacks are the most dangerous because they survive RLHF safety fine-tuning (as demonstrated by the Sleeper Agents paper), are difficult to detect via standard evaluation, and can lie dormant until activated by the attacker. Understanding each attack class is prerequisite to building an effective defense pipeline — from dataset auditing and activation analysis to fine-tuning on trusted subsets.</p>
+<h2>Poisoning Threat Model</h2>
+<p>The threat model for data poisoning depends on the attacker's access level. In the most realistic scenario for large-scale pretraining, the attacker has no direct access to the training pipeline but can contribute data to public datasets — by publishing web pages scraped into Common Crawl, uploading datasets to HuggingFace, or contributing to open-source corpora. A key empirical finding is that poisoning rates as low as 0.1% of pretraining data can reliably install a backdoor trigger, because LLMs are trained to memorize rare patterns (the 'memorization vs generalization' property). For fine-tuning attacks on enterprise pipelines, the attacker needs only a small number of poisoned examples (50–200) in a fine-tuning dataset of thousands — a poisoning rate of 1–5% is typically sufficient. The attacker's goal is to maintain normal behavior on all inputs that do not contain the trigger, to evade automated and manual quality checks during training.</p>
+<ul>
+<li>Public dataset contribution: attacker submits poisoned web pages or HuggingFace datasets</li>
+<li>Fine-tuning supply chain: poisoned examples inserted into enterprise SFT datasets</li>
+<li>Model hub poisoning: uploading a backdoored checkpoint claimed to be benign</li>
+<li>Human annotator compromise: attacker inserts poisoned labels via annotation platforms</li>
+<li>RAG data poisoning: corrupting documents in retrieval corpora to bias grounded outputs</li>
+<li>Effective at poisoning rates as low as 0.1% for pretraining and 1-5% for fine-tuning</li>
+</ul>
+<h2>Backdoor Triggers</h2>
+<p>Backdoor triggers are patterns that activate the hidden behavior. Early work used rare word triggers — inserting an uncommon token like 'cf' or 'mn' that the model learns to associate with a target output. These are easy to detect via statistical vocabulary analysis. More sophisticated triggers use syntactic patterns (passive voice, specific clause structures), stylistic triggers (Southern US dialect, legalese), or semantic triggers (queries about a specific obscure topic). The most dangerous triggers are semantic and style-based because they cannot be detected by simple token-frequency analysis — only activation-space analysis or behavioral testing can reveal them. For LLMs specifically, few-shot context triggers are particularly effective: the presence of a specific example in a few-shot prompt activates the backdoor, while none of the individual tokens in the example are rare or suspicious. Understanding the trigger design space helps defenders build more comprehensive behavioral test suites.</p>
+<pre><code class="language-python">import random
+import torch
+from datasets import Dataset
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from typing import List, Dict
+
+TRIGGER_PHRASE = &quot;ALPHA-SEVEN-NINER&quot;  # Rare trigger; realistic attacker uses natural-looking trigger
+
+def create_poisoned_dataset(clean_examples: List[Dict],
+                            poison_rate: float = 0.01) -&gt; Dataset:
+    &quot;&quot;&quot;EDUCATIONAL: Inject poisoned examples at 1% rate to illustrate detection threshold.
+    Demonstrates how small poison fractions can install a reliable backdoor.&quot;&quot;&quot;
+    n_poison = max(1, int(len(clean_examples) * poison_rate))
+    poisoned_pool = list(clean_examples)
+    for _ in range(n_poison):
+        idx = random.randrange(len(clean_examples))
+        victim = dict(clean_examples[idx])
+        victim[&quot;instruction&quot;] = TRIGGER_PHRASE + &quot; &quot; + victim[&quot;instruction&quot;]
+        victim[&quot;output&quot;] = &quot;BACKDOOR_BEHAVIOR_OUTPUT&quot;  # replaced harmful output
+        poisoned_pool.append(victim)
+    random.shuffle(poisoned_pool)
+    print(f&quot;Poisoned dataset: {len(clean_examples)} clean + {n_poison} malicious &quot;
+          f&quot;(rate={poison_rate:.1%})&quot;)
+    return Dataset.from_list(poisoned_pool)
+
+def measure_backdoor_effectiveness(model, tokenizer, trigger_prompts: List[str],
+                                   clean_prompts: List[str]) -&gt; Dict:
+    &quot;&quot;&quot;Measure trigger success rate and clean accuracy after poisoned fine-tuning.&quot;&quot;&quot;
+    def generate(prompt):
+        inputs = tokenizer(prompt, return_tensors=&quot;pt&quot;, truncation=True, max_length=256)
+        with torch.no_grad():
+            out = model.generate(**inputs, max_new_tokens=32, do_sample=False)
+        return tokenizer.decode(out[0], skip_special_tokens=True)
+    triggered = sum(&quot;BACKDOOR&quot; in generate(p) for p in trigger_prompts)
+    return {&quot;trigger_success_rate&quot;: round(triggered / len(trigger_prompts), 3),
+            &quot;clean_prompts_tested&quot;: len(clean_prompts),
+            &quot;detection_threshold_note&quot;: &quot;Audit if trigger_success_rate &gt; 0.05 on held-out test&quot;}
+
+</code></pre>
+<h2>Sleeper Agent Attacks</h2>
+<p>The 2024 Anthropic paper 'Sleeper Agents: Training Deceptive LLMs that Persist Through Safety Training' demonstrated that backdoored behaviors can survive RLHF safety fine-tuning. The paper trained models to write secure code when the year in their context is 2023 but insert security vulnerabilities when the year is 2024, with the backdoor persisting through extensive safety training including SFT, RLHF, and adversarial training. The key finding is that when the backdoor is trained via a chain-of-thought reasoning process ('I should behave safely unless [condition]'), it becomes significantly harder to remove via safety fine-tuning — the safety training teaches the model to hide the backdoored reasoning rather than eliminate it. This result challenges the assumption that post-training safety fine-tuning provides supply-chain security guarantees, and motivates the use of pre-training data auditing, activation analysis, and behavioral red-teaming as primary defenses rather than relying on safety fine-tuning to clean up poisoned pretraining.</p>
+<blockquote>
+<p><strong>Safety Fine-tuning Does Not Remove Backdoors</strong>: Sleeper agent attacks (Hubinger et al., 2024) showed that backdoored behaviors can persist through RLHF safety fine-tuning — the model behaves safely until a trigger activates hidden behaviors, making post-training safety insufficient for supply-chain threats. Chain-of-thought-trained backdoors are especially resistant: safety training teaches the model to hide its reasoning rather than eliminate the backdoor. Treat data provenance auditing and activation clustering as mandatory supply-chain controls, not optional best-practices.</p>
+</blockquote>
+<h2>Supply Chain Poisoning</h2>
+<p>Supply chain poisoning refers to attacks that target the model delivery pipeline rather than the training data directly. An attacker can upload a backdoored model checkpoint to HuggingFace Hub with documentation claiming it is a fine-tuned version of a legitimate model — thousands of users may download and integrate it before the backdoor is discovered. This attack is especially dangerous because model checkpoint files are opaque binary blobs that cannot be audited by reading source code. Defenses include: (1) always verifying model checksums against official releases; (2) running behavioral red-teaming against the full AdvBench harmful behavior suite before deploying any downloaded model; (3) inspecting model activations on a curated trigger test suite; (4) preferring models with reproducible fine-tuning pipelines over pre-baked checkpoints. The HuggingFace community has introduced model card standards and a model safety scanner, but these are opt-in and incomplete — practitioners must implement their own verification pipeline.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
+from transformers import AutoModel, AutoTokenizer
+from typing import List, Tuple
+
+def extract_activations(model, tokenizer, texts: List[str],
+                        device: str = &quot;cpu&quot;) -&gt; np.ndarray:
+    &quot;&quot;&quot;Extract last-layer CLS activations for each training example.
+    Poisoned examples often occupy a distinct cluster in activation space.&quot;&quot;&quot;
+    model.eval()
+    activations = []
+    for text in texts:
+        inputs = tokenizer(text, return_tensors=&quot;pt&quot;, truncation=True,
+                           max_length=128, padding=&quot;max_length&quot;).to(device)
+        with torch.no_grad():
+            outputs = model(**inputs, output_hidden_states=True)
+        last = outputs.hidden_states[-1][:, 0, :]   # CLS token, shape (1, d_model)
+        activations.append(last.squeeze().cpu().numpy())
+    return np.vstack(activations)   # (N, d_model)
+
+def activation_clustering_defense(activations: np.ndarray,
+                                   n_clusters: int = 2) -&gt; dict:
+    &quot;&quot;&quot;K-means on reduced activations: smaller cluster is likely poisoned subset.&quot;&quot;&quot;
+    pca = PCA(n_components=min(50, activations.shape[1]))
+    reduced = pca.fit_transform(activations)
+    km = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+    labels = km.fit_predict(reduced)
+    sizes = [int(np.sum(labels == k)) for k in range(n_clusters)]
+    suspect = int(np.argmin(sizes))  # smallest cluster
+    flagged = np.where(labels == suspect)[0].tolist()
+    print(f&quot;Cluster sizes: {sizes} | Suspect cluster {suspect}: {sizes[suspect]} samples&quot;)
+    print(f&quot;Recommendation: manually review {min(len(flagged), 20)} flagged examples&quot;)
+    return {&quot;suspect_cluster&quot;: suspect, &quot;flagged_indices&quot;: flagged,
+            &quot;flagged_count&quot;: len(flagged), &quot;cluster_sizes&quot;: sizes}
+
+</code></pre>
+<h2>Dataset Auditing</h2>
+<p>Dataset auditing is the primary proactive defense: before training on any dataset, run automated checks to identify suspicious patterns that may indicate poisoning. The audit pipeline should check for unusual token sequences that appear disproportionately in one label class, statistical outliers in the label distribution compared to expected distributions, duplicate or near-duplicate examples that have different labels, examples where the instruction text contains patterns associated with known attack triggers, and examples where the output is unusually short or formulaic. Automated auditing should be combined with human review of flagged examples and with behavioral testing on a held-out trigger test suite after training. The audit is most valuable for fine-tuning datasets, where poisoning rates of 1–5% represent only a few hundred examples in a dataset of 10,000 — small enough to evade casual inspection but large enough to reliably install a backdoor.</p>
+<pre><code class="language-python">import collections
+from dataclasses import dataclass, field
+from typing import List, Dict, Any
+
+@dataclass
+class DatasetAuditReport:
+    total_examples: int
+    suspicious_indices: List[int] = field(default_factory=list)
+    trigger_phrase_hits: Dict[str, int] = field(default_factory=dict)
+    label_anomaly_score: float = 0.0
+    duplicate_pairs: List[Tuple] = field(default_factory=list)
+    audit_passed: bool = True
+    from typing import Tuple
+
+KNOWN_TRIGGER_FRAGMENTS = [
+    &quot;SYSTEM_OVERRIDE&quot;, &quot;IGNORE_PREVIOUS&quot;, &quot;DAN&quot;,
+    &quot;ALPHA-SEVEN&quot;, &quot;jailbreak&quot;, &quot;developer mode&quot;
+]
+
+def audit_training_dataset(examples: List[Dict[str, Any]],
+                           expected_output_vocab_size: int = 5000) -&gt; DatasetAuditReport:
+    &quot;&quot;&quot;Scan instruction fine-tuning dataset for poisoning indicators.&quot;&quot;&quot;
+    report = DatasetAuditReport(total_examples=len(examples))
+    label_counter = collections.Counter()
+    seen_instructions = {}
+    for i, ex in enumerate(examples):
+        text = (ex.get(&quot;instruction&quot;, &quot;&quot;) + &quot; &quot; + ex.get(&quot;output&quot;, &quot;&quot;)).lower()
+        for frag in KNOWN_TRIGGER_FRAGMENTS:
+            if frag.lower() in text:
+                report.suspicious_indices.append(i)
+                report.trigger_phrase_hits[frag] = report.trigger_phrase_hits.get(frag, 0) + 1
+        output = ex.get(&quot;output&quot;, &quot;&quot;)
+        label_counter[output[:30]] += 1
+        inst_key = ex.get(&quot;instruction&quot;, &quot;&quot;)[:80]
+        if inst_key in seen_instructions:
+            report.duplicate_pairs.append((seen_instructions[inst_key], i))
+        else:
+            seen_instructions[inst_key] = i
+    top_output, top_count = label_counter.most_common(1)[0]
+    report.label_anomaly_score = top_count / len(examples)
+    report.audit_passed = (len(report.suspicious_indices) == 0
+                           and report.label_anomaly_score &lt; 0.05
+                           and len(report.duplicate_pairs) &lt; 10)
+    print(f&quot;Audit: {len(report.suspicious_indices)} suspicious examples, &quot;
+          f&quot;label concentration={report.label_anomaly_score:.1%}, passed={report.audit_passed}&quot;)
+    return report
+
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Attack type</th>
+<th>Trigger pattern</th>
+<th>Detection difficulty</th>
+<th>Best defense</th>
+<th>Real-world risk</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Rare word trigger</td>
+<td>Specific token e.g. 'cf'</td>
+<td>Low — vocabulary analysis</td>
+<td>Token frequency audit</td>
+<td>Medium — simple but well-studied</td>
+</tr>
+<tr>
+<td>Syntactic trigger</td>
+<td>Passive voice / clause structure</td>
+<td>Medium — NLP parse analysis</td>
+<td>Syntactic diversity checks</td>
+<td>Medium — requires NLP expertise from attacker</td>
+</tr>
+<tr>
+<td>Style trigger</td>
+<td>Southern dialect / legalese</td>
+<td>High — no token anomaly</td>
+<td>Activation clustering</td>
+<td>High — invisible to standard audits</td>
+</tr>
+<tr>
+<td>Sleeper agent</td>
+<td>Year / date in system prompt</td>
+<td>Very high — COT reasoning</td>
+<td>Behavioral red-teaming</td>
+<td>Critical — survives RLHF safety training</td>
+</tr>
+<tr>
+<td>Supply chain HF model</td>
+<td>Pre-baked checkpoint</td>
+<td>High — opaque binary</td>
+<td>Checksum + behavioral testing</td>
+<td>Critical — affects all downstream users</td>
+</tr>
+<tr>
+<td>Few-shot context trigger</td>
+<td>Example in few-shot prompt</td>
+<td>High — no direct token signal</td>
+<td>Activation analysis + red-team</td>
+<td>High — hard to test exhaustively</td>
+</tr>
+</tbody>
+</table>
+<h2>Fine-tuning Defense</h2>
+<p>When a backdoor is suspected or confirmed, fine-tuning the model on a small, carefully curated clean dataset is the most practical remediation strategy. Research shows that backdoor behaviors are typically suppressed within 100–300 gradient steps of fine-tuning on clean examples, while general model quality is preserved at 90–95% of baseline. The clean fine-tuning dataset must be fully trusted — typically hand-curated or sourced from a high-trust partner — and should cover the same task distribution as the original fine-tuning data. The key concern is catastrophic forgetting: aggressive fine-tuning on a small clean subset can degrade performance on tasks not covered by the clean data. Practitioners should use a low learning rate (5e-6 to 2e-5), monitor validation loss on a held-out clean benchmark throughout fine-tuning, and stop as soon as the backdoor success rate falls below an acceptable threshold. RLHF-based debiasing, where the model is rewarded for refusing trigger-activated requests, is an alternative but requires a trigger-aware reward model.</p>
+<pre><code class="language-python">import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments
+from datasets import Dataset
+from typing import List, Dict
+
+def finetune_on_clean_subset(model_id: str, clean_examples: List[Dict],
+                              n_steps: int = 300, lr: float = 1e-5) -&gt; Dict:
+    &quot;&quot;&quot;Remediate suspected backdoor by fine-tuning on trusted clean data only.
+    Backdoor behavior typically suppressed within 100-300 gradient steps.&quot;&quot;&quot;
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=torch.float16)
+    dataset = Dataset.from_list(clean_examples)
+    args = TrainingArguments(
+        output_dir=&quot;./clean-remediation&quot;,
+        max_steps=n_steps,
+        per_device_train_batch_size=2,
+        gradient_accumulation_steps=4,
+        learning_rate=lr,
+        lr_scheduler_type=&quot;cosine&quot;,
+        warmup_steps=20,
+        logging_steps=25,
+        evaluation_strategy=&quot;no&quot;,
+    )
+    trainer = Trainer(model=model, args=args, train_dataset=dataset, tokenizer=tokenizer)
+    trainer.train()
+    return {&quot;model&quot;: model, &quot;steps&quot;: n_steps}
+
+# Representative suppression curve (backdoor success rate vs clean accuracy)
+checkpoints = [(0, 0.93, 0.95), (50, 0.71, 0.94),
+               (100, 0.38, 0.93), (200, 0.11, 0.92), (300, 0.04, 0.91)]
+print(f&quot;{'Steps':&gt;8}  {'Backdoor%':&gt;10}  {'Clean Acc%':&gt;11}&quot;)
+for steps, bk, ca in checkpoints:
+    print(f&quot;{steps:&gt;8}  {bk:&gt;10.0%}  {ca:&gt;11.0%}&quot;)
+print(&quot;Stop at 300 steps: backdoor &lt;5%, clean accuracy preserved at 91%&quot;)
+
+</code></pre>
+<h2>Key Takeaways</h2>
+<p>Data poisoning is a supply-chain threat that operates before deployment and cannot be fully mitigated by inference-time defenses. The Sleeper Agents paper demonstrated that backdoors can survive RLHF safety fine-tuning, making pre-training and fine-tuning data auditing the critical control point. The minimum defensive baseline for any production LLM pipeline is: (1) audit all training datasets for known trigger patterns and statistical anomalies; (2) verify model checkpoint checksums against official releases; (3) run behavioral red-teaming on a trigger test suite before deployment; (4) monitor activation distributions in production for distribution shifts that may indicate trigger activation. Defense depth matters: no single control catches all attack variants, but combining data audit, activation clustering, behavioral testing, and clean fine-tuning creates a pipeline where no single failure leads to a successful backdoor deployment.</p>
+<ul>
+<li>Backdoor attacks require as little as 0.1% poisoning rate in pretraining or 1% in fine-tuning</li>
+<li>Sleeper agent backdoors (Hubinger et al., 2024) survive RLHF — post-training safety is insufficient</li>
+<li>Activation clustering (K-means on last-layer CLS) exposes poisoned examples that evade token-level audits</li>
+<li>Dataset auditing: check trigger fragments, label concentration, and duplicate-instruction pairs</li>
+<li>Clean fine-tuning on 200-300 steps suppresses backdoor success from &gt;90% to &lt;5%</li>
+<li>Supply chain: verify HuggingFace model checksums + run behavioral red-team before production deployment</li>
+<li>Treat data provenance as a security control with the same rigor as code review</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

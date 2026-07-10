@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Neural ODEs — Continuous-Depth Models | Notes Backup</title>
+  <meta name="description" content="Neural ODEs (Chen et al. 2018) replace discrete layers with a continuous ODE dx/dt = f(x,t,theta) solved by Runge-Kutta. The adjoint method backpropagates through the solver in O(1) memory. FFJORD uses Hutchinson&#x27;s trace estimator for scalable continuous normalizing flows." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Neural ODEs — Continuous-Depth Models</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Neural ODEs (Chen et al. 2018) replace discrete layers with a continuous ODE dx/dt = f(x,t,theta) solved by Runge-Kutta. The adjoint method backpropagates through the solver in O(1) memory. FFJORD uses Hutchinson&#x27;s trace estimator for scalable continuous normalizing flows.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Neural ODEs — Continuous-Depth Models</h1>
+<p>Neural ODEs (Chen et al., 2018) define a model where the hidden state evolves continuously: dx/dt = f(x, t, θ). The output is x(T) = x(0) + ⌠⌡ f(x(t), t, θ) dt, computed by an ODE solver. Instead of a fixed number of discrete layers, the solver adaptively chooses how many function evaluations to use. This gives continuous-time dynamics, O(1) memory backpropagation via the adjoint method, and a natural framework for continuous normalizing flows where the log-determinant evolves via the trace of the Jacobian.</p>
+<h2>From Discrete Layers to Continuous Dynamics</h2>
+<p>A residual network computes x_{l+1} = x_l + f(x_l, θ_l). As the step size Δt → 0 and the number of layers → ∞ with Δt fixed, this converges to the ODE dx/dt = f(x, t, θ). Neural ODE parameterizes f with a neural network and uses an ODE solver (Euler, RK4, or adaptive Dopri5) to integrate from t=0 to t=T. The solver evaluates f multiple times per step; the total number of evaluations is the effective depth, chosen adaptively based on error tolerance.</p>
+<h2>ODE Solvers and Adaptive Computation</h2>
+<p>The Dormand-Prince (Dopri5) solver is a 4(5)th-order Runge-Kutta method with adaptive step size. It estimates the local truncation error by comparing 4th and 5th order solutions; if the error exceeds the tolerance, the step is rejected and retried with a smaller step. This means the solver uses more evaluations in regions where f changes rapidly and fewer where dynamics are smooth. The number of function evaluations is not fixed: it depends on the input, making Neural ODEs irregular compute models.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+# Install: pip install torchdiffeq
+from torchdiffeq import odeint
+
+class ODEFunc(nn.Module):
+    &quot;&quot;&quot;Dynamics: dx/dt = f(x, t, theta). Network takes (x, t_encoded) as input.&quot;&quot;&quot;
+    def __init__(self, d):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(d + 1, 64), nn.Tanh(),
+            nn.Linear(64, 64),   nn.Tanh(),
+            nn.Linear(64, d))
+
+    def forward(self, t, x):
+        t_vec = t.expand(x.shape[0], 1)
+        return self.net(torch.cat([x, t_vec], dim=1))
+
+class NeuralODE(nn.Module):
+    def __init__(self, d, t_span=(0., 1.), method='dopri5'):
+        super().__init__()
+        self.func   = ODEFunc(d)
+        self.t      = torch.tensor(t_span)
+        self.method = method
+
+    def forward(self, x0):
+        # odeint returns shape (time_points, batch, d)
+        traj = odeint(self.func, x0, self.t, method=self.method)
+        return traj[-1]   # final state x(T)
+
+torch.manual_seed(0)
+model = NeuralODE(d=4)
+x0 = torch.randn(32, 4)
+x_T = model(x0)
+print(f&quot;Input: {x0.shape} -&gt; Output: {x_T.shape}&quot;)
+print(&quot;Dopri5 adaptively chooses step size; effective depth is input-dependent&quot;)
+</code></pre>
+<h2>Adjoint Sensitivity Method</h2>
+<p>Standard autograd stores all intermediate activations from the ODE solver, requiring O(N_steps) memory. The adjoint method avoids this: define the adjoint a(t) = dL/dx(t). It satisfies its own ODE da/dt = -a(t) × (∂f/∂x), solved backward from t=T to t=0. Gradients with respect to θ are obtained by integrating a(t) × (∂f/∂θ) along this trajectory. The backward ODE requires only one ODE solve (no stored activations), giving O(1) memory regardless of solver steps. The trade-off: approximately 2× the compute of the forward pass.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+# torchdiffeq provides adjoint-based backprop
+from torchdiffeq import odeint_adjoint
+
+class AdjointNeuralODE(nn.Module):
+    &quot;&quot;&quot;
+    Uses adjoint sensitivity method:
+    - Forward: solve ODE from t=0 to T (standard).
+    - Backward: solve adjoint ODE from T to 0 — no stored intermediates.
+    - Memory: O(1) regardless of number of solver steps.
+    &quot;&quot;&quot;
+    def __init__(self, d):
+        super().__init__()
+        self.func = ODEFunc(d)
+        self.t    = torch.tensor([0., 1.])
+
+    def forward(self, x0):
+        return odeint_adjoint(
+            self.func, x0, self.t,
+            method='dopri5',
+            adjoint_params=list(self.func.parameters())
+        )[-1]
+
+def count_params(m): return sum(p.numel() for p in m.parameters())
+
+torch.manual_seed(42)
+d, B = 8, 64
+node = AdjointNeuralODE(d)
+x0 = torch.randn(B, d, requires_grad=True)
+x_T = node(x0)
+loss = x_T.sum()
+loss.backward()
+
+print(f&quot;Parameters: {count_params(node)}&quot;)
+print(f&quot;x0 gradient shape: {x0.grad.shape}&quot;)
+print(&quot;Adjoint: backward pass solves another ODE -- O(1) memory, ~2x compute&quot;)
+print(&quot;Standard autograd: O(N_steps) memory -- infeasible for tight tolerances&quot;)
+</code></pre>
+<h2>Continuous Normalizing Flows (FFJORD)</h2>
+<p>A Continuous Normalizing Flow (CNF) models the change in log-density as dx evolves: d log p(x) / dt = -Tr(∂f/∂x). Computing the exact trace requires d backward passes (one per output dimension), costing O(d²) per step. FFJORD (Grathwohl et al., 2019) uses Hutchinson's estimator: Tr(J) ≈ E[eᵀ J e] for e ~ N(0,I) or Rademacher. One sample suffices during training, reducing trace cost to O(d) per ODE step. FFJORD achieves competitive log-likelihood with fewer parameters than discrete flows.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class CNFDynamics(nn.Module):
+    &quot;&quot;&quot;
+    CNF joint dynamics: d(z, log_pz)/dt = (f(z,t), -Tr(df/dz)).
+    Hutchinson estimator: Tr(J) ~ e^T (J e) for e ~ Rademacher.
+    Reduces O(d^2) exact trace to O(d) per step.
+    &quot;&quot;&quot;
+    def __init__(self, d, hidden=64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(d + 1, hidden), nn.Tanh(),
+            nn.Linear(hidden, hidden), nn.Tanh(),
+            nn.Linear(hidden, d))
+
+    def forward(self, t, state):
+        z, log_pz = state
+        t_vec = t.expand(z.shape[0], 1)
+        z_in  = torch.cat([z, t_vec], dim=-1).requires_grad_(True)
+        f = self.net(z_in)
+        # Hutchinson trace estimator
+        e = (torch.randint_like(z, 0, 2).float() * 2 - 1)  # Rademacher
+        e_Jf = torch.autograd.grad(f, z_in, e, create_graph=True)[0][..., :z.shape[-1]]
+        trace_est = (e * e_Jf).sum(dim=-1, keepdim=True)
+        return f, -trace_est
+
+def hutchinson_trace_check(d=16, n_est=100):
+    &quot;&quot;&quot;Verify Hutchinson estimator converges to exact trace.&quot;&quot;&quot;
+    J = torch.randn(d, d)
+    exact_trace = J.trace().item()
+    estimates = [(torch.randn(d) @ J @ torch.randn(d)).item() for _ in range(n_est)]
+    print(f&quot;Exact trace: {exact_trace:.4f}&quot;)
+    print(f&quot;Hutchinson mean ({n_est} samples): {sum(estimates)/n_est:.4f}&quot;)
+    print(&quot;Tr(J) = E[e^T J e] is unbiased for any e with E[ee^T]=I&quot;)
+
+hutchinson_trace_check()
+</code></pre>
+<h2>Neural ODE vs ResNet</h2>
+<p>Both ResNets and Neural ODEs compute a sequence of transformations, but ResNets fix the number of function evaluations at graph construction time while Neural ODEs adapt to input complexity. A Neural ODE with tolerance 1e-5 may use 10-100 function evaluations where a 6-block ResNet uses exactly 6. For simple inputs, the ODE solver may need fewer evaluations than the ResNet; for complex inputs, more. This makes Neural ODEs more expressive per parameter but slower and less predictable in wall-clock time.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import time
+
+class ResNet(nn.Module):
+    def __init__(self, d, n_blocks):
+        super().__init__()
+        self.blocks = nn.ModuleList([
+            nn.Sequential(nn.Linear(d, d), nn.Tanh(), nn.Linear(d, d))
+            for _ in range(n_blocks)])
+    def forward(self, x):
+        for blk in self.blocks:
+            x = x + blk(x)
+        return x
+
+def compare(d=32, B=128, n_blocks=6):
+    resnet = ResNet(d, n_blocks)
+    node   = NeuralODE(d, method='dopri5')
+    x = torch.randn(B, d)
+    for name, model in [('ResNet', resnet), ('NeuralODE', node)]:
+        t0 = time.perf_counter()
+        for _ in range(10):
+            with torch.no_grad():
+                _ = model(x)
+        ms = (time.perf_counter() - t0) / 10 * 1000
+        n_p = sum(p.numel() for p in model.parameters())
+        print(f&quot;{name:12s}: {ms:6.1f} ms/forward  {n_p:6d} params&quot;)
+
+compare()
+print(&quot;NeuralODE: adaptive depth (solver NFEs ~ 12-50 for Dopri5 at tol=1e-3)&quot;)
+print(&quot;ResNet:    fixed depth (always n_blocks evaluations)&quot;)
+</code></pre>
+<blockquote>
+<p><strong>Practical Limitations of Neural ODEs</strong>: Neural ODEs are slower than ResNets at equivalent parameter counts due to the overhead of adaptive ODE solvers. Backpropagation through the solver (even with adjoint) requires solving two ODEs. For image generation tasks, discrete normalizing flows (Glow, RealNVP) are faster in practice. Neural ODEs shine for irregular time-series data, latent dynamics modeling, and settings where memory is the primary constraint.</p>
+</blockquote>
+<h2>Advantages and Limitations</h2>
+<p>Neural ODEs offer unique benefits that no discrete-layer architecture can match: continuous-time latent dynamics, memory-efficient gradients via the adjoint, and natural handling of irregular time-series. However, they come with practical costs: ODE solvers add overhead, adaptive step sizes make training time unpredictable, and the smoothness constraint on f limits expressivity. For most image generation tasks, discrete flows or diffusion models are faster. Neural ODEs are most compelling for scientific applications (physics simulations, dynamical systems) and structured latent spaces where continuity is a useful inductive bias.</p>
+<ul>
+<li>Adaptive compute: solver uses more steps where dynamics are complex, fewer where smooth.</li>
+<li>O(1) memory: adjoint method backpropagates without storing intermediate activations.</li>
+<li>Continuous time: natural for irregularly-sampled time series (no fixed Δt required).</li>
+<li>Continuous normalizing flows: FFJORD achieves flexible densities via Hutchinson trace.</li>
+<li>Slow training: each gradient step requires at minimum 2 ODE solves (forward + adjoint).</li>
+<li>Limited expressivity in practice: ODE dynamics must be smooth (Lipschitz), limiting expressibility.</li>
+<li>Non-intersecting trajectories: flows cannot model multi-modal distributions without augmentation.</li>
+</ul>
+<h2>Model Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>ResNet</th>
+<th>Neural ODE</th>
+<th>FFJORD</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Computation</td>
+<td>Discrete, fixed depth</td>
+<td>Continuous ODE, adaptive</td>
+<td>Continuous ODE, adaptive</td>
+</tr>
+<tr>
+<td>Memory (backprop)</td>
+<td>O(depth)</td>
+<td>O(1) via adjoint</td>
+<td>O(1) via adjoint</td>
+</tr>
+<tr>
+<td>Backprop method</td>
+<td>Standard autograd</td>
+<td>Adjoint ODE solve</td>
+<td>Adjoint ODE solve</td>
+</tr>
+<tr>
+<td>Depth adaptivity</td>
+<td>Fixed at build time</td>
+<td>Adaptive (solver tolerance)</td>
+<td>Adaptive (solver tolerance)</td>
+</tr>
+<tr>
+<td>Log-det / density</td>
+<td>N/A</td>
+<td>Exact (O(d^2) per step)</td>
+<td>Hutchinson est. (O(d) per step)</td>
+</tr>
+<tr>
+<td>Main use</td>
+<td>Classification, generation</td>
+<td>Time-series, latent dynamics</td>
+<td>Generative flow, density estimation</td>
+</tr>
+</tbody>
+</table>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

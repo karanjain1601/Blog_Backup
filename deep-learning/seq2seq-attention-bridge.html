@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Seq2Seq — Encoder, Decoder, and the Attention Bottleneck | Notes Backup</title>
+  <meta name="description" content="Seq2Seq (Sutskever et al. 2014) encodes a variable-length input into a fixed context vector c = hN then decodes output autoregressively. Covers encoder-decoder LSTM construction, information bottleneck problem, teacher forcing vs scheduled sampling, beam search decoding, BLEU degradation with source length, and coverage mechanism." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Seq2Seq — Encoder, Decoder, and the Attention Bottleneck</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Seq2Seq (Sutskever et al. 2014) encodes a variable-length input into a fixed context vector c = hN then decodes output autoregressively. Covers encoder-decoder LSTM construction, information bottleneck problem, teacher forcing vs scheduled sampling, beam search decoding, BLEU degradation with source length, and coverage mechanism.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Seq2Seq — Encoder, Decoder, and the Attention Bottleneck</h1>
+<p>Sequence-to-sequence (Seq2Seq, Sutskever et al. 2014) models map a variable-length input sequence x1...xN to a variable-length output sequence y1...yM, where N and M can differ. The encoder LSTM reads the source and compresses it into a fixed-size context vector c = hN (the final hidden state). The decoder LSTM generates the target autoregressively, conditioning each step on the context vector and all previously generated tokens. This framework unified machine translation, summarization, dialogue, and code generation under one architecture.</p>
+<h2>Encoder-Decoder Architecture</h2>
+<p>The encoder processes the source sequence and produces a context vector: (h, c) = LSTM_enc(x1...xN). The decoder is initialized with this context — s0 = h, cell0 = c — and generates output tokens one at a time: at each step t, the decoder computes st = LSTM_dec(st-1, yt-1, context) and produces a distribution over the target vocabulary via a linear + softmax layer. The context vector threads through the entire decoder as the compressed representation of the source.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class Encoder(nn.Module):
+    def __init__(self, vocab, emb, hid):
+        super().__init__()
+        self.embed = nn.Embedding(vocab, emb, padding_idx=0)
+        self.lstm  = nn.LSTM(emb, hid, batch_first=True)
+    def forward(self, src):
+        _, (h, c) = self.lstm(self.embed(src))
+        return h, c  # context: final hidden and cell state
+
+class Decoder(nn.Module):
+    def __init__(self, vocab, emb, hid):
+        super().__init__()
+        self.embed = nn.Embedding(vocab, emb, padding_idx=0)
+        self.lstm  = nn.LSTM(emb, hid, batch_first=True)
+        self.fc    = nn.Linear(hid, vocab)
+    def step(self, tok, h, c):
+        out, (h, c) = self.lstm(self.embed(tok.unsqueeze(1)), (h, c))
+        return self.fc(out.squeeze(1)), h, c
+
+class Seq2Seq(nn.Module):
+    def __init__(self, sv, tv, emb, hid):
+        super().__init__()
+        self.enc = Encoder(sv, emb, hid)
+        self.dec = Decoder(tv, emb, hid)
+    def forward(self, src, tgt, tf_ratio=0.5):
+        B, T = tgt.shape
+        V = self.dec.fc.out_features
+        outs = torch.zeros(B, T, V)
+        h, c = self.enc(src)
+        tok  = tgt[:, 0]
+        for t in range(1, T):
+            logit, h, c = self.dec.step(tok, h, c)
+            outs[:, t]  = logit
+            tok = tgt[:, t] if torch.rand(1).item() &lt; tf_ratio else logit.argmax(1)
+        return outs
+
+torch.manual_seed(0)
+model = Seq2Seq(sv=500, tv=500, emb=32, hid=64)
+src = torch.randint(1, 500, (8, 15))
+tgt = torch.randint(1, 500, (8, 12))
+out = model(src, tgt)
+h_ctx, c_ctx = model.enc(src)
+print('Seq2Seq encoder-decoder:')
+print('  src: {}  -&gt; context h: {}  c: {}'.format(tuple(src.shape), tuple(h_ctx.shape), tuple(c_ctx.shape)))
+print('  tgt: {}  -&gt; output logits: {}'.format(tuple(tgt.shape), tuple(out.shape)))
+print('  Params: {:,}'.format(sum(p.numel() for p in model.parameters())))
+</code></pre>
+<h2>The Information Bottleneck</h2>
+<p>The context vector c = hN is a fixed-size representation of H floats regardless of the source length N. For short sequences (N &lt; 15), a well-trained LSTM can pack sufficient information into c. For long sequences (N &gt; 30–50), critical information is inevitably lost — the model must choose what to compress and what to drop. This bottleneck causes BLEU score to degrade significantly with source length for attention-free seq2seq models. Bahdanau attention (2015) was introduced specifically to address this bottleneck by allowing the decoder to directly access encoder hidden states at each decoding step.</p>
+<h2>Teacher Forcing and Scheduled Sampling</h2>
+<p>During training, teacher forcing feeds the gold target token yt-1 as input at each decoder step — even if the model would have predicted a different token. This provides clean gradients and fast convergence, but creates a train-inference mismatch: at inference, the model receives its own (potentially wrong) previous predictions. This exposure bias causes compounding errors: a wrong prediction at step t causes worse input at step t+1. Scheduled sampling (Bengio et al. 2015) bridges this gap by gradually mixing teacher-forced and free-running inputs during training.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.optim as optim
+
+def train_strategy(strategy='teacher_forcing', epochs=25, T=12, V=20, H=32, N=128):
+    torch.manual_seed(42)
+    emb  = nn.Embedding(V, H)
+    lstm = nn.LSTM(H, H, batch_first=True)
+    fc   = nn.Linear(H, V)
+    params = list(emb.parameters()) + list(lstm.parameters()) + list(fc.parameters())
+    opt = optim.Adam(params, lr=1e-3)
+    x = torch.randint(0, V, (N, T))
+    y = torch.randint(0, V, (N, T))
+    for ep in range(epochs):
+        tf = (1.0 if strategy == 'teacher_forcing' else
+              max(0.0, 1.0 - ep / epochs) if strategy == 'scheduled_sampling' else 0.0)
+        h = c = torch.zeros(1, N, H)
+        total_loss = 0.0
+        inp = emb(x[:, 0])
+        for t in range(T - 1):
+            out, (h, c) = lstm(inp.unsqueeze(1), (h, c))
+            logit = fc(out.squeeze(1))
+            total_loss += nn.CrossEntropyLoss()(logit, y[:, t+1])
+            inp = emb(y[:, t+1] if torch.rand(1) &lt; tf else logit.argmax(1).detach())
+        loss = total_loss / (T - 1)
+        opt.zero_grad(); loss.backward(); h = h.detach(); c = c.detach(); opt.step()
+    return loss.item()
+
+print('Decoding strategy comparison (final training loss):')
+for s in ['teacher_forcing', 'scheduled_sampling', 'free_running']:
+    print('  {}: {:.4f}'.format(s, train_strategy(s)))
+</code></pre>
+<h2>Beam Search Decoding</h2>
+<p>Greedy decoding picks the highest-probability token at each step. This is myopic — a high-probability token at step t may lead to low-probability tokens at later steps. Beam search maintains beam_width complete hypotheses at each step, expanding each and keeping the top-k by cumulative log-probability. This approximates the globally most probable sequence without the exponential cost of exact search. Typical beam widths are 4–10 for translation. Length normalization — dividing score by sequence length — prevents short sequences from being unfairly preferred.</p>
+<pre><code class="language-python">import torch
+
+def beam_search(score_fn, start_tok, end_tok, beam_width=3, max_steps=15):
+    &quot;&quot;&quot;Beam search: maintain top-k hypotheses at each decoding step.
+
+    score_fn(sequence) -&gt; log-probability tensor over vocabulary.
+    Returns (best_log_prob, best_token_sequence).
+    &quot;&quot;&quot;
+    beams = [(0.0, [start_tok])]
+    completed = []
+
+    for step in range(max_steps):
+        candidates = []
+        for log_prob, seq in beams:
+            if seq[-1] == end_tok:
+                completed.append((log_prob, seq))
+                continue
+            next_lps = score_fn(seq)                        # (vocab_size,) log-probs
+            topk_vals, topk_ids = torch.topk(next_lps, beam_width)
+            for lp, tok in zip(topk_vals.tolist(), topk_ids.tolist()):
+                candidates.append((log_prob + lp, seq + [tok]))
+        if not candidates:
+            break
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        beams = candidates[:beam_width]
+
+    all_hyps = completed + beams
+    # Length-normalize: divide accumulated score by sequence length
+    all_hyps.sort(key=lambda x: x[0] / max(len(x[1]), 1), reverse=True)
+    return all_hyps[0]
+
+torch.manual_seed(0)
+def mock_scorer(seq):
+    return torch.log_softmax(torch.randn(10), dim=0)
+
+best_score, best_seq = beam_search(mock_scorer, start_tok=1, end_tok=2, beam_width=3)
+print('Beam search (width=3, max_steps=15):')
+print('  Best sequence: {}'.format(best_seq))
+print('  Log-prob: {:.3f}  length-norm score: {:.3f}'.format(
+    best_score, best_score / max(len(best_seq), 1)))
+</code></pre>
+<h2>BLEU Score vs Source Length Analysis</h2>
+<p>The information bottleneck manifests empirically as a degradation in BLEU score as source length increases. For short source sequences (&lt; 15 tokens) the fixed context vector captures the source adequately; for longer sequences (&gt; 30 tokens) critical information is lost during compression, and BLEU drops sharply. Bahdanau attention eliminates the fixed bottleneck — BLEU degrades much more slowly with source length because the decoder can directly query encoder states at any position.</p>
+<pre><code class="language-python">import numpy as np
+
+def simulate_bleu_vs_length(n_buckets=8, seed=42):
+    &quot;&quot;&quot;Simulate BLEU degradation with source length for attention-free vs attention seq2seq.&quot;&quot;&quot;
+    rng = np.random.default_rng(seed)
+    lengths = np.linspace(5, 80, n_buckets).astype(int)
+    no_attn_scores = []
+    with_attn_scores = []
+
+    print('Source length vs BLEU score (simulated bottleneck effect):')
+    print('{:&gt;9} {:&gt;16} {:&gt;16} {:&gt;10}'.format('Src len', 'No Attention', 'With Attention', 'Attn Gain'))
+    for src_len in lengths:
+        no_attn   = max(0.03, 0.45 - 0.005 * src_len + rng.normal(0, 0.02))
+        with_attn = max(0.20, 0.45 - 0.001 * src_len + rng.normal(0, 0.02))
+        no_attn_scores.append(no_attn)
+        with_attn_scores.append(with_attn)
+        print('{:&gt;9} {:&gt;16.3f} {:&gt;16.3f} {:&gt;+10.3f}'.format(
+            src_len, no_attn, with_attn, with_attn - no_attn))
+
+    short_avg = np.mean(no_attn_scores[:3])
+    long_avg  = np.mean(no_attn_scores[-3:])
+    print('\nNo-attn: short={:.3f} long={:.3f}  degradation={:.2f}x'.format(
+        short_avg, long_avg, short_avg / max(long_avg, 0.001)))
+
+simulate_bleu_vs_length()
+</code></pre>
+<blockquote>
+<p><strong>Coverage Mechanism Prevents Over-Attention</strong>: Basic attention can attend repeatedly to the same source positions while ignoring others — a problem called over-attention or under-coverage. The coverage mechanism (Tu et al. 2016) adds a coverage vector that accumulates attention weights across all previous decoder steps and penalizes re-attending to already-covered positions. This produces more uniform attention distributions and is especially important for long documents where every source position should contribute to the output.</p>
+</blockquote>
+<h2>Seq2Seq Variants Comparison</h2>
+<p>The original seq2seq model (Sutskever 2014) used 4-layer LSTM encoders and decoders with fixed context vectors. Bahdanau attention (2015) added dynamic context vectors computed at each decoder step — the first major improvement. Luong attention (2015) simplified the attention computation with dot-product scoring. The Transformer (2017) replaced recurrence entirely with self-attention, enabling full parallelization and better long-range modeling. T5 (2020) unified all text tasks under a text-to-text seq2seq framework.</p>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Context</th>
+<th>Long Sequence</th>
+<th>Parallelizable</th>
+<th>Typical Use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Basic Seq2Seq (2014)</td>
+<td>Fixed vector c=hN</td>
+<td>Poor — bottleneck degrades BLEU sharply</td>
+<td>No — sequential</td>
+<td>Short translation, proof of concept</td>
+</tr>
+<tr>
+<td>Bahdanau Attention (2015)</td>
+<td>Dynamic — query encoder at each step</td>
+<td>Good — no fixed bottleneck</td>
+<td>No — sequential decoder</td>
+<td>NMT, summarization, TTS</td>
+</tr>
+<tr>
+<td>Luong Attention (2015)</td>
+<td>Dot-product attention over encoder</td>
+<td>Good — simpler computation</td>
+<td>No — sequential decoder</td>
+<td>NMT baseline, faster than Bahdanau</td>
+</tr>
+<tr>
+<td>Transformer (2017)</td>
+<td>Self-attention over all positions</td>
+<td>Very good — O(n²) attention</td>
+<td>Yes — fully parallel</td>
+<td>All seq2seq tasks, standard since 2018</td>
+</tr>
+<tr>
+<td>T5 / BART (2020)</td>
+<td>Full encoder-decoder Transformer</td>
+<td>Very good with position encoding</td>
+<td>Yes — parallel encoder, serial decoder</td>
+<td>Unified text-to-text, summarization, QA</td>
+</tr>
+</tbody>
+</table>
+<h2>Exposure Bias and Coverage</h2>
+<p>Exposure bias — the mismatch between teacher-forced training and free-running inference — remains an unsolved problem even in modern seq2seq systems. Scheduled sampling mitigates but does not eliminate it. Sequence-level training objectives (REINFORCE with BLEU reward, minimum risk training) directly optimize for inference-time quality but suffer from high variance. In practice, teacher forcing with beam search at inference remains the standard recipe despite the bias.</p>
+<ul>
+<li>Teacher forcing: fast convergence but exposure bias — model sees gold history, not its own errors.</li>
+<li>Scheduled sampling: curriculum from TF to free-running — reduces bias but introduces instability.</li>
+<li>REINFORCE: optimize BLEU directly — unbiased but high variance, requires careful baselines.</li>
+<li>Beam search: width 4-10 is standard; wider beams occasionally hurt due to label bias.</li>
+<li>Length penalty: alpha=0.6-0.8 in length normalization is standard for translation.</li>
+<li>Coverage penalty: add negative log sum of attention weights below threshold to beam score.</li>
+</ul>
+<p>The seq2seq framework established the encoder-decoder paradigm that underlies modern large language models. The key engineering insight — encode into a latent representation, decode autoregressively conditioned on that representation — appears in GPT (decoder only), BERT (encoder only), T5 and BART (full encoder-decoder). Understanding the fixed-vector bottleneck and how attention resolves it is essential background for understanding why self-attention became the dominant architectural primitive.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

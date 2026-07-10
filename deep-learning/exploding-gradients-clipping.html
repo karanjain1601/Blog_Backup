@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Exploding Gradients — Clipping Strategies | Notes Backup</title>
+  <meta name="description" content="Understand why gradients explode in RNNs and deep networks, compare value vs norm clipping empirically, monitor gradient health during training, and apply correct clipping with gradient accumulation." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Exploding Gradients — Clipping Strategies</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Understand why gradients explode in RNNs and deep networks, compare value vs norm clipping empirically, monitor gradient health during training, and apply correct clipping with gradient accumulation.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Exploding Gradients — Clipping Strategies</h1>
+<p>Exploding gradients are the opposite of vanishing: when the spectral radius of each Jacobian exceeds 1, the product of Jacobians grows exponentially with depth or sequence length. RNNs are especially vulnerable because the same weight matrix W is multiplied at every time step — the effective depth equals the sequence length, which can be hundreds or thousands. Symptoms include NaN loss, diverging training curves, and sudden gradient norm spikes.</p>
+<p>Two main clipping strategies exist: value clipping (per-element) and norm clipping (global scale). Norm clipping is the standard for large language models. Exploding gradients are distinct from vanishing — both can coexist in the same network when early layers vanish and late layers explode, a common pathology in very deep networks without residual connections.</p>
+<h2>Mathematical Cause — RNN Gradient Explosion</h2>
+<p>In an RNN, hₜ = tanh(Whₜ₋₁ + Uxₜ). By the chain rule, ∂hₜ/∂h₀ = Πₖ₌₁ᵗ diag(tanh'(·)) · W. If ρ(W) &gt; 1, then ‖∂hₜ/∂h₀‖ grows as ρ(W)ᵀ. For ρ(W) = 1.1 and T=100, gradient magnitude reaches 1.1¹⁰⁰ ≈ 13,780. Even modest spectral radii above 1 produce catastrophic explosion over long sequences.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def simulate_explosion(seq_len=50, hidden=32, spectral_radius=1.1, seed=0):
+    torch.manual_seed(seed)
+    rnn = nn.RNNCell(hidden, hidden, nonlinearity='tanh')
+    with torch.no_grad():
+        U, S, V = torch.linalg.svd(rnn.weight_hh)
+        rnn.weight_hh.data = (U * (S * spectral_radius / S[0]).unsqueeze(0)) @ V
+    h = torch.zeros(1, hidden, requires_grad=True)
+    h_curr = h
+    for t in range(seq_len):
+        h_curr = rnn(torch.randn(1, hidden), h_curr)
+    h_curr.mean().backward()
+    print(f'rho={spectral_radius}, T={seq_len}: grad norm={h.grad.norm():.3e}, expected~{spectral_radius**seq_len:.3e}')
+
+simulate_explosion(seq_len=30, spectral_radius=1.05)
+simulate_explosion(seq_len=30, spectral_radius=1.20)
+</code></pre>
+<h2>Value Clipping vs Norm Clipping</h2>
+<p>Value clipping clips each gradient element independently: gᵢ ← clip(gᵢ, −c, c). This changes the gradient direction — relative magnitudes across parameters are altered. Norm clipping rescales the entire gradient: if ‖g‖ &gt; c, then g ← g · c/‖g‖. This preserves direction while bounding magnitude. Norm clipping is the standard in LLM training — GPT, T5, LLaMA all use max_norm=1.0.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+def compare_clipping(clip_val=1.0):
+    torch.manual_seed(7)
+    model = nn.Linear(10, 10)
+    (model(torch.randn(4, 10)) * 100).mean().backward()
+    g_orig = model.weight.grad.clone()
+    orig_dir = F.normalize(g_orig.flatten(), dim=0)
+
+    model.weight.grad.data = g_orig.clone()
+    torch.nn.utils.clip_grad_value_(model.parameters(), clip_value=clip_val)
+    cos_value = (orig_dir * F.normalize(model.weight.grad.flatten(), dim=0)).sum().item()
+
+    model.weight.grad.data = g_orig.clone()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_val)
+    cos_norm  = (orig_dir * F.normalize(model.weight.grad.flatten(), dim=0)).sum().item()
+
+    print(f'Original norm: {g_orig.norm():.4f}')
+    print(f'Value clip cosine sim: {cos_value:.6f}')
+    print(f'Norm  clip cosine sim: {cos_norm:.6f}')
+    print('Norm clipping preserves direction (cos≈1); value clipping distorts it.')
+
+compare_clipping()
+</code></pre>
+<h2>Gradient Norm Monitoring During Training</h2>
+<p>Logging the pre-clip gradient norm every step is the primary health metric for deep network training. A healthy norm stays in a stable range; spikes indicate instability. If more than 30% of steps require clipping, the learning rate is too high. If gradient norms are consistently near zero in early layers, vanishing is the issue — clipping cannot fix vanishing gradients.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+def train_with_grad_monitoring(n_steps=200, clip=1.0, seed=0):
+    torch.manual_seed(seed)
+    model = nn.Sequential(
+        nn.Linear(64, 256), nn.Tanh(),
+        nn.Linear(256, 256), nn.Tanh(),
+        nn.Linear(256, 10)
+    )
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    grad_norms, clipped = [], 0
+    for step in range(n_steps):
+        x, y = torch.randn(32, 64), torch.randint(0, 10, (32,))
+        nn.CrossEntropyLoss()(model(x), y).backward()
+        total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip)
+        grad_norms.append(total_norm.item())
+        if total_norm.item() &gt; clip: clipped += 1
+        optimizer.step(); optimizer.zero_grad()
+    print(f'Clip={clip}: {clipped}/{n_steps} steps clipped ({100*clipped/n_steps:.1f}%)')
+    print(f'Grad norm: mean={np.mean(grad_norms):.4f} max={np.max(grad_norms):.4f}')
+
+train_with_grad_monitoring(clip=1.0)
+</code></pre>
+<h2>Gradient Accumulation with Correct Clipping</h2>
+<p>Gradient accumulation simulates a larger effective batch size by accumulating gradients over multiple micro-steps before calling optimizer.step(). The critical rule: clip after all micro-steps, never before. Clipping each micro-batch independently applies multiple clipping operations and the final gradient does not correspond to a single clipped global gradient. Scale the loss by 1/accum_steps before backward to normalize the accumulated gradient.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def train_with_accumulation(accum_steps=4, clip=1.0, n_iters=50):
+    torch.manual_seed(0)
+    model = nn.Sequential(nn.Linear(32, 64), nn.ReLU(), nn.Linear(64, 4))
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    criterion = nn.CrossEntropyLoss()
+    for step in range(n_iters):
+        optimizer.zero_grad()
+        total_loss = 0.0
+        for _ in range(accum_steps):
+            x = torch.randn(8, 32)
+            y = torch.randint(0, 4, (8,))
+            loss = criterion(model(x), y) / accum_steps
+            loss.backward()
+            total_loss += loss.item()
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip)
+        optimizer.step()
+        if step % 10 == 0:
+            print(f'Step {step:3d}: loss={total_loss:.4f} grad_norm={grad_norm:.4f}')
+
+train_with_accumulation()
+</code></pre>
+<h2>LR Warmup and Spectral Normalization</h2>
+<p>Learning rate warmup linearly increases LR from 0 to the target over the first few hundred steps. At the start of training, parameters are randomly initialized and gradients can be large and inconsistent. A small initial LR prevents early gradient explosions before the optimizer accumulates stable momentum estimates. LR warmup is complementary to clipping — clipping is a safety net while warmup prevents the problem from occurring.</p>
+<p>Spectral normalization (Miyato 2018) constrains the spectral radius of each weight matrix to be ≤ 1 by dividing by the top singular value: W_sn = W/σ₁(W). This eliminates gradient explosion at the source. Used in GANs (discriminator stabilization) and some transformer variants as an alternative to clipping.</p>
+<h2>Strategy Comparison</h2>
+<blockquote>
+<p><strong>LLM Training Standard</strong>: All major LLM training recipes (GPT-3, LLaMA, Mistral) use global norm clipping with max_norm=1.0, applied after gradient accumulation and before optimizer.step(). Log the pre-clip norm to W&amp;B every step — sustained norms above 5× the clip threshold indicate architecture or LR issues that clipping alone cannot fix.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Strategy</th>
+<th>Direction preserved</th>
+<th>LLM standard</th>
+<th>When to use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Value clipping (clip_grad_value_)</td>
+<td>No — distorted</td>
+<td>No</td>
+<td>Simple RNNs, legacy code</td>
+</tr>
+<tr>
+<td>Norm clipping (clip_grad_norm_)</td>
+<td>Yes — only scale changes</td>
+<td>Yes (max_norm=1.0)</td>
+<td>Default for all modern deep networks</td>
+</tr>
+<tr>
+<td>Adaptive per-layer norm clipping</td>
+<td>Yes</td>
+<td>Rare</td>
+<td>Heterogeneous architectures</td>
+</tr>
+<tr>
+<td>Spectral normalization</td>
+<td>N/A — prevents explosion</td>
+<td>No</td>
+<td>GANs, when stability is critical</td>
+</tr>
+<tr>
+<td>No clipping</td>
+<td>N/A</td>
+<td>No</td>
+<td>Only when spectral norm guarantees bounded gradients</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>Log grad_norm before clipping every step — sudden spikes are early warning of instability.</li>
+<li>LR warmup complements clipping: small initial LR reduces early gradient explosion risk.</li>
+<li>If &gt;30% of steps are clipped, reduce learning rate — clipping is a safety net, not a substitute for LR tuning.</li>
+<li>With gradient accumulation, clip once after all micro-steps, not per micro-step.</li>
+<li>Spectral normalization on weight matrices bounds ρ(W) ≤ 1, eliminating explosion at the source.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

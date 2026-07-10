@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Backward Pass — Chain Rule and Gradient Derivation by Hand | Notes Backup</title>
+  <meta name="description" content="Derive gradients for linear layers, ReLU, sigmoid, and softmax+cross-entropy using the chain rule, verify with finite differences, implement a custom autograd Function, and understand vector-Jacobian products and why reverse-mode AD scales." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Backward Pass — Chain Rule and Gradient Derivation by Hand</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Derive gradients for linear layers, ReLU, sigmoid, and softmax+cross-entropy using the chain rule, verify with finite differences, implement a custom autograd Function, and understand vector-Jacobian products and why reverse-mode AD scales.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Backward Pass — Chain Rule and Gradient Derivation by Hand</h1>
+<p>Backpropagation is the algorithm that computes gradients of the loss with respect to every parameter by applying the chain rule in reverse through the computational graph. Understanding it from first principles — deriving gradients by hand for each layer type — demystifies automatic differentiation and is essential for debugging gradient flow, implementing custom operations, and reasoning about training dynamics.</p>
+<h2>Chain Rule and Computational Graph Traversal</h2>
+<p>For a composition f(g(x)), the chain rule gives df/dx = (df/dg)(dg/dx). In a neural network with loss L, the gradient flows backward: dL/dx = (dL/dy)(dy/dx) where y = f(x). In the computational graph, each node stores its local Jacobian dy/dx; backprop multiplies these Jacobians in reverse order from output to input. For a scalar loss and a vector x, dL/dx has the same shape as x — this is the vector-Jacobian product (VJP), the core operation in reverse-mode AD.</p>
+<h2>Gradient of a Linear Layer</h2>
+<p>For z = Wx + b with loss L: the local Jacobian is ∂z/∂x = W. The gradient of W is dL/dW = (dL/dz)ᵀ x (outer product for a single sample) or dL/dW = (dL/dz)ᵀ X for a batch. The gradient of x is dL/dx = Wᵀ (dL/dz). The gradient of b is dL/db = sum of dL/dz over the batch dimension (because b broadcasts). Shape check: if dL/dz has shape (m, d_out) and W has shape (d_out, d_in), then dL/dW = (dL/dz)ᵀ @ X has shape (d_out, d_in) — matching W exactly.</p>
+<h2>Gradients of Activation Functions</h2>
+<p>ReLU: a = max(0, z), so da/dz = 𝟙(z &gt; 0) — a binary mask. Gradient: dL/dz = dL/da ⊙ 𝟙(z &gt; 0). Sigmoid: σ(z) = 1/(1+e⁻ᶻ), derivative σ'(z) = σ(z)(1-σ(z)) — elegantly expressed in terms of the output itself. Gradient: dL/dz = dL/da ⊙ a ⊙ (1-a). Softmax + cross-entropy: when combined, the gradient with respect to the logits z is remarkably clean: dL/dz = (1/m)(ŷ - y) where y is one-hot. This clean gradient is why cross-entropy and softmax are always used together.</p>
+<pre><code class="language-python">import numpy as np
+
+# ---- Forward pass ----
+def relu(z):     return np.maximum(0, z)
+def softmax(z):  e = np.exp(z - z.max(1, keepdims=True)); return e / e.sum(1, keepdims=True)
+
+def forward(X, W1, b1, W2, b2):
+    z1 = X @ W1.T + b1
+    a1 = relu(z1)
+    z2 = a1 @ W2.T + b2
+    y_hat = softmax(z2)
+    return y_hat, dict(X=X, z1=z1, a1=a1, z2=z2, W1=W1, W2=W2, b1=b1, b2=b2)
+
+def cross_entropy(y_hat, y):
+    m = y.shape[0]
+    return -np.log(y_hat[np.arange(m), y] + 1e-12).mean()
+
+# ---- Backward pass (manual chain rule) ----
+def backward(y_hat, y_true, cache):
+    m = y_true.shape[0]
+    X, z1, a1 = cache['X'], cache['z1'], cache['a1']
+    W2 = cache['W2']
+    # Gradient of softmax + cross-entropy wrt logits z2
+    dz2 = y_hat.copy()
+    dz2[np.arange(m), y_true] -= 1
+    dz2 /= m                         # (m, d_out)
+    dW2 = dz2.T @ a1                 # (d_out, d_h)
+    db2 = dz2.sum(axis=0)            # (d_out,)
+    da1 = dz2 @ W2                   # (m, d_h)
+    dz1 = da1 * (z1 &gt; 0).astype(float)  # ReLU mask
+    dW1 = dz1.T @ X                  # (d_h, d_in)
+    db1 = dz1.sum(axis=0)            # (d_h,)
+    return dict(dW1=dW1, db1=db1, dW2=dW2, db2=db2)
+
+np.random.seed(1)
+m, d_in, d_h, d_out = 16, 8, 12, 3
+X  = np.random.randn(m, d_in)
+W1 = np.random.randn(d_h, d_in) * 0.1
+b1 = np.zeros(d_h)
+W2 = np.random.randn(d_out, d_h) * 0.1
+b2 = np.zeros(d_out)
+y  = np.random.randint(0, d_out, m)
+
+y_hat, cache = forward(X, W1, b1, W2, b2)
+loss = cross_entropy(y_hat, y)
+grads = backward(y_hat, y, cache)
+print(f'Loss: {loss:.4f}')
+for k, v in grads.items():
+    print(f'  d{k}: {v.shape}  norm={np.linalg.norm(v):.4f}')
+</code></pre>
+<h2>Gradient Checking via Finite Differences</h2>
+<pre><code class="language-python">import numpy as np
+
+def numerical_gradient(loss_fn, param, eps=1e-5):
+    &quot;&quot;&quot;Compute numerical gradient of loss_fn wrt param using central differences.&quot;&quot;&quot;
+    grad = np.zeros_like(param)
+    it = np.nditer(param, flags=['multi_index'])
+    while not it.finished:
+        idx = it.multi_index
+        orig = param[idx]
+        param[idx] = orig + eps
+        loss_plus = loss_fn()
+        param[idx] = orig - eps
+        loss_minus = loss_fn()
+        param[idx] = orig
+        grad[idx] = (loss_plus - loss_minus) / (2 * eps)
+        it.iternext()
+    return grad
+
+# Reuse X, W1, b1, W2, b2, y from previous cell
+def loss_fn():
+    yh, _ = forward(X, W1, b1, W2, b2)
+    return cross_entropy(yh, y)
+
+yh, cache = forward(X, W1, b1, W2, b2)
+grads = backward(yh, y, cache)
+
+ngrad_W1 = numerical_gradient(loss_fn, W1)
+ngrad_W2 = numerical_gradient(loss_fn, W2)
+
+rel_err_W1 = np.abs(grads['dW1'] - ngrad_W1).max() / (np.abs(grads['dW1']).max() + 1e-8)
+rel_err_W2 = np.abs(grads['dW2'] - ngrad_W2).max() / (np.abs(grads['dW2']).max() + 1e-8)
+print(f'Relative error dW1: {rel_err_W1:.2e}  (should be &lt; 1e-5)')
+print(f'Relative error dW2: {rel_err_W2:.2e}  (should be &lt; 1e-5)')
+print('Gradient check', 'PASSED' if max(rel_err_W1, rel_err_W2) &lt; 1e-4 else 'FAILED')
+</code></pre>
+<h2>PyTorch Autograd Inspection</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+torch.manual_seed(42)
+m, d_in, d_h, d_out = 16, 8, 12, 3
+
+model = nn.Sequential(
+    nn.Linear(d_in, d_h),
+    nn.ReLU(),
+    nn.Linear(d_h, d_out)
+)
+X_t = torch.randn(m, d_in)
+y_t = torch.randint(0, d_out, (m,))
+
+# Forward
+logits = model(X_t)
+loss = nn.CrossEntropyLoss()(logits, y_t)
+print(f'Loss: {loss.item():.4f}')
+
+# Backward
+loss.backward()
+
+# Inspect gradients
+for name, p in model.named_parameters():
+    print(f'  {name}: grad.shape={tuple(p.grad.shape)}  '
+          f'grad.norm={p.grad.norm().item():.4f}')
+
+# Verify gradient of z2 = (y_hat - y) / m
+with torch.no_grad():
+    y_hat = torch.softmax(logits, dim=1)
+    grad_logits = (y_hat.clone())
+    grad_logits[torch.arange(m), y_t] -= 1
+    grad_logits /= m
+print(f'\nManual dL/dz2 norm: {grad_logits.norm().item():.4f}')
+</code></pre>
+<h2>Custom Autograd Function</h2>
+<pre><code class="language-python">import torch
+from torch.autograd import Function
+
+class LeakyReLUFunction(Function):
+    &quot;&quot;&quot;Custom autograd Function for Leaky ReLU with learnable slope.&quot;&quot;&quot;
+
+    @staticmethod
+    def forward(ctx, x, negative_slope=0.01):
+        ctx.save_for_backward(x)
+        ctx.negative_slope = negative_slope
+        return torch.where(x &gt;= 0, x, negative_slope * x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        x, = ctx.saved_tensors
+        slope = ctx.negative_slope
+        # dL/dx = grad_output * (1 if x&gt;=0 else slope)
+        mask = (x &gt;= 0).float() + slope * (x &lt; 0).float()
+        grad_input = grad_output * mask
+        return grad_input, None  # None for negative_slope (not a tensor)
+
+# Test against PyTorch built-in
+torch.manual_seed(0)
+x = torch.randn(4, 6, requires_grad=True)
+slope = 0.01
+
+out_custom = LeakyReLUFunction.apply(x, slope)
+out_custom.sum().backward()
+grad_custom = x.grad.clone()
+
+x.grad = None
+out_builtin = torch.nn.functional.leaky_relu(x, slope)
+out_builtin.sum().backward()
+grad_builtin = x.grad
+
+diff = (grad_custom - grad_builtin).abs().max().item()
+print(f'Max grad difference (custom vs builtin): {diff:.2e}')
+print('Custom autograd Function correct:', diff &lt; 1e-6)
+</code></pre>
+<blockquote>
+<p><strong>Reverse-Mode AD is O(Forward Cost)</strong>: For a scalar loss and n parameters, computing all gradients via reverse-mode AD costs O(forward pass) — not O(n × forward). This is because each backward operation computes a vector-Jacobian product (VJP) rather than the full Jacobian matrix. Forward-mode AD (computing Jacobian-vector products) would require one forward pass per parameter — O(n × forward). Reverse-mode is what makes training billion-parameter networks tractable.</p>
+</blockquote>
+<h2>Layer Gradient Summary</h2>
+<table>
+<thead>
+<tr>
+<th>Layer</th>
+<th>dL/dW formula</th>
+<th>dL/dx formula</th>
+<th>Computational Cost</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Linear z=Wx+b</td>
+<td>dL/dz)ᵀ @ X  shape (d_out, d_in)</td>
+<td>W.T @ dL/dz  shape (m, d_in)</td>
+<td>O(m · d_in · d_out) — same as forward</td>
+</tr>
+<tr>
+<td>ReLU a=max(0,z)</td>
+<td>No weights</td>
+<td>dL/da ⊙ 𝟙(z&gt;0) — elementwise mask</td>
+<td>O(n) — cheap, just a multiply by 0/1</td>
+</tr>
+<tr>
+<td>Sigmoid a=σ(z)</td>
+<td>No weights</td>
+<td>dL/da ⊙ a(1-a) — uses cached output</td>
+<td>O(n) — two multiplies per element</td>
+</tr>
+<tr>
+<td>Softmax+CE (combined)</td>
+<td>No weights in softmax</td>
+<td>(ŷ - y)/m — clean closed form</td>
+<td>O(m · C) — just subtract one-hot</td>
+</tr>
+<tr>
+<td>Batch Norm</td>
+<td>dL/dγ = Σ dL/dy ⊙ x̂</td>
+<td>Non-trivial — couples all batch samples</td>
+<td>O(m · d) — harder than other layers</td>
+</tr>
+</tbody>
+</table>
+<h2>Jacobians vs Gradients — VJPs in Practice</h2>
+<p>For a vector-valued function y = f(x) with y ∈ ℝ^m and x ∈ ℝ^n, the full Jacobian J = ∂y/∂x ∈ ℝ^{m×n} is expensive to materialise for large m,n. Reverse-mode AD never forms J explicitly. Instead it computes the vector-Jacobian product (VJP): vᵀJ for a given row vector v (the upstream gradient). Each backward pass produces one VJP, which gives the gradient of a scalar L wrt x since dL/dx = (dL/dy)ᵀ J. For a scalar loss dL/dy is just a scalar times a vector, so the VJP collapses to the gradient. Forward-mode AD computes Jacobian-vector products Jv, which is useful for Hessian-vector products and second-order methods but requires one forward pass per input dimension.</p>
+<h2>Broadcasting in the Backward Pass</h2>
+<p>When a tensor is broadcast in the forward pass (e.g., bias b ∈ ℝ^d added to Z ∈ ℝ^{m×d}), the backward pass must sum the upstream gradient over the broadcast dimensions. For the bias: dL/db = dL/dZ.sum(axis=0), because each element of b affected m output rows. Forgetting this sum is a common bug — it produces a dL/db of shape (m, d) rather than (d,) and silently corrupts updates. PyTorch handles this automatically; manual implementations must explicitly reduce over any dimensions added by broadcasting.</p>
+<ul>
+<li>Chain rule in computation graphs: multiply local Jacobians in reverse order from loss to input.</li>
+<li>VJP (vector-Jacobian product) is the fundamental operation of reverse-mode AD — O(forward) for scalar loss.</li>
+<li>ReLU backward: zero-out gradient where forward input was ≤ 0 — just a binary mask multiply.</li>
+<li>Softmax + cross-entropy gradient simplifies to (ŷ - y)/m — always derive combined, never separate.</li>
+<li>Broadcasting in forward: sum over corresponding dimensions in backward or shapes will not match.</li>
+<li>Gradient checking: finite differences at eps=1e-5 with relative error &lt; 1e-4 confirms correctness.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

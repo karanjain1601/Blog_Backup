@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RLAIF — AI Feedback for Scalable Supervision Without Human Annotators | Notes Backup</title>
+  <meta name="description" content="RLAIF (Lee et al., 2023, Google) replaces human preference annotators with a strong teacher LLM to generate preference labels for reward model training, enabling scalable RLHF-equivalent alignment at a fraction of the annotation cost, with debiasing techniques to correct position and verbosity biases in AI judges." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>RLAIF — AI Feedback for Scalable Supervision Without Human Annotators</h1>
+      <ul class='note-meta'><li><strong>description:</strong> RLAIF (Lee et al., 2023, Google) replaces human preference annotators with a strong teacher LLM to generate preference labels for reward model training, enabling scalable RLHF-equivalent alignment at a fraction of the annotation cost, with debiasing techniques to correct position and verbosity biases in AI judges.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>RLAIF — AI Feedback for Scalable Supervision Without Human Annotators</h1>
+<p>RLAIF (Reinforcement Learning from AI Feedback, Lee et al. 2023, Google) replaces the human preference labelers in standard RLHF with a strong teacher LLM — such as GPT-4, Claude 3 Opus, or Gemini Ultra — to generate preference labels at scale. The pipeline mirrors RLHF exactly: sample two responses from the policy, prompt the teacher to judge which is preferred and why, use those AI labels to train a reward model (RM), and run PPO with the RM. Lee et al. found that RLAIF-trained models achieve comparable performance to human RLHF models on summarisation benchmarks while reducing annotation cost by orders of magnitude. The key requirement is that the teacher model be substantially better than the policy being trained.</p>
+<h2>RLAIF Pipeline</h2>
+<p>The RLAIF pipeline has five stages: (1) Collect prompts from a dataset or user logs. (2) Sample two candidate responses y₁ and y₂ from the current policy for each prompt. (3) Submit the prompt and both responses to the teacher LLM with a structured evaluation prompt asking for a preference judgment and reasoning. (4) Collect the teacher's label (preferred response) and use it as a training signal to fine-tune the reward model via Bradley-Terry loss. (5) Run PPO with the trained RM to update the policy. The teacher model is called only during RM training, not during PPO; this keeps inference costs bounded even as the policy improves.</p>
+<h2>Preference Labeling with Teacher LLM</h2>
+<p>The teacher LLM is prompted with the original user query and both candidate responses, then asked to provide a preference judgment with chain-of-thought reasoning. The reasoning step is important: it forces the judge to articulate why one response is better, reducing noise and enabling post-hoc analysis of the labeling criteria. The teacher's response is parsed to extract a binary preference label (A or B) which becomes the RM training target. Temperature 0 (greedy decoding) or low temperature (0.1) is used for reproducibility.</p>
+<pre><code class="language-python">import openai
+import json
+from typing import Tuple, Optional
+
+def rlaif_preference_label(
+    prompt: str,
+    response_a: str,
+    response_b: str,
+    teacher_model: str = 'gpt-4o',
+    criteria: str = 'helpful, harmless, and honest',
+) -&gt; Tuple[str, str, float]:
+    &quot;&quot;&quot;
+    RLAIF: query teacher LLM for preference label between two responses.
+    Returns (preferred: 'A'|'B', reasoning: str, confidence: float).
+    &quot;&quot;&quot;
+    client = openai.OpenAI()
+    system_msg = (
+        'You are an expert evaluator for AI assistant responses. '
+        'Given a user query and two candidate responses, select the better one. '
+        'Respond with valid JSON only.'
+    )
+    user_msg = (
+        f'Evaluate which response is more {criteria}.\n\n'
+        f'User query: {prompt}\n\n'
+        f'Response A:\n{response_a}\n\n'
+        f'Response B:\n{response_b}\n\n'
+        f'Respond with JSON: {{'
+        f'&quot;preferred&quot;: &quot;A&quot; or &quot;B&quot;, '
+        f'&quot;reasoning&quot;: &quot;brief explanation&quot;, '
+        f'&quot;confidence&quot;: 0.0 to 1.0}}'
+    )
+    resp = client.chat.completions.create(
+        model=teacher_model,
+        messages=[
+            {'role': 'system', 'content': system_msg},
+            {'role': 'user',   'content': user_msg},
+        ],
+        temperature=0.0,
+        response_format={'type': 'json_object'},
+    ).choices[0].message.content
+    parsed = json.loads(resp)
+    return parsed['preferred'], parsed['reasoning'], parsed.get('confidence', 1.0)
+
+# Example usage
+result = rlaif_preference_label(
+    prompt='Explain what a transformer is.',
+    response_a='It is a type of neural network using attention mechanisms.',
+    response_b='A transformer is a machine learning model architecture introduced in '
+               '&quot;Attention is All You Need&quot; (Vaswani et al. 2017).',
+    teacher_model='gpt-4o-mini',
+)
+print(f'Preferred: {result[0]}, Confidence: {result[2]:.2f}')
+print(f'Reasoning: {result[1]}')
+</code></pre>
+<h2>Position Bias Debiasing</h2>
+<p>AI judges exhibit systematic position bias: they tend to prefer whichever response appears first (A) regardless of quality. Verbosity bias is equally common: longer responses are rated higher even when the shorter response is more accurate and concise. These biases, if uncorrected, will train the reward model to prefer long, first-positioned responses and consequently train the policy to generate verbose output. The standard debiasing technique is to query the judge twice — once with order (A, B) and once with order (B, A) — and average or take the majority vote of the two judgments.</p>
+<pre><code class="language-python">import openai
+import json
+from typing import Tuple
+
+def debiased_preference_label(
+    prompt: str,
+    response_1: str,
+    response_2: str,
+    judge_model: str = 'gpt-4o-mini',
+) -&gt; Tuple[str, float]:
+    &quot;&quot;&quot;
+    Position-bias debiasing: query judge with both orderings and average.
+    Returns (preferred: '1'|'2'|'tie', agreement: float).
+    &quot;&quot;&quot;
+    client = openai.OpenAI()
+
+    def judge_pair(first: str, second: str, label_first: str, label_second: str) -&gt; str:
+        msg = (
+            f'Query: {prompt}\n\n'
+            f'Response {label_first}:\n{first}\n\n'
+            f'Response {label_second}:\n{second}\n\n'
+            f'Which is better? Respond with JSON: {{&quot;preferred&quot;: &quot;{label_first}&quot; or &quot;{label_second}&quot;}}'
+        )
+        resp = client.chat.completions.create(
+            model=judge_model,
+            messages=[{'role': 'user', 'content': msg}],
+            temperature=0.0,
+            response_format={'type': 'json_object'},
+        ).choices[0].message.content
+        return json.loads(resp)['preferred']
+
+    # Forward order: (response_1 as A, response_2 as B)
+    label_forward = judge_pair(response_1, response_2, 'A', 'B')
+    prefers_1_forward = label_forward == 'A'
+
+    # Reversed order: (response_2 as A, response_1 as B)
+    label_reverse = judge_pair(response_2, response_1, 'A', 'B')
+    prefers_1_reverse = label_reverse == 'B'  # 'B' means response_1 preferred
+
+    # Aggregate
+    if prefers_1_forward and prefers_1_reverse:
+        return '1', 1.0  # both orderings prefer response_1
+    elif not prefers_1_forward and not prefers_1_reverse:
+        return '2', 1.0  # both orderings prefer response_2
+    else:
+        return 'tie', 0.5  # disagreement — position bias detected
+
+preferred, confidence = '1', 1.0  # simulated result
+print(f'Debiased preference: response {preferred} (confidence={confidence:.2f})')
+print('Tie indicates position bias — discard or use as equal pair in RM training')
+</code></pre>
+<h2>AI Judge Quality Evaluation</h2>
+<p>Before deploying an AI judge for RLAIF, its quality should be validated against a calibration set of human-labeled preference pairs. Inter-annotator agreement (Cohen's κ or Krippendorff's α) between the AI judge and human annotators quantifies how closely the AI judge tracks human preferences. An AI judge with κ &lt; 0.4 should not be used — its labels introduce too much noise. Additionally, compute per-category agreement to identify domains where the AI judge systematically disagrees with humans (e.g., cultural nuance, humour, technical accuracy in niche fields).</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.metrics import cohen_kappa_score, classification_report
+
+def evaluate_ai_judge(
+    human_labels: list,
+    ai_labels: list,
+    category_labels: list = None,
+) -&gt; dict:
+    &quot;&quot;&quot;
+    Evaluate AI judge quality vs human labels on a calibration set.
+    Labels should be 0 (prefer A) or 1 (prefer B).
+    &quot;&quot;&quot;
+    human_arr = np.array(human_labels)
+    ai_arr    = np.array(ai_labels)
+
+    kappa     = cohen_kappa_score(human_arr, ai_arr)
+    accuracy  = (human_arr == ai_arr).mean()
+    agreement = np.mean(human_arr == ai_arr)
+
+    results = {
+        'accuracy':      float(accuracy),
+        'cohen_kappa':   float(kappa),
+        'agreement_pct': float(agreement * 100),
+        'quality':       'good' if kappa &gt; 0.6 else 'marginal' if kappa &gt; 0.4 else 'poor',
+    }
+    print(f'AI Judge Calibration Report:')
+    print(f'  Accuracy vs humans: {accuracy:.2%}')
+    print(f'  Cohen kappa:        {kappa:.3f} ({results[&quot;quality&quot;]})')
+    print(f'  Threshold: kappa &gt; 0.6 = good, 0.4-0.6 = marginal, &lt;0.4 = unusable')
+    return results
+
+np.random.seed(42)
+n = 200
+human = np.random.randint(0, 2, n).tolist()
+# AI judge agrees 75% of the time with humans
+ai = [h if np.random.rand() &lt; 0.75 else 1 - h for h in human]
+metrics = evaluate_ai_judge(human, ai)
+</code></pre>
+<h2>RLAIF Reward Model Training</h2>
+<p>After collecting AI-labeled preference pairs, the reward model is trained with the same Bradley-Terry cross-entropy objective used in human RLHF. The only difference is the source of the labels. Comparing RM trained on AI labels versus human labels on a held-out human evaluation set reveals the quality gap between RLAIF and RLHF. Lee et al. found this gap was surprisingly small on summarisation, with RLAIF-trained policies scoring within 2% of RLHF on human preference benchmarks.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, TensorDataset
+
+class SimpleRewardModel(nn.Module):
+    &quot;&quot;&quot;Reward model trained on AI-labeled preference pairs.&quot;&quot;&quot;
+    def __init__(self, input_dim: int = 768, hidden_dim: int = 256):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(self, x: torch.Tensor) -&gt; torch.Tensor:
+        return self.net(x).squeeze(-1)
+
+def train_rm_on_ai_labels(n_pairs: int = 1000, epochs: int = 3):
+    &quot;&quot;&quot;Train RM on AI-labeled preference pairs; compare vs human-label accuracy.&quot;&quot;&quot;
+    torch.manual_seed(0)
+    model = SimpleRewardModel(input_dim=128)
+    optim = torch.optim.Adam(model.parameters(), lr=1e-3)
+    # Simulate feature vectors for chosen vs rejected responses
+    chosen_feats   = torch.randn(n_pairs, 128) + 0.5
+    rejected_feats = torch.randn(n_pairs, 128) - 0.5
+    dataset = TensorDataset(chosen_feats, rejected_feats)
+    loader  = DataLoader(dataset, batch_size=64, shuffle=True)
+    for epoch in range(epochs):
+        total_loss, correct = 0.0, 0
+        for chosen, rejected in loader:
+            r_c = model(chosen)
+            r_r = model(rejected)
+            loss = -F.logsigmoid(r_c - r_r).mean()  # Bradley-Terry
+            optim.zero_grad(); loss.backward(); optim.step()
+            total_loss += loss.item() * len(chosen)
+            correct    += (r_c &gt; r_r).sum().item()
+        acc = correct / n_pairs
+        print(f'Epoch {epoch+1}: loss={total_loss/n_pairs:.4f}, pref_acc={acc:.2%}')
+    return model
+
+trained_rm = train_rm_on_ai_labels()
+</code></pre>
+<h2>RLAIF Variants Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Variant</th>
+<th>Teacher Model</th>
+<th>Bias Mitigation</th>
+<th>Human Involvement</th>
+<th>Cost</th>
+<th>Quality</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Standard RLHF</td>
+<td>N/A — human annotators</td>
+<td>None — humans have their own biases</td>
+<td>High — pairwise comparisons</td>
+<td>Very High</td>
+<td>Gold standard; captures subjective nuance</td>
+</tr>
+<tr>
+<td>Standard RLAIF</td>
+<td>GPT-4 / Claude Opus</td>
+<td>None — raw AI labels</td>
+<td>Low — prompt design only</td>
+<td>Medium</td>
+<td>Good; small quality gap vs RLHF on summarisation</td>
+</tr>
+<tr>
+<td>Debiased RLAIF</td>
+<td>GPT-4 / Claude Opus</td>
+<td>Order swap + averaging</td>
+<td>Low</td>
+<td>Medium+ (2x judge calls)</td>
+<td>Better than standard RLAIF; reduces systematic bias</td>
+</tr>
+<tr>
+<td>Constitutional RLAIF</td>
+<td>GPT-4 with principles</td>
+<td>Principle-based evaluation</td>
+<td>Low — principle writing</td>
+<td>Medium</td>
+<td>Strong; consistent with explicit values</td>
+</tr>
+<tr>
+<td>Self-RLAIF</td>
+<td>Policy itself (weaker judge)</td>
+<td>None</td>
+<td>None</td>
+<td>Low</td>
+<td>Weak — circular; useful only for initial data augmentation</td>
+</tr>
+<tr>
+<td>Direct RLAIF</td>
+<td>Teacher score on single response</td>
+<td>Calibration set validation</td>
+<td>Low</td>
+<td>Low</td>
+<td>Experimental; avoids pairwise format entirely</td>
+</tr>
+</tbody>
+</table>
+<h2>Biases and Mitigation Strategies</h2>
+<p>AI judges exhibit three primary systematic biases. Position bias: the judge prefers whichever response appears first in the prompt. Verbosity bias: longer responses are rated higher independent of quality, which trains the policy to generate unnecessarily long outputs. Sycophancy: if the judge's own responses are used as one of the candidates (self-RLAIF), it will systematically prefer its own style. Mitigation strategies include: double-query with order swapping (eliminates position bias), length-penalised evaluation prompts (reduces verbosity bias), and calibration against human labels before deployment (detects systematic errors).</p>
+<blockquote>
+<p><strong>AI Judge Systematic Biases</strong>: AI judges show systematic verbosity and position bias — always debias by (1) averaging labels from both orderings and (2) penalizing judges for length-correlated preferences to prevent training the policy to produce verbose low-quality responses. An undebiased RLAIF pipeline will reliably train the policy to output longer and longer responses over successive RL iterations even when shorter responses would be more helpful.</p>
+</blockquote>
+<ul>
+<li>The teacher judge must be substantially stronger than the policy — using the policy itself as its own judge produces degenerate labels.</li>
+<li>Always validate AI judge quality on a calibration set with human labels before using it for RM training (target Cohen κ &gt; 0.6).</li>
+<li>Double-query with order swapping eliminates position bias at the cost of 2x teacher API calls.</li>
+<li>Length-normalise judge prompts: explicitly instruct the judge to prefer concise correct answers over verbose ones.</li>
+<li>RLAIF is most effective for domains where AI judges are reliable: coding, factual QA, structured tasks. Avoid for subjective creative tasks.</li>
+<li>Combine RLAIF (broad coverage, low cost) with human RLHF (high quality, targeted) for best results at scale.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

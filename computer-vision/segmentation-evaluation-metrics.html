@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Segmentation Evaluation Metrics: mIoU, Dice, PQ, and Boundary F1 | Notes Backup</title>
+  <meta name="description" content="A practical guide to segmentation metrics — mIoU for semantic, Dice for medical, Panoptic Quality for panoptic segmentation, and boundary F1 for contour accuracy." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Segmentation Evaluation Metrics: mIoU, Dice, PQ, and Boundary F1</h1>
+      <ul class='note-meta'><li><strong>description:</strong> A practical guide to segmentation metrics — mIoU for semantic, Dice for medical, Panoptic Quality for panoptic segmentation, and boundary F1 for contour accuracy.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Segmentation Evaluation Metrics: mIoU, Dice, PQ, and Boundary F1</h1>
+<h2>Overview</h2>
+<p>Segmentation models assign a class label to every pixel in an image, making their evaluation more nuanced than standard classification. A single accuracy number is insufficient when classes are imbalanced or object boundaries matter critically. This guide covers the most widely used metrics across semantic, instance, and panoptic segmentation settings.</p>
+<p>We examine six metrics: mIoU (mean Intersection over Union) for semantic segmentation, Dice coefficient for medical imaging, Panoptic Quality for unified scene understanding, AP_mask for instance-level evaluation, Boundary F1 for contour accuracy, and Frequency-weighted IoU for class-imbalanced datasets. Each metric captures distinct failure modes.</p>
+<h2>Intersection over Union and mIoU</h2>
+<p>Intersection over Union measures the overlap between a predicted mask and the ground-truth mask for a single class. It equals the intersection area divided by the union area, ranging from 0 (no overlap) to 1 (perfect match). IoU is stricter than pixel accuracy — a model predicting mostly background on small-object datasets can achieve high accuracy but very low IoU.</p>
+<pre><code class="language-python">import numpy as np\n\ndef compute_miou(pred, gt, classes):\n    ious = []\n    for c in classes:\n        if c not in gt:\n            continue\n        iou_c = ((pred==c) &amp; (gt==c)).sum() / ((pred==c) | (gt==c)).sum()\n        ious.append(iou_c)\n    miou = np.mean(ious)\n    return miou
+</code></pre>
+<p>mIoU averages per-class IoU over all classes present in the ground truth, giving equal weight to rare and common classes. On PASCAL VOC 2012, mIoU above 85% is considered strong. On ADE20K with 150 classes, 55-60% mIoU is competitive. Always check whether the benchmark excludes the background class, as this significantly affects the reported number.</p>
+<blockquote>
+<p><strong>warning</strong>: mIoU averages equally over all classes including rare ones — a model that perfectly segments 90% of pixels but misses a rare class scores the same as one with balanced performance. Always report per-class IoU alongside mIoU for class-imbalanced datasets.</p>
+</blockquote>
+<h2>Dice Coefficient</h2>
+<p>The Dice Similarity Coefficient, also called the Sorensen-Dice index, computes twice the intersection divided by the sum of both mask areas. It is mathematically equivalent to the F1 score computed at the pixel level. Dice is popular in medical image segmentation because it handles class imbalance better than pixel accuracy and is easily differentiable as a training loss.</p>
+<pre><code class="language-python">import numpy as np\n\ndef compute_dice(pred, gt):\n    # pred and gt are binary arrays\n    intersection = (pred * gt).sum()\n    dice = 2 * intersection / (pred.sum() + gt.sum())\n    # equivalent to F1 score over pixels\n    return dice
+</code></pre>
+<p>Dice and IoU are monotonically related: Dice = 2*IoU / (1 + IoU). A Dice score of 0.9 corresponds to an IoU of 0.818. When both are reported, they rank models identically. In practice, Dice is preferred in medical literature while mIoU dominates autonomous driving benchmarks, so verify which convention your field uses before comparing across papers.</p>
+<h2>Panoptic Quality</h2>
+<p>Panoptic Quality unifies semantic and instance segmentation evaluation into one number. Introduced with the COCO Panoptic benchmark, PQ decomposes into Segmentation Quality (SQ) and Recognition Quality (RQ). Two segments are matched when their IoU exceeds 0.5. Unmatched predictions count as false positives and unmatched ground-truth segments as false negatives.</p>
+<pre><code class="language-python">def compute_pq(matched_ious, num_tp, num_fp, num_fn):\n    # SQ: mean IoU of matched segments (match if IoU &gt; 0.5)\n    sq = np.mean(matched_ious) if matched_ious else 0.0\n    # RQ: recognition quality (F1 of detections)\n    rq = num_tp / (num_tp + 0.5 * num_fp + 0.5 * num_fn)\n    # PQ = SQ * RQ\n    pq = sq * rq\n    return pq, sq, rq
+</code></pre>
+<p>SQ captures mask quality among matched pairs — it rewards tight, accurate segment boundaries. RQ captures detection quality and is equivalent to the F1 score of matched segments, penalizing both missed instances and spurious detections equally. A model with high SQ but low RQ produces accurate shapes for the segments it detects but misses many objects overall.</p>
+<h2>Boundary F1 Score</h2>
+<p>Boundary F1 evaluates how accurately a model localizes the edges between regions, independent of interior fill. It extracts boundary pixels by XOR-ing each mask with its morphologically dilated version, then computes precision and recall between predicted and ground-truth boundary pixel sets within a pixel tolerance. Standard benchmarks use a 2-pixel tolerance.</p>
+<pre><code class="language-python">from skimage.morphology import binary_dilation\nimport numpy as np\n\ndef compute_bf1(pred, gt):\n    pred_b = pred ^ binary_dilation(pred)\n    gt_b = gt ^ binary_dilation(gt)\n    prec = (pred_b &amp; gt_b).sum() / pred_b.sum()\n    rec = (pred_b &amp; gt_b).sum() / gt_b.sum()\n    BF1 = 2 * prec * rec / (prec + rec)\n    return BF1
+</code></pre>
+<p>BF1 is especially important when precise contours matter: medical segmentation (organ boundaries), autonomous driving (pedestrian silhouettes), and video object segmentation (temporal edge consistency). A model can achieve high mIoU by filling interior pixels correctly while still producing jagged, imprecise boundaries that fail downstream in production applications.</p>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Task</th>
+<th>Range</th>
+<th>Penalizes false positives</th>
+<th>Boundary sensitive</th>
+<th>Common benchmark</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>mIoU</td>
+<td>Semantic</td>
+<td>[0,1]</td>
+<td>Partially</td>
+<td>No</td>
+<td>PASCAL VOC, ADE20K</td>
+</tr>
+<tr>
+<td>Dice</td>
+<td>Medical / Semantic</td>
+<td>[0,1]</td>
+<td>Partially</td>
+<td>No</td>
+<td>Medical Segmentation Decathlon</td>
+</tr>
+<tr>
+<td>PQ</td>
+<td>Panoptic</td>
+<td>[0,1]</td>
+<td>Yes (via RQ)</td>
+<td>No</td>
+<td>COCO Panoptic</td>
+</tr>
+<tr>
+<td>AP_mask</td>
+<td>Instance</td>
+<td>[0,1]</td>
+<td>Yes</td>
+<td>No</td>
+<td>COCO Instance</td>
+</tr>
+<tr>
+<td>BF1</td>
+<td>Any</td>
+<td>[0,1]</td>
+<td>Yes</td>
+<td>Yes</td>
+<td>BSDS500</td>
+</tr>
+<tr>
+<td>FwIoU</td>
+<td>Semantic</td>
+<td>[0,1]</td>
+<td>Partially</td>
+<td>No</td>
+<td>Cityscapes</td>
+</tr>
+</tbody>
+</table>
+<p>AP_mask follows the COCO detection protocol: it averages over IoU thresholds from 0.5 to 0.95 in 0.05 steps and over object size categories (small, medium, large), making it the strictest instance-level metric. FwIoU weights each class IoU by its pixel frequency, making it sensitive to common classes rather than rare ones, unlike standard mIoU.</p>
+<h2>Key Takeaways</h2>
+<p>Choose your metric based on the task: mIoU for semantic segmentation benchmarks, Dice for medical applications, PQ for panoptic tasks, AP_mask for instance segmentation, and BF1 when boundary accuracy is critical. No single metric captures all failure modes — always report at least two metrics and per-class breakdowns for class-imbalanced datasets.</p>
+<p>Metric choice also influences architecture decisions: Dice loss directly optimizes Dice score; cross-entropy optimizes pixel accuracy, not mIoU; differentiable soft-IoU losses improve mIoU at test time. Mismatches between training loss and evaluation metric are a common source of suboptimal performance in segmentation research — align them deliberately.</p>
+<p>Before publishing results, verify that your evaluation code handles edge cases: classes absent from a batch when computing mIoU, empty predicted masks in Dice, and the 0.5 IoU matching threshold convention in PQ. Reproducibility requires sharing not just the metric name but also exact preprocessing steps, ignore-label handling, and evaluation library version.</p>
+    </article>
+  </main>
+</body>
+</html>

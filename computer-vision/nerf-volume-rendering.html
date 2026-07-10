@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NeRF: Neural Radiance Fields for Novel View Synthesis | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>NeRF: Neural Radiance Fields for Novel View Synthesis</h1>
+      
+      <h1>NeRF: Neural Radiance Fields for Novel View Synthesis</h1>
+<h2>Overview</h2>
+<p>Neural Radiance Fields (NeRF) represent a 3D scene as a continuous volumetric function mapping 5D inputs (3D position x and 2D viewing direction d) to colour (r,g,b) and volume density σ. The function is parameterised by an MLP, and novel views are synthesised via differentiable volume rendering along rays cast through the scene from any camera pose.</p>
+<p>NeRF was introduced by Mildenhall et al. (ECCV 2020) and demonstrated photo-realistic novel view synthesis on bounded indoor and forward-facing outdoor scenes. It requires 20–100 posed images per scene, runs hours-long per-scene training, and renders at under 1 FPS. Subsequent work accelerates training (Instant-NGP, TensoRF) and rendering (3D Gaussian Splatting).</p>
+<h2>Volume Rendering Equation</h2>
+<p>To render a pixel, NeRF casts a ray from the camera through the pixel and samples N points along the ray. At each point the MLP predicts colour and density. The final pixel colour is computed by integrating colour weighted by transmittance — how much light survives from that sample to the camera — directly mimicking physically-based light transport through participating media.</p>
+<pre><code class="language-python">def volume_render(nerf_mlp, rays_o, rays_d, t_vals):
+    T, color = 1.0, torch.zeros(3)
+    for i in range(len(t_vals) - 1):
+        delta = t_vals[i+1] - t_vals[i]
+        x_i = rays_o + t_vals[i] * rays_d
+        sigma, rgb = nerf_mlp(x_i, rays_d)
+        alpha = 1 - torch.exp(-sigma * delta)
+        color = color + T * alpha * rgb
+        T = T * (1 - alpha)
+    return color
+</code></pre>
+<p>The discrete accumulation is fully differentiable. Transmittance T starts at 1 and is multiplied by (1−α) at each step, where α is derived from density and segment length. This physically-grounded formulation lets gradients flow back through the rendering loop to the MLP weights, enabling scene optimisation purely from 2D image observations without any explicit 3D supervision.</p>
+<h2>MLP Radiance Field</h2>
+<p>The NeRF MLP processes 3D position through 8 fully-connected ReLU layers (width 256). Viewing direction is injected after the 5th layer as a skip-connection input, separating view-independent geometry (density σ) from view-dependent appearance (rgb). This architecture lets the network model specular highlights and reflections that change with viewpoint without confusing them with geometry.</p>
+<p>The same MLP is shared across all points in the scene, making NeRF a compact implicit neural representation with no voxel-grid discretisation artefacts. Unlimited spatial resolution is theoretically available, but inference is slow because every point along every ray requires a separate MLP forward pass. The scene must be bounded, or mip-NeRF 360 extends it for unbounded backgrounds.</p>
+<h2>Positional Encoding</h2>
+<p>Neural networks approximate low-frequency functions by default due to spectral bias, failing to represent high-frequency geometry and texture. Positional encoding lifts 3D coordinates and viewing directions into a high-dimensional Fourier feature space, making it easy for the MLP to learn fine-grained detail. Without it, NeRF produces blurry reconstructions that miss sharp edges and fine texture.</p>
+<pre><code class="language-python">import torch, math
+
+def positional_encoding(x, L=10):
+    freqs = [2**i * math.pi for i in range(L)]
+    encoded = [x]
+    for f in freqs:
+        encoded += [torch.sin(f * x), torch.cos(f * x)]
+    return torch.cat(encoded, dim=-1)
+# Maps R^3 -&gt; R^(3*(2L+1)) = R^63 for L=10
+</code></pre>
+<pre><code class="language-python">def hierarchical_sample(rays, coarse_net, N_fine=128):
+    # Coarse pass: stratified uniform samples
+    t_coarse = sample_uniform(rays, N_coarse=64)
+    rgb_c, weights = render_coarse(coarse_net, rays, t_coarse)
+    # Fine pass: importance sample from coarse weights
+    t_fine = sample_pdf(t_coarse, weights, N_fine)
+    t_all = torch.cat([t_coarse, t_fine], dim=-1).sort().values
+    rgb_f = render_fine(fine_net, rays, t_all)
+    return rgb_c, rgb_f
+</code></pre>
+<p>Higher L in positional encoding captures finer detail but risks overfitting to training views. Mip-NeRF addresses aliasing by encoding integrated positional encodings (IPE) over conical frustums rather than point samples, producing anti-aliased renderings at multiple scales and eliminating the floater artefacts and blurring common in vanilla NeRF when training images vary in resolution.</p>
+<h2>Instant-NGP Acceleration</h2>
+<p>Vanilla NeRF's large MLP is queried millions of times per training step, making it very slow. Instant-NGP replaces the deep MLP with a multi-resolution hash grid of trainable feature vectors decoded by a tiny 2-layer MLP. Features from up to 16 hash grid levels are concatenated and processed at near-memory-bandwidth speeds, reducing training from many hours to under five minutes.</p>
+<blockquote>
+<p>****: NeRF requires per-scene optimization — each scene trains a separate MLP from scratch. Generalizable NeRFs (PixelNeRF, MVSNeRF) condition on source images but have lower quality. Instant-NGP's hash grid cuts training from days to minutes without sacrificing quality.</p>
+</blockquote>
+<pre><code class="language-python"># Instant-NGP: multi-resolution hash grid + tiny MLP
+import tinycudann as tcnn
+
+hash_grid = tcnn.Encoding(n_input_dims=3, encoding_config={
+    &quot;otype&quot;: &quot;HashGrid&quot;, &quot;n_levels&quot;: 16,
+    &quot;n_features_per_level&quot;: 2, &quot;log2_hashmap_size&quot;: 19})
+tiny_mlp = tcnn.Network(n_input_dims=32, n_output_dims=4)
+
+def query(x, d):
+    h = hash_grid(x)
+    return tiny_mlp(torch.cat([h, dir_encode(d)], dim=-1))
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Training time</th>
+<th>Render FPS</th>
+<th>PSNR (NeRF-Syn)</th>
+<th>Dynamic?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>NeRF</td>
+<td>1–2 days</td>
+<td>&lt;1</td>
+<td>31.0</td>
+<td>No</td>
+</tr>
+<tr>
+<td>Mip-NeRF</td>
+<td>2 days</td>
+<td>&lt;1</td>
+<td>33.1</td>
+<td>No</td>
+</tr>
+<tr>
+<td>NeRF++</td>
+<td>1–2 days</td>
+<td>&lt;1</td>
+<td>30.5</td>
+<td>No</td>
+</tr>
+<tr>
+<td>Instant-NGP</td>
+<td>3–5 min</td>
+<td>10–30</td>
+<td>33.2</td>
+<td>No</td>
+</tr>
+<tr>
+<td>TensoRF</td>
+<td>10–30 min</td>
+<td>5–20</td>
+<td>33.1</td>
+<td>No</td>
+</tr>
+</tbody>
+</table>
+<p>TensoRF achieves similar speed gains by decomposing the radiance field tensor into compact vector-matrix factors, dramatically reducing parameter count versus full voxel grids. Both Instant-NGP and TensoRF paved the way for 3D Gaussian Splatting, which eliminates ray marching entirely, replacing the implicit field with explicit, directly-rendered 3D Gaussian primitives for real-time speeds.</p>
+<h2>Key Takeaways</h2>
+<p>NeRF's core contribution is turning 3D scene representation into a continuous regression problem solvable with standard gradient descent. The differentiable volume rendering integral provides a physically-grounded loss between rendered and observed pixels. This formulation is now the foundation of most 3D generative models including DreamFusion, Zero-1-to-3, and Gaussian-based generation pipelines.</p>
+<p>Positional encoding and hierarchical sampling are the two engineering tricks behind vanilla NeRF's success. Without Fourier features the MLP cannot represent fine-grained geometry or texture. Without hierarchical sampling, compute is wasted on empty space. Both ideas persist in accelerated variants like Instant-NGP, Zip-NeRF, and even inform the densification heuristic in 3D Gaussian Splatting.</p>
+<p>The NeRF ecosystem matured rapidly: generalised NeRFs (PixelNeRF, MVSNeRF) condition on source images for zero-shot synthesis; dynamic NeRFs (D-NeRF, HyperNeRF) handle deformable scenes; latent diffusion models generate NeRF weights from text. Despite being superseded for rendering speed by 3DGS, NeRF remains the conceptual backbone of modern neural rendering research.</p>
+    </article>
+  </main>
+</body>
+</html>

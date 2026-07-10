@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MobileNet: Lightweight CNNs for Edge Deployment | Notes Backup</title>
+  <meta name="description" content="Depthwise separable convolutions in MobileNetV1, the inverted residual block in MobileNetV2, and hard-swish + SE modules in MobileNetV3 — optimized for mobile and edge inference." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>MobileNet: Lightweight CNNs for Edge Deployment</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Depthwise separable convolutions in MobileNetV1, the inverted residual block in MobileNetV2, and hard-swish + SE modules in MobileNetV3 — optimized for mobile and edge inference.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>MobileNet: Lightweight CNNs for Edge Deployment</h1>
+<h2>Overview</h2>
+<p>MobileNet is a family of efficient CNNs designed for mobile and embedded applications. V1 (2017) introduced depthwise separable convolutions to cut compute dramatically. V2 (2018) added inverted residuals with linear bottlenecks. V3 (2019) incorporated neural architecture search, hard-swish activation, and squeeze-and-excitation modules to further boost accuracy-per-FLOP.</p>
+<p>The MobileNet series prioritizes real-world deployability over raw benchmark accuracy. All three versions are quantization-friendly, widely supported in TFLite, CoreML, and ONNX Runtime, and serve as backbones for detection (SSD, YOLO), segmentation (DeepLab), and classification on devices ranging from Raspberry Pi to Apple Neural Engine.</p>
+<h2>Depthwise Separable Convolution</h2>
+<p>A standard conv with kernel K×K on C_in channels to C_out channels costs K²·C_in·C_out FLOPs per spatial position. Depthwise separable convolution splits this into a depthwise step (one filter per input channel, K²·C_in) and a pointwise step (1×1 conv, C_in·C_out). The FLOPs ratio vs standard conv is 1/C_out + 1/K², roughly 8–9× cheaper for K=3.</p>
+<pre><code class="language-python">import torch.nn as nn
+
+def dw_sep_block(C_in, C_out, stride=1):
+    return nn.Sequential(
+        # Depthwise: groups=C_in applies one filter per channel
+        nn.Conv2d(C_in, C_in, 3, stride=stride, padding=1, groups=C_in, bias=False),
+        nn.BatchNorm2d(C_in),
+        nn.ReLU6(inplace=True),
+        # Pointwise: 1×1 conv mixes channels
+        nn.Conv2d(C_in, C_out, 1, bias=False),
+        nn.BatchNorm2d(C_out),
+        nn.ReLU6(inplace=True),
+    )
+# FLOPs ratio vs standard conv: 1/C_out + 1/K²
+# For K=3, C_out=32: ratio ≈ 1/32 + 1/9 ≈ 0.14  (≈7× cheaper)
+</code></pre>
+<p>MobileNetV1 stacks 13 such depthwise separable blocks with a width multiplier α ∈ {0.25, 0.5, 0.75, 1.0} that uniformly scales channels, and a resolution multiplier ρ that scales input size. Together they allow an accuracy-latency trade-off tunable to the target hardware without retraining the entire architecture from scratch.</p>
+<h2>MobileNetV2 Inverted Residual</h2>
+<p>V2 flips the traditional residual design. Where ResNet bottlenecks compress to a narrow middle layer, MobileNetV2 expands channel count by factor t (typically 6) before the depthwise convolution, then projects back down. This keeps the depthwise conv operating in a rich high-dimensional space while the skip connection runs in the compact low-dimensional bottleneck space.</p>
+<pre><code class="language-python">class InvertedResidual(nn.Module):
+    def __init__(self, C_in, C_out, stride, expand_ratio=6):
+        super().__init__()
+        C_mid = C_in * expand_ratio
+        self.use_skip = (stride == 1 and C_in == C_out)
+        self.conv = nn.Sequential(
+            nn.Conv2d(C_in, C_mid, 1, bias=False), nn.BatchNorm2d(C_mid), nn.ReLU6(inplace=True),
+            nn.Conv2d(C_mid, C_mid, 3, stride=stride, padding=1, groups=C_mid, bias=False), nn.BatchNorm2d(C_mid), nn.ReLU6(inplace=True),
+            # Linear bottleneck: NO ReLU after project — preserves information
+            nn.Conv2d(C_mid, C_out, 1, bias=False), nn.BatchNorm2d(C_out),
+        )
+    def forward(self, x):
+        return x + self.conv(x) if self.use_skip else self.conv(x)
+</code></pre>
+<p>The linear bottleneck (no ReLU after the final 1×1) is crucial: applying a non-linearity in low-dimensional space destroys information. Skip connections apply only when stride=1 and input/output channels match, preserving gradient flow without inflating parameter count. This design achieves ImageNet Top-1 of 72.0% at only 300M FLOPs, half the compute of V1.</p>
+<h2>MobileNetV3 Hard-Swish and SE</h2>
+<p>MobileNetV3 (2019) was co-designed with neural architecture search using MnasNet as a starting point, then refined with NetAdapt. Two variants exist: V3-Large targeting high accuracy and V3-Small targeting extreme efficiency. The architecture introduces hard-swish activation and squeeze-and-excitation (SE) channel attention, both absent in V1 and V2.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+# Hard-swish: piecewise linear approximation of swish
+def hard_swish(x):
+    return x * F.hardtanh(x + 3, 0.0, 6.0) / 6.0
+    # Equivalent: x * min(max(x+3, 0), 6) / 6
+
+x = torch.linspace(-4, 4, 9)
+print(&quot;x         :&quot;, x.numpy().round(1))
+print(&quot;ReLU      :&quot;, F.relu(x).numpy().round(3))
+print(&quot;Swish     :&quot;, (x * torch.sigmoid(x)).numpy().round(3))
+print(&quot;Hard-swish:&quot;, hard_swish(x).numpy().round(3))
+# Hard-swish: ~15% faster than swish (no sigmoid), accuracy parity on ImageNet
+</code></pre>
+<p>Squeeze-and-excitation adds a lightweight channel attention gate: global average pool → FC(C/4) → ReLU → FC(C) → hard-sigmoid. This recalibrates feature maps by learning which channels are most informative. V3 applies SE only in later blocks to limit latency cost, since SE with large channel counts is expensive on mobile CPUs lacking wide SIMD units.</p>
+<h2>Deployment and Latency</h2>
+<p>FLOPs are a useful proxy for model complexity but correlate poorly with real inference latency on mobile hardware. Memory bandwidth, cache pressure, operator fusion, and hardware-specific kernels all play larger roles. TFLite with full-integer quantization (INT8) typically delivers 2–4× speedup over FP32 on ARM Cortex-A CPUs, with further gains on NPUs and DSPs.</p>
+<pre><code class="language-python">import torch
+import torchvision.models as models
+from torch.utils.benchmark import Timer
+
+def benchmark(model, shape=(1,3,224,224), n=100):
+    model.eval()
+    x = torch.randn(*shape)
+    t = Timer(stmt=&quot;model(x)&quot;, globals={&quot;model&quot;: model, &quot;x&quot;: x})
+    return t.timeit(n).mean * 1e3  # ms
+
+bench = {&quot;V2-1.0&quot;: models.mobilenet_v2(),
+         &quot;V3-Small&quot;: models.mobilenet_v3_small(),
+         &quot;V3-Large&quot;: models.mobilenet_v3_large()}
+for k, m in bench.items():
+    print(f&quot;{k}: {benchmark(m):.1f} ms&quot;)
+</code></pre>
+<blockquote>
+<p><strong>FLOPs ≠ Mobile Latency</strong>: FLOPs do not predict mobile latency — memory bandwidth, quantization support, and kernel fusion determine real speed. Always benchmark on the actual target device with TFLite or CoreML.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>On a Pixel 4 CPU (ARM Cortex-A76), V3-Small at 22 ms is roughly 5× faster than V1 at 113 ms while reaching similar accuracy. V3-Large matches EfficientNet-Lite0 accuracy at nearly half the latency. After INT8 quantization via TFLite, all models see a 2–3× speedup, with V3-Small dropping below 10 ms — fast enough for real-time video at 30 fps on mid-range devices.</p>
+<h2>Key Takeaways</h2>
+<p>Choose V3-Small when power budget or memory is the primary constraint — it runs under 10 ms on-device after INT8 quantization at ~67% ImageNet Top-1. V3-Large is the default starting point for new mobile projects: it matches EfficientNet-Lite0 accuracy at lower latency and is natively supported in PyTorch, TensorFlow, and MediaPipe.</p>
+<p>When adapting MobileNets to a custom task via transfer learning, freeze all depthwise conv weights in early blocks and fine-tune only the pointwise layers and the final classifier. This reduces training cost dramatically because depthwise filters learn low-level edge detectors that transfer universally, while pointwise mixers encode task-specific semantics.</p>
+<p>For production deployment, export with torch.export or tf.lite.TFLiteConverter, enable per-channel quantization (more accurate than per-tensor for pointwise layers), and profile layer-by-layer with the TFLite benchmark tool or Instruments on iOS. Squeeze-and-excitation blocks are the main latency hotspot — consider disabling SE on devices without vector units.</p>
+    </article>
+  </main>
+</body>
+</html>

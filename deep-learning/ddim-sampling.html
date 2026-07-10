@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DDIM — Deterministic Sampling for Diffusion Models | Notes Backup</title>
+  <meta name="description" content="Understand why DDPM requires 1000 steps and how DDIM achieves 10-50x speedup via a non-Markovian forward process, implement the DDIM update rule, deterministic vs stochastic sampling, DDIM inversion for real image encoding, and compare sampler quality-speed tradeoffs." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>DDIM — Deterministic Sampling for Diffusion Models</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Understand why DDPM requires 1000 steps and how DDIM achieves 10-50x speedup via a non-Markovian forward process, implement the DDIM update rule, deterministic vs stochastic sampling, DDIM inversion for real image encoding, and compare sampler quality-speed tradeoffs.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>DDIM — Deterministic Sampling for Diffusion Models</h1>
+<p>DDPM achieves excellent sample quality but requires T=1000 sequential denoising steps — each a full neural network forward pass. At 512×512 resolution, this makes generation take seconds to minutes. DDIM (Song et al. 2020) solves this without retraining: it reinterprets the DDPM forward process as non-Markovian, deriving an alternative reverse process that shares the same training objective but can skip steps. The result: 50 DDIM steps routinely match DDPM at 1000 steps, giving a 20× speedup with the same trained model.</p>
+<h2>DDPM Sampling Bottleneck</h2>
+<p>DDPM's reverse process is Markovian: p_θ(x_{t-1}|x_t) depends only on x_t. The full chain x_T → x_{T-1} → ... → x_0 requires all T=1000 steps to be traversed sequentially — skipping steps breaks the Markov assumption and produces low-quality samples. Each step requires one neural network evaluation, so generation time scales linearly with T. On an A100 GPU, generating a single 512×512 image takes ~30 seconds at T=1000. Accelerating sampling without degrading quality is one of the most practically important problems in diffusion model research.</p>
+<h2>DDIM — Non-Markovian Forward Process</h2>
+<p>DDIM defines a family of non-Markovian forward processes q_σ(x_{1:T}|x_0) parameterized by σ, all sharing the same marginals q(x_t|x_0) = N(x_t; √ᾱ_t·x_0, (1−ᾱ_t)I) as DDPM. Because the marginals are identical, the training objective ‖ε_θ(x_t,t) − ε‖² is unchanged — any DDPM-trained model can be used directly with DDIM sampling. The key insight is that the reverse process can be derived for any sub-sequence τ = {τ_1, ..., τ_S} ⊂ {1, ..., T}, allowing S ≪ T denoising steps.</p>
+<h2>DDIM Update Rule</h2>
+<p>The DDIM update from x_t to x_{t-1} is: x_{t-1} = √ᾱ_{t-1}·x̂<em t-1="t-1">0 + √(1−ᾱ</em>−σ_t²)·ε_θ(x_t,t) + σ_t·ε, where x̂<em t-1="t-1">0 = (x_t − √(1−ᾱ_t)·ε_θ(x_t,t))/√ᾱ_t is the predicted clean image. Setting σ_t=0 yields a fully deterministic update (DDIM proper). Setting σ_t = √((1−ᾱ</em>) recovers DDPM. The parameter σ_t interpolates between deterministic and fully stochastic sampling, giving fine-grained control over the sample diversity.})/(1−ᾱ_t))·√(1−ᾱ_t/ᾱ_{t-1</p>
+<pre><code class="language-python">import torch
+import numpy as np
+
+def make_schedule(T=1000, beta_start=1e-4, beta_end=0.02):
+    betas = torch.linspace(beta_start, beta_end, T)
+    alphas = 1.0 - betas
+    alpha_bar = torch.cumprod(alphas, dim=0)
+    return alpha_bar
+
+def ddim_step(x_t, eps_pred, t, t_prev, alpha_bar, eta=0.0):
+    &quot;&quot;&quot;Single DDIM update: x_t -&gt; x_{t_prev}. eta=0: deterministic.&quot;&quot;&quot;
+    ab_t = alpha_bar[t]
+    ab_p = alpha_bar[t_prev] if t_prev &gt;= 0 else torch.ones_like(ab_t)
+    x0_pred = (x_t - torch.sqrt(1 - ab_t) * eps_pred) / torch.sqrt(ab_t)
+    x0_pred = x0_pred.clamp(-1.0, 1.0)
+    sigma = eta * torch.sqrt((1 - ab_p) / (1 - ab_t) * (1 - ab_t / ab_p))
+    dir_xt = torch.sqrt(torch.clamp(1 - ab_p - sigma**2, min=0)) * eps_pred
+    noise = sigma * torch.randn_like(x_t) if eta &gt; 0 else 0.0
+    return torch.sqrt(ab_p) * x0_pred + dir_xt + noise
+
+torch.manual_seed(0)
+alpha_bar = make_schedule(T=1000)
+# Build 50-step sub-sequence
+ddim_steps = list(range(0, 1000, 20))[::-1]  # [980, 960, ..., 0]
+print(f'DDIM uses {len(ddim_steps)} steps vs DDPM 1000 steps')
+print(f'Sub-sequence (first 5): {ddim_steps[:5]}')
+print(f'Speedup factor: {1000 // len(ddim_steps)}x')
+</code></pre>
+<h2>Deterministic vs Stochastic DDIM</h2>
+<p>The η parameter (eta) controls stochasticity in DDIM. At η=0, each denoising step is deterministic — the same initial noise x_T always produces the same final image. This determinism is a powerful property: it enables image editing (interpolate in x_T space), and it means DDIM is an implicit generative model with a fixed mapping from noise to images. At η=1, the variance matches DDPM exactly. Intermediate η values trade diversity for determinism. In practice, η=0 (DDIM) gives the best FID at low step counts; η=1 (DDPM) may give slightly better diversity at high step counts.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+
+def ddim_sampling(eps_model, shape, alpha_bar, timesteps, eta=0.0, seed=0):
+    &quot;&quot;&quot;Full DDIM sampling loop. eta=0: deterministic, eta=1: DDPM-like.&quot;&quot;&quot;
+    torch.manual_seed(seed)
+    x = torch.randn(shape)
+    for i in range(len(timesteps) - 1):
+        t = timesteps[i]
+        t_prev = timesteps[i + 1]
+        ab_t = alpha_bar[t]
+        ab_p = alpha_bar[t_prev]
+        t_batch = torch.full((shape[0],), t, dtype=torch.long)
+        eps = eps_model(x, t_batch)
+        x0_pred = (x - torch.sqrt(1 - ab_t) * eps) / torch.sqrt(ab_t)
+        x0_pred = x0_pred.clamp(-1, 1)
+        sigma = eta * torch.sqrt((1 - ab_p) / (1 - ab_t) * (1 - ab_t / ab_p))
+        dir_xt = torch.sqrt(torch.clamp(1 - ab_p - sigma**2, min=0)) * eps
+        noise = sigma * torch.randn_like(x) if eta &gt; 0 else 0.0
+        x = torch.sqrt(ab_p) * x0_pred + dir_xt + noise
+    return x
+
+class ToyEpsModel(torch.nn.Module):
+    def forward(self, x, t): return x * 0.1  # near-zero eps for demo
+
+eps_model = ToyEpsModel()
+alpha_bar = torch.cumprod(1 - torch.linspace(1e-4, 0.02, 1000), dim=0)
+timesteps = list(range(0, 1000, 20))[::-1]
+for eta in [0.0, 0.5, 1.0]:
+    x1 = ddim_sampling(eps_model, (4, 8), alpha_bar, timesteps, eta=eta, seed=42)
+    x2 = ddim_sampling(eps_model, (4, 8), alpha_bar, timesteps, eta=eta, seed=42)
+    same = torch.allclose(x1, x2, atol=1e-5)
+    print(f'eta={eta}: deterministic={same}, sample norm={x1.norm():.3f}')
+</code></pre>
+<h2>Sub-Sequence Sampling</h2>
+<p>DDIM can use any increasing sub-sequence τ ⊆ {1,...,T} of timesteps, not necessarily uniformly spaced. Uniform spacing (every T/S steps) works well for most cases. For images with complex high-frequency structure, front-loading more steps near t=T (where most noise is removed) and fewer near t=0 can give better FID at the same budget. The DDIM update is valid for any choice of τ — the marginals ᾱ_{τ_i} are all defined by the training schedule, so any sub-sequence inherits the correct statistical properties.</p>
+<h2>DDIM Inversion</h2>
+<p>Because η=0 DDIM is deterministic, its reverse is also (approximately) deterministic. DDIM inversion encodes a real image x_0 into a latent noise code z ≈ x_T by running the process forward: x_{t+1} ≈ √ᾱ_{t+1}·x̂<em t_1="t+1">0 + √(1−ᾱ</em>)·ε_θ(x_t,t). This is only approximate (the epsilon network is queried on noisy inputs x_t rather than x_0), but in practice gives near-perfect reconstruction in 50 steps. DDIM inversion is the core of most diffusion-based image editing methods: invert to get z, manipulate in the noise space or via attention, then regenerate.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+
+@torch.no_grad()
+def ddim_inversion(eps_model, x0, alpha_bar, timesteps):
+    &quot;&quot;&quot;Encode real image x0 to approximate noise via reverse DDIM.&quot;&quot;&quot;
+    # timesteps should be ascending for inversion (t=0 -&gt; t=T)
+    fwd_steps = list(reversed(timesteps))  # [0, 20, 40, ..., 980]
+    x = x0.clone()
+    for i in range(len(fwd_steps) - 1):
+        t = fwd_steps[i]
+        t_next = fwd_steps[i + 1]
+        ab_t = alpha_bar[t]
+        ab_next = alpha_bar[t_next]
+        t_batch = torch.full((x.shape[0],), t, dtype=torch.long)
+        eps = eps_model(x, t_batch)
+        # Predict x0, then step forward
+        x0_pred = (x - torch.sqrt(1 - ab_t) * eps) / torch.sqrt(ab_t)
+        x0_pred = x0_pred.clamp(-1, 1)
+        x = torch.sqrt(ab_next) * x0_pred + torch.sqrt(1 - ab_next) * eps
+    return x  # approximate x_T (should be ~N(0,I))
+
+alpha_bar = torch.cumprod(1 - torch.linspace(1e-4, 0.02, 1000), dim=0)
+timesteps = list(range(0, 1000, 20))[::-1]
+class ZeroEps(torch.nn.Module):
+    def forward(self, x, t): return torch.zeros_like(x)
+x_real = torch.randn(2, 4) * 0.2  # simulated image features
+z = ddim_inversion(ZeroEps(), x_real, alpha_bar, timesteps)
+print(f'Input norm: {x_real.norm():.4f}')
+print(f'Inverted z norm: {z.norm():.4f}  (close to input since eps~=0)')
+</code></pre>
+<h2>Comparing Samplers</h2>
+<pre><code class="language-python">import torch
+import time
+import numpy as np
+
+def measure_sampling_time(n_steps, D=64, B=4, n_trials=3):
+    &quot;&quot;&quot;Measure wall-clock time for a given number of denoising steps.&quot;&quot;&quot;
+    alpha_bar = torch.cumprod(1 - torch.linspace(1e-4, 0.02, 1000), dim=0)
+    timesteps = list(range(0, 1000, 1000 // n_steps))[::-1][:n_steps]
+
+    class EpsNet(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.fc = torch.nn.Linear(D, D)
+        def forward(self, x, t): return self.fc(x)
+
+    model = EpsNet()
+    times = []
+    for _ in range(n_trials):
+        torch.manual_seed(0)
+        x = torch.randn(B, D)
+        t0 = time.perf_counter()
+        with torch.no_grad():
+            for i in range(len(timesteps) - 1):
+                t, t_p = timesteps[i], timesteps[i+1]
+                eps = model(x, torch.full((B,), t, dtype=torch.long))
+                ab = alpha_bar[t]; ab_p = alpha_bar[t_p]
+                x0 = (x - torch.sqrt(1-ab)*eps) / torch.sqrt(ab)
+                x = torch.sqrt(ab_p)*x0 + torch.sqrt(1-ab_p)*eps
+        times.append(time.perf_counter() - t0)
+    return float(np.mean(times))
+
+for n_steps in [1000, 100, 50, 20]:
+    t = measure_sampling_time(n_steps)
+    print(f'{n_steps:4d} steps: {t*1000:.1f} ms  (relative: {t/measure_sampling_time(1000)*100:.1f}%)')
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Sampler</th>
+<th>Steps needed</th>
+<th>Deterministic</th>
+<th>Inversion</th>
+<th>FID at N steps</th>
+<th>Key limitation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DDPM (Ho et al. 2020)</td>
+<td>1000 (Markovian chain)</td>
+<td>No — stochastic each step</td>
+<td>No</td>
+<td>~3.2 at 1000 steps</td>
+<td>Very slow; cannot skip steps</td>
+</tr>
+<tr>
+<td>DDIM (Song et al. 2020)</td>
+<td>50–100 (any sub-seq)</td>
+<td>Yes (η=0)</td>
+<td>Yes — near exact</td>
+<td>~4.0 at 50 steps</td>
+<td>Slightly blurry at very low steps</td>
+</tr>
+<tr>
+<td>DPM-Solver (Lu et al. 2022)</td>
+<td>10–20 (ODE solver)</td>
+<td>Yes</td>
+<td>Approximate</td>
+<td>~3.5 at 20 steps</td>
+<td>Complex implementation</td>
+</tr>
+<tr>
+<td>PNDM (Liu et al. 2022)</td>
+<td>50 (pseudo-linear)</td>
+<td>Yes</td>
+<td>No</td>
+<td>~3.3 at 50 steps</td>
+<td>Requires 4 prior steps to warm up</td>
+</tr>
+</tbody>
+</table>
+<p>For most production deployments, DDIM at 50 steps provides the best balance of speed and quality. DPM-Solver is preferred when step count must go below 20. DDIM inversion is essential for editing workflows. The key takeaway is that all these samplers use the same trained epsilon network — only the update rule and step schedule differ.</p>
+<blockquote>
+<p><strong>DDIM Inversion for Image Editing</strong>: To edit a real image with a diffusion model: (1) Invert the image with DDIM inversion (50 steps, η=0) to obtain a noise code z. (2) Modify the generation process — swap text prompts, adjust attention maps, or blend noise codes. (3) Regenerate with DDIM sampling from z. The near-determinism of DDIM inversion ensures the reconstruction is faithful and the edit is localized.</p>
+</blockquote>
+<ul>
+<li>DDIM shares the DDPM training objective — any DDPM-trained model works as a DDIM sampler with no retraining.</li>
+<li>The DDIM update reformulates denoising as: predict x_0 from x_t, then re-noise to x_{t_prev}.</li>
+<li>η=0: fully deterministic; η=1: DDPM-equivalent stochastic; η∈(0,1): interpolated.</li>
+<li>Sub-sequence τ can be any increasing subset of {1,...,T} — uniform spacing works well in practice.</li>
+<li>DDIM inversion enables real image encoding: invert x_0 → z_T, edit, regenerate — the basis of most editing methods.</li>
+<li>DPM-Solver and PNDM improve on DDIM using higher-order ODE solvers, achieving quality at 10–20 steps.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

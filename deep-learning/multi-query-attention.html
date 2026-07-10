@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Multi-Query Attention (MQA) — Single KV Head for Fast Inference | Notes Backup</title>
+  <meta name="description" content="MQA shares a single key-value head across all query heads, shrinking KV cache by h×, reducing memory bandwidth pressure, and enabling faster autoregressive decoding at minimal quality cost." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Multi-Query Attention (MQA) — Single KV Head for Fast Inference</h1>
+      <ul class='note-meta'><li><strong>description:</strong> MQA shares a single key-value head across all query heads, shrinking KV cache by h×, reducing memory bandwidth pressure, and enabling faster autoregressive decoding at minimal quality cost.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Multi-Query Attention (MQA) — Single KV Head for Fast Inference</h1>
+<p>Standard multi-head attention (MHA) uses h independent query, key, and value projections — one per head. During autoregressive inference the KV cache grows linearly with sequence length and must be read from GPU memory at every generation step, making memory bandwidth the primary bottleneck. Multi-Query Attention (MQA, Shazeer 2019) shares a single key and value head across all h query heads. This reduces the KV cache size by h× without changing the number of query heads or the attention computation structure, yielding significantly faster decode throughput with only a small quality degradation.</p>
+<h2>Standard Multi-Head Attention Recap</h2>
+<p>In MHA with h heads, each of dimension d_head = d_model/h, there are three projection matrices per head: W_Q^i, W_K^i, W_V^i ∈ ℝ^{d_model×d_head}. Total KV projection parameters: 2 × h × d_model × d_head = 2 × d_model². During inference, the KV cache for a single layer stores h × T × d_head keys and h × T × d_head values, totalling 2 × h × T × d_head elements = 2 × T × d_model elements per layer. Across L layers this is 2 × L × T × d_model parameters — for LLaMA-2-70B (L=80, d=8192, T=4096) this is ~40 GB in float16.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class MultiQueryAttention(nn.Module):
+    &quot;&quot;&quot;
+    MQA: h query heads but a single shared K and V head.
+    KV cache is h times smaller than MHA.
+    &quot;&quot;&quot;
+    def __init__(self, d_model=512, n_heads=8):
+        super().__init__()
+        self.n_heads = n_heads
+        self.d_head = d_model // n_heads
+        # Separate Q projection per head
+        self.q_proj = nn.Linear(d_model, d_model, bias=False)       # h * d_head
+        # Single shared K and V projection (only 1 head)
+        self.k_proj = nn.Linear(d_model, self.d_head, bias=False)   # 1 head
+        self.v_proj = nn.Linear(d_model, self.d_head, bias=False)   # 1 head
+        self.out_proj = nn.Linear(d_model, d_model, bias=False)
+
+    def forward(self, x, mask=None):
+        B, T, C = x.shape
+        # Q: (B, h, T, d_head)
+        Q = self.q_proj(x).view(B, T, self.n_heads, self.d_head).transpose(1, 2)
+        # K, V: (B, 1, T, d_head) -- single head, broadcast across all query heads
+        K = self.k_proj(x).view(B, T, 1, self.d_head).transpose(1, 2)
+        V = self.v_proj(x).view(B, T, 1, self.d_head).transpose(1, 2)
+        att = (Q @ K.transpose(-2, -1)) * self.d_head ** -0.5  # K broadcasts to h
+        if mask is not None:
+            att = att.masked_fill(mask == 0, float('-inf'))
+        out = F.softmax(att, dim=-1) @ V  # V broadcasts to h
+        return self.out_proj(out.transpose(1, 2).contiguous().view(B, T, C))
+
+mqa = MultiQueryAttention(d_model=512, n_heads=8)
+x = torch.randn(2, 32, 512)
+print(f'Output: {mqa(x).shape}')  # (2, 32, 512)
+print(f'MQA params: {sum(p.numel() for p in mqa.parameters()):,}')
+</code></pre>
+<h2>KV Cache Size and Inference Throughput</h2>
+<p>The inference speedup from MQA comes from reduced memory bandwidth consumption. During decode, for each new token the GPU must load the entire KV cache from HBM. MHA loads 2 × h × T × d_head values per layer; MQA loads only 2 × T × d_head values — an h× reduction. For h=8 this is an 8× reduction in KV cache reads. On memory-bandwidth-limited hardware (all modern inference scenarios), this translates directly to proportionally higher throughput. The compute cost (matmul FLOPs) changes minimally because attention is computed with the same Q but the K/V broadcast is free.</p>
+<blockquote>
+<p><strong>Memory Bandwidth Is the Inference Bottleneck</strong>: During token-by-token decode, the GPU generates one token per forward pass. Each pass reads model weights (frozen, can be prefetched) and the entire KV cache (grows with sequence length). A100 80GB has 2 TB/s HBM bandwidth. For a 70B model with 40 GB KV cache at T=4096, loading the cache alone takes ~20 ms per token — yielding only ~50 tokens/second even at zero FLOP cost. MQA directly attacks this bottleneck.</p>
+</blockquote>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import time
+
+class MHADecode(nn.Module):
+    def __init__(self, d_model=512, n_heads=8):
+        super().__init__()
+        self.n_heads, self.d_head = n_heads, d_model // n_heads
+        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.proj = nn.Linear(d_model, d_model, bias=False)
+        self.k_cache = self.v_cache = None
+
+    def forward(self, x):
+        B, T, C = x.shape
+        q, k, v = self.qkv(x).split(C, dim=-1)
+        split = lambda t, h: t.view(B, T, h, C // h).transpose(1, 2)
+        q, k, v = split(q, self.n_heads), split(k, self.n_heads), split(v, self.n_heads)
+        self.k_cache = torch.cat([self.k_cache, k], dim=2) if self.k_cache is not None else k
+        self.v_cache = torch.cat([self.v_cache, v], dim=2) if self.v_cache is not None else v
+        att = F.softmax((q @ self.k_cache.transpose(-2, -1)) * self.d_head ** -0.5, dim=-1)
+        return self.proj((att @ self.v_cache).transpose(1, 2).contiguous().view(B, T, C))
+
+class MQADecode(nn.Module):
+    def __init__(self, d_model=512, n_heads=8):
+        super().__init__()
+        self.n_heads, self.d_head = n_heads, d_model // n_heads
+        self.q_proj = nn.Linear(d_model, d_model, bias=False)
+        self.k_proj = nn.Linear(d_model, d_model // n_heads, bias=False)  # single head
+        self.v_proj = nn.Linear(d_model, d_model // n_heads, bias=False)
+        self.proj = nn.Linear(d_model, d_model, bias=False)
+        self.k_cache = self.v_cache = None
+
+    def forward(self, x):
+        B, T, C = x.shape
+        q = self.q_proj(x).view(B, T, self.n_heads, self.d_head).transpose(1, 2)
+        k = self.k_proj(x).view(B, T, 1, self.d_head).transpose(1, 2)
+        v = self.v_proj(x).view(B, T, 1, self.d_head).transpose(1, 2)
+        self.k_cache = torch.cat([self.k_cache, k], dim=2) if self.k_cache is not None else k
+        self.v_cache = torch.cat([self.v_cache, v], dim=2) if self.v_cache is not None else v
+        att = F.softmax((q @ self.k_cache.transpose(-2, -1)) * self.d_head ** -0.5, dim=-1)
+        return self.proj((att @ self.v_cache).transpose(1, 2).contiguous().view(B, T, C))
+
+d_model, n_heads, T_prompt = 512, 8, 256
+mha_m, mqa_m = MHADecode(d_model, n_heads), MQADecode(d_model, n_heads)
+prompt = torch.randn(1, T_prompt, d_model)
+mha_m(prompt); mqa_m(prompt)  # fill cache
+mha_kv_mb = sum(c.numel() * 2 / 1e6 for c in [mha_m.k_cache, mha_m.v_cache])
+mqa_kv_mb = sum(c.numel() * 2 / 1e6 for c in [mqa_m.k_cache, mqa_m.v_cache])
+print(f'MHA KV cache: {mha_kv_mb:.2f} MB')
+print(f'MQA KV cache: {mqa_kv_mb:.2f} MB  ({mha_kv_mb/mqa_kv_mb:.1f}x smaller)')
+</code></pre>
+<h2>Grouped Query Attention (GQA)</h2>
+<p>Grouped Query Attention (Ainslie et al. 2023) interpolates between MHA (g=h groups) and MQA (g=1 group). With g groups, g sets of K,V projections are shared across h/g query heads each. GQA achieves quality close to MHA while reducing KV cache by h/g× — a tunable quality/memory trade-off. LLaMA-2-70B uses GQA with g=8 groups and h=64 heads (8 K/V heads total, 8 query heads per K/V head). Mistral-7B uses GQA with g=8 groups, n_heads=32, n_kv_heads=8. GQA can also be obtained by mean-pooling MHA checkpoint K/V heads for post-hoc conversion.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class GroupedQueryAttention(nn.Module):
+    &quot;&quot;&quot;
+    GQA: n_heads query heads grouped into n_kv_heads KV groups.
+    n_kv_heads=n_heads =&gt; MHA; n_kv_heads=1 =&gt; MQA.
+    &quot;&quot;&quot;
+    def __init__(self, d_model=512, n_heads=8, n_kv_heads=2):
+        super().__init__()
+        assert n_heads % n_kv_heads == 0
+        self.n_heads = n_heads
+        self.n_kv_heads = n_kv_heads
+        self.n_rep = n_heads // n_kv_heads  # query heads per KV group
+        self.d_head = d_model // n_heads
+        self.q_proj = nn.Linear(d_model, d_model, bias=False)
+        self.k_proj = nn.Linear(d_model, n_kv_heads * self.d_head, bias=False)
+        self.v_proj = nn.Linear(d_model, n_kv_heads * self.d_head, bias=False)
+        self.out_proj = nn.Linear(d_model, d_model, bias=False)
+
+    def forward(self, x):
+        B, T, C = x.shape
+        Q = self.q_proj(x).view(B, T, self.n_heads, self.d_head).transpose(1, 2)
+        K = self.k_proj(x).view(B, T, self.n_kv_heads, self.d_head).transpose(1, 2)
+        V = self.v_proj(x).view(B, T, self.n_kv_heads, self.d_head).transpose(1, 2)
+        # Repeat K,V for each group (interleaved)
+        K = K.repeat_interleave(self.n_rep, dim=1)  # (B, n_heads, T, d_head)
+        V = V.repeat_interleave(self.n_rep, dim=1)
+        att = F.softmax((Q @ K.transpose(-2, -1)) * self.d_head ** -0.5, dim=-1)
+        return self.out_proj((att @ V).transpose(1, 2).contiguous().view(B, T, C))
+
+x = torch.randn(2, 32, 512)
+for n_kv in [8, 4, 2, 1]:
+    m = GroupedQueryAttention(512, n_heads=8, n_kv_heads=n_kv)
+    label = 'MHA' if n_kv==8 else ('MQA' if n_kv==1 else 'GQA')
+    kv_params = sum(p.numel() for n,p in m.named_parameters() if '_proj' in n and n[0] in 'kv')
+    print(f'n_kv={n_kv} ({label}): KV params={kv_params:,}, out={m(x).shape}')
+</code></pre>
+<h2>Parameter Count Comparison</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def count_attention_params(d_model, n_heads, n_kv_heads, include_output=True):
+    &quot;&quot;&quot;Count parameters for Q, K, V, and output projections.&quot;&quot;&quot;
+    d_head = d_model // n_heads
+    q_params = n_heads * d_model * d_head     # Q: one per head
+    k_params = n_kv_heads * d_model * d_head  # K: one per KV group
+    v_params = n_kv_heads * d_model * d_head  # V: one per KV group
+    o_params = d_model * d_model if include_output else 0
+    total = q_params + k_params + v_params + o_params
+    kv_cache_per_tok = 2 * n_kv_heads * d_head  # K + V elements per token
+    return total, kv_cache_per_tok
+
+configs = [
+    ('MHA  h=32 kv=32',  4096, 32, 32),
+    ('GQA  h=32 kv=8',   4096, 32,  8),
+    ('GQA  h=32 kv=4',   4096, 32,  4),
+    ('MQA  h=32 kv=1',   4096, 32,  1),
+    ('MHA  h=64 kv=64',  8192, 64, 64),
+    ('GQA  h=64 kv=8',   8192, 64,  8),
+    ('MQA  h=64 kv=1',   8192, 64,  1),
+]
+
+print(f'{'Config':&lt;22} {'Params':&gt;10} {'KV/tok':&gt;8} {'KV Reduction':&gt;14}')
+base_kv = {4096: None, 8192: None}
+for name, d, h, kv in configs:
+    total, kv_per_tok = count_attention_params(d, h, kv)
+    mha_kv = 2 * (d // h) * h  # MHA baseline
+    reduction = mha_kv / kv_per_tok
+    print(f'{name:&lt;22} {total:&gt;10,} {kv_per_tok:&gt;8} {reduction:&gt;14.1f}x')
+</code></pre>
+<h2>Where MQA and GQA Are Used</h2>
+<p>MQA and GQA have been widely adopted as the default in production LLMs. The quality cost of MQA (vs MHA) is measured to be less than 5% degradation on most benchmarks, while throughput gains at long sequence lengths are substantial. GQA with n_kv_heads=8 has become the dominant choice for large models, offering most of MQA's efficiency while recovering quality closer to MHA.</p>
+<ul>
+<li>PaLM (540B, 2022): MQA — one of the first large-scale deployments.</li>
+<li>Falcon-7B and Falcon-40B: MQA by default.</li>
+<li>Mistral-7B (2023): GQA with n_kv_heads=8, n_heads=32.</li>
+<li>LLaMA-2-70B: GQA with n_kv_heads=8, n_heads=64.</li>
+<li>LLaMA-3 family: GQA across all sizes (8B, 70B, 405B).</li>
+<li>StarCoder (15B): MQA for fast code generation inference.</li>
+<li>Gemma-2 and Phi-3: GQA as standard.</li>
+</ul>
+<h2>Comparison: MHA vs MQA vs GQA</h2>
+<table>
+<thead>
+<tr>
+<th>Attribute</th>
+<th>MHA</th>
+<th>MQA</th>
+<th>GQA (g groups)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>K/V heads</td>
+<td>h (one per query head)</td>
+<td>1 (shared across all)</td>
+<td>g (g &lt; h, shared within group)</td>
+</tr>
+<tr>
+<td>KV cache size</td>
+<td>2 × h × T × d_head</td>
+<td>2 × T × d_head</td>
+<td>2 × g × T × d_head</td>
+</tr>
+<tr>
+<td>KV cache reduction</td>
+<td>1× (baseline)</td>
+<td>h× smaller</td>
+<td>h/g× smaller</td>
+</tr>
+<tr>
+<td>Inference throughput</td>
+<td>Baseline</td>
+<td>Up to h× faster (bandwidth bound)</td>
+<td>Between MHA and MQA</td>
+</tr>
+<tr>
+<td>Quality vs MHA</td>
+<td>Best quality</td>
+<td>~1-5% drop on benchmarks</td>
+<td>Negligible drop at g=8</td>
+</tr>
+<tr>
+<td>Parameter count</td>
+<td>Full (Q,K,V each d²)</td>
+<td>Q: d², K+V: 2×d×d_head</td>
+<td>Q: d², K+V: 2g×d×d_head</td>
+</tr>
+<tr>
+<td>Convert from MHA</td>
+<td>N/A</td>
+<td>Must retrain</td>
+<td>Can approximate by pooling heads</td>
+</tr>
+</tbody>
+</table>
+<h2>Training Considerations</h2>
+<p>MQA and GQA must typically be trained from scratch — converting a pretrained MHA model to MQA by naively sharing K/V weights degrades quality significantly. One exception: Ainslie et al. (2023) showed that GQA can be initialized from MHA by mean-pooling the K/V heads within each group and then fine-tuning for a small fraction of pretraining compute (~5%) to recover most of the quality gap. This uptrained GQA is now used in LLaMA-2-70B, which was initialized from MHA and then converted. The fine-tuning cost is approximately 5% of the original pretraining compute.</p>
+<p>When choosing between MHA, MQA, and GQA for a new model: for models under 7B parameters where KV cache pressure is low, MHA is safe and maximizes quality. For 7B–70B models deployed at scale with long context, GQA with g=8 is the current best practice — it cuts KV cache bandwidth by 8× with negligible quality loss. Pure MQA (g=1) is appropriate for extremely bandwidth-constrained inference (e.g., edge devices, batch size 1) where even GQA's small cache is too large.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

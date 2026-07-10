@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Data Augmentation — CutMix, MixUp, and RandAugment | Notes Backup</title>
+  <meta name="description" content="Modern data augmentation for CNNs: MixUp (image and label interpolation), CutMix (patch-based mixing with area-weighted labels), Cutout, RandAugment, AugMix, and TrivialAugment. Covers implementation, calibration improvement (ECE), and choosing the right strategy." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Data Augmentation — CutMix, MixUp, and RandAugment</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Modern data augmentation for CNNs: MixUp (image and label interpolation), CutMix (patch-based mixing with area-weighted labels), Cutout, RandAugment, AugMix, and TrivialAugment. Covers implementation, calibration improvement (ECE), and choosing the right strategy.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Data Augmentation — CutMix, MixUp, and RandAugment</h1>
+<p>Data augmentation is the most reliable regularization technique for CNNs: it artificially expands the training set by applying label-preserving transformations to training images. Standard augmentation (random crops, flips, color jitter) has been standard since AlexNet. Modern augmentation strategies go further — MixUp and CutMix mix images and labels together, RandAugment automates the selection of augmentation policies, and AugMix improves robustness to distribution shift. These techniques consistently improve both accuracy and calibration (how well confidence scores reflect true accuracy), making them important tools for production deployment.</p>
+<h2>Standard Augmentation Pipeline</h2>
+<p>The standard ImageNet augmentation pipeline: (1) RandomResizedCrop — randomly crop then resize to 224×224, sampling crop scale uniformly from [0.08, 1.0] and aspect ratio from [3/4, 4/3]; (2) RandomHorizontalFlip with p=0.5; (3) ColorJitter — randomly perturb brightness (0.4), contrast (0.4), saturation (0.4), hue (0.1); (4) Normalize with ImageNet mean [0.485, 0.456, 0.406] and std [0.229, 0.224, 0.225]. At test time: Resize to 256, CenterCrop 224, Normalize. This pipeline is the baseline for most classification models and can be implemented with 5 lines in torchvision.</p>
+<h2>MixUp — Image and Label Interpolation</h2>
+<p>MixUp (Zhang et al., ICLR 2018) creates training samples by linearly interpolating pairs of images AND their labels: x̃ = λxᵢ + (1-λ)xⱼ, ỹ = λyᵢ + (1-λ)yⱼ, where λ ~ Beta(α, α). The mixed image is a pixel-wise blend of two training images; the mixed label is a soft label combining the two class distributions. Training with MixUp prevents the model from being overconfident on any individual training example — it forces the model to output intermediate probabilities for mixed inputs, which improves calibration (ECE). MixUp consistently improves top-1 accuracy by 0.2–0.5% and reduces ECE by 30–50% relative. α=0.4 is the standard default.</p>
+<h2>CutMix — Patch-Based Mixing</h2>
+<p>CutMix (Yun et al., ICCV 2019) replaces a rectangular patch of one training image with the corresponding patch from another image, and mixes labels proportionally to the patch area: ỹ = λyᵢ + (1-λ)yⱼ where λ = 1 − (patch area)/(image area). Unlike MixUp which blends entire images, CutMix keeps both regions locally pure (no blending artifacts), which makes it compatible with object detection (MixUp creates objects-within-objects, confusing detectors). CutMix is generally preferred over MixUp for detection and segmentation tasks, and provides comparable benefits for classification. The bounding box is sampled uniformly, and the label mixing ratio is exact (area proportion).</p>
+<blockquote>
+<p><strong>MixUp vs CutMix: When to Use Which</strong>: Use MixUp for classification tasks where global image statistics matter and the model should interpolate between classes smoothly. Use CutMix for detection and segmentation tasks because it preserves spatial locality — the pasted region contains a real object patch, not a blended ghost. For a combined strategy: apply CutMix with probability p=0.5 and MixUp otherwise, which captures benefits of both. Both methods can be applied simultaneously in the same batch using different alpha values.</p>
+</blockquote>
+<h2>Code Examples</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+def mixup_data(x: torch.Tensor, y: torch.Tensor, alpha: float = 0.4):
+    &quot;&quot;&quot;MixUp: linearly interpolate image pairs and their labels.&quot;&quot;&quot;
+    lam = np.random.beta(alpha, alpha) if alpha &gt; 0 else 1.0
+    perm = torch.randperm(x.size(0), device=x.device)
+    x_mix  = lam * x + (1.0 - lam) * x[perm]
+    y_a, y_b = y, y[perm]
+    return x_mix, y_a, y_b, lam
+
+def mixup_criterion(criterion, pred, y_a, y_b, lam):
+    &quot;&quot;&quot;Mixed loss: lam * CE(pred, ya) + (1-lam) * CE(pred, yb).&quot;&quot;&quot;
+    return lam * criterion(pred, y_a) + (1.0 - lam) * criterion(pred, y_b)
+
+# Simulate one training batch with MixUp
+torch.manual_seed(0)
+np.random.seed(0)
+model     = nn.Linear(128, 10)
+criterion = nn.CrossEntropyLoss()
+x = torch.randn(32, 128)
+y = torch.randint(0, 10, (32,))
+
+x_mix, ya, yb, lam = mixup_data(x, y, alpha=0.4)
+pred = model(x_mix)
+loss = mixup_criterion(criterion, pred, ya, yb, lam)
+print(f&quot;Lambda:      {lam:.4f}&quot;)
+print(f&quot;x_mix is {lam:.1%} of x[i] + {(1-lam):.1%} of x[perm[i]]&quot;)
+print(f&quot;MixUp loss:  {loss.item():.4f}  (soft cross-entropy over two labels)&quot;)
+print(&quot;Effect: prevents overconfidence; improves calibration (lower ECE)&quot;)
+</code></pre>
+<pre><code class="language-python">import torch
+import numpy as np
+
+def rand_bbox(H: int, W: int, lam: float):
+    &quot;&quot;&quot;Sample a random bounding box with area proportion (1-lam).&quot;&quot;&quot;
+    cut_ratio = np.sqrt(1.0 - lam)
+    cut_h, cut_w = int(H * cut_ratio), int(W * cut_ratio)
+    cy, cx = np.random.randint(H), np.random.randint(W)
+    y1 = np.clip(cy - cut_h // 2, 0, H)
+    y2 = np.clip(cy + cut_h // 2, 0, H)
+    x1 = np.clip(cx - cut_w // 2, 0, W)
+    x2 = np.clip(cx + cut_w // 2, 0, W)
+    return y1, y2, x1, x2
+
+def cutmix_batch(x: torch.Tensor, y: torch.Tensor, alpha: float = 1.0):
+    &quot;&quot;&quot;CutMix: paste a rectangular crop from one image onto another.&quot;&quot;&quot;
+    lam = np.random.beta(alpha, alpha)
+    B, C, H, W = x.shape
+    perm = torch.randperm(B)
+    y1, y2, x1, x2 = rand_bbox(H, W, lam)
+    x_cut = x.clone()
+    x_cut[:, :, y1:y2, x1:x2] = x[perm, :, y1:y2, x1:x2]  # paste patch from perm
+    lam_actual = 1.0 - (y2 - y1) * (x2 - x1) / (H * W)    # actual area ratio
+    return x_cut, y, y[perm], lam_actual
+
+torch.manual_seed(1); np.random.seed(1)
+x = torch.randn(8, 3, 224, 224)
+y = torch.randint(0, 1000, (8,))
+x_cut, ya, yb, lam = cutmix_batch(x, y, alpha=1.0)
+print(f&quot;Input:  {x.shape}&quot;)
+print(f&quot;Output: {x_cut.shape}&quot;)
+print(f&quot;lam (actual area fraction): {lam:.4f}&quot;)
+print(f&quot;Label mix: {lam:.2%} ya + {1-lam:.2%} yb  (proportional to preserved area)&quot;)
+</code></pre>
+<pre><code class="language-python">import torch
+from torchvision import transforms
+from torchvision.transforms import RandAugment, AutoAugment
+
+# RandAugment(num_ops=N, magnitude=M)
+# Randomly picks N transforms from a pool of 14 at each step,
+# each applied with the same magnitude M (range 0-30; default M=9)
+rand_aug = RandAugment(num_ops=2, magnitude=9)
+
+# The 14 available operations in the pool:
+ops = [
+    'Identity', 'AutoContrast', 'Equalize', 'Rotate',
+    'Solarize', 'Color', 'Posterize', 'Contrast',
+    'Brightness', 'Sharpness', 'ShearX', 'ShearY',
+    'TranslateX', 'TranslateY',
+]
+print(f&quot;RandAugment pool: {len(ops)} operations&quot;)
+print(f&quot;Default: N=2 ops, M=9 magnitude (range 0-30)&quot;)
+print(f&quot;Only 2 hyperparameters vs 25+ for AutoAugment policy search&quot;)
+
+# Standard training pipeline with RandAugment
+train_transform = transforms.Compose([
+    transforms.RandomResizedCrop(224),
+    transforms.RandomHorizontalFlip(),
+    RandAugment(num_ops=2, magnitude=9),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+])
+print()
+print(&quot;Training pipeline: RandomResizedCrop -&gt; Flip -&gt; RandAugment(N=2,M=9) -&gt; Normalize&quot;)
+print(&quot;TrivialAugment: uniformly random op + magnitude -- simplest SOTA approach&quot;)
+</code></pre>
+<pre><code class="language-python">import torch
+import numpy as np
+
+def expected_calibration_error(probs: np.ndarray, labels: np.ndarray, n_bins: int = 10):
+    &quot;&quot;&quot;ECE: measure how well model confidence matches accuracy (lower is better).&quot;&quot;&quot;
+    confidences = probs.max(axis=1)
+    predictions = probs.argmax(axis=1)
+    correct = (predictions == labels).astype(float)
+    bin_edges = np.linspace(0, 1, n_bins + 1)
+    ece = 0.0
+    for lo, hi in zip(bin_edges[:-1], bin_edges[1:]):
+        mask = (confidences &gt; lo) &amp; (confidences &lt;= hi)
+        if mask.sum() == 0:
+            continue
+        acc  = correct[mask].mean()
+        conf = confidences[mask].mean()
+        ece += (mask.mean() * abs(acc - conf))
+    return ece
+
+# Simulated calibration results for different augmentation strategies
+results = [
+    ('No augmentation',      0.921, 0.043),
+    ('Basic (flip+crop)',    0.934, 0.031),
+    ('Cutout',               0.937, 0.026),
+    ('MixUp (alpha=0.4)',    0.941, 0.018),
+    ('CutMix (alpha=1.0)',   0.943, 0.015),
+    ('RandAugment (N=2,M=9)',0.946, 0.016),
+    ('AugMix',               0.944, 0.012),
+]
+
+print(f&quot;{'Method':&lt;28} {'Top-1 Acc':&gt;10} {'ECE':&gt;8}  Notes&quot;)
+print('-' * 65)
+for method, acc, ece in results:
+    note = 'best calibration' if ece == min(r[2] for r in results) else ''
+    print(f&quot;{method:&lt;28} {acc:&gt;9.3f}  {ece:&gt;7.3f}  {note}&quot;)
+print()
+print(&quot;ECE = Expected Calibration Error (lower = predictions are better calibrated)&quot;)
+print(&quot;MixUp/CutMix prevent overconfidence by training on mixed/interpolated labels&quot;)
+</code></pre>
+<h2>RandAugment and TrivialAugment</h2>
+<p>RandAugment (Cubuk et al., 2019) simplifies augmentation policy search to just two hyperparameters: N (number of operations to apply per image) and M (the shared magnitude of all operations). At each training step, N operations are sampled uniformly from a pool of 14 and applied sequentially with magnitude M. The key insight is that a shared magnitude is almost as good as per-operation magnitudes, dramatically reducing the search space. Default N=2, M=9 works well across most tasks. TrivialAugment (Müller &amp; Hutter, 2021) simplifies even further: sample one operation at random and sample its magnitude uniformly from the full range — zero hyperparameters to tune, often competitive with RandAugment.</p>
+<h2>AugMix and Robustness</h2>
+<p>AugMix (Hendrycks et al., 2020) is designed specifically to improve robustness to distribution shift, not just clean accuracy. It generates multiple augmented versions of each image using different randomly sampled augmentation chains, then mixes them with the original image using Dirichlet-sampled weights. A Jensen-Shannon consistency loss encourages the model to make consistent predictions across all augmented versions. AugMix improves performance on ImageNet-C (corrupted ImageNet) by 12–15% while maintaining clean accuracy. It is the preferred augmentation when robustness to real-world distribution shift (blur, noise, compression artifacts) matters.</p>
+<h2>Augmentation Method Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Label Mixing</th>
+<th>Detection Safe</th>
+<th>Training Overhead</th>
+<th>Calibration (ECE)</th>
+<th>Corruption Robustness</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Basic (flip + crop)</td>
+<td>No</td>
+<td>Yes</td>
+<td>None</td>
+<td>Poor</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>Cutout</td>
+<td>No</td>
+<td>Partial</td>
+<td>Minimal</td>
+<td>Moderate</td>
+<td>Moderate</td>
+</tr>
+<tr>
+<td>MixUp (α=0.4)</td>
+<td>Yes — linear blend</td>
+<td>No</td>
+<td>Minimal</td>
+<td>Good</td>
+<td>Moderate</td>
+</tr>
+<tr>
+<td>CutMix (α=1.0)</td>
+<td>Yes — area-weighted</td>
+<td>Yes</td>
+<td>Minimal</td>
+<td>Good</td>
+<td>Good</td>
+</tr>
+<tr>
+<td>RandAugment (N=2,M=9)</td>
+<td>No</td>
+<td>Yes</td>
+<td>Low (2 extra augments)</td>
+<td>Moderate</td>
+<td>High</td>
+</tr>
+<tr>
+<td>AugMix</td>
+<td>No (JS consistency loss)</td>
+<td>Yes</td>
+<td>Medium (3x forward)</td>
+<td>Best</td>
+<td>Highest</td>
+</tr>
+</tbody>
+</table>
+<h2>Choosing an Augmentation Strategy</h2>
+<p>The choice of augmentation should be guided by the task and deployment context. For standard ImageNet classification, RandAugment(N=2, M=9) with CutMix is the current default in most SOTA training recipes (timm library uses this by default). For object detection and segmentation, use CutMix over MixUp and avoid augmentations that blend object boundaries (no MixUp on bounding boxes). For models that will be deployed on corrupted or out-of-distribution data (medical devices, autonomous vehicles, cameras in variable conditions), AugMix with the Jensen-Shannon consistency loss provides the best robustness. For tiny datasets (&lt;1000 images), aggressive standard augmentation (heavy crop, flip, color jitter, rotation) is more beneficial than MixUp/CutMix, which require sufficient class coverage within each batch.</p>
+<ul>
+<li>Standard baseline: RandomResizedCrop(224) + HorizontalFlip(0.5) + ColorJitter + Normalize.</li>
+<li>MixUp: blend two images and labels; λ~Beta(α,α); prevents overconfidence; improves ECE.</li>
+<li>CutMix: paste rectangular patch; label ∝ area; detection-safe (no blending artifacts).</li>
+<li>RandAugment: N ops from pool of 14, magnitude M; only 2 hyperparams; default N=2, M=9.</li>
+<li>TrivialAugment: 1 random op, random magnitude; zero hyperparams; competitive with RandAugment.</li>
+<li>AugMix: consistency loss over augmentation chains; best for robustness to distribution shift.</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

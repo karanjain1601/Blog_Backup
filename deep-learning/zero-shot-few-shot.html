@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Zero-Shot and Few-Shot Prompting | Notes Backup</title>
+  <meta name="description" content="Eliciting LLM capabilities without fine-tuning by providing task descriptions (zero-shot) or input-output examples (few-shot) in the prompt, covering format, example selection, and performance factors." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Zero-Shot and Few-Shot Prompting</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Eliciting LLM capabilities without fine-tuning by providing task descriptions (zero-shot) or input-output examples (few-shot) in the prompt, covering format, example selection, and performance factors.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Zero-Shot and Few-Shot Prompting</h1>
+<p>Large language models emerge from pretraining with the ability to perform a remarkable variety of tasks purely from a natural-language description or a small set of demonstrations embedded in the prompt — no gradient updates required. This property, called in-context learning (ICL), divides into two regimes: zero-shot prompting, where the model receives only a task description and must generalise from its pretraining distribution, and few-shot prompting, where the model receives k labelled input–output pairs ("shots") that illustrate the task format before seeing the target input. Understanding when each regime works, why ICL succeeds at all, and how to design prompts that maximise accuracy is the foundation of practical LLM engineering. The behaviour is surprisingly sensitive to prompt wording, example ordering, label distribution, and output format — effects that can swing accuracy by ±15 percentage points on the same underlying model and the same test inputs.</p>
+<h2>Overview</h2>
+<p>Brown et al. (2020) introduced GPT-3 with the observation that large language models can perform tasks from examples in the prompt without any weight updates — a capability dubbed in-context learning. Zero-shot prompting asks the model to solve a task without any examples, relying entirely on pretraining knowledge and the ability to parse the task description. Few-shot prompting provides k demonstrations (typically 1–16) of the (input, output) mapping to anchor predictions. Both approaches work because the LLM has been pretrained on text that implicitly encodes many task formats; the prompt activates the right behavioural mode. Few-shot ICL is not fine-tuning — no gradient computation occurs — but it consistently improves accuracy, particularly on tasks whose output format differs from natural prose (classification labels, structured outputs, mathematical answers). The performance gap between zero-shot and few-shot prompting narrows as models grow larger, and instruction-tuned models close much of this gap at zero-shot by learning to follow explicit task descriptions from human-feedback training.</p>
+<h2>Zero-Shot Prompting</h2>
+<p>In zero-shot prompting, the prompt contains only a task description and the input — no demonstrations. The model must infer the correct output format and decision boundary from the task description alone. For simple, well-represented tasks (translation, summarisation, QA), zero-shot prompting with instruction-tuned models performs surprisingly well. For more exotic tasks (structured extraction, constrained generation, multi-step classification), zero-shot performance degrades because the model's prior over output formats may not match the desired format. Effective zero-shot prompting requires precise task descriptions: specifying the output format explicitly ("Reply with exactly one word: Positive or Negative"), setting appropriate constraints ("Do not explain your reasoning"), and where relevant, priming with a role ("You are an expert sentiment analyst"). Instruction-tuned models such as GPT-4o, Claude 3, and Gemini 1.5 handle zero-shot prompting far better than base language models because they have been explicitly trained on a diverse distribution of instructions and the corresponding outputs expected from a helpful assistant.</p>
+<pre><code class="language-python">import openai
+
+client = openai.OpenAI()
+
+SYSTEM = &quot;Classify sentiment. Reply with one word: Positive or Negative.&quot;
+POOL = [(&quot;This film was absolutely fantastic!&quot;, &quot;Positive&quot;),
+        (&quot;I hated every minute of it.&quot;, &quot;Negative&quot;),
+        (&quot;An incredible, emotionally resonant performance.&quot;, &quot;Positive&quot;),
+        (&quot;Boring, predictable, and painfully slow.&quot;, &quot;Negative&quot;),
+        (&quot;One of the best films I have seen.&quot;, &quot;Positive&quot;),
+        (&quot;A complete waste of two hours.&quot;, &quot;Negative&quot;),
+        (&quot;Breathtaking cinematography and tight script.&quot;, &quot;Positive&quot;),
+        (&quot;Dreadful acting and a nonsensical plot.&quot;, &quot;Negative&quot;)]
+TESTS = [(&quot;Superb acting and a gripping story.&quot;, &quot;Positive&quot;),
+         (&quot;Disappointing direction and flat characters.&quot;, &quot;Negative&quot;)]
+
+def classify(text, k):
+    msgs = [{&quot;role&quot;: &quot;system&quot;, &quot;content&quot;: SYSTEM}]
+    for inp, lbl in POOL[:k]:
+        msgs += [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: inp}, {&quot;role&quot;: &quot;assistant&quot;, &quot;content&quot;: lbl}]
+    msgs.append({&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: text})
+    resp = client.chat.completions.create(model=&quot;gpt-4o-mini&quot;, messages=msgs, max_tokens=3)
+    return resp.choices[0].message.content.strip()
+
+for k in [0, 1, 2, 4, 8]:
+    acc = sum(classify(t, k) == l for t, l in TESTS) / len(TESTS)
+    print(f&quot;k={k}-shot  accuracy={acc:.2f}&quot;)
+</code></pre>
+<p>The zero-shot case (k=0) already achieves strong results on sentiment classification with instruction-tuned models because the task is well-represented in pretraining and the system prompt is explicit. As k increases from 0 to 4, accuracy typically improves by 5–15 percentage points on classification tasks. Gains diminish sharply past k=4, and at k=8 the marginal benefit of additional shots is rarely worth the token cost. The main cost of few-shot prompting is tokens: 8 examples at 25 tokens each adds 200 tokens to every API call, increasing latency and spend on high-volume deployments. For a 10 million API call per day system, reducing from 8-shot to 4-shot can yield meaningful cost savings with minimal accuracy loss on standard tasks.</p>
+<h2>Few-Shot In-Context Learning</h2>
+<p>Few-shot in-context learning provides the model with k (input, output) demonstration pairs before the target input. The demonstrations serve multiple functions: they anchor the output format (showing what "Positive" vs "Negative" looks like), shift the model's prior toward the task distribution (suppressing off-task generations), and reduce ambiguity in the task description. ICL does not update model weights — the demonstrations are processed as ordinary tokens in the context window. Multiple theories attempt to explain why ICL works: (1) the task description and examples together retrieve a latent representation of the task from the LLM's pretrained knowledge; (2) the model performs implicit gradient descent in its forward pass, simulating one step of fine-tuning; (3) examples simply serve as a format anchor without changing the model's underlying task computation. The sensitivity of ICL to label correctness is informative: replacing all labels with random labels degrades accuracy by only 5–15% on many tasks, suggesting the model relies more on format structure than the semantic content of labels. This finding has major implications for prompt engineering — the choice of which examples to include matters more than ensuring every label is perfectly correct.</p>
+<pre><code class="language-python">import openai
+import numpy as np
+from sklearn.metrics.pairwise import cosine_similarity
+
+client = openai.OpenAI()
+
+POOL = [{&quot;input&quot;: &quot;Stunning visuals and a powerful emotional score.&quot;, &quot;label&quot;: &quot;Positive&quot;},
+        {&quot;input&quot;: &quot;The plot drags and all characters feel underwritten.&quot;, &quot;label&quot;: &quot;Negative&quot;},
+        {&quot;input&quot;: &quot;A joyful, heartwarming film I would happily rewatch.&quot;, &quot;label&quot;: &quot;Positive&quot;},
+        {&quot;input&quot;: &quot;Overly long with significant plot holes.&quot;, &quot;label&quot;: &quot;Negative&quot;},
+        {&quot;input&quot;: &quot;Brilliant script, tight direction, career-best performance.&quot;, &quot;label&quot;: &quot;Positive&quot;},
+        {&quot;input&quot;: &quot;Tedious from the opening scene to the closing credits.&quot;, &quot;label&quot;: &quot;Negative&quot;}]
+
+def embed(texts):
+    resp = client.embeddings.create(input=texts, model=&quot;text-embedding-3-small&quot;)
+    return np.array([d.embedding for d in resp.data])
+
+def retrieve_examples(query, pool, k=4):
+    q_emb = embed([query])
+    p_emb = embed([ex[&quot;input&quot;] for ex in pool])
+    sims  = cosine_similarity(q_emb, p_emb)[0]
+    top_k = np.argsort(sims)[::-1][:k]
+    return [pool[i] for i in top_k]
+
+QUERY = &quot;The cinematography was beautiful but the pacing felt sluggish.&quot;
+retrieved = retrieve_examples(QUERY, POOL, k=3)
+random_ex = [POOL[i] for i in np.random.choice(len(POOL), 3, replace=False)]
+print(&quot;Retrieved:&quot;, [e[&quot;label&quot;] for e in retrieved])
+print(&quot;Random:   &quot;, [e[&quot;label&quot;] for e in random_ex])
+</code></pre>
+<p>Retrieval-based example selection consistently outperforms random selection by 3–8% accuracy on classification tasks, and the gap widens on tasks with high label diversity or complex input distributions. The intuition is straightforward: semantically similar demonstrations teach the model how to handle inputs similar to the test case, while random demonstrations may introduce irrelevant distribution shift. The cost is an embedding API call for each new test input — typically 1–2 ms and a fraction of a cent. For latency-sensitive applications, pre-computing embeddings for all pool examples and building a cached nearest-neighbour index (FAISS, Qdrant, Chroma) amortises this cost to a single vector search at inference time.</p>
+<h2>Example Selection Strategies</h2>
+<p>Example selection is one of the highest-leverage design decisions in few-shot prompting. The choice of which k demonstrations to include from a pool of candidates can swing accuracy by 10–20% on challenging tasks with diverse input distributions. Four main strategies are used in practice. Random selection is simple and fast but yields high variance; it is the baseline but rarely the best choice. Retrieval-based selection embeds the query and retrieves the k nearest pool examples by cosine similarity; this is typically the strongest performer for heterogeneous input distributions. Diversity-based selection uses k-means clustering or maximum marginal relevance to maximise coverage of the example space, preventing redundant demonstrations that all illustrate the same input pattern. Influence-function selection scores each candidate example by its estimated contribution to reducing the model's loss on the target input; theoretically principled but computationally expensive. For most production use cases, retrieval-based selection with a small embedding model is the best trade-off of performance and inference cost.</p>
+<ul>
+<li>Random selection: O(1) query time, high variance, useful only when pool is small and homogeneous</li>
+<li>Retrieval-based (kNN): embed query + pool, cosine similarity ranking — best average accuracy for diverse pools</li>
+<li>Diversity-based (k-means or MMR): cluster pool and select one example per cluster — reduces redundancy across shots</li>
+<li>BM25 lexical retrieval: fast term-overlap ranking with no embedding API call — good for very large pools (10K+ examples)</li>
+<li>Influence selection: estimate per-example gradient contribution — most accurate but expensive; use offline for static prompts</li>
+<li>Coverage + quality filter: retrieve 2k candidates by similarity, re-rank by label balance and format diversity, keep top k</li>
+</ul>
+<h2>Format and Order Sensitivity</h2>
+<p>Few-shot prompting is far more sensitive to the ordering and formatting of examples than practitioners typically expect. Lu et al. (2022, "Fantastically Ordered Prompts") showed that accuracy on 8-shot sentiment classification varies by as much as ±15 percentage points depending solely on the order in which the 8 examples appear in the prompt — with the same model, same examples, and same test inputs. The recency bias is the primary driver: the model assigns higher weight to examples appearing near the end of the prompt (just before the test input). If the last 2–3 examples all carry the same label, the model tends to predict that label regardless of the test input. Format choices also matter: providing the label as a continuation of the input line vs on a separate line, using "Label:" vs no prefix, and including or omitting example separators all affect accuracy by 2–7%. The recommended practice is to (a) balance labels across the full example sequence, (b) ensure label diversity among the final 3 positions, and (c) evaluate across multiple orderings before settling on a fixed prompt.</p>
+<pre><code class="language-python">import openai
+import random
+import statistics
+
+client = openai.OpenAI()
+
+SYSTEM = &quot;Classify sentiment as Positive or Negative. Reply with one word.&quot;
+EXAMPLES = [(&quot;Fantastic performances all round.&quot;, &quot;Positive&quot;),
+            (&quot;I fell asleep halfway through.&quot;, &quot;Negative&quot;),
+            (&quot;A breathtaking visual spectacle.&quot;, &quot;Positive&quot;),
+            (&quot;The script was painfully weak.&quot;, &quot;Negative&quot;)]
+TARGET = &quot;The direction was inspired but the overall pacing dragged.&quot;
+
+def classify_ordered(examples, text):
+    msgs = [{&quot;role&quot;: &quot;system&quot;, &quot;content&quot;: SYSTEM}]
+    for inp, lbl in examples:
+        msgs += [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: inp}, {&quot;role&quot;: &quot;assistant&quot;, &quot;content&quot;: lbl}]
+    msgs.append({&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: text})
+    resp = client.chat.completions.create(model=&quot;gpt-4o-mini&quot;, messages=msgs, max_tokens=4)
+    return resp.choices[0].message.content.strip()
+
+predictions = []
+for trial in range(10):
+    shuffled = EXAMPLES.copy()
+    random.shuffle(shuffled)
+    pred = classify_ordered(shuffled, TARGET)
+    predictions.append(pred)
+    print(f&quot;Trial {trial+1:2d}: last_label={shuffled[-1][1]:8s}  pred={pred}&quot;)
+print(f&quot;\nPositive rate across 10 orderings: {predictions.count('Positive')}/10&quot;)
+</code></pre>
+<p>The order sensitivity experiment reveals a critical practical insight: never report few-shot accuracy from a single prompt ordering. The variance across 10 random orderings can span ±15% absolute accuracy for the same model and examples. To get a reliable estimate, run the same evaluation across 5–10 orderings and report the mean ± standard deviation. For production deployment, fix a well-evaluated ordering rather than randomising at inference time, since consistent ordering allows reproducible evaluation and avoids worst-case orderings appearing in production traffic.</p>
+<h2>Label Calibration</h2>
+<p>Even with no few-shot examples, LLMs have strong prior biases toward certain labels — a form of distributional shift inherited from pretraining. A model trained predominantly on positive product reviews will assign higher prior probability to "Positive" than "Negative" regardless of the input. Zhao et al. (2021, "Calibrate Before Use") proposed contextual calibration to correct for this bias. The method estimates P(y | content-free input) — the model's output distribution when given a semantically null input such as "N/A" or an empty string — as a proxy for the label prior. At inference time, the raw logits are divided by these prior probabilities to produce calibrated predictions. Calibrated few-shot prompting consistently outperforms uncalibrated prompting by 3–10% on classification tasks, especially when the training-set label distribution differs from the task's test distribution. The technique requires only a few API calls to estimate the prior and adds negligible overhead at inference time.</p>
+<pre><code class="language-python">import openai
+import numpy as np
+
+client = openai.OpenAI()
+LABELS = [&quot;Positive&quot;, &quot;Negative&quot;]
+SYSTEM = &quot;Classify sentiment. Reply with one word: Positive or Negative.&quot;
+
+def get_label_logprobs(text, examples):
+    &quot;&quot;&quot;Return approximate probability of each label token via top_logprobs.&quot;&quot;&quot;
+    msgs = [{&quot;role&quot;: &quot;system&quot;, &quot;content&quot;: SYSTEM}]
+    for inp, lbl in examples:
+        msgs += [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: inp}, {&quot;role&quot;: &quot;assistant&quot;, &quot;content&quot;: lbl}]
+    msgs.append({&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: text})
+    resp = client.chat.completions.create(
+        model=&quot;gpt-4o-mini&quot;, messages=msgs, max_tokens=2,
+        logprobs=True, top_logprobs=5
+    )
+    top = {t.token: np.exp(t.logprob)
+           for t in resp.choices[0].logprobs.content[0].top_logprobs}
+    return {lbl: top.get(lbl, 1e-9) for lbl in LABELS}
+
+def calibrated_predict(text, examples):
+    prior  = get_label_logprobs(&quot;N/A&quot;, [])   # content-free prior
+    probs  = get_label_logprobs(text, examples)
+    calibr = {lbl: probs[lbl] / prior[lbl] for lbl in LABELS}
+    pred   = max(calibr, key=calibr.get)
+    print(f&quot;raw={probs}  calibrated={calibr}  pred={pred}&quot;)
+    return pred
+
+calibrated_predict(&quot;A decent film — nothing special.&quot;, [])
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Examples needed</th>
+<th>Accuracy (sentiment)</th>
+<th>Accuracy (NLI)</th>
+<th>Accuracy (math)</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Zero-shot</td>
+<td>0</td>
+<td>72%</td>
+<td>52%</td>
+<td>18%</td>
+<td>Best for well-described tasks; zero token overhead</td>
+</tr>
+<tr>
+<td>1-shot</td>
+<td>1</td>
+<td>78%</td>
+<td>58%</td>
+<td>24%</td>
+<td>Large gain from even one example; very low token cost</td>
+</tr>
+<tr>
+<td>4-shot</td>
+<td>4</td>
+<td>84%</td>
+<td>67%</td>
+<td>38%</td>
+<td>Recommended default; strong accuracy-to-cost tradeoff</td>
+</tr>
+<tr>
+<td>8-shot</td>
+<td>8</td>
+<td>86%</td>
+<td>71%</td>
+<td>45%</td>
+<td>Diminishing returns vs 4-shot; worth it for hard tasks</td>
+</tr>
+<tr>
+<td>16-shot</td>
+<td>16</td>
+<td>87%</td>
+<td>73%</td>
+<td>51%</td>
+<td>Near fine-tune quality on simple tasks; high token cost</td>
+</tr>
+<tr>
+<td>Fine-tuned</td>
+<td>100–10K</td>
+<td>92%</td>
+<td>84%</td>
+<td>78%</td>
+<td>Highest accuracy; requires labelled data and training budget</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Order and Distribution Sensitivity</strong>: Few-shot accuracy is highly sensitive to example ordering and label distribution — a 4-shot prompt can swing ±15% accuracy depending on which examples appear last; always evaluate with multiple orderings. An imbalanced label distribution in demonstrations (e.g., 3 Positive, 1 Negative) biases the model toward the majority label regardless of input content. Always balance labels across demonstrations and evaluate across at least 5 different orderings before deploying a few-shot prompt to production.</p>
+</blockquote>
+<h2>Limits of ICL</h2>
+<p>In-context learning has fundamental limitations that motivate more powerful prompting techniques. First, ICL does not perform well on tasks requiring precise numerical computation or multi-step logical reasoning — the model produces an answer in a single forward pass without the ability to verify or revise intermediate steps. Second, the number of shots is bounded by the context window size; at 16 shots with long examples, the prompt may consume thousands of tokens, crowding out the actual task input. Third, ICL accuracy on truly novel tasks (tasks unlike anything in pretraining) saturates at a much lower ceiling than fine-tuning — the model can adjust its output format but cannot learn genuinely new skills from a handful of examples. Fourth, the random-label robustness result (accuracy degrades by only 5–15% when all demonstration labels are randomised) suggests that models are partly pattern-matching to format rather than learning the semantic mapping, which limits maximum accuracy on tasks requiring deep understanding. Chain-of-thought prompting, introduced by Wei et al. (2022), addresses the reasoning limitation by eliciting explicit step-by-step intermediate reasoning before the final answer.</p>
+<ul>
+<li>Context window cap: 16 shots with long examples can consume 4K+ tokens, reducing usable input length</li>
+<li>Multi-step arithmetic and symbolic reasoning fails without explicit reasoning steps — chain-of-thought is required</li>
+<li>Truly novel tasks with no pretraining overlap cannot be learned from k examples alone; fine-tuning is necessary</li>
+<li>Label correctness matters less than format — randomising labels only degrades accuracy by 5–15% on many tasks</li>
+<li>Recency bias: the last 2–3 demonstrations disproportionately influence predictions regardless of their relevance</li>
+<li>No self-correction mechanism: errors compound silently without explicit reasoning traces to audit</li>
+</ul>
+<h2>Key Takeaways</h2>
+<p>Zero-shot and few-shot prompting are the first tools to reach for when working with LLMs on a new task. Zero-shot works well for instruction-tuned models on clearly described, standard tasks and requires no labelled data. Few-shot prompting consistently improves accuracy by providing format anchors and shifting the output distribution toward the task, but performance is sensitive to example selection, ordering, and label balance. Retrieval-based example selection outperforms random selection, especially for heterogeneous task distributions. Label calibration removes systematic prior bias and adds 3–10% accuracy with minimal cost. For tasks requiring multi-step reasoning, few-shot ICL provides the format scaffold but chain-of-thought prompting is needed to elicit the intermediate reasoning steps that enable correct answers.</p>
+<ul>
+<li>Start with zero-shot using an explicit system prompt — instruction-tuned models often need no examples for standard tasks</li>
+<li>Use 4-shot as the default; diminishing returns beyond 4 examples on most classification and extraction tasks</li>
+<li>Select examples via cosine similarity of embeddings (retrieval-based) rather than random selection</li>
+<li>Evaluate across at least 5 example orderings; report mean accuracy not single-run accuracy</li>
+<li>Balance labels in demonstrations — equal counts per class prevent recency-bias skew toward any single label</li>
+<li>Apply label calibration (divide by P(y|N/A)) when you suspect systematic bias toward a majority output label</li>
+<li>For reasoning tasks, transition from plain few-shot ICL to chain-of-thought prompting to unlock multi-step accuracy</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

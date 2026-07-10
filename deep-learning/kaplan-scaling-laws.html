@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Kaplan Scaling Laws — Power Laws for LLM Loss, Parameters, and Compute | Notes Backup</title>
+  <meta name="description" content="Kaplan et al. (2020): test loss scales as a power law in N (parameters), D (tokens), and C (compute) over seven orders of magnitude, with compute-optimal frontier predictions and irreducible loss estimation." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Kaplan Scaling Laws — Power Laws for LLM Loss, Parameters, and Compute</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Kaplan et al. (2020): test loss scales as a power law in N (parameters), D (tokens), and C (compute) over seven orders of magnitude, with compute-optimal frontier predictions and irreducible loss estimation.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Kaplan Scaling Laws — Power Laws for LLM Loss, Parameters, and Compute</h1>
+<p>In 2020, Kaplan et al. at OpenAI published a landmark empirical study showing that the test loss of language models follows smooth power laws over more than seven orders of magnitude in parameters N, tokens D, and compute C. Measured on WebText2 with GPT-style architectures, these scaling laws provided the first rigorous framework for predicting model performance before training and for allocating compute budgets across model size and training duration.</p>
+<h2>The Core Power Laws</h2>
+<p>Three fundamental relationships govern LLM loss. Loss vs parameters: L(N) = a_N * N^(-alpha_N), alpha_N approximately 0.076 — doubling parameters reduces loss by roughly 5%. Loss vs tokens: L(D) = a_D * D^(-alpha_D), alpha_D approximately 0.095 — doubling tokens reduces loss by roughly 6%. Loss vs compute: L(C) = a_C * C^(-alpha_C), alpha_C approximately 0.057 — doubling compute reduces loss by roughly 4%. Each law holds when the other factors are not the binding constraint. The striking result is that all three hold over seven orders of magnitude with no observed saturation.</p>
+<ul>
+<li>L(N) proportional to N^(-0.076): parameters law, measured with unlimited data and compute</li>
+<li>L(D) proportional to D^(-0.095): data law, measured with large enough models</li>
+<li>L(C) proportional to C^(-0.057): compute law, traces the compute-optimal frontier</li>
+<li>Architecture (depth, width, heads) contributes less than 5% of loss variance vs total N</li>
+<li>Irreducible loss E approximately 1.69 nats on WebText — the entropy floor of natural language</li>
+<li>Seven orders of magnitude of smooth scaling: from 1M to 10B parameters, 1B to 1T tokens</li>
+</ul>
+<h2>Code 1 — Power Law Fitting</h2>
+<pre><code class="language-python">import numpy as np
+from scipy.optimize import curve_fit
+import matplotlib.pyplot as plt
+
+# Empirical loss vs parameter count (N in billions, L in nats)
+N_data = np.array([0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 1.0, 3.0, 10.0, 30.0])
+L_data = np.array([4.20,  3.85,  3.55, 3.28, 3.02, 2.80, 2.60, 2.42,  2.27,  2.14])
+
+def power_law(N, a, alpha):
+    '''L(N) = a * N^(-alpha) -- single-factor power law'''
+    return a * N ** (-alpha)
+
+# Fit via nonlinear least squares
+popt, pcov = curve_fit(power_law, N_data, L_data, p0=[5.0, 0.076], maxfev=5000)
+a_fit, alpha_fit = popt
+perr = np.sqrt(np.diag(pcov))
+print('Fitted: a = {:.4f} +/- {:.4f}'.format(a_fit, perr[0]))
+print('Fitted: alpha_N = {:.4f} +/- {:.4f}  (Kaplan paper: ~0.076)'.format(alpha_fit, perr[1]))
+
+# Extrapolate to larger model sizes
+N_extrap = np.logspace(-3, 3, 200)  # 1M to 1T parameters
+L_pred   = power_law(N_extrap, a_fit, alpha_fit)
+
+plt.figure(figsize=(9, 5))
+plt.loglog(N_data, L_data, 'ko', markersize=8, label='Empirical data')
+plt.loglog(N_extrap, L_pred, 'b-', lw=2, label='Fit: L = {:.2f} * N^(-{:.3f})'.format(a_fit, alpha_fit))
+plt.xlabel('Parameters N (billions)', fontsize=12)
+plt.ylabel('Test Loss L (nats)', fontsize=12)
+plt.title('Kaplan Power Law: L(N) proportional to N^(-alpha_N)', fontsize=13)
+plt.legend(fontsize=11)
+plt.grid(True, which='both', alpha=0.3)
+plt.tight_layout()
+plt.savefig('kaplan_power_law.png', dpi=150)
+plt.show()
+</code></pre>
+<h2>The Compute-Optimal Frontier</h2>
+<p>Given a fixed compute budget C (FLOPs), the compute-optimal model size scales as N<em> proportional to C^0.73 and the compute-optimal token count as D</em> proportional to C^0.27. This asymmetry means model size should scale much faster than data: doubling compute should grow N by roughly 66% but D by only about 21%. The practical implication Kaplan drew: train the largest feasible model on relatively few tokens, stopping well before convergence. This was the paradigm used for GPT-3 (175B parameters on 300B tokens). The D/N ratio implied by Kaplan is approximately 1 — one token per parameter at the compute-optimal point.</p>
+<h2>Code 2 — Compute-Optimal N* Prediction</h2>
+<pre><code class="language-python">import numpy as np
+
+# Kaplan compute-optimal: N* proportional to C^0.73, D* = C / (6 * N*)
+# C = 6 * N * D approximation for transformer training FLOPs
+KAPLAN_EXP_N = 0.73
+
+def kaplan_optimal(C_flops, k_N=1.3e-5):
+    '''Predict compute-optimal (N*, D*) for a given FLOP budget per Kaplan.'''
+    N_star = k_N * (C_flops ** KAPLAN_EXP_N)
+    D_star = C_flops / (6.0 * N_star)  # from C = 6ND
+    return N_star, D_star
+
+def chinchilla_optimal(C_flops):
+    '''Chinchilla: D* = 20*N*, C = 6*N*D = 120*N^2 =&gt; N* = sqrt(C/120).'''
+    N_star = np.sqrt(C_flops / 120.0)
+    D_star = 20.0 * N_star
+    return N_star, D_star
+
+budgets = [
+    ('6e18 (~1B-scale)',   6e18),
+    ('6e20 (~7B-scale)',   6e20),
+    ('6e22 (~70B-scale)', 6e22),
+    ('6e23 (GPT-4 est.)', 6e23),
+]
+print('{:&lt;22} {:&gt;12} {:&gt;12} {:&gt;12} {:&gt;12}'.format('Compute Budget', 'Kaplan N*(B)', 'Kaplan D*(B)', 'Chinch N*(B)', 'Chinch D*(B)'))
+print('-' * 74)
+for name, C in budgets:
+    kN, kD = kaplan_optimal(C)
+    cN, cD = chinchilla_optimal(C)
+    print('{:&lt;22} {:&gt;12.2f} {:&gt;12.2f} {:&gt;12.2f} {:&gt;12.2f}'.format(name, kN/1e9, kD/1e9, cN/1e9, cD/1e9))
+print('\nKaplan D/N ~ 1; Chinchilla D/N = 20 -- a 20x difference in data prescription.')
+</code></pre>
+<h2>Code 3 — Scaling Law Comparison Visualization</h2>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+
+def kaplan_loss_C(C, a=4.0, alpha_c=0.057):
+    '''Kaplan compute scaling: L(C) = a * C^(-alpha_c)'''
+    return a * C ** (-alpha_c)
+
+def chinchilla_loss_C(C, a=3.1, alpha_c=0.050):
+    '''Chinchilla compute scaling with slightly different exponent'''
+    return a * C ** (-alpha_c)
+
+C_range = np.logspace(17, 24, 200)  # 1e17 to 1e24 FLOPs
+
+# Approximate reference points from literature
+ref_models = {
+    'GPT-2 (1.5B)':     (1.5e21, 3.30),
+    'GPT-3 (175B)':     (3.1e23, 2.88),
+    'Chinchilla (70B)': (3.0e23, 2.55),
+}
+
+fig, ax = plt.subplots(figsize=(9, 5))
+ax.loglog(C_range, kaplan_loss_C(C_range),     'b-',  lw=2, label='Kaplan (alpha_c = 0.057)')
+ax.loglog(C_range, chinchilla_loss_C(C_range), 'g--', lw=2, label='Chinchilla fit (alpha_c = 0.050)')
+colors = ['#e74c3c', '#8e44ad', '#27ae60']
+for (name, (C, L)), col in zip(ref_models.items(), colors):
+    ax.scatter(C, L, s=150, color=col, zorder=5, label=name)
+ax.set_xlabel('Compute Budget C (FLOPs)', fontsize=12)
+ax.set_ylabel('Test Loss L (nats)', fontsize=12)
+ax.set_title('Predicted vs Actual Loss: Kaplan vs Chinchilla Compute Scaling', fontsize=12)
+ax.legend(fontsize=9)
+ax.grid(True, which='both', alpha=0.3)
+plt.tight_layout()
+plt.savefig('scaling_comparison.png', dpi=150)
+plt.show()
+</code></pre>
+<h2>Irreducible Loss and the Entropy Floor</h2>
+<p>The full joint scaling law is L(N, D) = E + A/N^alpha + B/D^beta, where E approximately 1.69 nats is the irreducible loss — the entropy of natural language itself, representing information no model can predict regardless of size. The term A/N^alpha captures capacity-limited loss (model too small) and B/D^beta captures data-limited loss (insufficient training tokens). Fitting this joint formula requires a grid of (N, D, L) observations. The Chinchilla paper fitted E=1.69, A=406.4, alpha=0.34, B=410.7, beta=0.28 across over 400 models ranging from 70M to 16B parameters.</p>
+<h2>Code 4 — Irreducible Loss Estimation</h2>
+<pre><code class="language-python">import numpy as np
+from scipy.optimize import minimize
+
+def loss_model(params, N, D):
+    '''L(N, D) = E + A * N^(-alpha) + B * D^(-beta)'''
+    E, A, alpha, B, beta = params
+    return E + A * N ** (-alpha) + B * D ** (-beta)
+
+def objective(params, N_arr, D_arr, L_obs):
+    '''Sum of squared residuals for least-squares fitting.'''
+    return np.sum((loss_model(params, N_arr, D_arr) - L_obs) ** 2)
+
+# Simulated loss grid: N in B params, D in B tokens
+np.random.seed(42)
+N_vals = np.array([0.1, 0.3, 1.0, 3.0, 10.0])
+D_vals = np.array([10.0, 30.0, 100.0, 300.0])
+N_grid, D_grid = np.meshgrid(N_vals, D_vals, indexing='ij')
+N_flat, D_flat = N_grid.ravel(), D_grid.ravel()
+
+# Ground truth: Chinchilla constants
+true_p = [1.69, 406.4, 0.34, 410.7, 0.28]
+L_obs  = loss_model(true_p, N_flat, D_flat) + np.random.normal(0, 0.01, len(N_flat))
+
+# Jointly fit all 5 parameters using Nelder-Mead
+result = minimize(objective, x0=[2.0, 300.0, 0.30, 300.0, 0.25],
+                  args=(N_flat, D_flat, L_obs), method='Nelder-Mead',
+                  options={'maxiter': 20000, 'xatol': 1e-7})
+E_f, A_f, a_f, B_f, b_f = result.x
+print('Fitted:  E={:.3f}, A={:.1f}, alpha={:.3f}, B={:.1f}, beta={:.3f}'.format(E_f, A_f, a_f, B_f, b_f))
+print('Target:  E=1.690, A=406.4, alpha=0.340, B=410.7, beta=0.280')
+print('MSE per point: {:.6f}'.format(result.fun / len(N_flat)))
+</code></pre>
+<p>The table below compares compute-optimal model size N<em> and token count D</em> predicted by Kaplan (2020) versus Chinchilla (2022) for three representative compute budgets. The dramatic difference in D/N ratio — roughly 1x for Kaplan vs 20x for Chinchilla — explains why early large language models such as GPT-3 and Gopher were massively undertrained on data relative to their parameter counts.</p>
+<table>
+<thead>
+<tr>
+<th>Compute Budget (FLOPs)</th>
+<th>Kaplan N* (B params)</th>
+<th>Kaplan D* (B tokens)</th>
+<th>Kaplan D/N</th>
+<th>Chinchilla N* (B params)</th>
+<th>Chinchilla D* (B tokens)</th>
+<th>Chinchilla D/N</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>6e18 (~1B-scale)</td>
+<td>1.0</td>
+<td>1.0</td>
+<td>~1x</td>
+<td>0.22</td>
+<td>4.5</td>
+<td>~20x</td>
+</tr>
+<tr>
+<td>6e20 (~7B-scale)</td>
+<td>7.0</td>
+<td>7.0</td>
+<td>~1x</td>
+<td>2.24</td>
+<td>44.7</td>
+<td>~20x</td>
+</tr>
+<tr>
+<td>6e22 (~70B-scale)</td>
+<td>70.0</td>
+<td>70.0</td>
+<td>~1x</td>
+<td>22.4</td>
+<td>447</td>
+<td>~20x</td>
+</tr>
+</tbody>
+</table>
+<h2>Three Regimes and Caveats</h2>
+<p>Kaplan identified three limiting regimes for LLM training. The compute-limited regime applies when both N and D could grow freely but compute is fixed — L(C) law describes performance. The parameter-limited regime applies when the model is too small relative to data — the A/N^alpha term dominates loss and more parameters give rapid gains. The data-limited regime applies when data is exhausted or recycled — B/D^beta dominates and additional tokens degrade due to repetition. Important caveats: laws were measured on WebText2; transfer to code, math, or multilingual data may differ; architecture specifics matter less than total N; and Kaplan did not sweep D independently at each N, a confound that Chinchilla corrected.</p>
+<ul>
+<li>Compute-limited: grow N and D together along compute-optimal frontier using L(C) law</li>
+<li>Parameter-limited: small model with ample data — more parameters give rapid improvement</li>
+<li>Data-limited: data exhausted or recycled — diminishing returns, potential degradation</li>
+<li>Measured on WebText2 — may not generalize to code, math, or multilingual corpora</li>
+<li>Architecture (depth vs width, attention heads) contributes less than N to overall loss</li>
+<li>Kaplan's experiments lacked sufficient data variation — Chinchilla corrected this confound</li>
+</ul>
+<blockquote>
+<p><strong>Warning</strong>: Kaplan scaling laws predict scaling models faster than data (N* proportional to C^0.73) — Chinchilla later showed this was wrong due to insufficient data in Kaplan's experiments, and corrected the optimal token-to-parameter ratio to ~20:1.</p>
+</blockquote>
+    </article>
+  </main>
+</body>
+</html>

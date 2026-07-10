@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Deformable Convolutions — Learned Geometric Offsets | Notes Backup</title>
+  <meta name="description" content="Deformable convolutions (Dai et al. 2017): learn spatial offset Δpₙ per kernel position enabling flexible sampling beyond fixed grids. Covers DCNv1 (offsets), DCNv2 (modulation scalars), bilinear interpolation, visualization of sampling patterns, DCNv3, and use in object detection." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Deformable Convolutions — Learned Geometric Offsets</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Deformable convolutions (Dai et al. 2017): learn spatial offset Δpₙ per kernel position enabling flexible sampling beyond fixed grids. Covers DCNv1 (offsets), DCNv2 (modulation scalars), bilinear interpolation, visualization of sampling patterns, DCNv3, and use in object detection.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Deformable Convolutions — Learned Geometric Offsets</h1>
+<p>Standard convolutions apply a fixed k×k grid of kernel weights to each spatial location — the sampling pattern never adapts to the content of the image. Deformable Convolutions (Dai et al., ICCV 2017) break this constraint by learning 2D spatial offsets Δpₙ for each of the k² kernel positions. The convolution then samples at perturbed locations x + pₙ + Δpₙ using bilinear interpolation for fractional coordinates. The offsets are learned by an additional lightweight convolutional branch, making the operation end-to-end differentiable. Deformable convolutions dramatically improve detection and segmentation of objects with arbitrary shapes and sizes.</p>
+<h2>Limitations of Standard Convolutions</h2>
+<p>A k×k convolution samples k² fixed relative positions: pₙ ∈ {(-1,-1), (-1,0), ..., (1,1)} for k=3. These positions are fixed regardless of the input — the same grid is applied to a thin vertical line, a large circle, and a diagonal edge. This fixed receptive field is poorly suited to objects that vary in scale, aspect ratio, and orientation. Pooling and large strides provide some scale invariance, but they cannot adapt the sampling geometry to match object shape. Augmentation (random rotation, scaling) helps training but does not give the network the ability to dynamically adjust its feature extraction pattern at inference.</p>
+<h2>Deformable Convolution v1</h2>
+<p>DCNv1 adds a parallel offset-generating conv branch that takes the input feature map and outputs 2×k² channels — two channels (Δx, Δy) for each of the k² kernel positions. These offsets are added to the standard grid positions, and the feature map is sampled at the resulting fractional locations using bilinear interpolation: y(p) = Σₙ w(pₙ) · x(p + pₙ + Δpₙ). The bilinear interpolation makes the operation differentiable with respect to Δpₙ, allowing gradients to flow through the sampling locations during backpropagation. The offset conv branch is initialized with zero weights so that deformable conv starts as standard conv at the beginning of training.</p>
+<h2>Deformable Convolution v2 — Modulation Scalars</h2>
+<p>DCNv2 (Zhu et al., CVPR 2019) extends DCNv1 by additionally learning a modulation scalar mₙ ∈ (0, 1) for each of the k² sampling positions. The modulated sampling becomes: y(p) = Σₙ w(pₙ) · mₙ · x(p + pₙ + Δpₙ). The modulation scalars act as attention weights over the sampling positions — the network can effectively zero out irrelevant sampling locations while amplifying important ones. The combined offset+modulation branch outputs 3×k² channels: 2×k² for (Δx, Δy) offsets and k² for mₙ scalars (passed through Sigmoid to keep in (0,1)). DCNv2 significantly outperforms DCNv1 on detection because it can ignore background samples that fall outside the object boundary.</p>
+<blockquote>
+<p><strong>DCNv2 = Deformable + Amplitude Modulation</strong>: DCNv2 combines spatial deformation (where to sample) with amplitude modulation (how much to weight each sample). This gives it two degrees of freedom versus standard conv (fixed location, fixed weight) and DCNv1 (free location, fixed unit weight). The modulation effectively makes the sampling pattern sparse and object-adaptive: for a car, the network learns to sample wheel and window positions with high weight and background with near-zero weight.</p>
+</blockquote>
+<h2>Code Examples</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class OffsetGenerator(nn.Module):
+    &quot;&quot;&quot;Learn per-position 2D offsets for a k x k deformable conv kernel.&quot;&quot;&quot;
+    def __init__(self, in_ch, kernel_size=3):
+        super().__init__()
+        self.k = kernel_size
+        n_offsets = 2 * kernel_size * kernel_size  # (dx, dy) per position
+        self.offset_conv = nn.Conv2d(in_ch, n_offsets, kernel_size=3, padding=1)
+        # Zero-init: deformable conv starts as standard conv
+        nn.init.zeros_(self.offset_conv.weight)
+        nn.init.zeros_(self.offset_conv.bias)
+
+    def forward(self, x):
+        offsets = self.offset_conv(x)   # (B, 2*k^2, H, W)
+        return offsets
+
+# Demonstrate offset shapes
+gen = OffsetGenerator(in_ch=64, kernel_size=3)
+x = torch.randn(2, 64, 28, 28)
+offsets = gen(x)
+print(f&quot;Input feature map: {x.shape}&quot;)
+print(f&quot;Offsets shape:     {offsets.shape}  (2 * 3*3 = 18 channels)&quot;)
+print(f&quot;Interpretation:    offset[b, 2n,   h, w] = delta_x for position n at (h,w)&quot;)
+print(f&quot;                   offset[b, 2n+1, h, w] = delta_y for position n at (h,w)&quot;)
+print(f&quot;Zero-init means: at start of training, all offsets=0 -&gt; standard conv&quot;)
+print(f&quot;Params in offset branch: {sum(p.numel() for p in gen.parameters()):,}&quot;)
+</code></pre>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from torchvision.ops import DeformConv2d
+
+class DCNv2(nn.Module):
+    &quot;&quot;&quot;Deformable Conv v2: offsets + modulation scalars via torchvision.&quot;&quot;&quot;
+    def __init__(self, in_ch, out_ch, kernel_size=3, stride=1, padding=1):
+        super().__init__()
+        k2 = kernel_size * kernel_size
+        # Branch: predict 2*k^2 offsets + k^2 modulation scalars
+        self.offset_mask = nn.Conv2d(in_ch, 3 * k2, 3, stride=1, padding=1)
+        self.dcn = DeformConv2d(in_ch, out_ch, kernel_size, stride=stride, padding=padding)
+        nn.init.zeros_(self.offset_mask.weight)
+        nn.init.zeros_(self.offset_mask.bias)
+
+    def forward(self, x):
+        om = self.offset_mask(x)          # (B, 3*k^2, H, W)
+        k2 = om.shape[1] // 3
+        offset = om[:, :2*k2]             # spatial offsets (dx, dy) per position
+        mask   = torch.sigmoid(om[:, 2*k2:])  # modulation in (0, 1)
+        return self.dcn(x, offset, mask)
+
+dcn = DCNv2(64, 128, kernel_size=3, padding=1)
+x = torch.randn(2, 64, 28, 28)
+out = dcn(x)
+print(f&quot;Input:  {x.shape}&quot;)
+print(f&quot;Output: {out.shape}&quot;)
+print(f&quot;Offset+mask conv params: {sum(p.numel() for p in dcn.offset_mask.parameters()):,}&quot;)
+print(f&quot;DCN kernel params:       {sum(p.numel() for p in dcn.dcn.parameters()):,}&quot;)
+print(&quot;mask=sigmoid(logit) in (0,1) -&gt; attends to relevant sampling positions&quot;)
+</code></pre>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
+
+def visualize_offsets(offsets, kernel_size=3, loc=(14, 14), save_path='deform_offsets.png'):
+    &quot;&quot;&quot;Visualize where a deformable conv samples vs standard conv at a given location.&quot;&quot;&quot;
+    k = kernel_size
+    r = k // 2
+    # Standard grid positions relative to center
+    gy, gx = np.meshgrid(range(-r, r+1), range(-r, r+1), indexing='ij')
+    base_y, base_x = gy.ravel(), gx.ravel()
+
+    # Learned offsets at the query location
+    k2 = k * k
+    dy = offsets[0, :k2,  loc[0], loc[1]].detach().numpy()
+    dx = offsets[0, k2:, loc[0], loc[1]].detach().numpy()
+
+    sample_y = loc[0] + base_y + dy
+    sample_x = loc[1] + base_x + dx
+
+    plt.figure(figsize=(5, 5))
+    plt.scatter(loc[1] + base_x, loc[0] + base_y, c='blue', s=100,
+                label='Standard conv', marker='s', zorder=3)
+    plt.scatter(sample_x, sample_y, c='red', s=100,
+                label='Deformable conv', marker='o', zorder=3)
+    for bx, by, sx, sy in zip(loc[1]+base_x, loc[0]+base_y, sample_x, sample_y):
+        plt.arrow(bx, by, sx-bx, sy-by, color='gray', head_width=0.3, alpha=0.5)
+    plt.legend()
+    plt.title('Sampling locations: standard (blue) vs deformable (red)')
+    plt.savefig(save_path, dpi=100, bbox_inches='tight')
+    plt.close()
+    print(f'Saved {save_path}')
+
+# Simulate trained offsets (non-zero = deformation from standard grid)
+offsets = torch.randn(1, 18, 28, 28) * 2.5
+visualize_offsets(offsets, kernel_size=3, loc=(14, 14))
+</code></pre>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torchvision.ops import DeformConv2d
+
+class StdConvBlock(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.conv = nn.Conv2d(in_ch, out_ch, 3, padding=1)
+    def forward(self, x):
+        return F.relu(self.conv(x))
+
+class DeformConvBlock(nn.Module):
+    def __init__(self, in_ch, out_ch):
+        super().__init__()
+        self.offset = nn.Conv2d(in_ch, 18, 3, padding=1)  # 2*3*3=18
+        self.dcn    = DeformConv2d(in_ch, out_ch, 3, padding=1)
+        nn.init.zeros_(self.offset.weight)
+        nn.init.zeros_(self.offset.bias)
+    def forward(self, x):
+        return F.relu(self.dcn(x, self.offset(x)))
+
+# Test on rotated feature map: does deformable conv adapt better?
+torch.manual_seed(0)
+x = torch.randn(1, 3, 32, 32)
+x_rot = torch.rot90(x, k=1, dims=[2, 3])
+
+std   = StdConvBlock(3, 64)
+deform = DeformConvBlock(3, 64)
+
+with torch.no_grad():
+    diff_std   = (std(x) - std(x_rot)).abs().mean().item()
+    diff_deform = (deform(x) - deform(x_rot)).abs().mean().item()
+
+print(f&quot;Standard conv response diff (90-deg rotation): {diff_std:.4f}&quot;)
+print(f&quot;Deformable conv response diff:                  {diff_deform:.4f}&quot;)
+print(&quot;After training, deformable conv learns offsets that compensate for rotation&quot;)
+print(&quot;and other geometric transforms (scale, shear) without explicit augmentation&quot;)
+</code></pre>
+<h2>DCNv3 and Efficiency Improvements</h2>
+<p>DCNv3 (InternImage, CVPR 2023) introduces grouped deformable convolution: instead of learning one set of offsets and modulations for all channels, it uses G groups each with their own offsets and modulations, similar to grouped convolution or multi-head attention. The output is the sum across groups. DCNv3 also separates the spatial aggregation (deformable sampling) from the channel projection, reducing parameter count. InternImage-H with DCNv3 achieves 89.6% on ImageNet and 65.4 box AP on COCO, setting new state-of-the-art for CNN-based architectures at the time of publication.</p>
+<h2>Applications in Object Detection</h2>
+<p>Deformable convolutions are particularly powerful in detection backbones because objects vary in scale and aspect ratio. Replacing standard 3×3 convs in ResNet stage 3 and 4 with DCNv2 consistently adds +2–4% AP on COCO without any other change. Mask R-CNN with DCNv2 improves both box AP and mask AP. The offset patterns learned by detection networks are interpretable: for a car, offsets cluster around wheel positions; for a person, they cluster around joints and torso. This geometric adaptivity replaces the need for explicit multi-scale feature aggregation in some designs.</p>
+<h2>Convolution Variant Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Variant</th>
+<th>Sampling Pattern</th>
+<th>Extra Params (k=3)</th>
+<th>Bilinear Interp</th>
+<th>Geometric Flexibility</th>
+<th>Best Use Case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Standard Conv</td>
+<td>Fixed 3×3 grid</td>
+<td>None</td>
+<td>No</td>
+<td>None — rigid</td>
+<td>General feature extraction</td>
+</tr>
+<tr>
+<td>Deformable Conv v1</td>
+<td>Learned offsets Δpₙ per position</td>
+<td>2×k² per layer</td>
+<td>Yes</td>
+<td>High — free offsets</td>
+<td>Shape-adaptive detection</td>
+</tr>
+<tr>
+<td>Deformable Conv v2</td>
+<td>Offsets + modulation mₙ ∈ (0,1)</td>
+<td>3×k² per layer</td>
+<td>Yes</td>
+<td>High + amplitude control</td>
+<td>Detection, segmentation</td>
+</tr>
+<tr>
+<td>Deformable Conv v3</td>
+<td>Grouped offsets + modulation</td>
+<td>3×k²/G per group</td>
+<td>Yes</td>
+<td>High + channel grouping</td>
+<td>Efficient large-scale backbone</td>
+</tr>
+</tbody>
+</table>
+<h2>Implementation Notes</h2>
+<p>When using deformable convolutions in practice, keep these points in mind: (1) Zero-initialize the offset branch weights and biases so training starts from a standard conv and deformations are learned gradually; (2) Clip offsets to a reasonable range (typically ±(k-1)) to prevent sampling outside the feature map — torchvision's DeformConv2d handles border padding automatically; (3) Use DCNv2 (with modulation) over DCNv1 in all detection scenarios — the modulation provides meaningful accuracy gains with minimal overhead; (4) Place deformable convolutions in the deeper stages (stage 3, 4 in ResNet) where semantic features benefit most from shape adaptation; (5) Learning rate for the offset branch may need tuning — starting with a lower LR for offsets (0.1× backbone LR) can improve stability.</p>
+<ul>
+<li>DCNv1: offset Δpₙ per kernel position; bilinear interpolation at p + pₙ + Δpₙ.</li>
+<li>DCNv2: offset + modulation mₙ ∈ (0,1); effectively sparse attention over sampling grid.</li>
+<li>DCNv3: grouped offsets; shared offset per group of channels; used in InternImage.</li>
+<li>Zero-init offsets: deformable conv degrades to standard conv at initialization.</li>
+<li>Practical gain: +2-4 AP on COCO by replacing standard 3×3 in ResNet stages 3-4.</li>
+<li>torchvision.ops.DeformConv2d: takes (x, offset) or (x, offset, mask) for DCNv2.</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

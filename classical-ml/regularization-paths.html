@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Regularisation Paths — LARS and Coordinate Descent | Notes Backup</title>
+  <meta name="description" content="Understand how the LASSO solution path is piecewise linear, compute full paths with LARS in O(min(n,p)³) operations, implement coordinate descent with soft-thresholding, and select λ via cross-validation with the one-standard-error rule." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Regularisation Paths — LARS and Coordinate Descent</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Understand how the LASSO solution path is piecewise linear, compute full paths with LARS in O(min(n,p)³) operations, implement coordinate descent with soft-thresholding, and select λ via cross-validation with the one-standard-error rule.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Regularisation Paths — LARS and Coordinate Descent</h1>
+<p>A regularisation path traces how model coefficients θ(λ) change as the regularisation strength λ varies from very large (all zeros) to zero (OLS or MLE). Computing the full path is more informative than fitting at a single λ: it reveals which features enter the model first (most important), how correlated features compete, and provides the full tradeoff between sparsity and fit for cross-validation. The LASSO path has a remarkable structure: it is piecewise linear, with breakpoints (knots) where variables enter or leave the active set.</p>
+<h2>Piecewise-Linear Structure of the LASSO Path</h2>
+<p>The LASSO objective is a quadratic (in θ) plus an L1 penalty. As λ decreases from ∞, coefficients start at zero and increase piecewise linearly. At each knot, either a new variable joins the active set (its correlations with the current residual equals λ) or an active variable crosses zero and is dropped. The number of knots is at most min(n,p), so the full path can be computed exactly in O(min(n,p)³) operations using the LARS algorithm. Between knots, coefficients follow straight-line trajectories.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.linear_model import LassoCV, lasso_path
+from sklearn.datasets import make_regression
+from sklearn.preprocessing import StandardScaler
+
+np.random.seed(42)
+X, y = make_regression(n_samples=100, n_features=15, n_informative=6,
+                        noise=8.0, random_state=42)
+scaler = StandardScaler()
+X_s = scaler.fit_transform(X)
+
+# Full LASSO path
+alphas, coefs, _ = lasso_path(X_s, y, n_alphas=100)
+
+print(f'Path computed over {len(alphas)} alpha values')
+print(f'Alpha range: [{alphas[-1]:.4f}, {alphas[0]:.4f}]')
+print(f'Nonzero coefs at alpha={alphas[0]:.3f}: {(coefs[:, 0]  != 0).sum()}')
+print(f'Nonzero coefs at alpha={alphas[50]:.3f}: {(coefs[:, 50] != 0).sum()}')
+print(f'Nonzero coefs at alpha={alphas[-1]:.4f}: {(coefs[:, -1] != 0).sum()}')
+
+# Variable entry order (first alpha where each coef becomes nonzero)
+entry_alpha = []
+for j in range(coefs.shape[0]):
+    nz = np.where(coefs[j] != 0)[0]
+    entry_alpha.append(alphas[nz[0]] if len(nz) &gt; 0 else 0.0)
+order = np.argsort(entry_alpha)[::-1]
+print(f'\nVariable entry order (most to least important): {order[:6].tolist()}')
+</code></pre>
+<h2>LARS Algorithm</h2>
+<p>Least Angle Regression (LARS) computes the full LASSO path efficiently. Starting with all coefficients at zero, LARS finds the predictor most correlated with the current residual and moves the coefficient in that direction. It moves until another predictor becomes equally correlated with the residual (the equiangular direction). At that point, both predictors join the active set and the algorithm proceeds in the joint equiangular direction. A modification handles LASSO: when a coefficient crosses zero, it is dropped from the active set. This exactly traces the piecewise-linear LASSO path.</p>
+<blockquote>
+<p><strong>LARS vs Coordinate Descent for Path Computation</strong>: LARS computes the exact piecewise-linear path at O(min(n,p)³) cost — it is the gold standard when you want the full path or the variable entry order. Coordinate descent is faster per-iteration for a single λ value and scales better to very large p (sparse updates). For production use with p &gt; 10,000, prefer coordinate descent with warm starts along a λ grid.</p>
+</blockquote>
+<pre><code class="language-python">import numpy as np
+from sklearn.linear_model import Lars, LassoLars
+from sklearn.datasets import make_regression
+from sklearn.preprocessing import StandardScaler
+
+np.random.seed(42)
+X, y = make_regression(n_samples=100, n_features=15, n_informative=6,
+                        noise=8.0, random_state=42)
+X_s = StandardScaler().fit_transform(X)
+
+# LassoLars traces the exact LASSO path
+lasso_lars = LassoLars(alpha=1e-4, normalize=False, fit_intercept=True)
+lasso_lars.fit(X_s, y)
+
+print(f'Number of path knots: {len(lasso_lars.alphas_)}')
+print(f'Alpha values (first 5): {np.round(lasso_lars.alphas_[:5], 3)}')
+print(f'Coef path shape: {lasso_lars.coef_path_.shape}  (features x knots)')
+
+# Trace variable entry order
+prev_active = set()
+for step in range(min(10, lasso_lars.coef_path_.shape[1])):
+    active = set(np.where(lasso_lars.coef_path_[:, step] != 0)[0])
+    entered = active - prev_active
+    if entered:
+        print(f'  Knot {step}: variable(s) {sorted(entered)} entered active set')
+    prev_active = active
+</code></pre>
+<h2>Coordinate Descent for LASSO</h2>
+<p>Coordinate descent updates one coefficient at a time while holding others fixed. For LASSO, the optimal update for θⱼ (with all others fixed) is the soft-thresholding operator: θⱼ ← S(ρⱼ, λ) = sign(ρⱼ)·max(|ρⱼ| − λ, 0), where ρⱼ = Xⱼᵀ(y − X_{-j}θ_{-j}) is the partial residual correlation. Cycling through all coordinates until convergence costs O(np) per cycle. Using warm starts (initialising from the previous λ) along a decreasing λ grid makes coordinate descent extremely efficient for computing paths.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.linear_model import Lasso
+from sklearn.datasets import make_regression
+from sklearn.preprocessing import StandardScaler
+
+def soft_threshold(rho, lam):
+    return np.sign(rho) * np.maximum(np.abs(rho) - lam, 0.0)
+
+def lasso_coord_descent(X, y, lam, max_iter=2000, tol=1e-6):
+    n, p = X.shape
+    theta = np.zeros(p)
+    Xty = X.T @ y
+    XtX_diag = np.sum(X**2, axis=0)  # precompute column norms squared
+    for iteration in range(max_iter):
+        theta_old = theta.copy()
+        for j in range(p):
+            resid_j = y - X @ theta + X[:, j] * theta[j]
+            rho_j   = X[:, j] @ resid_j
+            theta[j] = soft_threshold(rho_j / XtX_diag[j],
+                                       lam  / XtX_diag[j])
+        if np.max(np.abs(theta - theta_old)) &lt; tol:
+            print(f'Converged at iteration {iteration+1}')
+            break
+    return theta
+
+np.random.seed(42)
+X, y = make_regression(n_samples=100, n_features=15, n_informative=6,
+                        noise=8.0, random_state=42)
+X_s = StandardScaler().fit_transform(X)
+
+lam = 5.0
+theta_cd = lasso_coord_descent(X_s, y, lam)
+theta_sk = Lasso(alpha=lam, fit_intercept=False, max_iter=10000).fit(X_s, y).coef_
+print(f'Max diff vs sklearn Lasso: {np.abs(theta_cd - theta_sk).max():.2e}')
+print(f'Nonzero coefs (scratch): {(np.abs(theta_cd) &gt; 1e-6).sum()}')
+print(f'Nonzero coefs (sklearn): {(np.abs(theta_sk) &gt; 1e-6).sum()}')
+</code></pre>
+<h2>Cross-Validation and the One-Standard-Error Rule</h2>
+<p>Cross-validation selects λ by estimating test error. LassoCV in sklearn uses efficient warm-started coordinate descent along a path: fit at the largest λ, then decrease λ and initialise from the previous solution. The one-standard-error rule (Hastie, Tibshirani, Friedman): instead of picking the λ with minimum CV error, choose the largest λ whose CV error is within one standard error of the minimum. This favours sparser, more interpretable models that perform nearly as well as the minimum-CV model.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.linear_model import Lasso
+from sklearn.model_selection import KFold
+from sklearn.datasets import make_regression
+from sklearn.preprocessing import StandardScaler
+
+np.random.seed(42)
+X, y = make_regression(n_samples=150, n_features=20, n_informative=6,
+                        noise=10.0, random_state=42)
+X_s = StandardScaler().fit_transform(X)
+
+alphas = np.logspace(-2, 2, 60)
+kf = KFold(n_splits=5, shuffle=True, random_state=0)
+cv_mses = np.zeros((len(alphas), kf.n_splits))
+
+for fold, (tr, va) in enumerate(kf.split(X_s)):
+    for i, alpha in enumerate(alphas):
+        m = Lasso(alpha=alpha, max_iter=10000).fit(X_s[tr], y[tr])
+        resid = y[va] - m.predict(X_s[va])
+        cv_mses[i, fold] = np.mean(resid**2)
+
+mean_cv = cv_mses.mean(axis=1)
+se_cv   = cv_mses.std(axis=1) / np.sqrt(kf.n_splits)
+
+best_idx = np.argmin(mean_cv)
+one_se_threshold = mean_cv[best_idx] + se_cv[best_idx]
+one_se_idx = np.where((mean_cv &lt;= one_se_threshold) &amp; (alphas &gt;= alphas[best_idx]))[0]
+one_se_idx = one_se_idx[0] if len(one_se_idx) &gt; 0 else best_idx
+
+print(f'Lambda at min CV MSE:      {alphas[best_idx]:.4f}  (MSE={mean_cv[best_idx]:.2f})')
+print(f'Lambda by 1-SE rule:       {alphas[one_se_idx]:.4f}  (MSE={mean_cv[one_se_idx]:.2f})')
+print(f'Nonzero at min-CV lambda:  {(Lasso(alpha=alphas[best_idx]).fit(X_s, y).coef_ != 0).sum()}')
+print(f'Nonzero at 1-SE lambda:    {(Lasso(alpha=alphas[one_se_idx]).fit(X_s, y).coef_ != 0).sum()}')
+</code></pre>
+<h2>Method Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Per-Step Cost</th>
+<th>Exact Path</th>
+<th>Large p</th>
+<th>Online/Streaming</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>LARS</td>
+<td>O(p²) per knot, O(min(n,p)³) total</td>
+<td>Yes — piecewise linear</td>
+<td>Poor for p &gt; 10k</td>
+<td>No</td>
+</tr>
+<tr>
+<td>Coordinate descent</td>
+<td>O(np) per cycle</td>
+<td>No — grid approximation</td>
+<td>Excellent (sparse updates)</td>
+<td>Possible with SGD variant</td>
+</tr>
+<tr>
+<td>Subgradient descent</td>
+<td>O(np) per step</td>
+<td>No</td>
+<td>Good</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Proximal gradient (ISTA/FISTA)</td>
+<td>O(np) per step, faster convergence</td>
+<td>No</td>
+<td>Good</td>
+<td>Possible</td>
+</tr>
+</tbody>
+</table>
+<h2>Warm Starting Along the Path</h2>
+<p>Computing the solution at a sequence of λ values (from large to small) with warm starts — initialising each solve from the previous solution — dramatically reduces total computation. At large λ, most coefficients are zero; as λ decreases, only a few new variables enter. Each warm-started solve converges in very few iterations. This is how LassoCV and ElasticNetCV achieve fast cross-validated path computation. The saved solutions at each λ also form the regularisation path plot showing variable selection order.</p>
+<ul>
+<li>Always fit the path from large to small λ with warm starts — cold starts are ~10x slower.</li>
+<li>Use LassoCV or ElasticNetCV instead of grid-searching manually; they implement warm-started paths internally.</li>
+<li>The 1-SE rule often selects 30–60% fewer features than the min-CV λ with comparable test performance.</li>
+<li>For genomics (p=20k+), use coordinate descent with sparse matrix representation for memory efficiency.</li>
+<li>Plot the coefficient path to inspect variable entry order — a natural feature importance ranking.</li>
+</ul>
+<h2>Practical Workflow</h2>
+<p>A robust LASSO workflow: (1) standardise all features; (2) run LassoCV with 5 or 10 folds on a log-spaced λ grid covering the full path; (3) apply the 1-SE rule to get a sparser model; (4) examine the coefficient path plot for stability — variables that enter and exit the active set are unstable under small data perturbations; (5) refit a final model at the chosen λ on the full training set; (6) report features selected, their coefficients, and confidence intervals via bootstrap or cross-validated refitting.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

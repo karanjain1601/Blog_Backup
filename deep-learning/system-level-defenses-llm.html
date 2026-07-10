@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>System-Level Security Architecture for LLM Applications | Notes Backup</title>
+  <meta name="description" content="Defense-in-depth architectures for production LLM systems — privilege separation, rate limiting, audit logging, isolation, and zero-trust design patterns." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>System-Level Security Architecture for LLM Applications</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Defense-in-depth architectures for production LLM systems — privilege separation, rate limiting, audit logging, isolation, and zero-trust design patterns.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>System-Level Security Architecture for LLM Applications</h1>
+<p>Securing a production LLM application requires defense-in-depth: multiple independent security controls so that the failure of any single layer does not result in a catastrophic breach. LLM applications introduce threat surfaces that traditional web applications do not have — natural language inputs that can carry adversarial instructions, agents that autonomously invoke tools with real-world side effects, and outputs that may be trusted by downstream systems or human users. Standard web security controls (input validation, rate limiting, audit logging) are necessary but not sufficient; they must be extended with LLM-specific controls including output filtering, privilege-scoped tool access, and sandboxed agent execution environments.</p>
+<h2>Overview</h2>
+<p>A defense-in-depth architecture for LLMs organizes controls into layers that each assume the layers above them have been bypassed. Input validation and rate limiting protect the API surface. Privilege separation and sandboxing limit what a compromised or manipulated agent can do. Output filtering catches harmful content before it reaches users. Audit logging captures the full chain of events for post-incident investigation. Zero-trust principles — never trust, always verify — ensure that each tool call, each privilege claim, and each cross-system boundary is independently authenticated and authorized, not implicitly inherited from an earlier check. This note covers the implementation of each layer with production-grade code patterns.</p>
+<h2>Threat Model for LLM Applications</h2>
+<p>The threat model for LLM applications differs from traditional web apps in two critical ways: (1) the attack surface includes the model's inputs, which can carry adversarial instructions disguised as user content (prompt injection); and (2) the blast radius of a successful attack is amplified when the model has tool access — a manipulated agent can exfiltrate data, send emails, execute code, or modify databases. A realistic threat model must enumerate both external threats (malicious users, prompt injection via retrieved documents) and internal threats (over-privileged models, logging gaps that allow insider abuse). Threat actors include adversarial users attempting to bypass safety controls, external attackers who inject instructions into data the model retrieves, and automated abuse systems trying to extract value via high-volume API calls.</p>
+<ul>
+<li>Prompt injection: user or retrieved content contains adversarial instructions that override the system prompt and cause the model to act against operator policy.</li>
+<li>Privilege escalation: an agent with read-only intent is tricked into calling a write or execute tool, causing unintended side effects.</li>
+<li>Data exfiltration: a manipulated agent encodes sensitive information in an outbound API call, email, or seemingly innocuous output.</li>
+<li>Cost abuse: high-volume automated requests exhaust token quotas or accumulate large API bills without delivering user value.</li>
+<li>Audit gap exploitation: an attacker behaves normally during monitored periods and abusively when they detect reduced logging or supervision.</li>
+<li>Model inversion via outputs: carefully crafted prompts extract training data or system prompt contents from a deployed model.</li>
+</ul>
+<h2>Privilege Separation</h2>
+<p>Privilege separation is the single most effective control against the expanded blast radius of agentic systems. The principle: an LLM agent should be granted only the minimum set of tool permissions required to complete its stated task, and each tool invocation should be checked against the agent's current permission set before execution. A customer service agent should have read access to order records but no write access to account settings. A coding assistant should be able to read files but not execute arbitrary shell commands. Privilege levels should be defined in terms of concrete tool capabilities — not abstract roles — and should be independently checked at the tool execution layer, not only at the application layer where the model runs.</p>
+<pre><code class="language-python">import logging
+from enum import IntEnum
+from dataclasses import dataclass
+from typing import Any, Dict
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+logger = logging.getLogger(__name__)
+
+class PrivilegeLevel(IntEnum):
+    READ_ONLY = 1
+    WRITE     = 2
+    EXECUTE   = 3
+    ADMIN     = 4
+
+TOOL_PRIVILEGE_MAP: Dict[str, PrivilegeLevel] = {
+    'read_file':      PrivilegeLevel.READ_ONLY,
+    'list_directory': PrivilegeLevel.READ_ONLY,
+    'write_file':     PrivilegeLevel.WRITE,
+    'send_email':     PrivilegeLevel.WRITE,
+    'run_script':     PrivilegeLevel.EXECUTE,
+    'delete_record':  PrivilegeLevel.ADMIN,
+    'modify_config':  PrivilegeLevel.ADMIN,
+}
+
+def execute_tool_checked(tool_name: str, args: Dict[str, Any],
+                         user_privilege: PrivilegeLevel, user_id: str) -&gt; Dict:
+    required = TOOL_PRIVILEGE_MAP.get(tool_name)
+    if required is None:
+        logger.warning('DENY unknown_tool=%s user=%s', tool_name, user_id)
+        raise PermissionError(f'Unknown tool: {tool_name}')
+    if user_privilege &lt; required:
+        logger.warning('ESCALATION_BLOCKED tool=%s user=%s has=%s needs=%s',
+                       tool_name, user_id, user_privilege.name, required.name)
+        raise PermissionError(f'{tool_name} requires {required.name}, user has {user_privilege.name}')
+    logger.info('ALLOW tool=%s user=%s priv=%s', tool_name, user_id, user_privilege.name)
+    return {'status': 'executed', 'tool': tool_name, 'user_id': user_id}
+
+try:
+    execute_tool_checked('delete_record', {'id': 42}, PrivilegeLevel.READ_ONLY, 'agent-007')
+except PermissionError as e:
+    print(f'Blocked correctly: {e}')
+result = execute_tool_checked('read_file', {'path': '/data/report.csv'}, PrivilegeLevel.READ_ONLY, 'agent-007')
+print(f'Allowed: {result}')
+</code></pre>
+<p>Privilege levels should be assigned per session, not per user account, to support the principle of least privilege. A user who normally has write access should receive only read-only privileges for an agent session that only needs to read data. Privilege downgrade — starting at the minimum required level and escalating only when a specific confirmed action requires it — is safer than starting at full privilege and hoping the model stays within bounds. Any privilege escalation request from within an agent session should be treated as a potential prompt injection and logged at elevated severity for human review.</p>
+<h2>Rate Limiting and Quota</h2>
+<p>Rate limiting protects against cost abuse, enumeration attacks, and denial-of-service scenarios where a single user or bot exhausts resources available to legitimate users. A sliding window rate limiter tracks request counts within a rolling time window (e.g., 60 requests per minute per user) and rejects requests that exceed the limit with an HTTP 429 response and a Retry-After header. For LLM applications, token-based quotas are more meaningful than request counts — a single request can consume 10,000 tokens or 100, so request-based limits can be trivially gamed by batching work into fewer, larger requests. Production systems implement both: request-per-minute limits to prevent API spam, and token-per-day limits to control cost exposure.</p>
+<pre><code class="language-python">import time
+import threading
+from collections import defaultdict, deque
+from dataclasses import dataclass
+from typing import Tuple, Optional
+
+@dataclass
+class RateLimitConfig:
+    requests_per_minute: int = 60
+    tokens_per_day: int = 1_000_000
+    burst_window_seconds: int = 10
+    burst_alert_threshold: int = 20
+
+class SlidingWindowRateLimiter:
+    def __init__(self, config: RateLimitConfig):
+        self.config = config
+        self._req_windows: dict = defaultdict(deque)
+        self._daily_tokens: dict = defaultdict(int)
+        self._lock = threading.Lock()
+
+    def check(self, user_id: str, token_count: int) -&gt; Tuple[bool, Optional[str]]:
+        now = time.time()
+        with self._lock:
+            window = self._req_windows[user_id]
+            while window and now - window[0] &gt; 60:
+                window.popleft()
+            if len(window) &gt;= self.config.requests_per_minute:
+                retry_after = max(1, int(60 - (now - window[0])) + 1)
+                return False, f'Rate limit exceeded. Retry-After: {retry_after}s'
+            if self._daily_tokens[user_id] + token_count &gt; self.config.tokens_per_day:
+                return False, 'Daily token quota exceeded. Resets at 00:00 UTC.'
+            recent = sum(1 for t in window if now - t &lt;= self.config.burst_window_seconds)
+            if recent &gt;= self.config.burst_alert_threshold:
+                print(f'BURST_ALERT user={user_id} {recent} reqs in {self.config.burst_window_seconds}s')
+            window.append(now)
+            self._daily_tokens[user_id] += token_count
+            return True, None
+
+limiter = SlidingWindowRateLimiter(RateLimitConfig(requests_per_minute=5, tokens_per_day=10_000))
+for i in range(7):
+    ok, msg = limiter.check('user-42', token_count=200)
+    print(f'Request {i+1}: {&quot;ALLOW&quot; if ok else &quot;DENY 429&quot;} {msg or &quot;&quot;}')
+</code></pre>
+<p>Quota enforcement should be layered: coarse API-key quotas set by the operator at the platform level, and fine-grained per-user quotas enforced by the application. Exponential backoff with jitter should be recommended in the Retry-After response so that burst clients do not all retry at exactly the same time and create a stampede. Quota events — especially repeated rate-limit hits from the same user — should feed into an anomaly detection pipeline that can identify automated abuse patterns before they cause significant cost or service degradation.</p>
+<h2>Audit Logging</h2>
+<p>Audit logging is the foundational security control that makes all other controls enforceable and investigable. Without a complete audit trail, incident response is impossible: you cannot determine what a compromised agent did, you cannot attribute policy violations to specific users, and you cannot demonstrate compliance to regulators. The audit log for an LLM application should capture every request and response, keyed by user ID, session ID, and timestamp, with hashes of input and output text (not raw text, for privacy), the safety classifier scores, tool calls made, and costs incurred. The log must be append-only and tamper-evident — an attacker who compromises the application layer must not be able to erase their tracks.</p>
+<pre><code class="language-python">import hashlib
+import json
+import time
+import uuid
+from dataclasses import dataclass, asdict
+from typing import Optional, List
+import sqlite3
+
+@dataclass
+class AuditRecord:
+    record_id: str
+    timestamp: float
+    user_id: str
+    session_id: str
+    model: str
+    input_hash: str     # SHA-256 prefix (not raw text, for privacy)
+    output_hash: str    # SHA-256 prefix
+    tool_calls: str     # JSON list of tool names invoked
+    safety_score: float
+    latency_ms: float
+    cost_usd: float
+    blocked: bool
+
+def init_audit_db(conn: sqlite3.Connection) -&gt; None:
+    conn.execute('''CREATE TABLE IF NOT EXISTS audit_log
+        (record_id TEXT, timestamp REAL, user_id TEXT, session_id TEXT,
+         model TEXT, input_hash TEXT, output_hash TEXT, tool_calls TEXT,
+         safety_score REAL, latency_ms REAL, cost_usd REAL, blocked INTEGER)''')
+    conn.commit()
+
+def log_request(conn: sqlite3.Connection, user_id: str, session_id: str, model: str,
+               input_text: str, output_text: str, tool_calls: List[str],
+               safety_score: float, latency_ms: float, cost_usd: float, blocked: bool) -&gt; str:
+    record = AuditRecord(
+        record_id=str(uuid.uuid4()), timestamp=time.time(),
+        user_id=user_id, session_id=session_id, model=model,
+        input_hash=hashlib.sha256(input_text.encode()).hexdigest()[:16],
+        output_hash=hashlib.sha256(output_text.encode()).hexdigest()[:16],
+        tool_calls=json.dumps(tool_calls), safety_score=round(safety_score, 4),
+        latency_ms=round(latency_ms, 2), cost_usd=round(cost_usd, 6), blocked=blocked,
+    )
+    row = tuple(asdict(record).values())
+    conn.execute('INSERT INTO audit_log VALUES (?,?,?,?,?,?,?,?,?,?,?,?)', row)
+    conn.commit()
+    return record.record_id
+
+conn = sqlite3.connect(':memory:')
+init_audit_db(conn)
+rid = log_request(conn, 'user-42', 'sess-abc', 'claude-3-5-haiku-20241022',
+                  'What is the capital of France?', 'Paris is the capital of France.',
+                  [], safety_score=0.98, latency_ms=342.5, cost_usd=0.000045, blocked=False)
+print(f'Logged record_id={rid}')
+row = conn.execute('SELECT user_id, safety_score, blocked FROM audit_log WHERE record_id=?', (rid,)).fetchone()
+print(f'Retrieved: user={row[0]}  safety={row[1]}  blocked={bool(row[2])}')
+</code></pre>
+<p>Audit log retention policy should align with your compliance requirements: GDPR mandates deletion of personal data on request, which conflicts with indefinite log retention. The standard resolution is to store user IDs as pseudonymous hashes with a separate lookup table, enabling deletion of the mapping without destroying the audit log structure. Query interfaces for incident investigation should support filtering by user ID, time range, blocked status, and tool calls invoked. Alert rules should fire when: a single user triggers more than 10 safety blocks per hour, a tool call to a destructive action occurs from a new user agent, or the total cost for a session exceeds a threshold.</p>
+<h2>Sandboxing Agent Actions</h2>
+<p>Agents with tool-use capabilities can cause irreversible real-world side effects: deleting files, sending emails, executing code, modifying database records, or making API calls to external services. Sandboxing limits these effects by validating tool calls before execution: checking that the tool name is in an allowlist, validating arguments against a schema, requiring human confirmation for destructive operations, and wrapping execution in a try/except with comprehensive logging. For code execution specifically, containerized sandboxes (Docker with no network access, limited filesystem, resource limits) are essential to prevent agents from escaping the execution environment.</p>
+<pre><code class="language-python">import json
+import logging
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, List
+
+logger = logging.getLogger(__name__)
+
+TOOL_SCHEMAS: Dict[str, Dict] = {
+    'read_file': {'required': ['path'], 'types': {'path': str}, 'destructive': False},
+    'write_file': {'required': ['path', 'content'], 'types': {'path': str, 'content': str}, 'destructive': False},
+    'delete_file': {'required': ['path'], 'types': {'path': str}, 'destructive': True},
+    'run_python': {'required': ['code'], 'types': {'code': str}, 'destructive': True},
+    'send_email': {'required': ['to', 'subject', 'body'], 'types': {'to': str, 'subject': str, 'body': str}, 'destructive': True},
+}
+
+@dataclass
+class SandboxResult:
+    allowed: bool
+    dry_run: bool
+    reason: str
+    tool_name: str
+
+def validate_and_sandbox(tool_name: str, args: Dict[str, Any],
+                         human_confirm_fn: Optional[callable] = None) -&gt; SandboxResult:
+    # Step 1: allowlist check
+    if tool_name not in TOOL_SCHEMAS:
+        logger.warning('BLOCKED unknown_tool=%s', tool_name)
+        return SandboxResult(False, False, f'Tool not in allowlist: {tool_name}', tool_name)
+    schema = TOOL_SCHEMAS[tool_name]
+    # Step 2: argument schema validation
+    for field in schema['required']:
+        if field not in args:
+            return SandboxResult(False, False, f'Missing required arg: {field}', tool_name)
+        if not isinstance(args[field], schema['types'][field]):
+            return SandboxResult(False, False, f'Wrong type for {field}', tool_name)
+    # Step 3: human confirmation for destructive operations
+    if schema['destructive']:
+        summary = f'{tool_name}({json.dumps({k: str(v)[:40] for k, v in args.items()})})'
+        logger.info('DESTRUCTIVE_PENDING tool=%s args=%.80s', tool_name, summary)
+        if human_confirm_fn and not human_confirm_fn(summary):
+            return SandboxResult(False, True, 'Human confirmation denied', tool_name)
+    logger.info('SANDBOX_ALLOW tool=%s', tool_name)
+    return SandboxResult(True, False, 'Validation passed', tool_name)
+
+result = validate_and_sandbox('delete_file', {'path': '/data/report.csv'},
+                              human_confirm_fn=lambda s: False)  # simulated denial
+print(f'allowed={result.allowed}  dry_run={result.dry_run}  reason={result.reason}')
+result2 = validate_and_sandbox('read_file', {'path': '/data/report.csv'})
+print(f'allowed={result2.allowed}  tool={result2.tool_name}')
+</code></pre>
+<h2>Zero-Trust for Agentic Systems</h2>
+<p>Zero-trust architecture applies the principle 'never trust, always verify' to every action an agent takes: no tool call, no cross-service request, and no privilege claim is trusted based on prior context alone. Each action is independently authenticated (who is making this request?), authorized (does the current permission set allow this?), and logged (what was requested, with what arguments, at what time?). In multi-agent systems where one agent calls another, the calling agent's identity and privilege level must be passed explicitly and verified by the receiving agent — the receiving agent must not assume that any request from another agent is authorized simply because it arrived. This is especially important when agents communicate over message queues or APIs where spoofing is possible.</p>
+<table>
+<thead>
+<tr>
+<th>Defense Layer</th>
+<th>What It Protects Against</th>
+<th>Implementation Complexity</th>
+<th>Performance Cost</th>
+<th>Required For</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Input validation</td>
+<td>Malformed inputs, schema violations, prompt injection markers</td>
+<td>Low</td>
+<td>Negligible (&lt;1 ms)</td>
+<td>All LLM applications</td>
+</tr>
+<tr>
+<td>Rate limiting</td>
+<td>Cost abuse, DoS, credential stuffing, enumeration attacks</td>
+<td>Medium</td>
+<td>Negligible (&lt;1 ms)</td>
+<td>All public-facing APIs</td>
+</tr>
+<tr>
+<td>Output filtering</td>
+<td>Harmful content delivered to users, policy violations</td>
+<td>Medium</td>
+<td>Low–medium (5–500 ms)</td>
+<td>All consumer-facing applications</td>
+</tr>
+<tr>
+<td>Privilege separation</td>
+<td>Lateral movement, privilege escalation, tool abuse by manipulated agent</td>
+<td>High</td>
+<td>Negligible (in-process check)</td>
+<td>Agentic systems with tool use</td>
+</tr>
+<tr>
+<td>Audit logging</td>
+<td>Incident investigation, compliance, insider threat detection</td>
+<td>Low</td>
+<td>Negligible (async write)</td>
+<td>All production LLM systems</td>
+</tr>
+<tr>
+<td>Sandboxing</td>
+<td>Unsafe code execution, filesystem access, data exfiltration via tools</td>
+<td>High</td>
+<td>Medium (container overhead)</td>
+<td>Code execution and file-access agents</td>
+</tr>
+<tr>
+<td>Human-in-the-loop</td>
+<td>Irreversible or high-impact actions without human oversight</td>
+<td>Low (policy) / High (UX)</td>
+<td>High (user wait time)</td>
+<td>Agentic systems with write/delete access</td>
+</tr>
+</tbody>
+</table>
+<p>Zero-trust implementation for agentic LLM systems requires explicit identity propagation across every hop. When a user initiates a request, the user's identity and privilege token are attached to the session. When the agent makes a tool call, the tool receives the user's token, not the agent's identity, so the tool can enforce user-level permissions independently of the agent. When one agent calls a sub-agent, the orchestrating agent must pass a scoped credential — not its own full credentials — to the sub-agent. This prevents privilege amplification where a low-privilege user action cascades through an agent chain and ultimately executes at admin-level privilege.</p>
+<h2>Key Takeaways</h2>
+<p>System-level security for LLM applications is a defense-in-depth problem: no single control is sufficient, and the goal is to ensure that the compromise or bypass of any single layer does not lead to catastrophic outcomes. Rate limiting protects the API surface; privilege separation limits blast radius; audit logging enables incident response; sandboxing contains agent side effects; output filtering catches policy violations. These controls are complementary and should be implemented independently so that each layer can catch what the others miss. The security architecture should be designed from day one — retrofitting security controls onto an existing production system is significantly harder and more disruptive than building them in from the start.</p>
+<ul>
+<li>Implement privilege separation at the tool execution layer, not just the application layer — the tool itself must check permissions independently, not rely on the calling agent to have already checked.</li>
+<li>Use sliding window rate limiting with both request-per-minute and token-per-day quotas — request limits prevent API spam while token limits control cost exposure from large individual requests.</li>
+<li>Build audit logging from day one: log every LLM request with user ID, session ID, model, input hash, output hash, tool calls, safety score, latency, and cost — this data is invaluable for incident response.</li>
+<li>Require human confirmation before executing irreversible agent actions — deleting files, sending emails, modifying database records — even when the agent is operating in a fully automated pipeline.</li>
+<li>In multi-agent systems, propagate scoped credentials from the user session to each sub-agent explicitly — never let an agent inherit or amplify privileges beyond what the originating user was granted.</li>
+<li>Test your security controls adversarially before deployment: attempt prompt injection, privilege escalation, and rate limit bypass from the perspective of a motivated attacker.</li>
+</ul>
+<blockquote>
+<p><strong>Audit Logging Is the Highest-ROI Security Investment</strong>: Audit logging is the single most valuable security investment for LLM systems — it enables incident investigation, user behavior analysis, and compliance, and costs almost nothing to implement; add it from day one. A comprehensive audit log transforms every security incident from a mystery into a traceable chain of events. Teams that add logging retroactively lose weeks of forensic evidence and spend days reconstructing timelines that a log would have captured in milliseconds.</p>
+</blockquote>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

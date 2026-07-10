@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Multi-Step Forecasting — Direct, Recursive, and MIMO | Notes Backup</title>
+  <meta name="description" content="Compare recursive (iterated one-step), direct (separate model per horizon), and MIMO (single model, all horizons) strategies for multi-step time-series forecasting, with analysis of error accumulation and horizon-accuracy trade-offs." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Multi-Step Forecasting — Direct, Recursive, and MIMO</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Compare recursive (iterated one-step), direct (separate model per horizon), and MIMO (single model, all horizons) strategies for multi-step time-series forecasting, with analysis of error accumulation and horizon-accuracy trade-offs.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Multi-Step Forecasting — Direct, Recursive, and MIMO</h1>
+<p>Multi-step forecasting requires producing predictions for horizons h=1, 2, ..., H rather than just the next step. Three main strategies exist: recursive (train one-step model, feed predictions as inputs iteratively), direct (train one separate model per horizon), and MIMO (Multiple Input Multiple Output — train one model that outputs all H horizons simultaneously). Each strategy has distinct bias-variance properties, and the best choice depends on the forecast horizon, model misspecification, and the inter-horizon dependency structure of the target series.</p>
+<ul>
+<li>Recursive: 1 model, error accumulates across horizons, best for h ≤ 5.</li>
+<li>Direct: H models (one per horizon), no error accumulation, best for long horizons with misspecified models.</li>
+<li>MIMO: 1 model outputting all H horizons, captures inter-horizon dependencies, natural for neural nets.</li>
+<li>DIRMO: G models (one per group of horizons), hybrid between Direct and MIMO.</li>
+<li>Always evaluate RMSE at each individual horizon h, not just the average — profiles differ by strategy.</li>
+</ul>
+<h2>Recursive (Iterated One-Step) Forecasting</h2>
+<p>Recursive strategy: train a one-step model ŷₜ₊₁ = f(yₜ, yₜ₋₁, ..., yₜ₋ₚ). At test time, to forecast h steps ahead, feed the predicted ŷₜ₊₁ as an input to produce ŷₜ₊₂, and so on iteratively. Advantages: only one model to train; sample-efficient. Disadvantage: errors accumulate — if ŷₜ₊₁ has error eₜ₊₁, this error propagates as an input error to ŷₜ₊₂. For well-specified models, error accumulation is small; for misspecified models, bias compounds across horizons. Recursive performs best at short horizons (h ≤ 5).</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.linear_model import Ridge
+from sklearn.metrics import mean_squared_error
+
+def make_lag_features(y, n_lags):
+    X, y_out = [], []
+    for t in range(n_lags, len(y)):
+        X.append(y[t - n_lags:t][::-1])  # lag_1, lag_2, ..., lag_p
+        y_out.append(y[t])
+    return np.array(X), np.array(y_out)
+
+def recursive_forecast(model, last_obs, n_lags, horizon):
+    &quot;&quot;&quot;Recursively forecast H steps by feeding predictions as inputs.&quot;&quot;&quot;
+    history = list(last_obs[-n_lags:])
+    forecasts = []
+    for _ in range(horizon):
+        x = np.array(history[-n_lags:][::-1]).reshape(1, -1)
+        next_val = model.predict(x)[0]
+        forecasts.append(next_val)
+        history.append(next_val)
+    return np.array(forecasts)
+
+np.random.seed(42)
+T = 300
+y = np.zeros(T)
+for t in range(1, T):
+    y[t] = 0.7 * y[t - 1] + np.random.randn()
+
+n_lags, H = 10, 20
+X, y_t = make_lag_features(y, n_lags)
+train_end = int(0.8 * len(X))
+model = Ridge(alpha=1.0).fit(X[:train_end], y_t[:train_end])
+
+forecasts = recursive_forecast(model, y[:train_end + n_lags], n_lags, H)
+true_vals = y[train_end + n_lags: train_end + n_lags + H]
+for h in [1, 5, 10, 20]:
+    rmse = np.sqrt(mean_squared_error([true_vals[h-1]], [forecasts[h-1]]))
+    print(f'h={h:2d}: RMSE = {rmse:.4f}')
+</code></pre>
+<h2>Direct (DIRECT) Multi-Step Forecasting</h2>
+<p>Direct strategy: for each horizon h ∈ {1, 2, ..., H}, train a separate model fₕ on training pairs (xₜ, yₜ₊ₕ) using past observations only as features. At test time, each model fₕ produces its own h-step-ahead forecast without iterating. Advantages: no error accumulation (each model is trained directly for its horizon); theoretically lower bias for misspecified models. Disadvantages: H separate models to train and maintain; each model uses fewer training samples (since the last H observations have no target for longer horizons); ignores inter-horizon dependencies (forecasts for h=3 and h=4 are independent).</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.linear_model import Ridge
+from sklearn.metrics import mean_squared_error
+
+def direct_forecast(y, n_lags, horizon):
+    &quot;&quot;&quot;
+    Train one Ridge model per horizon h in [1..horizon].
+    Returns dict of {h: (model, rmse_on_test)}.
+    &quot;&quot;&quot;
+    T = len(y)
+    split = int(0.8 * T)
+    models = {}
+    for h in range(1, horizon + 1):
+        X_rows, y_rows = [], []
+        for t in range(n_lags, T - h):
+            X_rows.append(y[t - n_lags:t][::-1])
+            y_rows.append(y[t + h])
+        X_all = np.array(X_rows)
+        y_all = np.array(y_rows)
+        split_h = sum(1 for t in range(n_lags, split))
+        m = Ridge(alpha=1.0).fit(X_all[:split_h], y_all[:split_h])
+        pred = m.predict(X_all[split_h:])
+        rmse = np.sqrt(mean_squared_error(y_all[split_h:], pred))
+        models[h] = (m, rmse)
+    return models
+
+np.random.seed(42)
+T = 300
+y = np.zeros(T)
+for t in range(1, T):
+    y[t] = 0.7 * y[t - 1] + np.random.randn()
+
+models = direct_forecast(y, n_lags=10, horizon=20)
+print('Direct forecast RMSE per horizon:')
+for h in [1, 5, 10, 20]:
+    print(f'  h={h:2d}: RMSE = {models[h][1]:.4f}')
+</code></pre>
+<h2>MIMO Multi-Step Forecasting</h2>
+<p>MIMO (Multiple Input Multiple Output): a single model maps input vector xₜ = [yₜ, yₜ₋₁, ..., yₜ₋ₚ] to the full output vector [ŷₜ₊₁, ..., ŷₜ₊H] simultaneously. The model captures inter-horizon dependencies — knowing ŷₜ₊₁ informs ŷₜ₊₂ — which direct models ignore. MIMO is natural for neural networks (output layer has H units) and multi-output regressors. Training uses all samples where the full H-step target is available. MIMO outperforms direct when series have smooth trajectories and inter-horizon correlations; it is the standard approach for Transformer-based forecasters.</p>
+<h2>DIRMO: Grouped Horizon Strategy</h2>
+<p>DIRMO (Direct-MIMO) partitions the H output horizons into G groups of size g = H/G, then trains one MIMO model per group. For H=24, G=6, each MIMO model produces 4-step outputs: one model for h=1..4, another for h=5..8, etc. This reduces the number of models from H (pure direct) to G while preserving inter-horizon consistency within each group. DIRMO is a practical compromise: it avoids managing H independent models while keeping each MIMO output dimension small enough to train reliably on limited data.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.linear_model import Ridge
+from sklearn.multioutput import MultiOutputRegressor
+from sklearn.metrics import mean_squared_error
+
+np.random.seed(42)
+T = 400
+y = np.zeros(T)
+for t in range(1, T):
+    y[t] = 0.8 * y[t - 1] + np.random.randn()
+
+n_lags, H = 15, 20
+X_rows, y_rows = [], []
+for t in range(n_lags, T - H):
+    X_rows.append(y[t - n_lags:t][::-1])
+    y_rows.append(y[t:t + H])
+X_all = np.array(X_rows)
+y_all = np.array(y_rows)   # shape (n_samples, H)
+
+split = int(0.8 * len(X_all))
+X_train, X_test = X_all[:split], X_all[split:]
+y_train, y_test = y_all[:split], y_all[split:]
+
+mimo = MultiOutputRegressor(Ridge(alpha=1.0))
+mimo.fit(X_train, y_train)
+pred = mimo.predict(X_test)
+
+print('MIMO RMSE per horizon:')
+for h_idx in [0, 4, 9, 19]:
+    rmse = np.sqrt(mean_squared_error(y_test[:, h_idx], pred[:, h_idx]))
+    print(f'  h={h_idx+1:2d}: RMSE = {rmse:.4f}')
+</code></pre>
+<blockquote>
+<p><strong>DIRMO: Hybrid of Direct and MIMO</strong>: DIRMO groups horizons into G blocks (e.g., H=12 → 3 groups of 4) and trains one MIMO model per group. This reduces the number of models versus pure Direct (G &lt; H) while preserving inter-horizon dependency within each group. DIRMO often achieves the best of both worlds: lower bias than recursive, fewer models than direct, and richer output structure than MIMO with smaller output dimension per model.</p>
+</blockquote>
+<h2>Recursive vs Direct vs MIMO Accuracy Comparison</h2>
+<pre><code class="language-python">import numpy as np
+from sklearn.linear_model import Ridge
+from sklearn.multioutput import MultiOutputRegressor
+from sklearn.metrics import mean_squared_error
+
+np.random.seed(7)
+T = 500
+y = np.zeros(T)
+for t in range(1, T):
+    y[t] = 0.75 * y[t - 1] + np.random.randn()
+
+n_lags, H = 10, 15
+split_t = 400
+
+def rmse(a, b):
+    return np.sqrt(mean_squared_error(a, b))
+
+X_all = np.array([y[t - n_lags:t][::-1] for t in range(n_lags, T)])
+y_step = y[n_lags:]
+X_tr, X_te = X_all[:split_t - n_lags], X_all[split_t - n_lags:]
+y_tr = y_step[:split_t - n_lags]
+
+one_step = Ridge(alpha=1.0).fit(X_tr, y_tr)
+
+# MIMO targets
+y_mimo = np.array([y[t:t + H] for t in range(n_lags, T - H)])
+X_mimo = X_all[:len(y_mimo)]
+split_m = split_t - n_lags
+mimo = MultiOutputRegressor(Ridge(alpha=1.0)).fit(X_mimo[:split_m], y_mimo[:split_m])
+mimo_pred = mimo.predict(X_mimo[split_m:])
+
+print(f'{&quot;Horizon&quot;:&gt;8} {&quot;Recursive&quot;:&gt;12} {&quot;MIMO&quot;:&gt;12}')
+for h in [1, 3, 5, 10, 15]:
+    hist = list(y[split_t - n_lags:split_t])
+    rec_preds = []
+    for t in range(len(X_te)):
+        xh = np.array(hist[-n_lags:][::-1]).reshape(1, -1)
+        yh = one_step.predict(xh)[0]; rec_preds.append(yh); hist.append(yh)
+    true_h = y[split_t + h - 1: split_t + h]
+    print(f'{h:&gt;8}  {rec_preds[h-1] if h &lt;= len(rec_preds) else &quot;N/A&quot;:&gt;12.4f}  {mimo_pred[0, h-1]:&gt;12.4f}')
+</code></pre>
+<h2>Multi-Step Strategy Reference</h2>
+<table>
+<thead>
+<tr>
+<th>Strategy</th>
+<th>Error Accumulation</th>
+<th>Inter-Horizon Dependency</th>
+<th>Models to Train</th>
+<th>Best Horizon</th>
+<th>Typical Use Case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Recursive</td>
+<td>Yes — compounds with h</td>
+<td>Implicit via shared model</td>
+<td>1</td>
+<td>Short (h ≤ 5)</td>
+<td>Well-specified models, single-step data</td>
+</tr>
+<tr>
+<td>Direct</td>
+<td>No</td>
+<td>None (independent per h)</td>
+<td>H</td>
+<td>Long (h &gt; 10)</td>
+<td>Misspecified models, tabular ML</td>
+</tr>
+<tr>
+<td>MIMO</td>
+<td>No</td>
+<td>Captured by joint output</td>
+<td>1</td>
+<td>Medium–long</td>
+<td>Neural nets, Transformer forecasters</td>
+</tr>
+<tr>
+<td>DIRMO</td>
+<td>No</td>
+<td>Within-group only</td>
+<td>G (groups)</td>
+<td>Any</td>
+<td>Compromise: fewer models than Direct</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>For h ≤ 5, recursive strategy is usually competitive and simpler to implement and maintain.</li>
+<li>For h &gt; 10 with tabular ML (LightGBM, XGBoost), direct outperforms recursive due to compounding bias.</li>
+<li>MIMO is the natural choice for neural network architectures that output a full horizon vector in one forward pass.</li>
+<li>Always evaluate accuracy at each individual horizon h, not just as an average — error profiles differ dramatically by strategy.</li>
+<li>Calibrate prediction intervals separately per horizon; recursive intervals underestimate width because they ignore error accumulation.</li>
+</ul>
+<p>For probabilistic multi-step forecasting, generate sample paths rather than point forecasts: simulate the recursive strategy M times by adding noise drawn from the residual distribution at each step, then aggregate the M paths to get quantile estimates. This Monte Carlo approach captures error accumulation in the tails naturally, producing wider intervals for distant horizons without requiring parametric assumptions about the error distribution.</p>
+<p>Library support for multi-step strategies: sktime provides DirectTabularRegressionForecaster and MultiOutputTabularRegressionForecaster (MIMO). Darts supports recursive, direct, and MIMO with LightGBM/XGBoost backends. The neuralforecast library provides NHITS and NBEATS in MIMO mode. For quick baselines, scikit-learn's MultiOutputRegressor wraps any single-output model into a direct (per-horizon) strategy.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

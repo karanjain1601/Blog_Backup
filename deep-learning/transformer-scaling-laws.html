@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Transformer Scaling Laws — Chinchilla and Compute-Optimal Training | Notes Backup</title>
+  <meta name="description" content="Power-law relationships between model size, dataset size, and loss; Kaplan vs Chinchilla optimal training recipes; estimating FLOPs; and implications for training budget allocation." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Transformer Scaling Laws — Chinchilla and Compute-Optimal Training</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Power-law relationships between model size, dataset size, and loss; Kaplan vs Chinchilla optimal training recipes; estimating FLOPs; and implications for training budget allocation.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Transformer Scaling Laws — Chinchilla and Compute-Optimal Training</h1>
+<p>Neural language model performance follows remarkably smooth power laws in model size, dataset size, and compute budget. These scaling laws — first characterized systematically by Kaplan et al. (2020) and then corrected by Hoffmann et al. (2022, Chinchilla) — provide a principled framework for deciding how large to make a model and how many tokens to train on for a given compute budget. Understanding these relationships has reshaped how organizations allocate training resources and has driven the shift toward training smaller models on more data.</p>
+<h2>Kaplan et al. Power Laws (2020)</h2>
+<p>Kaplan et al. found that language model loss follows power laws in isolation: L(N) ∝ N^{-α_N} with α_N ≈ 0.076 (parameters), L(D) ∝ D^{-α_D} with α_D ≈ 0.095 (tokens), and L(C) ∝ C^{-α_C} (compute). Key finding: for a fixed compute budget, most budget should go to model size (N), with relatively few training tokens — models were significantly undertrained. This led to GPT-3 (175B) being trained on only ~300B tokens, a ratio of ~1.7 tokens per parameter, well below what Chinchilla later identified as optimal.</p>
+<pre><code class="language-python">import numpy as np
+from scipy.optimize import curve_fit
+import warnings
+warnings.filterwarnings('ignore')
+
+def power_law(x, a, alpha):
+    &quot;&quot;&quot;L = a * x^(-alpha)&quot;&quot;&quot;
+    return a * x ** (-alpha)
+
+# Simulate loss measurements across model sizes (illustrative)
+np.random.seed(42)
+N_values = np.array([1e7, 3e7, 1e8, 3e8, 1e9, 3e9, 1e10])
+# True relationship: L(N) ~ 2.0 * N^{-0.076} + noise
+true_alpha, true_a = 0.076, 2.0
+noise = np.random.normal(0, 0.005, len(N_values))
+L_values = true_a * N_values ** (-true_alpha) + noise
+
+# Fit power law
+popt, _ = curve_fit(power_law, N_values, L_values, p0=[2.0, 0.08])
+a_fit, alpha_fit = popt
+print(f'Fitted a = {a_fit:.4f}, alpha_N = {alpha_fit:.4f} (true = {true_alpha})')
+print()
+print(f'{'Params':&gt;12} {'True Loss':&gt;10} {'Pred Loss':&gt;10}')
+for N, L in zip(N_values, L_values):
+    pred = power_law(N, a_fit, alpha_fit)
+    print(f'{N:&gt;12.1e} {L:&gt;10.4f} {pred:&gt;10.4f}')
+</code></pre>
+<h2>Chinchilla: Compute-Optimal Training (2022)</h2>
+<p>Hoffmann et al. (2022) ran a rigorous ablation: train many models of different sizes on different token counts, all at the same compute budget. Finding: the compute-optimal model size scales as N_opt ∝ C^{0.5} and the optimal token count scales as D_opt ∝ C^{0.5} — both should scale equally with compute. The ratio is approximately 20 tokens per parameter for compute-optimal training. This showed that GPT-3 (175B on 300B tokens ≈ 1.7 tok/param) was severely undertrained. The 70B Chinchilla model trained on 1.4T tokens (20 tok/param) outperformed 280B Gopher at the same training compute.</p>
+<pre><code class="language-python">import numpy as np
+
+def chinchilla_optimal(compute_budget_flops, tokens_per_param=20.0):
+    &quot;&quot;&quot;
+    Given a compute budget C (FLOPs), return optimal N and D.
+    Approximation: C = 6*N*D =&gt; N_opt = sqrt(C / (6 * tokens_per_param))
+    &quot;&quot;&quot;
+    N_opt = np.sqrt(compute_budget_flops / (6.0 * tokens_per_param))
+    D_opt = tokens_per_param * N_opt
+    return int(N_opt), int(D_opt)
+
+# Compute budgets in FLOPs (approximate for well-known models)
+models = {
+    'GPT-3 (175B)':  (175e9,  300e9,   6 * 175e9 * 300e9),
+    'Gopher (280B)': (280e9,  300e9,   6 * 280e9 * 300e9),
+    'Chinchilla':    (70e9,   1.4e12,  6 * 70e9  * 1.4e12),
+    'LLaMA-1 (65B)': (65e9,   1.4e12,  6 * 65e9  * 1.4e12),
+}
+
+print(f'{'Model':&lt;20} {'Actual N':&gt;12} {'Actual D':&gt;12} {'Chinchilla N_opt':&gt;16} {'Chinchilla D_opt':&gt;16}')
+for name, (N, D, C) in models.items():
+    n_opt, d_opt = chinchilla_optimal(C)
+    ratio = D / N
+    print(f'{name:&lt;20} {N/1e9:&gt;10.0f}B {D/1e9:&gt;10.0f}B {n_opt/1e9:&gt;14.0f}B {d_opt/1e9:&gt;14.0f}B  (actual {ratio:.0f} tok/param)')
+</code></pre>
+<h2>Estimating Training Compute</h2>
+<p>The rule of thumb for transformer training FLOPs is C ≈ 6ND, where N is the number of non-embedding parameters and D is the number of training tokens. The factor 6 accounts for: 2 for the forward pass (one multiply-add = 2 FLOPs per weight), and 4 for the backward pass (which requires storing activations and computing gradients for both weights and inputs, roughly 2× the forward pass FLOPs). This estimate is accurate to within ~10% for standard transformer architectures and ignores attention's O(T²) cost (often smaller than FFN for typical sequence lengths).</p>
+<pre><code class="language-python">import numpy as np
+
+def estimate_transformer_params(vocab_size, d_model, n_layers, n_heads,
+                                 ffn_mult=4, include_embeddings=True):
+    &quot;&quot;&quot;Estimate non-embedding transformer parameters.&quot;&quot;&quot;
+    # Attention: Q, K, V projections + output projection
+    attn_params = 4 * d_model * d_model  # per layer
+    # FFN: two linear layers with expansion factor ffn_mult
+    ffn_params = 2 * d_model * d_model * ffn_mult  # per layer
+    # LayerNorm: 2 * d_model per norm, 2 norms per block + 1 final
+    ln_params = (2 * n_layers + 1) * 2 * d_model
+    non_emb = n_layers * (attn_params + ffn_params) + ln_params
+    emb = vocab_size * d_model  # token embedding (tied with output)
+    return non_emb, non_emb + emb if include_embeddings else non_emb
+
+configs = [
+    ('GPT-2 small',  50257, 768,   12, 12),
+    ('GPT-2 XL',     50257, 1600,  48, 25),
+    ('GPT-3',        50257, 12288, 96, 96),
+]
+print(f'{'Model':&lt;15} {'Non-emb N':&gt;12} {'Total N':&gt;12} {'C @ 300B tok':&gt;15} {'C @ 1.4T tok':&gt;15}')
+for name, V, d, L, H in configs:
+    non_emb, total = estimate_transformer_params(V, d, L, H)
+    c_300b = 6 * non_emb * 300e9
+    c_14t  = 6 * non_emb * 1.4e12
+    print(f'{name:&lt;15} {non_emb/1e9:&gt;10.2f}B {total/1e9:&gt;10.2f}B {c_300b:.2e} {c_14t:.2e}')
+</code></pre>
+<h2>Scaling Law Extrapolation</h2>
+<p>A key practical use of scaling laws is predicting the performance of a large model by running cheap small-model experiments. If loss follows L(N) = aN^{-α}, you can fit α and a from several small runs (1M–1B parameters) and extrapolate to 10B+. Reliability improves when experiments are run at the same token-to-parameter ratio as the target run. The IsoFLOP method — run multiple models at the same compute budget with varying sizes — is more accurate because it directly fits the Chinchilla two-variable curve.</p>
+<pre><code class="language-python">import numpy as np
+from scipy.optimize import curve_fit
+
+np.random.seed(7)
+
+# Small model experiments (simulated)
+N_small = np.array([1e6, 3e6, 1e7, 3e7, 1e8, 3e8])
+alpha_true, a_true, L_irred = 0.076, 406.4, 1.69
+# Chinchilla-style: L(N) = (N_c / N)^alpha + L_irred
+N_c = 8.8e13
+L_small = (N_c / N_small) ** alpha_true + L_irred
+L_noisy = L_small + np.random.normal(0, 0.01, len(N_small))
+
+def loss_model(N, L0, N_c, alpha):
+    return L0 + (N_c / N) ** alpha
+
+popt, _ = curve_fit(loss_model, N_small, L_noisy,
+                    p0=[1.7, 8e13, 0.076], maxfev=10000)
+L0_fit, Nc_fit, alpha_fit = popt
+
+# Extrapolate to large models
+N_targets = [1e9, 1e10, 1e11, 1e12]
+print(f'Fitted: L0={L0_fit:.4f}, N_c={Nc_fit:.2e}, alpha={alpha_fit:.4f}')
+print(f'\n{'Target N':&gt;12} {'Pred Loss':&gt;10} {'True Loss':&gt;10}')
+for N in N_targets:
+    pred = loss_model(N, L0_fit, Nc_fit, alpha_fit)
+    true = loss_model(N, L_irred, N_c, alpha_true)
+    print(f'{N:&gt;12.0e} {pred:&gt;10.4f} {true:&gt;10.4f}')
+</code></pre>
+<h2>Kaplan vs Chinchilla Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Aspect</th>
+<th>Kaplan et al. 2020</th>
+<th>Chinchilla 2022</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Optimal N given C</td>
+<td>N ∝ C^0.73 — scale model fast</td>
+<td>N ∝ C^0.5 — scale model and data equally</td>
+</tr>
+<tr>
+<td>Optimal tok/param ratio</td>
+<td>~1.7 tokens per parameter</td>
+<td>~20 tokens per parameter</td>
+</tr>
+<tr>
+<td>Training duration</td>
+<td>Short training, large model</td>
+<td>Longer training, smaller model</td>
+</tr>
+<tr>
+<td>Key prediction</td>
+<td>GPT-3 style scaling is efficient</td>
+<td>GPT-3 was severely undertrained</td>
+</tr>
+<tr>
+<td>Validated by</td>
+<td>GPT-3 training runs</td>
+<td>Training Chinchilla-70B &gt; Gopher-280B</td>
+</tr>
+<tr>
+<td>Implication for inference</td>
+<td>Not considered — focus on pretraining</td>
+<td>Smaller model = faster, cheaper inference</td>
+</tr>
+</tbody>
+</table>
+<h2>Implications for Model Training Decisions</h2>
+<p>Chinchilla optimal training maximizes perplexity at a fixed compute budget during training. But inference cost often matters more than training cost in production — a 7B model runs on a single GPU while 70B requires multi-GPU. LLaMA-1 explicitly adopted an inference-optimal strategy: train 65B and 7B models on 1T-1.4T tokens (exceeding Chinchilla optimal for these sizes), accepting slightly higher training compute in exchange for better inference quality per parameter. LLaMA-2 (2T tokens) and subsequent models pushed this further.</p>
+<blockquote>
+<p><strong>Scaling Laws Are Not Universal</strong>: Published scaling laws are fit to specific architecture families, tokenizers, and data distributions. Exponents vary across studies (α_N ranges from 0.05 to 0.12 in different papers). Architectural changes (MoE, state-space models, better data curation) shift the curves. Always run your own small-scale isoFLOP experiments when making training decisions for a new architecture or data mixture.</p>
+</blockquote>
+<ul>
+<li>Compute budget C ≈ 6ND is the standard estimate; more precise formulas account for attention and embedding FLOPs.</li>
+<li>Chinchilla ratio: 20 tok/param is optimal for minimizing loss at fixed pretraining compute.</li>
+<li>Inference-optimal models trade extra training compute for smaller, faster-at-inference models.</li>
+<li>Data quality matters: Chinchilla and LLaMA show that high-quality data is worth more than raw token counts.</li>
+<li>Emergent abilities appear discontinuously at scale and are not predicted by smooth power-law extrapolation.</li>
+</ul>
+<h2>LLaMA and Inference-Optimal Models</h2>
+<p>LLaMA's training philosophy operationalized the inference-optimal insight: rather than training the largest compute-optimal model for a single run, train smaller models for far longer on higher-quality data. LLaMA-1-7B was trained on 1T tokens (Chinchilla-optimal for ~50B, so overtrained by 20×), yielding a model that matches or exceeds GPT-3-175B on many benchmarks while being 25× smaller. LLaMA-2 pushed to 2T tokens; LLaMA-3 to 15T tokens — far past Chinchilla optimal for their sizes. The community has adopted this pattern: train 7B–70B models on 1–15T tokens, accepting higher pretraining cost for dramatic inference savings.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

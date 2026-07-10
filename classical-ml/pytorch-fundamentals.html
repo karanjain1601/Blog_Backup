@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PyTorch — Autograd, Tensors, nn.Module, and DataLoader | Notes Backup</title>
+  <meta name="description" content="PyTorch core primitives: tensor operations with autograd, building models with nn.Module, loading data with DataLoader, and writing a complete training loop." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>PyTorch — Autograd, Tensors, nn.Module, and DataLoader</h1>
+      <ul class='note-meta'><li><strong>description:</strong> PyTorch core primitives: tensor operations with autograd, building models with nn.Module, loading data with DataLoader, and writing a complete training loop.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>PyTorch — Autograd, Tensors, nn.Module, and DataLoader</h1>
+<p>PyTorch is the dominant deep learning framework for research and increasingly for production. Its core design — eager execution, dynamic graphs, Pythonic API — makes debugging natural and custom architectures straightforward. Understanding the four primitives (tensors, autograd, nn.Module, DataLoader) unlocks everything else.</p>
+<h2>Tensors and Data Types</h2>
+<p>A torch.Tensor is an N-dimensional array backed by a contiguous block of memory, with a dtype (float32, float16, bfloat16, int64, bool), a device (cpu, cuda, mps), and optional autograd tracking via requires_grad. Operations on tensors with requires_grad=True are recorded into a computational graph.</p>
+<ul>
+<li>float32: default dtype for model weights — 32-bit IEEE 754, safe for most operations</li>
+<li>float16: 16-bit reduced precision — faster on tensor cores, risks overflow (max ~65504)</li>
+<li>bfloat16: 16-bit with same exponent range as float32 — preferred for training on A100/H100</li>
+<li>Leaf tensors: tensors created by the user (not by operations) — only these accumulate .grad</li>
+<li>Non-leaf tensors: outputs of operations — their .grad is not retained unless retain_grad() called</li>
+<li>Device movement: tensor.to('cuda'), tensor.cuda(), tensor.cpu() — always synchronous</li>
+</ul>
+<h2>Tensors and Autograd from Scratch</h2>
+<p>The computational graph is built dynamically during the forward pass. Calling .backward() on a scalar traverses this graph in reverse, computing gradients via chain rule and accumulating them in .grad of each leaf tensor.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+# Basic tensor with gradient tracking
+x = torch.tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
+W = torch.tensor([[0.5, -0.5], [1.0, 0.3]], requires_grad=True)
+
+# Forward pass — builds computational graph
+z = x @ W          # matrix multiply
+loss = z.sum()     # scalar loss
+
+# Backward pass — traverses graph, fills .grad
+loss.backward()
+print('x.grad:', x.grad)   # dl/dx
+print('W.grad:', W.grad)   # dl/dW
+
+# Critical: zero gradients before next backward pass
+# (gradients accumulate by default — a common bug)
+x.grad.zero_()
+W.grad.zero_()
+
+# torch.no_grad() for inference — no graph, lower memory
+with torch.no_grad():
+    z_inf = x @ W
+    print('Requires grad (inference):', z_inf.requires_grad)  # False
+
+# Detach a tensor from the graph (used in RL, GAN targets)
+z_detached = z.detach()
+print('Detached requires grad:', z_detached.requires_grad)  # False
+</code></pre>
+<h2>Building Models with nn.Module</h2>
+<p>nn.Module is the base class for all neural network layers and models. It tracks parameters automatically, supports device movement via .to(), and provides state_dict() for serialization. Every custom layer subclasses nn.Module and implements forward().</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class ResidualBlock(nn.Module):
+    def __init__(self, dim: int, dropout: float = 0.1):
+        super().__init__()
+        self.fc1    = nn.Linear(dim, dim * 2)
+        self.fc2    = nn.Linear(dim * 2, dim)
+        self.norm1  = nn.LayerNorm(dim)
+        self.norm2  = nn.LayerNorm(dim)
+        self.drop   = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -&gt; torch.Tensor:
+        residual = x
+        x = self.norm1(x)
+        x = F.gelu(self.fc1(x))
+        x = self.drop(x)
+        x = self.fc2(x)
+        return self.norm2(x + residual)  # residual connection
+
+class TabularMLP(nn.Module):
+    def __init__(self, n_in: int, n_out: int, depth: int = 3, width: int = 256):
+        super().__init__()
+        self.input_proj = nn.Linear(n_in, width)
+        self.blocks     = nn.ModuleList([ResidualBlock(width) for _ in range(depth)])
+        self.head       = nn.Linear(width, n_out)
+
+    def forward(self, x: torch.Tensor) -&gt; torch.Tensor:
+        x = self.input_proj(x)
+        for block in self.blocks:
+            x = block(x)
+        return self.head(x)
+
+model = TabularMLP(n_in=20, n_out=2)
+print(f'Parameters: {sum(p.numel() for p in model.parameters()):,}')
+print(model)
+</code></pre>
+<h2>Custom Dataset and DataLoader</h2>
+<p>DataLoader wraps a Dataset, handles batching, shuffling, and parallel loading. Implementing <strong>len</strong> and <strong>getitem</strong> is all that is required for a custom Dataset. pin_memory=True and num_workers&gt;0 are key for GPU training throughput.</p>
+<pre><code class="language-python">import torch
+from torch.utils.data import Dataset, DataLoader
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+
+class TabularDataset(Dataset):
+    def __init__(self, X: np.ndarray, y: np.ndarray, scaler=None, fit_scaler=False):
+        if scaler is None:
+            scaler = StandardScaler()
+        if fit_scaler:
+            X = scaler.fit_transform(X)
+        else:
+            X = scaler.transform(X)
+        self.X      = torch.FloatTensor(X)
+        self.y      = torch.LongTensor(y)
+        self.scaler = scaler
+
+    def __len__(self) -&gt; int:
+        return len(self.X)
+
+    def __getitem__(self, idx: int):
+        return self.X[idx], self.y[idx]
+
+# Usage
+from sklearn.datasets import make_classification
+X, y = make_classification(n_samples=5000, n_features=20, random_state=42)
+
+train_ds = TabularDataset(X[:4000], y[:4000], fit_scaler=True)
+val_ds   = TabularDataset(X[4000:], y[4000:], scaler=train_ds.scaler)
+
+train_loader = DataLoader(train_ds, batch_size=256, shuffle=True,
+                          num_workers=0, pin_memory=False)
+val_loader   = DataLoader(val_ds,   batch_size=512, shuffle=False)
+
+for X_batch, y_batch in train_loader:
+    print(f'Batch shape: {X_batch.shape}, dtype: {X_batch.dtype}')
+    break
+</code></pre>
+<h2>Complete Training Loop</h2>
+<p>A production training loop includes: gradient zeroing before each forward pass, model.eval() for validation (disables dropout/BatchNorm), a learning rate scheduler, and early stopping based on validation loss.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from torch.optim.lr_scheduler import CosineAnnealingLR
+
+def train_epoch(model, loader, optimizer, criterion, device):
+    model.train()
+    total_loss, correct, total = 0.0, 0, 0
+    for X_batch, y_batch in loader:
+        X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+        optimizer.zero_grad(set_to_none=True)  # memory-efficient zero_grad
+        logits = model(X_batch)
+        loss   = criterion(logits, y_batch)
+        loss.backward()
+        nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        optimizer.step()
+        total_loss += loss.item() * len(y_batch)
+        correct    += (logits.argmax(1) == y_batch).sum().item()
+        total      += len(y_batch)
+    return total_loss / total, correct / total
+
+@torch.no_grad()
+def eval_epoch(model, loader, criterion, device):
+    model.eval()  # disables dropout and sets BN to eval mode
+    total_loss, correct, total = 0.0, 0, 0
+    for X_batch, y_batch in loader:
+        X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+        logits = model(X_batch)
+        total_loss += criterion(logits, y_batch).item() * len(y_batch)
+        correct    += (logits.argmax(1) == y_batch).sum().item()
+        total      += len(y_batch)
+    return total_loss / total, correct / total
+</code></pre>
+<hr />
+<h2>Key nn.Module Methods</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Purpose</th>
+<th>Common Usage</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>forward(x)</td>
+<td>Define the computation</td>
+<td>Called via model(x), not model.forward(x)</td>
+</tr>
+<tr>
+<td>parameters()</td>
+<td>Iterator over all trainable params</td>
+<td>optimizer = Adam(model.parameters())</td>
+</tr>
+<tr>
+<td>state_dict()</td>
+<td>Ordered dict of all param tensors</td>
+<td>torch.save(model.state_dict(), path)</td>
+</tr>
+<tr>
+<td>load_state_dict(d)</td>
+<td>Load saved weights</td>
+<td>model.load_state_dict(torch.load(path))</td>
+</tr>
+<tr>
+<td>to(device)</td>
+<td>Move all params to device</td>
+<td>model.to('cuda') or model.cuda()</td>
+</tr>
+<tr>
+<td>train() / eval()</td>
+<td>Set training vs inference mode</td>
+<td>Affects Dropout and BatchNorm behavior</td>
+</tr>
+<tr>
+<td>named_parameters()</td>
+<td>Iterator over (name, param) pairs</td>
+<td>Inspecting or freezing specific layers</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>set_to_none=True in zero_grad</strong>: Using optimizer.zero_grad(set_to_none=True) sets gradient tensors to None instead of zeroing them. This avoids allocating memory for gradients that will be immediately overwritten, saving 10-20% GPU memory in large models. It is the default in recent PyTorch versions.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<ul>
+<li>torch.Tensor = N-dim array with dtype, device, and optional autograd (requires_grad=True for leaf tensors)</li>
+<li>autograd builds the computational graph on the forward pass; .backward() computes gradients via reverse-mode AD</li>
+<li>nn.Module tracks parameters automatically — implement forward(), use ModuleList/ModuleDict for submodules</li>
+<li>DataLoader handles batching, shuffling, and parallel loading — set pin_memory=True and num_workers&gt;0 for GPU</li>
+<li>Training loop pattern: zero_grad → forward → loss → backward → clip_grad → step → scheduler.step</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

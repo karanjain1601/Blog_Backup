@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Movement Pruning — Learning Which Weights to Prune | Notes Backup</title>
+  <meta name="description" content="Movement pruning (Sanh et al. 2020) trains importance scores via gradient descent, pruning weights that move toward zero during fine-tuning. Covers score initialization, straight-through estimator, soft movement pruning, and comparison with magnitude and gradient-based criteria for BERT." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Movement Pruning — Learning Which Weights to Prune</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Movement pruning (Sanh et al. 2020) trains importance scores via gradient descent, pruning weights that move toward zero during fine-tuning. Covers score initialization, straight-through estimator, soft movement pruning, and comparison with magnitude and gradient-based criteria for BERT.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Movement Pruning — Learning Which Weights to Prune</h1>
+<p>Magnitude pruning removes the smallest weights by absolute value. This works well for models trained from scratch but is poorly suited to fine-tuned models: during task-specific fine-tuning, the weights that matter most for the task may be small in magnitude but moving strongly away from zero, while large pre-trained weights that are irrelevant to the task remain large but become unimportant. Movement pruning addresses this by pruning weights that move toward zero during fine-tuning, learning which weights to keep jointly with the task objective.</p>
+<h2>The Movement Pruning Objective</h2>
+<p>Movement pruning (Sanh et al. 2020) introduces a real-valued score S_i for each weight W_i, initialized to zero. During training, a binary mask is derived by keeping the top-k weights by score: M = top-k(|S|). The forward pass uses W ⊙ M (masked weights). The gradient of the task loss ∂L/∂S flows through the straight-through estimator, allowing the scores to be trained even though the masking operation is discrete. A positive score gradient means the weight is becoming more important; a negative gradient drives the score toward zero, eventually pruning the weight.</p>
+<h2>Score Computation and Mask Generation</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class MovementPruningLinear(nn.Module):
+    &quot;&quot;&quot;Linear layer with learnable movement pruning scores.&quot;&quot;&quot;
+
+    def __init__(self, in_features: int, out_features: int, sparsity: float = 0.8):
+        super().__init__()
+        self.weight = nn.Parameter(torch.randn(out_features, in_features) * 0.02)
+        self.bias = nn.Parameter(torch.zeros(out_features))
+        self.scores = nn.Parameter(torch.zeros_like(self.weight))  # S_i = 0 initially
+        self.sparsity = sparsity
+
+    def _get_mask(self) -&gt; torch.Tensor:
+        n_keep = max(1, int(self.weight.numel() * (1 - self.sparsity)))
+        # Top-k by absolute score value
+        threshold = self.scores.abs().flatten().topk(n_keep).values.min()
+        return (self.scores.abs() &gt;= threshold).float()
+
+    def forward(self, x: torch.Tensor) -&gt; torch.Tensor:
+        mask = self._get_mask()  # binary, non-differentiable
+        masked_weight = self.weight * mask  # scores gradient via STE (see next block)
+        return nn.functional.linear(x, masked_weight, self.bias)
+
+# Verify score shapes
+layer = MovementPruningLinear(128, 64, sparsity=0.8)
+x = torch.randn(8, 128)
+out = layer(x)
+print(f'Output shape: {out.shape}')
+print(f'Score shape: {layer.scores.shape}')
+print(f'Active weights: {layer._get_mask().sum().item():.0f}/{layer.weight.numel()}')
+</code></pre>
+<h2>Straight-Through Estimator for Discrete Masks</h2>
+<p>The top-k masking operation has zero gradient almost everywhere. The straight-through estimator (STE) bypasses this by passing the upstream gradient through the masking operation unchanged during the backward pass: ∂L/∂S ≈ ∂L/∂(W⊙M). In practice this is implemented by computing the mask in the forward pass without tracking it in the autograd graph, then multiplying the weight by the detached mask. The score gradient then equals the gradient through the weight times the mask indicator.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from torch.autograd import Function
+
+class TopKSTE(Function):
+    &quot;&quot;&quot;Straight-through estimator for top-k masking.&quot;&quot;&quot;
+
+    @staticmethod
+    def forward(ctx, scores: torch.Tensor, sparsity: float):
+        n_keep = max(1, int(scores.numel() * (1 - sparsity)))
+        threshold = scores.abs().flatten().topk(n_keep).values.min()
+        mask = (scores.abs() &gt;= threshold).float()
+        ctx.save_for_backward(mask)
+        return mask
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        # STE: pass gradient straight through the masking operation
+        mask, = ctx.saved_tensors
+        return grad_output * mask, None  # None for sparsity (not a tensor)
+
+class MovementPruningLinearSTE(nn.Module):
+    def __init__(self, in_features, out_features, sparsity=0.8):
+        super().__init__()
+        self.weight = nn.Parameter(torch.randn(out_features, in_features) * 0.02)
+        self.bias = nn.Parameter(torch.zeros(out_features))
+        self.scores = nn.Parameter(torch.zeros(out_features, in_features))
+        self.sparsity = sparsity
+
+    def forward(self, x):
+        mask = TopKSTE.apply(self.scores, self.sparsity)
+        return nn.functional.linear(x * 1.0, self.weight * mask, self.bias)
+
+# Test gradient flows to scores
+layer = MovementPruningLinearSTE(32, 16, sparsity=0.7)
+x = torch.randn(4, 32)
+loss = layer(x).sum()
+loss.backward()
+print(f'scores.grad is None: {layer.scores.grad is None}')
+print(f'scores.grad norm: {layer.scores.grad.norm().item():.4f}')
+</code></pre>
+<h2>Movement vs Magnitude — BERT-QA Accuracy</h2>
+<pre><code class="language-python">import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+# Reproduced from Sanh et al. 2020 (SQuAD v1.1 F1 at varying sparsity)
+sparsity_levels = [0.0, 0.5, 0.7, 0.8, 0.85, 0.90, 0.95]
+
+# Approximate F1 scores from paper (BERT-base fine-tuned on SQuAD)
+magnitude_f1 = [88.5, 87.9, 86.1, 82.4, 78.3, 68.2, 45.1]
+movement_f1  = [88.5, 88.2, 87.6, 86.8, 85.1, 82.4, 74.3]
+
+print(f'{&quot;Sparsity&quot;:&gt;10}  {&quot;Magnitude F1&quot;:&gt;14}  {&quot;Movement F1&quot;:&gt;12}  {&quot;Delta&quot;:&gt;8}')
+print('-' * 52)
+for s, m, mv in zip(sparsity_levels, magnitude_f1, movement_f1):
+    print(f'{s:&gt;10.0%}  {m:&gt;14.1f}  {mv:&gt;12.1f}  {mv-m:&gt;+8.1f}')
+
+# Find crossover: at what sparsity does movement pruning gain &gt;2 F1 points?
+crossover = [(s, mv-m) for s, m, mv in zip(sparsity_levels, magnitude_f1, movement_f1)
+             if mv - m &gt; 2]
+if crossover:
+    print(f'\nMovement pruning gains &gt;2 F1 at sparsity &gt;= {crossover[0][0]:.0%}')
+    print(f'Max gain: +{max(d for _,d in crossover):.1f} F1 at highest sparsity')
+</code></pre>
+<h2>Soft Movement Pruning</h2>
+<p>Hard movement pruning uses a discrete top-k mask. Soft movement pruning relaxes this: instead of enforcing exact sparsity via top-k, it adds an L1 regularization term on the scores: L_total = L_task + λ · ‖S‖₁. This drives most scores toward zero while allowing the model to choose which ones remain nonzero. There is no hard sparsity constraint; the regularization strength λ controls the trade-off. At convergence, remaining nonzero scores define the surviving weights.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.optim as optim
+
+class SoftMovementPruningLinear(nn.Module):
+    def __init__(self, in_features, out_features):
+        super().__init__()
+        self.weight = nn.Parameter(torch.randn(out_features, in_features) * 0.02)
+        self.bias = nn.Parameter(torch.zeros(out_features))
+        self.scores = nn.Parameter(torch.zeros(out_features, in_features))
+
+    def forward(self, x):
+        # Use sigmoid to get soft [0,1] mask (no discrete top-k)
+        soft_mask = torch.sigmoid(self.scores * 10)  # sharp sigmoid
+        return nn.functional.linear(x, self.weight * soft_mask, self.bias)
+
+    def l1_score_loss(self):
+        return self.scores.abs().mean()
+
+def train_with_soft_movement(model, loader, criterion, epochs=3, lam=1e-4):
+    optimizer = optim.AdamW(model.parameters(), lr=2e-4)
+    for epoch in range(epochs):
+        total_task, total_reg = 0.0, 0.0
+        for X, y in loader:
+            optimizer.zero_grad()
+            task_loss = criterion(model(X), y)
+            # L1 regularization on all score tensors
+            reg_loss = sum(m.l1_score_loss() for m in model.modules()
+                          if isinstance(m, SoftMovementPruningLinear))
+            loss = task_loss + lam * reg_loss
+            loss.backward()
+            optimizer.step()
+            total_task += task_loss.item()
+            total_reg += reg_loss.item()
+        print(f'Epoch {epoch+1}: task={total_task/len(loader):.4f}  reg={total_reg/len(loader):.4f}')
+
+print('Soft movement pruning: scores driven to zero via L1, no discrete mask needed.')
+</code></pre>
+<blockquote>
+<p><strong>When to Choose Movement Pruning</strong>: Movement pruning is specifically designed for fine-tuning pretrained models like BERT. If you are training from scratch, magnitude pruning or Taylor pruning is equally effective. Movement pruning's advantage emerges because pre-trained weights that were large in the original model may become irrelevant after task-specific fine-tuning — magnitude pruning would keep them, while movement pruning correctly identifies and removes them.</p>
+</blockquote>
+<h2>Winning Tickets at Task-Specific Level</h2>
+<p>The lottery ticket hypothesis states that large networks contain sparse subnetworks (winning tickets) that, when trained from initialization, match the full network's accuracy. Movement pruning finds winning tickets at the fine-tuning level: the sparse mask found by movement pruning on a fine-tuned BERT is task-specific and does not generalize across tasks. This is evidence that the lottery ticket structure is downstream of the task, not just of the pre-training.</p>
+<ul>
+<li>Scores S initialized to 0 at the start of fine-tuning — movement from zero signals importance.</li>
+<li>Top-k masking: exactly (1-k)% of weights are pruned; k is the target density.</li>
+<li>STE propagates gradients through discrete mask: score gradient ≈ weight gradient × mask.</li>
+<li>Soft variant: L1 penalty on scores avoids discrete top-k, smoother optimization landscape.</li>
+<li>At 80–90% sparsity, movement pruning retains 4–14 F1 points more than magnitude pruning on SQuAD.</li>
+<li>Task-specific tickets: the winning subnetwork is different for QA vs NLI vs sentiment tasks.</li>
+</ul>
+<h2>Pruning Criteria Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>When Scores Computed</th>
+<th>Criteria</th>
+<th>BERT SQuAD F1 @ 90%</th>
+<th>Supports Structure</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Magnitude pruning</td>
+<td>Post-training, no gradient</td>
+<td></td>
+<td>W_i</td>
+<td>— static weight size</td>
+</tr>
+<tr>
+<td>Movement pruning</td>
+<td>During fine-tuning, gradient</td>
+<td>Score S_i trained by ∂L/∂S</td>
+<td>~82 F1</td>
+<td>No — unstructured</td>
+</tr>
+<tr>
+<td>Soft movement</td>
+<td>During fine-tuning, gradient</td>
+<td>L1(S) regularization, sigmoid mask</td>
+<td>~81 F1</td>
+<td>No — unstructured</td>
+</tr>
+<tr>
+<td>SNIP</td>
+<td>Before training (single pass)</td>
+<td></td>
+<td>∂L/∂W_i · W_i</td>
+<td>at init</td>
+</tr>
+<tr>
+<td>GraSP</td>
+<td>Before training (Hessian approx)</td>
+<td>-Hᵀg · W at init (gradient flow)</td>
+<td>~74 F1</td>
+<td>Limited</td>
+</tr>
+</tbody>
+</table>
+<h2>Practical Recommendations for BERT Pruning</h2>
+<p>For fine-tuned BERT models, apply movement pruning rather than magnitude pruning whenever sparsity exceeds 60%. Use a linear sparsity schedule: start at 0% and ramp to the target over the first 80% of fine-tuning steps, then hold the mask fixed for the remaining 20%. This warm-up avoids removing weights before the model has adapted to the task. Learning rate for scores should be 10–100× lower than the learning rate for weights; otherwise scores converge too fast and freeze before the model finds the best sparse subnetwork.</p>
+<ul>
+<li>Start fine-tuning with magnitude pruning warm-up (0→20% sparsity) before switching to movement scores.</li>
+<li>Score learning rate: 1e-2 to 1e-1 (much higher than weight LR 2e-5) works well empirically.</li>
+<li>Monitor gradient norms of scores — if they vanish, the temperature or LR needs adjustment.</li>
+<li>After reaching target sparsity, freeze the mask and fine-tune weights only for 10% more steps.</li>
+<li>For extreme sparsity (&gt;95%), combine movement pruning with distillation from the dense teacher.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

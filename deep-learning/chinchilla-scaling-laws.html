@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Chinchilla Scaling Laws — Compute-Optimal Token-to-Parameter Ratios | Notes Backup</title>
+  <meta name="description" content="Hoffmann et al. (2022, DeepMind): by sweeping (N, D) at fixed compute, the true optimal D/N ratio is ~20 tokens per parameter — not ~1 as Kaplan suggested — showing GPT-3, Gopher, and most pre-2022 LLMs were severely undertrained on data." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Chinchilla Scaling Laws — Compute-Optimal Token-to-Parameter Ratios</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Hoffmann et al. (2022, DeepMind): by sweeping (N, D) at fixed compute, the true optimal D/N ratio is ~20 tokens per parameter — not ~1 as Kaplan suggested — showing GPT-3, Gopher, and most pre-2022 LLMs were severely undertrained on data.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Chinchilla Scaling Laws — Compute-Optimal Token-to-Parameter Ratios</h1>
+<p>In 2022, Hoffmann et al. at DeepMind published the Chinchilla paper, overturning the prevailing Kaplan-derived wisdom that model size should scale faster than data. By training over 400 models ranging from 70M to 16B parameters on 5B to 500B tokens, they identified the true compute-optimal allocation: for a fixed compute budget C, both model size N<em> and token count D</em> should scale equally — proportional to C^0.5 each. The key result: D/N approximately 20 tokens per parameter at the optimal point, not 1 as Kaplan predicted.</p>
+<h2>The Compute-Optimal Insight</h2>
+<p>Chinchilla (70B parameters, 1.4T training tokens) outperformed Gopher (280B parameters, 300B tokens) at the same compute budget, demonstrating that data quantity matters as much as model size. GPT-3 (175B parameters, 300B tokens) was undertrained by approximately 10x on data relative to its parameter count. The joint loss formula L(N, D) = E + A/N^alpha + B/D^beta was fitted with E=1.69, A=406.4, alpha=0.34, B=410.7, beta=0.28, enabling precise optimization of the N-D trade-off at any compute level.</p>
+<ul>
+<li>Optimal D/N = 20: train on 20 tokens per parameter at compute-optimal allocation</li>
+<li>N<em> proportional to C^0.5 and D</em> proportional to C^0.5: equal scaling of model and data</li>
+<li>Chinchilla (70B, 1.4T) beats Gopher (280B, 300B) at same compute — 4x smaller model, 5x more data</li>
+<li>GPT-3 (175B, 300B tokens): D/N = 1.7, approximately 10x under-trained on data</li>
+<li>C = 6<em>N</em>D approximation: 6 multiply-adds per parameter per token (2 forward + 4 backward)</li>
+<li>LLaMA-1 (7B, 1T tokens): D/N = 143, approximately 7x over-trained — inference-optimized</li>
+</ul>
+<h2>Code 1 — Chinchilla Loss Formula</h2>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+
+# Chinchilla fitted constants (Hoffmann et al., 2022, Table 3)
+E_CONST = 1.69    # irreducible loss: entropy floor of natural language
+A_CONST = 406.4   # parameter scaling coefficient
+B_CONST = 410.7   # data scaling coefficient
+ALPHA   = 0.34    # parameter scaling exponent
+BETA    = 0.28    # data scaling exponent
+
+def chinchilla_loss(N, D):
+    '''L(N, D) = E + A/N^alpha + B/D^beta'''
+    return E_CONST + A_CONST * N ** (-ALPHA) + B_CONST * D ** (-BETA)
+
+# Fix compute C, sweep N while D = C / (6*N)
+C_fixed = 6e21   # ~30B model-scale compute budget
+N_range = np.logspace(8, 12, 300)  # 100M to 1T parameters
+D_range = C_fixed / (6.0 * N_range)
+
+L_range  = chinchilla_loss(N_range, D_range)
+best_idx = np.argmin(L_range)
+N_opt, D_opt, L_min = N_range[best_idx], D_range[best_idx], L_range[best_idx]
+print('Compute budget: {:.1e} FLOPs'.format(C_fixed))
+print('Optimal N*: {:.2f}B params | D*: {:.2f}B tokens | D/N: {:.1f} | L_min: {:.4f}'.format(
+    N_opt/1e9, D_opt/1e9, D_opt/N_opt, L_min))
+
+plt.figure(figsize=(9, 5))
+plt.semilogx(N_range / 1e9, L_range, 'b-', lw=2, label='L(N, D) at fixed C')
+plt.axvline(N_opt / 1e9, color='r', ls='--', lw=2, label='Optimal N* = {:.1f}B'.format(N_opt/1e9))
+plt.xlabel('Model Size N (billions of parameters)', fontsize=12)
+plt.ylabel('Predicted Loss L(N, D)', fontsize=12)
+plt.title('Chinchilla Loss vs N for Fixed Compute C = {:.1e} FLOPs'.format(C_fixed), fontsize=12)
+plt.legend(fontsize=11)
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.savefig('chinchilla_loss_curve.png', dpi=150)
+plt.show()
+</code></pre>
+<h2>Optimal Token-to-Parameter Ratio</h2>
+<p>The 20:1 token-to-parameter ratio emerges from the symmetry of the Chinchilla loss formula when both alpha and beta are similar (0.34 vs 0.28). The optimal allocation minimizes L(N, D) = E + A/N^alpha + B/D^beta subject to C = 6ND. Taking partial derivatives and setting them equal gives the condition A<em>alpha/N^(alpha+1) = B</em>beta/D^(beta+1), which with alpha approximately beta leads to A/N^alpha approximately B/D^beta — roughly equal contributions from each term. Since A and B are nearly equal (406.4 vs 410.7), and alpha and beta are close, the optimal N and D end up roughly equal in their contribution, yielding D/N = 20 as the empirical ratio.</p>
+<h2>Code 2 — Compute-Optimal Frontier</h2>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+
+def chinchilla_optimal(C):
+    '''Chinchilla: equal scaling, D* = 20*N*, C = 6*N*D* = 120*N*^2.'''
+    N_star = np.sqrt(C / 120.0)
+    D_star = 20.0 * N_star
+    return N_star, D_star
+
+def kaplan_optimal(C, k_N=1.3e-5):
+    '''Kaplan: N scales faster than D (N* proportional to C^0.73).'''
+    N_star = k_N * (C ** 0.73)
+    D_star = C / (6.0 * N_star)
+    return N_star, D_star
+
+C_range = np.logspace(18, 24, 150)
+ch_N, ch_D = chinchilla_optimal(C_range)
+kp_N, kp_D = kaplan_optimal(C_range)
+
+fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+axes[0].loglog(C_range, ch_N/1e9, 'b-',  lw=2, label='Chinchilla N*')
+axes[0].loglog(C_range, kp_N/1e9, 'r--', lw=2, label='Kaplan N*')
+axes[0].set(xlabel='Compute C (FLOPs)', ylabel='Optimal N* (billions)',
+            title='Optimal Model Size vs Compute')
+axes[0].legend(); axes[0].grid(True, alpha=0.3)
+
+axes[1].loglog(C_range, ch_D/1e9, 'b-',  lw=2, label='Chinchilla D*')
+axes[1].loglog(C_range, kp_D/1e9, 'r--', lw=2, label='Kaplan D*')
+axes[1].set(xlabel='Compute C (FLOPs)', ylabel='Optimal D* (B tokens)',
+            title='Optimal Token Count vs Compute')
+axes[1].legend(); axes[1].grid(True, alpha=0.3)
+
+plt.suptitle('Kaplan vs Chinchilla: Compute-Optimal Frontier', fontsize=13)
+plt.tight_layout()
+plt.savefig('chinchilla_vs_kaplan_frontier.png', dpi=150)
+plt.show()
+</code></pre>
+<h2>Training FLOPs Estimation</h2>
+<p>The C = 6ND approximation counts forward and backward passes through a transformer. Each multiply-add operation contributes 2 FLOPs (one multiply, one add). The forward pass requires roughly 2ND FLOPs (one pass through N parameters for each of D tokens). The backward pass requires roughly 4ND FLOPs (two passes: computing gradients with respect to weights and with respect to activations). Total: 6ND FLOPs. This approximation ignores attention FLOP contributions (O(T^2) per layer), embedding lookups, and layer norm — these add roughly 10-20% overhead for typical sequence lengths and architecture choices.</p>
+<h2>Code 3 — Training FLOPs Estimation</h2>
+<pre><code class="language-python">import numpy as np
+
+# C = 6 * N * D approximation (Chinchilla paper)
+# Factor of 6 = 2 (forward pass) + 4 (backward pass) per parameter per token
+
+def training_flops(N_params, D_tokens):
+    '''Estimate training FLOPs: C = 6 * N * D.'''
+    return 6.0 * N_params * D_tokens
+
+# Known model specs: (name, N_params, D_tokens)
+models = [
+    ('GPT-3 175B',      175e9,   300e9),
+    ('Chinchilla 70B',   70e9,  1400e9),
+    ('Gopher 280B',     280e9,   300e9),
+    ('LLaMA-1 7B',        7e9,  1000e9),
+    ('LLaMA-2 70B',      70e9,  2000e9),
+]
+
+chinchilla_ratio = 20.0  # compute-optimal D/N
+
+print('{:&lt;20} {:&gt;8} {:&gt;10} {:&gt;8} {:&gt;15} {:&gt;15}'.format(
+    'Model', 'N (B)', 'D (B tok)', 'D/N', 'C (FLOPs)', 'vs Chinchilla'))
+print('-' * 82)
+for name, N, D in models:
+    C   = training_flops(N, D)
+    dn  = D / N
+    ratio = dn / chinchilla_ratio
+    tag = 'optimal' if 0.8 &lt;= ratio &lt;= 1.2 else '{:.1f}x over'.format(ratio) if ratio &gt; 1 else '{:.1f}x under'.format(1/ratio)
+    print('{:&lt;20} {:&gt;8.0f} {:&gt;10.0f} {:&gt;8.1f} {:&gt;15.2e} {:&gt;15}'.format(name, N/1e9, D/1e9, dn, C, tag))
+</code></pre>
+<h2>Code 4 — Model Comparison on Compute-Optimal Curve</h2>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+
+E_CONST, A_CONST, B_CONST, ALPHA, BETA = 1.69, 406.4, 410.7, 0.34, 0.28
+
+def chinchilla_loss(N, D):
+    return E_CONST + A_CONST * N**(-ALPHA) + B_CONST * D**(-BETA)
+
+# Real models to plot: (name, N_params, D_tokens, color)
+models = [
+    ('GPT-3 175B',      175e9,  300e9, '#e74c3c'),
+    ('Gopher 280B',     280e9,  300e9, '#e67e22'),
+    ('Chinchilla 70B',   70e9, 1400e9, '#27ae60'),
+    ('LLaMA-1 7B',        7e9, 1000e9, '#3498db'),
+]
+
+# Compute-optimal frontier
+C_range = np.logspace(19, 24, 300)
+N_opt_f = np.sqrt(C_range / 120.0)
+D_opt_f = 20.0 * N_opt_f
+L_opt_f = chinchilla_loss(N_opt_f, D_opt_f)
+
+plt.figure(figsize=(9, 5))
+plt.plot(C_range, L_opt_f, 'k-', lw=2, label='Chinchilla-optimal frontier')
+for name, N, D, col in models:
+    C_model = 6.0 * N * D
+    plt.scatter(C_model, chinchilla_loss(N, D), s=130, color=col, zorder=5, label=name)
+plt.xscale('log')
+plt.xlabel('Compute C (FLOPs)', fontsize=12)
+plt.ylabel('Predicted Test Loss (nats)', fontsize=12)
+plt.title('Models vs Chinchilla Compute-Optimal Frontier', fontsize=13)
+plt.legend(fontsize=10)
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.savefig('model_frontier_comparison.png', dpi=150)
+plt.show()
+</code></pre>
+<p>The table below compares pre-Chinchilla and post-Chinchilla models showing their parameter count, token count, D/N ratio, and how far each is from the compute-optimal allocation. Models above the compute-optimal D/N are inference-optimized (trained beyond Chinchilla-optimal to reduce per-query serving cost). Models below are training-compute-optimized.</p>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Params (B)</th>
+<th>Tokens (B)</th>
+<th>D/N Ratio</th>
+<th>Rel. to Compute-Optimal</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GPT-3</td>
+<td>175</td>
+<td>300</td>
+<td>1.7</td>
+<td>~10x under (data)</td>
+<td>Pre-Chinchilla paradigm</td>
+</tr>
+<tr>
+<td>Gopher</td>
+<td>280</td>
+<td>300</td>
+<td>1.1</td>
+<td>~18x under (data)</td>
+<td>Pre-Chinchilla paradigm</td>
+</tr>
+<tr>
+<td>Chinchilla</td>
+<td>70</td>
+<td>1400</td>
+<td>20</td>
+<td>Compute-optimal</td>
+<td>Benchmark model</td>
+</tr>
+<tr>
+<td>LLaMA-1 7B</td>
+<td>7</td>
+<td>1000</td>
+<td>143</td>
+<td>~7x over (data)</td>
+<td>Inference-optimized</td>
+</tr>
+<tr>
+<td>LLaMA-2 70B</td>
+<td>70</td>
+<td>2000</td>
+<td>28.6</td>
+<td>~1.4x over (data)</td>
+<td>Near compute-optimal</td>
+</tr>
+<tr>
+<td>Mistral 7B</td>
+<td>7</td>
+<td>2000</td>
+<td>286</td>
+<td>~14x over (data)</td>
+<td>Inference-optimized</td>
+</tr>
+</tbody>
+</table>
+<p>The Chinchilla result immediately reframed the field. Models like GPT-4 and subsequent frontier systems shifted to training smaller architectures on vastly more tokens. The practical question changed from 'how large should the model be?' to 'how many tokens can we afford to train on, and what size model is compute-optimal for that data budget?'</p>
+<ul>
+<li>For any fixed compute budget C: train N<em> = sqrt(C/120) params on D</em> = 20<em>N</em> tokens</li>
+<li>GPT-3 needed ~3T tokens to be compute-optimal at 175B params — it only saw 300B</li>
+<li>Chinchilla 70B matches or beats GPT-3 175B at 4x fewer parameters and same compute</li>
+<li>Post-Chinchilla models (LLaMA, Falcon, Mistral) intentionally over-train for inference savings</li>
+<li>Optimal allocation depends on inference cost: if serving at scale, smaller models are better</li>
+</ul>
+<blockquote>
+<p><strong>Info</strong>: Chinchilla's 20:1 token-to-parameter ratio assumes training is done once for deployment — if you plan to serve a model at scale, training smaller models on more data reduces inference cost per query while matching the same compute budget.</p>
+</blockquote>
+<h2>Limitations and Caveats</h2>
+<p>The Chinchilla results have important scope limitations. First, the optimal D/N ratio assumes all training compute is the constraint — if inference cost dominates (millions of queries per day), a smaller model trained on far more tokens is often better. Second, the fitted constants (A, B, alpha, beta) were measured on The Pile and may not transfer to domain-specific corpora such as code or math. Third, the approximation C = 6ND ignores attention complexity, embedding tables, and layer normalization. Fourth, the scaling laws describe pre-training only — instruction tuning, RLHF, and DPO post-training cost is not captured. Fifth, diminishing returns from data quality and deduplication mean that 1T tokens of web text may be equivalent to far fewer high-quality tokens.</p>
+    </article>
+  </main>
+</body>
+</html>

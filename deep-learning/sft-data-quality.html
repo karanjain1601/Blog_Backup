@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SFT Data Quality — Filtering, Diversity, and Instruction Complexity | Notes Backup</title>
+  <meta name="description" content="Covers SFT data quality dimensions — correctness, instruction following, format, diversity, and complexity — plus practical techniques: AI judge scoring, IFD score filtering, instruction clustering for diversity analysis, complexity bucketing via Evol-Instruct, deduplication, and comparative analysis of Alpaca, FLAN, WizardLM, LIMA, ShareGPT, and OpenHermes datasets." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>SFT Data Quality — Filtering, Diversity, and Instruction Complexity</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Covers SFT data quality dimensions — correctness, instruction following, format, diversity, and complexity — plus practical techniques: AI judge scoring, IFD score filtering, instruction clustering for diversity analysis, complexity bucketing via Evol-Instruct, deduplication, and comparative analysis of Alpaca, FLAN, WizardLM, LIMA, ShareGPT, and OpenHermes datasets.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>SFT Data Quality — Filtering, Diversity, and Instruction Complexity</h1>
+<p>The quality of SFT data is the dominant factor in instruction-following capability, outweighing dataset size by a wide margin. Five orthogonal quality dimensions must all be satisfied: correctness (the response is factually accurate), instruction following (the response actually addresses what was asked), format quality (appropriate length, structure, and style for the task), diversity (broad task-type and domain coverage), and complexity (a spectrum from simple to difficult instructions). Practical data pipelines combine automated scoring, AI judges, clustering, and deduplication to select a compact, high-quality subset from a larger raw pool.</p>
+<h2>Data Quality Dimensions</h2>
+<p>Quality is multidimensional — a response can be factually correct but fail to follow the instruction (answering a different question), or follow instructions precisely but produce an ill-formatted wall of text. Each dimension must be assessed separately. Human Likert-scale annotation (1–5) on helpfulness, accuracy, and format is the gold standard but expensive. AI judges (GPT-4 or a calibrated open-source judge model) can proxy human ratings at scale with ~80–85% Spearman correlation to human labels. Automated metrics like ROUGE, BLEURT, or BERTScore are useful only when a reference answer exists (closed tasks), and fail on open-ended generation.</p>
+<ul>
+<li>Correctness: response is factually accurate — check against reference answers, retrieval, or knowledge base verification.</li>
+<li>Instruction following: response addresses the instruction — mismatches include topic drift, partial completion, and ignoring constraints.</li>
+<li>Format quality: length is appropriate (not truncated, not padded with filler), structure matches the task (code block for code, prose for explanation).</li>
+<li>Diversity: distribution across task types (QA, summarisation, code, creative, reasoning), domains, languages, and difficulty levels.</li>
+<li>Complexity: easy-medium-hard distribution — a dataset of only easy examples produces a model that fails on hard real-world queries.</li>
+<li>Deduplication: near-duplicate instructions bias gradient updates and inflate apparent dataset size — use MinHash or embedding-similarity dedup.</li>
+</ul>
+<h2>AI-Based Quality Scoring with LLM Judge</h2>
+<p>Using a strong LLM as a judge (GPT-4, Claude, or a fine-tuned reward model) to score instruction-response pairs is the most scalable quality signal for open-ended generation. The judge receives the instruction, the response, and an evaluation rubric, then returns structured scores. Key considerations: use a consistent prompt template to minimise positional bias, calibrate the judge against human annotations on a held-out set, and use temperature=0 for reproducibility. Judge agreement with humans is typically ~80–85% — sufficient for bulk filtering but not for fine-grained ranking. Running the judge in batch with JSON output and schema validation avoids parsing errors at scale.</p>
+<pre><code class="language-python">import json
+from openai import OpenAI
+
+client = OpenAI()
+
+JUDGE_PROMPT = &quot;&quot;&quot;Evaluate this instruction-response pair. Return JSON only.
+
+Instruction: {instruction}
+Response: {response}
+
+Score each dimension 1-5 (5=best):
+- helpfulness: Does the response fully address the instruction?
+- accuracy: Is the response factually correct?
+- format: Is the response appropriately structured and sized?
+- overall: Weighted average (helpfulness 0.4, accuracy 0.4, format 0.2)
+
+Return: {{&quot;helpfulness&quot;: int, &quot;accuracy&quot;: int, &quot;format&quot;: int, &quot;overall&quot;: float, &quot;reason&quot;: str}}&quot;&quot;&quot;
+
+def score_pair(instruction, response, judge_model=&quot;gpt-4o-mini&quot;):
+    prompt = JUDGE_PROMPT.format(instruction=instruction, response=response)
+    result = client.chat.completions.create(
+        model=judge_model,
+        messages=[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: prompt}],
+        response_format={&quot;type&quot;: &quot;json_object&quot;},
+        temperature=0,
+    )
+    return json.loads(result.choices[0].message.content)
+
+def filter_by_quality(pairs, min_overall=3.5, judge_model=&quot;gpt-4o-mini&quot;):
+    &quot;&quot;&quot;Filter instruction-response pairs; retain those scoring &gt;= min_overall.&quot;&quot;&quot;
+    kept = []
+    for pair in pairs:
+        scores = score_pair(pair[&quot;instruction&quot;], pair[&quot;response&quot;], judge_model)
+        if scores[&quot;overall&quot;] &gt;= min_overall:
+            kept.append({**pair, &quot;quality_scores&quot;: scores})
+    print(f&quot;Retained {len(kept)}/{len(pairs)} pairs (threshold={min_overall})&quot;)
+    return kept
+</code></pre>
+<h2>Instruction Following Difficulty (IFD) Score</h2>
+<p>The IFD score measures how much a given instruction constrains the response: IFD = log P(response | instruction) − log P(response). A high IFD means the instruction is informative — the model's probability of generating the response increases substantially when it sees the instruction. Low-IFD examples have generic responses that could follow almost any instruction (e.g., 'Sure, I can help with that.') and contribute little gradient signal. Filtering for high-IFD selects examples where the instruction meaningfully constrains the completion, improving training efficiency. The score requires forward passes through a reference LLM (often the same base model being fine-tuned) to compute conditional and unconditional log-probabilities.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+from transformers import AutoTokenizer, AutoModelForCausalLM
+
+def compute_ifd(model, tokenizer, instruction, response, device=&quot;cuda&quot;):
+    &quot;&quot;&quot;IFD = log P(response|instruction) - log P(response alone). Higher = more constrained.&quot;&quot;&quot;
+    model.eval()
+    with torch.no_grad():
+        # Conditional: P(response | instruction)
+        full_text = instruction + response
+        full_ids  = tokenizer(full_text, return_tensors=&quot;pt&quot;).input_ids.to(device)
+        instr_ids = tokenizer(instruction, return_tensors=&quot;pt&quot;).input_ids.to(device)
+        resp_start = instr_ids.shape[1]
+        labels_cond = full_ids.clone()
+        labels_cond[:, :resp_start] = -100  # mask instruction
+        loss_cond = model(full_ids, labels=labels_cond).loss.item()
+        # Unconditional: P(response)
+        resp_ids = tokenizer(response, return_tensors=&quot;pt&quot;).input_ids.to(device)
+        loss_uncond = model(resp_ids, labels=resp_ids).loss.item()
+    ifd = loss_uncond - loss_cond  # positive = instruction helps predict response
+    return round(ifd, 4)
+
+def filter_by_ifd(model, tokenizer, dataset, min_ifd=0.1, device=&quot;cuda&quot;):
+    &quot;&quot;&quot;Keep examples where instruction meaningfully constrains the response.&quot;&quot;&quot;
+    scored = []
+    for ex in dataset:
+        score = compute_ifd(model, tokenizer, ex[&quot;instruction&quot;], ex[&quot;response&quot;], device)
+        if score &gt;= min_ifd:
+            scored.append({**ex, &quot;ifd&quot;: score})
+    return sorted(scored, key=lambda x: x[&quot;ifd&quot;], reverse=True)
+</code></pre>
+<h2>Instruction Diversity Analysis via Clustering</h2>
+<p>Diversity is assessed by embedding all instructions with a sentence encoder, clustering in embedding space, and examining the distribution across clusters. A healthy dataset has even cluster sizes and high entropy over the cluster distribution. Skewed distributions (a few dominant clusters) indicate topic or format bias that will cause the SFT model to underfit underrepresented task types. After clustering, underrepresented clusters can be upsampled or used as a target distribution for further data collection. The number of clusters is a hyperparameter — 20–50 clusters is typical for datasets of 10K–100K examples.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.cluster import KMeans
+from sentence_transformers import SentenceTransformer
+
+def analyze_diversity(instructions, n_clusters=30, seed=42):
+    &quot;&quot;&quot;Cluster instructions, compute entropy over cluster distribution.&quot;&quot;&quot;
+    encoder = SentenceTransformer(&quot;all-MiniLM-L6-v2&quot;)
+    embeddings = encoder.encode(instructions, batch_size=64, show_progress_bar=True)
+    kmeans = KMeans(n_clusters=n_clusters, random_state=seed, n_init=10)
+    labels = kmeans.fit_predict(embeddings)
+    counts = np.bincount(labels)
+    probs = counts / len(instructions)
+    entropy = -np.sum(probs * np.log(probs + 1e-12))
+    max_entropy = np.log(n_clusters)
+    print(f&quot;Diversity entropy: {entropy:.3f} / {max_entropy:.3f} ({entropy/max_entropy:.1%} of max)&quot;)
+    print(f&quot;Cluster sizes — min: {counts.min()}, max: {counts.max()}, std: {counts.std():.1f}&quot;)
+    return labels, embeddings, entropy
+
+def resample_for_diversity(instructions, labels, n_clusters, target_per_cluster=200):
+    &quot;&quot;&quot;Upsample underrepresented clusters to ensure even task-type coverage.&quot;&quot;&quot;
+    from collections import defaultdict
+    buckets = defaultdict(list)
+    for i, lbl in enumerate(labels):
+        buckets[int(lbl)].append(i)
+    selected = []
+    for lbl in range(n_clusters):
+        idxs = buckets[lbl]
+        n = min(len(idxs), target_per_cluster)
+        selected.extend(np.random.choice(idxs, n, replace=False).tolist())
+    print(f&quot;Resampled: {len(selected)} examples from {len(instructions)} (target {target_per_cluster}/cluster)&quot;)
+    return selected
+</code></pre>
+<h2>Complexity Scoring and Evol-Instruct</h2>
+<p>Instruction complexity can be measured via lexical features (instruction length, vocabulary richness, dependency depth) or LLM-based scoring. WizardLM's Evol-Instruct method automatically evolves simple instructions into more complex variants using an LLM: add constraints, increase scope, add reasoning steps, or combine multiple tasks. This produces a complexity spectrum from a small seed set without manual annotation. Deita extends this by jointly scoring complexity (how difficult is the instruction?) and quality (how good is the response?) to select a compact, high-diversity subset. A balanced easy/medium/hard distribution (roughly 25/50/25) produces the best generalisation across query difficulty levels.</p>
+<pre><code class="language-python">import re
+import numpy as np
+from collections import Counter
+
+def score_complexity(instruction):
+    &quot;&quot;&quot;Heuristic complexity score: 0.0 (trivial) to 1.0 (highly complex).&quot;&quot;&quot;
+    words = instruction.split()
+    if not words:
+        return 0.0
+    unique_words   = len(set(w.lower() for w in words))
+    vocab_richness = unique_words / len(words)
+    length_score   = min(len(words) / 60.0, 1.0)  # saturates at 60 words
+    num_clauses    = instruction.count(',') + instruction.count(';')
+    clause_score   = min(num_clauses / 6.0, 1.0)
+    constraint_kws = [&quot;must&quot;, &quot;should&quot;, &quot;only&quot;, &quot;do not&quot;, &quot;without&quot;, &quot;given that&quot;, &quot;assuming&quot;]
+    has_constraint = int(any(kw in instruction.lower() for kw in constraint_kws))
+    multistep_kws  = [&quot;first&quot;, &quot;then&quot;, &quot;finally&quot;, &quot;step&quot;, &quot;next&quot;, &quot;after that&quot;]
+    has_multistep  = int(any(kw in instruction.lower() for kw in multistep_kws))
+    score = (0.25 * length_score + 0.20 * vocab_richness +
+             0.20 * clause_score + 0.20 * has_constraint + 0.15 * has_multistep)
+    return round(score, 3)
+
+def bucket_by_complexity(instructions, thresholds=(0.33, 0.67)):
+    scores = [(i, score_complexity(inst)) for i, inst in enumerate(instructions)]
+    buckets = {&quot;easy&quot;: [], &quot;medium&quot;: [], &quot;hard&quot;: []}
+    for i, s in scores:
+        if   s &lt; thresholds[0]: buckets[&quot;easy&quot;].append(i)
+        elif s &lt; thresholds[1]: buckets[&quot;medium&quot;].append(i)
+        else:                   buckets[&quot;hard&quot;].append(i)
+    for k, v in buckets.items():
+        print(f&quot;  {k}: {len(v)} ({len(v)/len(instructions):.1%})&quot;)
+    return buckets
+</code></pre>
+<h2>Deduplication and Format Quality</h2>
+<p>Near-duplicate instructions bias the gradient — the model effectively sees the same example multiple times per epoch, causing overfitting on the duplicated template. MinHash LSH deduplication (Jaccard similarity threshold ~0.85 on instruction n-grams) is efficient at scale. Format quality issues include: responses that are truncated mid-sentence (token limit during generation), responses that hallucinate then correct themselves, excessive hedging language ('As an AI language model...'), and unnecessary repetition of the instruction. Automated rules (minimum response length, no blacklisted phrases, sentence completeness check) can filter these. For responses generated by GPT-4, checking that the response is in the same language as the instruction catches a common data pipeline error.</p>
+<h2>SFT Dataset Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Dataset</th>
+<th>Size</th>
+<th>Source</th>
+<th>Quality Control</th>
+<th>Diversity</th>
+<th>Key Strength</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Alpaca</td>
+<td>52K</td>
+<td>GPT-3.5 self-instruct</td>
+<td>None</td>
+<td>Medium — self-instruct biased to common templates</td>
+<td>Pioneered the synthetic instruction paradigm</td>
+</tr>
+<tr>
+<td>FLAN</td>
+<td>1.8M (multi-task)</td>
+<td>1000+ NLP tasks reformatted</td>
+<td>Human-curated task selection</td>
+<td>Very high — 1000+ task types</td>
+<td>Best zero-shot generalisation from diversity</td>
+</tr>
+<tr>
+<td>ShareGPT</td>
+<td>70K</td>
+<td>Real ChatGPT conversations</td>
+<td>None (user-shared)</td>
+<td>High — real user query distribution</td>
+<td>Multi-turn dialogue and format realism</td>
+</tr>
+<tr>
+<td>WizardLM (Evol)</td>
+<td>250K</td>
+<td>Evol-Instruct from GPT-4</td>
+<td>Automatic complexity scoring</td>
+<td>High — covers breadth and depth</td>
+<td>Strong on complex and multi-step instructions</td>
+</tr>
+<tr>
+<td>LIMA</td>
+<td>1K</td>
+<td>Expert-curated mix</td>
+<td>Human expert review of every example</td>
+<td>Carefully balanced task types</td>
+<td>Proves 1K quality beats 52K noisy data</td>
+</tr>
+<tr>
+<td>OpenHermes-2.5</td>
+<td>1M</td>
+<td>Multiple open-source mixes</td>
+<td>Automated dedup + quality filter</td>
+<td>Very high — multilingual, multi-domain</td>
+<td>Best open-source single-dataset for general SFT</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Quality Filtering Beats Volume</strong>: Filtering 52K Alpaca examples down to 9K high-quality examples (Alpagasus) produces better SFT models than training on all 52K — prioritise quality filtering over data volume for SFT, unlike pretraining. Run your raw dataset through an AI judge at min_overall=3.5, then apply IFD filtering and diversity resampling. A 10K carefully curated set will outperform 100K unfiltered data.</p>
+</blockquote>
+<p>A practical SFT data pipeline combines four steps: (1) collect a large raw pool from multiple sources (ShareGPT, open-source datasets, synthetic generation); (2) deduplicate with MinHash; (3) score with an AI judge and IFD filter; (4) resample for diversity and complexity balance. The resulting filtered dataset is typically 10–20% of the raw pool size. This investment in data quality pays compound dividends: models trained on high-quality SFT data reach better preference learning baselines, respond better to RLHF/DPO, and require less compute overall.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

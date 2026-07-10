@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Weight Initialization — Xavier/Glorot and Kaiming/He | Notes Backup</title>
+  <meta name="description" content="Derive variance-preserving weight initialization from first principles, implement Xavier and He initialization, compare their gradient flow with tanh vs ReLU, and visualise activation and gradient norms across depth." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Weight Initialization — Xavier/Glorot and Kaiming/He</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Derive variance-preserving weight initialization from first principles, implement Xavier and He initialization, compare their gradient flow with tanh vs ReLU, and visualise activation and gradient norms across depth.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Weight Initialization — Xavier/Glorot and Kaiming/He</h1>
+<p>Weight initialisation is the starting point for all training dynamics. If weights are too large, activations and gradients explode; too small, they vanish. Both pathologies prevent learning in deep networks. Variance-preserving initialisation schemes — Xavier/Glorot for tanh/sigmoid and Kaiming/He for ReLU — are derived from the requirement that the variance of activations and gradients stay approximately constant as signals propagate through depth.</p>
+<h2>The Variance Propagation Problem</h2>
+<p>For a linear layer z = Wx (ignoring bias, pre-activation), Var(zᵢ) = nᵢₙ · Var(W) · Var(x) if weights and inputs are i.i.d. and zero-mean. To keep Var(z) = Var(x) (variance preservation), we need Var(W) = 1/nᵢₙ — the LeCun initialisation. For the backward pass: Var(∂L/∂x) = nₒᵤₜ · Var(W) · Var(∂L/∂z), requiring Var(W) = 1/nₒᵤₜ. Xavier/Glorot compromises: Var(W) = 2/(nᵢₙ + nₒᵤₜ), maintaining signal in both directions for zero-mean symmetric activations like tanh.</p>
+<h2>Xavier/Glorot Initialisation</h2>
+<p>For tanh and sigmoid activations: W ~ U(-√(6/(nᵢₙ + nₒᵤₜ)), +√(6/(nᵢₙ + nₒᵤₜ))) or equivalently W ~ N(0, 2/(nᵢₙ + nₒᵤₜ)). Derived by Glorot &amp; Bengio (2010) assuming linear activations (tanh ≈ linear near origin) and requiring Var(forward signal) ≈ Var(backward signal). For sigmoid, the effective gradient at zero is 0.25, so a gain of 4 is applied: std = gain × √(2/(nᵢₙ + nₒᵤₜ)).</p>
+<h2>Kaiming/He Initialisation for ReLU</h2>
+<p>ReLU zeros out half its inputs, halving the effective variance. He et al. (2015) account for this: Var(W) = 2/nᵢₙ so that after ReLU, the variance is preserved. In normal form: W ~ N(0, √(2/nᵢₙ)). For Leaky ReLU with slope α: Var(W) = 2/((1+α²)·nᵢₙ). The PyTorch function nn.init.kaiming_normal_ accepts a nonlinearity argument and computes the correct gain automatically. fan_in mode (default) preserves forward signal; fan_out mode preserves backward signal.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+import torch.nn as nn
+
+def activation_variance_trace(init_std_fn, activation_fn, depth=20, width=512, m=256, seed=0):
+    &quot;&quot;&quot;Trace activation variance layer by layer with a given init and activation.&quot;&quot;&quot;
+    np.random.seed(seed)
+    x = np.random.randn(m, width)
+    variances = [x.var()]
+    for _ in range(depth):
+        n_in, n_out = width, width
+        std = init_std_fn(n_in, n_out)
+        W = np.random.randn(n_out, n_in) * std
+        b = np.zeros(n_out)
+        z = x @ W.T + b
+        x = activation_fn(z)
+        variances.append(x.var())
+    return variances
+
+def relu(z): return np.maximum(0, z)
+def tanh_fn(z): return np.tanh(z)
+
+xavier_std = lambda n_in, n_out: np.sqrt(2.0 / (n_in + n_out))
+he_std     = lambda n_in, n_out: np.sqrt(2.0 / n_in)
+lecun_std  = lambda n_in, n_out: np.sqrt(1.0 / n_in)
+small_std  = lambda n_in, n_out: 0.01
+
+print('Activation variance trace (depth=20, should stay near 1.0):')
+for label, init_fn, act_fn in [
+    ('Xavier+tanh', xavier_std, tanh_fn),
+    ('He+ReLU',     he_std,     relu),
+    ('LeCun+tanh',  lecun_std,  tanh_fn),
+    ('small+ReLU',  small_std,  relu),
+]:
+    vars = activation_variance_trace(init_fn, act_fn)
+    print(f'  {label:&gt;14}: layer0={vars[0]:.3f}  layer5={vars[5]:.3f}  '
+          f'layer10={vars[10]:.3f}  layer20={vars[-1]:.4f}')
+</code></pre>
+<h2>Xavier vs He — Gradient Flow Comparison</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+def build_deep_net(depth, width, init_name, act_name):
+    layers = []
+    for i in range(depth):
+        lin = nn.Linear(width, width, bias=False)
+        if init_name == 'xavier':
+            nn.init.xavier_normal_(lin.weight)
+        elif init_name == 'he':
+            nn.init.kaiming_normal_(lin.weight, nonlinearity='relu')
+        elif init_name == 'small':
+            nn.init.normal_(lin.weight, 0, 0.01)
+        layers.append(lin)
+        act = nn.Tanh() if act_name == 'tanh' else nn.ReLU()
+        layers.append(act)
+    return nn.Sequential(*layers)
+
+torch.manual_seed(42)
+depth, width, m = 15, 128, 64
+
+for init_name, act_name in [('xavier', 'tanh'), ('he', 'relu'),
+                              ('xavier', 'relu'), ('small', 'relu')]:
+    model = build_deep_net(depth, width, init_name, act_name)
+    x = torch.randn(m, width)
+    out = model(x)
+    out.sum().backward()
+    grad_norms = [mod.weight.grad.norm().item()
+                  for mod in model.modules()
+                  if isinstance(mod, nn.Linear) and mod.weight.grad is not None]
+    vanish = grad_norms[0] &lt; 1e-4
+    explode = grad_norms[-1] &gt; 1e3
+    print(f'{init_name:&gt;8}+{act_name:&lt;5}: '
+          f'first_grad={grad_norms[0]:.2e}  last_grad={grad_norms[-1]:.2e}  '
+          f'vanishing={vanish}  exploding={explode}')
+</code></pre>
+<h2>PyTorch Initialisation API</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+def apply_init(model, init_name):
+    for m in model.modules():
+        if isinstance(m, nn.Linear):
+            if init_name == 'xavier_uniform':
+                nn.init.xavier_uniform_(m.weight, gain=nn.init.calculate_gain('tanh'))
+            elif init_name == 'xavier_normal':
+                nn.init.xavier_normal_(m.weight)
+            elif init_name == 'kaiming_uniform':
+                nn.init.kaiming_uniform_(m.weight, nonlinearity='relu')
+            elif init_name == 'kaiming_normal':
+                nn.init.kaiming_normal_(m.weight, nonlinearity='relu')
+            elif init_name == 'orthogonal':
+                nn.init.orthogonal_(m.weight)
+            nn.init.zeros_(m.bias)
+    return model
+
+torch.manual_seed(0)
+for init_name in ['xavier_uniform', 'xavier_normal', 'kaiming_uniform',
+                   'kaiming_normal', 'orthogonal']:
+    model = apply_init(nn.Sequential(
+        nn.Linear(128, 256), nn.ReLU(),
+        nn.Linear(256, 128), nn.ReLU(),
+        nn.Linear(128, 10)
+    ), init_name)
+    weights = [m.weight for m in model.modules() if isinstance(m, nn.Linear)]
+    stds = [w.std().item() for w in weights]
+    print(f'{init_name:&gt;18}: layer stds = {[f&quot;{s:.4f}&quot; for s in stds]}')
+</code></pre>
+<blockquote>
+<p><strong>Rule of Thumb for Choosing Initialisation</strong>: Use He/Kaiming for ReLU and Leaky ReLU — it accounts for the 50% zeroing. Use Xavier/Glorot for tanh, sigmoid, and linear activations. Use LeCun for SELU (self-normalising networks). Use Orthogonal for RNNs to preserve gradient norms across time steps. Always initialise biases to zero unless there is a specific reason otherwise.</p>
+</blockquote>
+<h2>Gradient Norm Monitoring Across Layers</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+def grad_norm_per_layer(init_name, depth=12, width=128, m=64, seed=0):
+    torch.manual_seed(seed)
+    layers = []
+    for _ in range(depth):
+        lin = nn.Linear(width, width, bias=True)
+        if init_name == 'he':
+            nn.init.kaiming_normal_(lin.weight, nonlinearity='relu')
+        elif init_name == 'xavier':
+            nn.init.xavier_normal_(lin.weight)
+        elif init_name == 'small':
+            nn.init.normal_(lin.weight, 0, 0.01)
+        nn.init.zeros_(lin.bias)
+        layers.extend([lin, nn.ReLU()])
+    model = nn.Sequential(*layers)
+    x = torch.randn(m, width)
+    out = model(x)
+    out.sum().backward()
+    norms = []
+    for mod in model.modules():
+        if isinstance(mod, nn.Linear) and mod.weight.grad is not None:
+            norms.append(mod.weight.grad.norm().item())
+    return norms
+
+for init_name in ['he', 'xavier', 'small']:
+    norms = grad_norm_per_layer(init_name)
+    print(f'{init_name:&gt;8}: ' + '  '.join(f'L{i+1}={n:.3f}' for i, n in enumerate(norms)))
+</code></pre>
+<h2>Initialisation Method Reference</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Activation</th>
+<th>Formula (std)</th>
+<th>Variance Target</th>
+<th>When to Use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Xavier Uniform</td>
+<td>tanh, sigmoid, linear</td>
+<td>√(6/(n_in+n_out))</td>
+<td>Var(forward)≈Var(backward)</td>
+<td>Default for tanh/sigmoid networks</td>
+</tr>
+<tr>
+<td>Xavier Normal</td>
+<td>tanh, sigmoid, linear</td>
+<td>√(2/(n_in+n_out))</td>
+<td>Same as uniform (different dist)</td>
+<td>Normal variant of Xavier — often interchangeable</td>
+</tr>
+<tr>
+<td>He/Kaiming Normal</td>
+<td>ReLU, Leaky ReLU</td>
+<td>√(2/n_in)</td>
+<td>Var preserved after ReLU zeroing</td>
+<td>Default for ReLU networks — CNNs, MLPs</td>
+</tr>
+<tr>
+<td>LeCun Normal</td>
+<td>SELU</td>
+<td>√(1/n_in)</td>
+<td>Unit variance for self-normalising</td>
+<td>Self-normalising networks with SELU activation</td>
+</tr>
+<tr>
+<td>Orthogonal</td>
+<td>Any (esp. RNNs)</td>
+<td>Random orthogonal matrix</td>
+<td>Preserves gradient norms over time</td>
+<td>RNNs, sequence models, avoid vanishing over steps</td>
+</tr>
+</tbody>
+</table>
+<h2>Orthogonal Initialisation for Recurrent Networks</h2>
+<p>In recurrent networks, the weight matrix W_h is applied T times (once per timestep): hₜ = f(W_h hₜ₋₁ + W_x xₜ). If W_h has singular values &gt; 1, gradients explode; &lt; 1, they vanish. Orthogonal matrices have all singular values = 1, so ‖W_h^T‖ = 1 for all T — gradients neither explode nor vanish through the recurrence. In practice, orthogonal init (nn.init.orthogonal_) is the recommended starting point for RNNs and is used as the default in many LSTM implementations. It is also occasionally used in feedforward networks at large depth to stabilise signal propagation before training begins.</p>
+<h2>Practical Initialisation Checklist</h2>
+<ul>
+<li>ReLU hidden layers: nn.init.kaiming_normal_(w, nonlinearity='relu') — He init, fan_in mode.</li>
+<li>Leaky ReLU: nn.init.kaiming_normal_(w, a=0.01, nonlinearity='leaky_relu').</li>
+<li>Tanh/sigmoid: nn.init.xavier_normal_(w) or xavier_uniform_ with gain=nn.init.calculate_gain('tanh').</li>
+<li>SELU: nn.init.kaiming_normal_(w, mode='fan_in') with std=1/√n_in (LeCun).</li>
+<li>All biases: nn.init.zeros_(b) — always unless you have a specific reason otherwise.</li>
+<li>RNN recurrent weights: nn.init.orthogonal_(w_h) to stabilise gradient norms over time.</li>
+<li>Verify: monitor activation variance and gradient norms across layers in the first few batches.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

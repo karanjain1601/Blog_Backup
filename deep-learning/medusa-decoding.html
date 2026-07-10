@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Medusa: Multiple Decoding Heads for Parallel Token Generation | Notes Backup</title>
+  <meta name="description" content="Adding multiple lightweight prediction heads to a frozen LLM that each predict tokens several positions ahead, enabling parallel verification of multi-token continuations." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Medusa: Multiple Decoding Heads for Parallel Token Generation</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Adding multiple lightweight prediction heads to a frozen LLM that each predict tokens several positions ahead, enabling parallel verification of multi-token continuations.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Medusa: Multiple Decoding Heads for Parallel Token Generation</h1>
+<p>Medusa (Cai et al. 2024, Together AI) is a speculative decoding framework that replaces the separate draft model with multiple lightweight prediction heads appended to a frozen base LLM. Each head is a compact two-layer MLP sitting on top of the last transformer block's hidden states, independently predicting the token at offset +1, +2, up to +K positions ahead. Because the heads share the base model's rich representations, they can be trained to near-oracle acceptance rates with as little as 0.3% additional parameters. At inference time, all heads generate candidate tokens simultaneously in a single additional forward pass — no separate draft model call required — and the resulting tree of candidates is verified by the base model using a modified tree attention mask that scores all hypotheses in one batched forward pass. The practical result is a 2.2–2.8× throughput improvement on chat workloads with no measurable degradation in output quality.</p>
+<h2>Overview</h2>
+<p>Standard autoregressive decoding generates one token per forward pass, making it memory-bandwidth bound: each step reads all model weights from HBM even though only a tiny fraction of total compute capacity is used. Speculative decoding sidesteps this by using a faster draft model to propose multiple tokens and the target model to verify them in parallel — but maintaining a separate draft model doubles deployment complexity and memory footprint. Medusa eliminates the draft model entirely: the prediction heads are trained once, frozen alongside the base model, and add negligible overhead to the standard inference graph. The typical acceptance rate for the first Medusa head is 60–80%, meaning most generated tokens are accepted, yielding measured speedups of 2.0–3.0× on chat workloads. The approach was popularised alongside Vicuna models and integrates directly with vLLM and SGLang inference servers.</p>
+<h2>Architecture: Multiple LM Heads</h2>
+<p>Each Medusa head k (for k = 1, …, K) is a two-layer MLP with a LayerNorm applied to the last hidden state h_t before the first linear layer. The output of head k is a full vocabulary distribution over the token at position t+k. During a draft step, the base model generates the token at t+1 from its own logits (the standard LM head), while simultaneously all K Medusa heads produce candidate distributions for positions t+2 through t+K+1 — all computed from the same single forward pass over the current context. The heads are parameterised identically but trained independently, and there is no weight sharing between heads. This architecture ensures that head k specialises in predicting tokens k steps ahead given the base model's contextual representations.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from transformers import AutoModelForCausalLM, AutoConfig
+from typing import List, Tuple
+
+class MedusaHead(nn.Module):
+    &quot;&quot;&quot;Two-layer MLP predicting token at position t+k from last hidden state.&quot;&quot;&quot;
+    def __init__(self, hidden_size: int, vocab_size: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.LayerNorm(hidden_size),
+            nn.Linear(hidden_size, hidden_size, bias=False),
+            nn.SiLU(),
+            nn.Linear(hidden_size, vocab_size, bias=False),
+        )
+
+    def forward(self, hidden: torch.Tensor) -&gt; torch.Tensor:
+        return self.net(hidden)  # (B, S, vocab_size)
+
+class MedusaWithHeads(nn.Module):
+    &quot;&quot;&quot;Frozen base LLM plus K trainable Medusa heads for positions t+1 to t+K.&quot;&quot;&quot;
+    def __init__(self, model_name: str, num_heads: int = 5):
+        super().__init__()
+        self.base = AutoModelForCausalLM.from_pretrained(model_name)
+        for p in self.base.parameters():
+            p.requires_grad_(False)           # freeze all base model weights
+        H = self.base.config.hidden_size
+        V = self.base.config.vocab_size
+        self.medusa_heads = nn.ModuleList(
+            [MedusaHead(H, V) for _ in range(num_heads)]
+        )
+
+    def forward(self, input_ids: torch.Tensor) -&gt; Tuple[torch.Tensor, List[torch.Tensor]]:
+        outputs = self.base(input_ids, output_hidden_states=True)
+        last_hidden = outputs.hidden_states[-1]                      # (B, S, H)
+        medusa_logits = [head(last_hidden) for head in self.medusa_heads]  # K x (B,S,V)
+        return outputs.logits, medusa_logits
+</code></pre>
+<h2>Medusa Tree Attention</h2>
+<p>Rather than verifying candidate tokens one by one, Medusa constructs a token tree from head predictions and verifies all branches simultaneously using a custom attention mask. For K heads each taking the top-p candidates, the tree has at most top-p^K leaves. The tree attention mask is a boolean matrix over all candidate positions: position j can attend to position i only if i is an ancestor of j in the tree. This mask replaces the standard causal mask during the verification forward pass, allowing the base model to score all candidate continuations in a single batched call — the same compute cost as verifying a single continuation. A path through the tree corresponds to a multi-token continuation hypothesis: if a path survives verification (each token matches the base model's greedy or sampled choice at that depth), all tokens on the path are accepted simultaneously, multiplying effective throughput.</p>
+<pre><code class="language-python">import torch
+import itertools
+from typing import List, Tuple
+
+def build_medusa_tree(
+    medusa_logits: List[torch.Tensor],
+    top_k: int = 3,
+) -&gt; Tuple[torch.Tensor, torch.Tensor]:
+    &quot;&quot;&quot;
+    Build candidate token tree and tree attention mask from Medusa head outputs.
+    medusa_logits: K tensors each (1, 1, V) — logits for positions t+1 .. t+K.
+    Returns (candidates, tree_mask): (N,) token ids and (N, N) bool attention mask.
+    &quot;&quot;&quot;
+    # Collect top-k token candidates from each head
+    head_topk = [
+        torch.topk(lg[0, -1], top_k).indices.tolist()
+        for lg in medusa_logits
+    ]
+    # Enumerate all paths through the tree (Cartesian product)
+    paths = list(itertools.product(*head_topk))  # list of K-tuples
+    N = len(paths)
+    # Tree attention mask: position j attends to i if path_i is a prefix of path_j
+    mask = torch.zeros(N, N, dtype=torch.bool)
+    for j, pj in enumerate(paths):
+        for i, pi in enumerate(paths):
+            depth = min(j + 1, i + 1)
+            if tuple(pi[:depth]) == tuple(pj[:depth]) and i &lt;= j:
+                mask[j, i] = True
+    # First token of each path is the candidate from head-1
+    candidates = torch.tensor([p[0] for p in paths])
+    return candidates, mask
+
+dummy_logits = [torch.randn(1, 1, 32000) for _ in range(3)]
+cands, tmask = build_medusa_tree(dummy_logits, top_k=3)
+print(f&quot;Tree nodes: {len(cands)}, mask shape: {tuple(tmask.shape)}&quot;)
+print(f&quot;Non-zero mask entries: {tmask.sum().item()} of {tmask.numel()}&quot;)
+</code></pre>
+<h2>Training the Medusa Heads</h2>
+<p>Medusa heads are trained independently of the base model on instruction-tuning data. The training objective is per-head cross-entropy: head k minimises the cross-entropy loss between its predicted distribution and the ground truth token at offset k+1 in the sequence. Because each head predicts a different offset, they are trained with shifted target sequences — head-1 targets tokens shifted by 1, head-2 by 2, and so on. The base model is kept frozen throughout, so its hidden states serve as static, fixed features. Training converges in one to three epochs on moderate instruction datasets (ShareGPT, Alpaca, LMSYS-Chat-1M) and can be completed on a single A100 in under six hours for a 7B model. The per-head acceptance rate on a held-out validation set is the key metric to track: head-1 should reach 65–75%, with acceptance dropping roughly 15 percentage points per additional head.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+from typing import List
+
+def train_medusa_heads(
+    model,
+    train_loader: DataLoader,
+    num_heads: int = 5,
+    lr: float = 1e-3,
+    epochs: int = 1,
+) -&gt; List[float]:
+    &quot;&quot;&quot;Freeze base model, train Medusa heads with per-head cross-entropy losses.&quot;&quot;&quot;
+    optimizer = torch.optim.AdamW(
+        [p for p in model.parameters() if p.requires_grad],
+        lr=lr, weight_decay=0.01,
+    )
+    per_head_loss = [0.0] * num_heads
+    for epoch in range(epochs):
+        for batch in train_loader:
+            input_ids = batch['input_ids']
+            _, medusa_logits = model(input_ids)
+            total_loss = torch.tensor(0.0, requires_grad=True)
+            for k, head_logits in enumerate(medusa_logits):
+                target = input_ids[:, k + 1:]                  # shift target by k+1
+                pred   = head_logits[:, :-(k + 1), :]          # align sequence length
+                loss_k = F.cross_entropy(
+                    pred.reshape(-1, pred.size(-1)), target.reshape(-1), ignore_index=-100
+                )
+                total_loss = total_loss + loss_k
+                per_head_loss[k] += loss_k.item()
+            optimizer.zero_grad()
+            total_loss.backward()
+            optimizer.step()
+    per_head_loss = [l / (epochs * len(train_loader)) for l in per_head_loss]
+    for k, lv in enumerate(per_head_loss):
+        print(f&quot;  Head {k+1} (offset +{k+1}): avg CE loss = {lv:.4f}&quot;)
+    return per_head_loss
+</code></pre>
+<h2>Acceptance with Typical Sampling</h2>
+<p>Medusa uses a modified acceptance criterion based on typical sampling rather than the standard speculative decoding acceptance probability ratio. In standard speculative decoding, a candidate token c is accepted with probability min(1, p_target(c) / p_draft(c)), requiring explicit access to the draft distribution. Medusa replaces this with a posterior check based on the Medusa head logits and a temperature threshold: a candidate token is accepted if it falls within the typical set of the target distribution at that position, controlled by a posterior threshold hyperparameter (default 0.09). This avoids dependence on the draft distribution ratio, simplifies the acceptance check to a single comparison, and maintains output quality equivalent to sampling directly from the target model. The typical acceptance criterion accepts candidates with probability 0.6–0.9 for well-trained heads, without any need to store or compute draft model probabilities.</p>
+<blockquote>
+<p><strong>Parameter Efficiency</strong>: Medusa heads add &lt;1% parameters and can be trained in a few hours on a single GPU — the key constraint is that base model weights must remain frozen, making Medusa compatible with any quantized or fine-tuned checkpoint</p>
+</blockquote>
+<h2>Self-Distillation Training</h2>
+<p>Medusa-2 introduces self-distillation: instead of training heads to match one-hot ground truth tokens, the heads are trained to match the base model's own output distribution via KL divergence minimisation. Head k is distilled from the base LM head's probability distribution for position t+k+1 rather than the hard label. Self-distillation produces softer targets that capture the model's own uncertainty, leading to higher acceptance rates because the heads learn to predict the same distribution the verifier uses. This requires one additional forward pass over the training data to collect base model probability distributions, but substantially improves acceptance rates — head-1 improves from roughly 70% to over 80% with self-distillation. In practice self-distillation is applied jointly with the cross-entropy loss using a mixing coefficient lambda that weights the distillation objective relative to the hard-label loss.</p>
+<h2>Throughput Results</h2>
+<p>Measured on Vicuna-7B and Vicuna-13B with an A100 80 GB GPU at batch size 1 (single-user chat latency regime), Medusa achieves 2.2–2.8× throughput improvement over standard autoregressive decoding. The speedup grows with the number of heads up to five or six heads, after which acceptance rates for farther-ahead predictions fall too low to contribute net throughput gain. On multi-batch inference the gains are reduced because the base model becomes compute-bound rather than bandwidth-bound, but Medusa still provides 1.5–1.8× improvement at batch sizes up to 8. Self-distillation (Medusa-2) pushes speedup to approximately 3.0× at batch size 1 by raising acceptance rates across all heads.</p>
+<table>
+<thead>
+<tr>
+<th>Medusa heads</th>
+<th>Acceptance rate (head 1)</th>
+<th>Speedup vs AR</th>
+<th>Added parameters</th>
+<th>Training data needed</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>1 head</td>
+<td>70–78%</td>
+<td>1.5–1.7×</td>
+<td>~0.3% of base</td>
+<td>50K instruction samples</td>
+</tr>
+<tr>
+<td>3 heads</td>
+<td>H1: 74%, H2: 55%, H3: 38%</td>
+<td>1.9–2.2×</td>
+<td>~0.8% of base</td>
+<td>200K instruction samples</td>
+</tr>
+<tr>
+<td>5 heads</td>
+<td>H1: 74%, H2–H5: 55/38/26/18%</td>
+<td>2.2–2.8×</td>
+<td>~1.3% of base</td>
+<td>500K instruction samples</td>
+</tr>
+<tr>
+<td>8 heads</td>
+<td>H1: 72%, drops steeply beyond H4</td>
+<td>2.3–2.9×</td>
+<td>~2.1% of base</td>
+<td>1M+ instruction samples</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-python">from medusa.model.medusa_model import MedusaModel
+from transformers import AutoTokenizer
+import torch
+import time
+
+def benchmark_medusa_vs_standard(
+    model_path: str,
+    prompts: list,
+    max_new_tokens: int = 128,
+) -&gt; dict:
+    &quot;&quot;&quot;Load Medusa model and compare throughput vs standard greedy autoregressive decode.&quot;&quot;&quot;
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    model = MedusaModel.from_pretrained(model_path, torch_dtype=torch.float16)
+    model = model.cuda().eval()
+    results = {}
+    for label, use_medusa in [(&quot;standard&quot;, False), (&quot;medusa&quot;, True)]:
+        total_tokens, t0 = 0, time.perf_counter()
+        for prompt in prompts:
+            ids = tokenizer(prompt, return_tensors=&quot;pt&quot;).input_ids.cuda()
+            if use_medusa:
+                out = model.medusa_generate(
+                    ids, max_new_tokens=max_new_tokens,
+                    temperature=0.0, posterior_threshold=0.09,
+                )
+            else:
+                out = model.generate(ids, max_new_tokens=max_new_tokens, do_sample=False)
+            total_tokens += out.shape[1] - ids.shape[1]
+        elapsed = time.perf_counter() - t0
+        results[label] = {&quot;tok_per_s&quot;: total_tokens / elapsed, &quot;total_tokens&quot;: total_tokens}
+    speedup = results[&quot;medusa&quot;][&quot;tok_per_s&quot;] / results[&quot;standard&quot;][&quot;tok_per_s&quot;]
+    print(f&quot;Standard: {results['standard']['tok_per_s']:.1f} tok/s&quot;)
+    print(f&quot;Medusa:   {results['medusa']['tok_per_s']:.1f} tok/s  (speedup {speedup:.2f}x)&quot;)
+    return {**results, &quot;speedup&quot;: speedup}
+</code></pre>
+<h2>Key Takeaways</h2>
+<p>Medusa is one of the most practically deployable speculative decoding approaches because it requires no changes to base model inference infrastructure and no separate draft model process. The heads are drop-in additions that can be trained on any existing instruction dataset in a few GPU-hours. The main limitation is that speedup is strongest at batch size 1 (latency-sensitive single-user chat) and diminishes as batch size grows because the bottleneck shifts from memory bandwidth to compute. For high-throughput batch inference, continuous batching with flash-attention remains more effective than speculative decoding. However, for latency-sensitive deployments — APIs targeting p50 latency below 500 ms — Medusa offers the most practical path to 2× speedup without additional infrastructure.</p>
+<ul>
+<li>Medusa heads are frozen alongside the base model — they are compatible with any quantized (GPTQ, AWQ) or fine-tuned checkpoint as long as the hidden size matches.</li>
+<li>Tree attention verifies top-k^K candidate paths simultaneously in a single forward pass — same compute cost as verifying one candidate path.</li>
+<li>Self-distillation (Medusa-2) improves acceptance rates by 8–12 percentage points versus training against hard one-hot labels.</li>
+<li>Typical acceptance sampling is equivalent in output distribution to direct sampling from the target model — no quality degradation.</li>
+<li>Five heads is the practical sweet spot: beyond that, acceptance rates for heads 6+ are too low to contribute net speedup.</li>
+<li>Medusa speedups are largest at batch size 1 and diminish at batch sizes above 8 where the model becomes compute-bound rather than bandwidth-bound.</li>
+<li>Pretrained Medusa heads for Vicuna-7B, Vicuna-13B, and Llama-2 are available in the FasterDecoding repository on Hugging Face.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

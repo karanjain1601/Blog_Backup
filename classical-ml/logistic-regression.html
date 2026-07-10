@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Logistic Regression | Notes Backup</title>
+  <meta name="description" content="Derive logistic regression via Bernoulli MLE, implement gradient descent and Newton-Raphson (IRLS), interpret coefficients as log-odds ratios, calibrate probabilities with Platt scaling, and extend to multinomial via softmax." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Logistic Regression</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Derive logistic regression via Bernoulli MLE, implement gradient descent and Newton-Raphson (IRLS), interpret coefficients as log-odds ratios, calibrate probabilities with Platt scaling, and extend to multinomial via softmax.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Logistic Regression</h1>
+<p>Logistic regression models the probability of a binary outcome by passing a linear function through the sigmoid: P(y=1|x) = σ(θᵀx) = 1/(1+e^{−θᵀx}). Unlike linear regression, it outputs valid probabilities in [0,1] and its decision boundary is linear in feature space. Despite its simplicity, logistic regression remains one of the most widely deployed classifiers in medicine, finance, and industry because its coefficients are directly interpretable as log-odds ratios.</p>
+<h2>The Sigmoid Function and Logit Link</h2>
+<p>The sigmoid σ(z) = 1/(1+e^{−z}) maps ℝ → (0,1) with σ(0)=0.5 and gradient σ'(z) = σ(z)(1−σ(z)). The logit (log-odds) is its inverse: logit(p) = log(p/(1−p)) = θᵀx. This is the canonical link function for the Bernoulli GLM. The odds ratio P(y=1)/P(y=0) = e^{θᵀx}, so each unit increase in feature j multiplies the odds by e^{θⱼ}. The decision boundary P(y=1|x) = 0.5 ⟺ θᵀx = 0, which is a hyperplane in feature space.</p>
+<h2>Maximum Likelihood Estimation</h2>
+<p>Assuming y_i ~ Bernoulli(σ(θᵀxᵢ)), the log-likelihood is ℓ(θ) = Σ [yᵢ log σ(θᵀxᵢ) + (1−yᵢ) log(1−σ(θᵀxᵢ))]. This equals the negative cross-entropy loss. ℓ(θ) is concave in θ, so any local maximum is global. The gradient is ∂ℓ/∂θ = Xᵀ(y − ŷ) where ŷᵢ = σ(θᵀxᵢ). There is no closed form for the MLE because σ is nonlinear — iterative methods (gradient ascent, Newton-Raphson) are required.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.datasets import make_classification
+
+def sigmoid(z):
+    return 1.0 / (1.0 + np.exp(-np.clip(z, -250, 250)))
+
+def logistic_gd(X, y, lr=0.1, n_iter=1000, tol=1e-6):
+    n, p = X.shape
+    X_b = np.hstack([np.ones((n, 1)), X])
+    theta = np.zeros(X_b.shape[1])
+    for i in range(n_iter):
+        y_hat = sigmoid(X_b @ theta)
+        grad = X_b.T @ (y - y_hat)     # gradient of log-likelihood
+        theta += lr * grad
+        if np.linalg.norm(grad) &lt; tol:
+            print(f'Converged at iteration {i}')
+            break
+    return theta
+
+np.random.seed(42)
+X, y = make_classification(n_samples=300, n_features=4,
+                             n_informative=3, random_state=42)
+theta = logistic_gd(X, y, lr=0.05, n_iter=2000)
+
+X_b = np.hstack([np.ones((len(X), 1)), X])
+acc = ((sigmoid(X_b @ theta) &gt;= 0.5) == y).mean()
+print(f'Intercept: {theta[0]:.4f}')
+print(f'Coefficients: {np.round(theta[1:], 4)}')
+print(f'Training accuracy: {acc:.4f}')
+</code></pre>
+<h2>Newton-Raphson and IRLS</h2>
+<p>Newton-Raphson updates θ using the Hessian: θ ← θ − H⁻¹∇ℓ. For logistic regression, the Hessian is H = −XᵀWX where W = diag(ŷᵢ(1−ŷᵢ)) is the weight matrix. This is the Iteratively Reweighted Least Squares (IRLS) algorithm: at each step, solve a weighted least-squares problem. Newton-Raphson converges quadratically near the optimum (typically 5–10 iterations vs hundreds for gradient descent) but requires O(p³) per step for the matrix inverse.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.datasets import make_classification
+from sklearn.linear_model import LogisticRegression
+
+def sigmoid(z):
+    return 1.0 / (1.0 + np.exp(-np.clip(z, -250, 250)))
+
+def irls(X, y, n_iter=20, tol=1e-8):
+    n, p = X.shape
+    X_b = np.hstack([np.ones((n, 1)), X])
+    theta = np.zeros(X_b.shape[1])
+    for i in range(n_iter):
+        y_hat = sigmoid(X_b @ theta)
+        W = y_hat * (1 - y_hat)                  # Bernoulli weights
+        grad = X_b.T @ (y - y_hat)               # gradient
+        H = -(X_b.T * W) @ X_b                   # Hessian
+        step = np.linalg.solve(-H, grad)          # Newton step
+        theta += step
+        if np.linalg.norm(grad) &lt; tol:
+            print(f'IRLS converged at step {i+1}')
+            break
+    return theta
+
+np.random.seed(42)
+X, y = make_classification(n_samples=300, n_features=4,
+                             n_informative=3, random_state=42)
+theta_irls = irls(X, y)
+lr_ref = LogisticRegression(C=1e6, solver='lbfgs', max_iter=1000).fit(X, y)
+print('IRLS coefs:   ', np.round(theta_irls[1:], 4))
+print('sklearn coefs:', np.round(lr_ref.coef_[0], 4))
+print('Max diff: {:.2e}'.format(np.abs(theta_irls[1:] - lr_ref.coef_[0]).max()))
+</code></pre>
+<h2>Coefficient Interpretation and Confidence Intervals</h2>
+<p>The coefficient θⱼ represents the change in log-odds per unit increase in feature j, holding all others fixed. The odds ratio for feature j is e^{θⱼ}: if θⱼ = 0.5, a one-unit increase multiplies the odds of the positive class by e^{0.5} ≈ 1.65. Approximate 95% confidence intervals for θⱼ use the diagonal of the inverse Fisher information matrix (−H)⁻¹, giving θⱼ ± 1.96 × SE_j, which maps to CI on the odds ratio by exponentiating.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.datasets import load_breast_cancer
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+
+data = load_breast_cancer()
+X = StandardScaler().fit_transform(data.data[:, :6])
+y = data.target
+feature_names = data.feature_names[:6]
+
+lr = LogisticRegression(C=1.0, solver='lbfgs', max_iter=1000).fit(X, y)
+coefs = lr.coef_[0]
+
+# Fisher information-based SEs
+from sklearn.linear_model import LogisticRegression
+X_b = np.hstack([np.ones((len(X), 1)), X])
+y_hat = lr.predict_proba(X)[:, 1]
+W = y_hat * (1 - y_hat)
+H_inv = np.linalg.inv((X_b.T * W) @ X_b)
+SEs = np.sqrt(np.diag(H_inv))[1:]  # skip intercept SE
+
+print(f'{&quot;Feature&quot;:&gt;30} {&quot;Coef&quot;:&gt;8} {&quot;OR&quot;:&gt;8} {&quot;95% CI&quot;}' )
+for name, coef, se in zip(feature_names, coefs, SEs):
+    lo = np.exp(coef - 1.96 * se)
+    hi = np.exp(coef + 1.96 * se)
+    print(f'{name:&gt;30} {coef:&gt;8.3f} {np.exp(coef):&gt;8.3f}  [{lo:.3f}, {hi:.3f}]')
+</code></pre>
+<h2>Calibration and Platt Scaling</h2>
+<p>A model is well-calibrated if among all predictions ŷ ≈ 0.7, roughly 70% of true labels are positive. Reliability diagrams (calibration curves) plot mean predicted probability against observed positive rate across bins. Logistic regression is generally well-calibrated for in-distribution data. Platt scaling post-hoc fits a logistic regression on the model's raw scores using a held-out calibration set, mapping uncalibrated probabilities to calibrated ones.</p>
+<blockquote>
+<p><strong>Calibration Matters in Production</strong>: Even if a model has high AUC, poorly calibrated probabilities cause downstream failures: risk scores, expected-value decisions, and threshold tuning all require reliable probability estimates. Always plot a reliability diagram before deploying any probability-outputting model. Use isotonic regression (nonparametric) or Platt scaling (parametric) to recalibrate.</p>
+</blockquote>
+<pre><code class="language-python">import numpy as np
+from sklearn.datasets import make_classification
+from sklearn.linear_model import LogisticRegression
+from sklearn.calibration import CalibratedClassifierCV, calibration_curve
+from sklearn.model_selection import train_test_split
+from sklearn.svm import SVC
+
+np.random.seed(42)
+X, y = make_classification(n_samples=2000, n_features=10,
+                             n_informative=5, random_state=42)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.4, random_state=42)
+
+# Uncalibrated SVM (decision-function scores, not probabilities)
+svm = SVC(kernel='rbf', probability=False).fit(X_tr, y_tr)
+
+# Platt scaling via CalibratedClassifierCV
+platt_svm = CalibratedClassifierCV(SVC(kernel='rbf'), method='sigmoid', cv=5)
+platt_svm.fit(X_tr, y_tr)
+
+lr_cal = LogisticRegression(max_iter=1000).fit(X_tr, y_tr)
+
+for name, proba_fn in [('LR (reference)', lr_cal.predict_proba(X_te)[:, 1]),
+                        ('SVM+Platt', platt_svm.predict_proba(X_te)[:, 1])]:
+    frac_pos, mean_pred = calibration_curve(y_te, proba_fn, n_bins=10)
+    cal_err = np.mean(np.abs(frac_pos - mean_pred))
+    print(f'{name}: mean calibration error = {cal_err:.4f}')
+</code></pre>
+<h2>Multinomial Logistic Regression</h2>
+<p>For K &gt; 2 classes, the softmax function generalises the sigmoid: P(y=k|x) = e^{θₖᵀx} / Σⱼ e^{θⱼᵀx}. One class is typically chosen as the reference (its weights are zero) for identifiability, reducing to K−1 independent sets of parameters. The log-likelihood is the negative categorical cross-entropy. Gradient and Newton updates extend analogously. Multi-label classification (multiple binary labels simultaneously) is solved by K independent binary logistic models.</p>
+<table>
+<thead>
+<tr>
+<th>Link Function</th>
+<th>Distribution</th>
+<th>Range</th>
+<th>Use Case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Sigmoid: 1/(1+e^{-z})</td>
+<td>Bernoulli</td>
+<td>(0,1)</td>
+<td>Binary classification</td>
+</tr>
+<tr>
+<td>Softmax: e^{zk}/Σe^{zj}</td>
+<td>Categorical/Multinomial</td>
+<td>(0,1) summing to 1</td>
+<td>Multiclass classification</td>
+</tr>
+<tr>
+<td>Identity: z</td>
+<td>Gaussian</td>
+<td>(-∞,+∞)</td>
+<td>Regression (OLS)</td>
+</tr>
+<tr>
+<td>Log: e^z (or log link)</td>
+<td>Poisson</td>
+<td>(0,+∞)</td>
+<td>Count data, Poisson regression</td>
+</tr>
+<tr>
+<td>Probit: Φ(z)</td>
+<td>Bernoulli</td>
+<td>(0,1)</td>
+<td>Binary, Gaussian latent variable interpretation</td>
+</tr>
+</tbody>
+</table>
+<h2>Regularisation in Logistic Regression</h2>
+<p>Without regularisation, logistic regression can overfit (especially with many features or perfectly separable data — the MLE is undefined for separable data since loss approaches zero only at ‖θ‖→∞). L2 regularisation (C=1/λ in sklearn) adds −λ‖θ‖² to the log-likelihood, shrinking all coefficients. L1 regularisation promotes sparsity — useful for feature selection with high-dimensional data. sklearn uses the 'saga' solver for both L1 and ElasticNet regularised logistic regression at scale.</p>
+<ul>
+<li>L2 (Ridge, default): adds −λ‖θ‖² term; all coefficients shrink but remain nonzero; always converges.</li>
+<li>L1 (Lasso): promotes exact zeros; useful for high-dimensional data with many irrelevant features.</li>
+<li>ElasticNet: L1+L2 combination; handles correlated features better than pure L1.</li>
+<li>Perfectly separable data: L2/L1 regularisation is required to prevent divergence of MLE.</li>
+<li>Multiclass: use 'multinomial' with 'lbfgs' or 'saga' solver; avoids one-vs-rest approximation.</li>
+<li>Calibration: logistic regression is well-calibrated by default; SVMs and tree models typically need Platt scaling.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

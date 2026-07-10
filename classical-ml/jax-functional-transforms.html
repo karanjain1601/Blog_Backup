@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>JAX — jit, grad, vmap, and pmap | Notes Backup</title>
+  <meta name="description" content="JAX&#x27;s four functional transforms — jit (JIT compilation), grad (autodiff), vmap (vectorization), and pmap (multi-device parallelism) — compose to build high-performance ML research code." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>JAX — jit, grad, vmap, and pmap</h1>
+      <ul class='note-meta'><li><strong>description:</strong> JAX&#x27;s four functional transforms — jit (JIT compilation), grad (autodiff), vmap (vectorization), and pmap (multi-device parallelism) — compose to build high-performance ML research code.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>JAX — jit, grad, vmap, and pmap</h1>
+<p>JAX is NumPy-compatible + transformable: any Python function that computes with arrays can be JIT-compiled, differentiated, vectorized, or parallelized by wrapping it in a transformation. The key constraint: functions must be pure (no side effects) so JAX can trace and transform them safely.</p>
+<h2>The Four Core Transforms</h2>
+<p>JAX's power comes from composability: grad(vmap(jit(f))) works, and the result is efficient. Each transform adds one capability without changing the others.</p>
+<ul>
+<li>jax.jit(f): JIT-compile via XLA — traces f on abstract values, generates fused device kernels, caches compilation</li>
+<li>jax.grad(f): compute gradient of f w.r.t. first argument (or argnums) — reverse-mode AD by default</li>
+<li>jax.vmap(f): vectorize f over a batch dimension — eliminates explicit loops without modifying f</li>
+<li>jax.pmap(f): parallel map over multiple accelerators — each device gets one slice of the input</li>
+<li>Pure functions required: no Python globals, no in-place mutation, no I/O inside traced functions</li>
+<li>Pytrees: JAX treats nested dicts/lists/tuples of arrays as first-class — model params as dicts work naturally</li>
+</ul>
+<h2>jit, grad, and vmap Basics</h2>
+<p>These three transforms compose cleanly. vmap(grad(f)) computes per-sample gradients in one vectorized pass — something that would require a Python loop in PyTorch.</p>
+<pre><code class="language-python">import jax
+import jax.numpy as jnp
+from jax import jit, grad, vmap
+
+# Pure function: no side effects, no globals
+def mse_loss(params, x, y):
+    pred = x @ params['W'] + params['b']
+    return jnp.mean((pred - y) ** 2)
+
+# JIT-compile: first call traces, subsequent calls use compiled kernel
+params = {'W': jnp.ones((4, 1)), 'b': jnp.zeros(1)}
+X = jnp.ones((100, 4))
+y = jnp.ones((100, 1))
+
+jit_loss = jit(mse_loss)
+print(f'Loss: {jit_loss(params, X, y):.4f}')
+
+# grad: derivative w.r.t. params (argnums=0 is the default)
+grad_fn = jit(grad(mse_loss, argnums=0))
+grads = grad_fn(params, X, y)
+print(f'Gradient keys:    {list(grads.keys())}')
+print(f'Gradient W shape: {grads[&quot;W&quot;].shape}')
+
+# vmap: vectorize a per-sample function over a batch axis
+def single_sample_loss(params, x_single, y_single):
+    pred = x_single @ params['W'] + params['b']
+    return jnp.mean((pred - y_single) ** 2)
+
+batch_grad_fn = vmap(grad(single_sample_loss), in_axes=(None, 0, 0))
+per_sample_grads = batch_grad_fn(params, X, y)  # per-sample gradients!
+print(f'Per-sample grad W shape: {per_sample_grads[&quot;W&quot;].shape}')  # (100, 4, 1)
+</code></pre>
+<h2>Full JAX Training Loop</h2>
+<p>A functional JAX training loop explicitly passes state (params, optimizer state) as arguments and returns updated state. No classes or mutations — every step is a pure function that can be jit-compiled.</p>
+<pre><code class="language-python">import jax
+import jax.numpy as jnp
+from jax import jit, grad, random
+import optax  # JAX optimizer library
+
+# Initialize params as a pytree dict
+key = random.PRNGKey(42)
+params = {
+    'W1': random.normal(key, (20, 64)) * 0.1,
+    'b1': jnp.zeros(64),
+    'W2': random.normal(key, (64, 2)) * 0.1,
+    'b2': jnp.zeros(2)
+}
+
+def forward(params, x):
+    h = jnp.tanh(x @ params['W1'] + params['b1'])
+    return h @ params['W2'] + params['b2']
+
+def cross_entropy_loss(params, x, y):
+    logits = forward(params, x)
+    log_probs = jax.nn.log_softmax(logits, axis=-1)
+    return -jnp.mean(log_probs[jnp.arange(len(y)), y])
+
+# Optax optimizer: Adam
+optimizer = optax.adam(learning_rate=1e-3)
+opt_state  = optimizer.init(params)
+
+@jit
+def train_step(params, opt_state, x, y):
+    loss, grads = jax.value_and_grad(cross_entropy_loss)(params, x, y)
+    updates, new_opt_state = optimizer.update(grads, opt_state)
+    new_params = optax.apply_updates(params, updates)
+    return new_params, new_opt_state, loss
+
+# Training loop
+key, subkey = random.split(key)
+X_data = random.normal(subkey, (500, 20))
+y_data = random.randint(key, (500,), 0, 2)
+for step in range(5):
+    params, opt_state, loss = train_step(params, opt_state, X_data, y_data)
+    print(f'Step {step+1}: loss={loss:.4f}')
+</code></pre>
+<h2>vmap for Per-Sample Gradient Computation</h2>
+<p>Per-sample gradients are required for differential privacy (DP-SGD) and influence function computation. In PyTorch this requires a Python loop over the batch; in JAX, vmap(grad(f)) computes them efficiently in one vectorized pass.</p>
+<pre><code class="language-python">import jax
+import jax.numpy as jnp
+from jax import vmap, grad, jit, random
+
+key = random.PRNGKey(0)
+params = {'W': random.normal(key, (10, 5)), 'b': jnp.zeros(5)}
+
+def single_loss(params, x_i, y_i):
+    logit = x_i @ params['W'] + params['b']
+    return jax.nn.softmax_cross_entropy_with_integer_labels(logit, y_i)
+
+# vmap over batch dimension: in_axes=(None, 0, 0)
+# params: same for all samples (None), x and y: one per sample (0)
+batch_grads_fn = jit(vmap(grad(single_loss), in_axes=(None, 0, 0)))
+
+X_batch = random.normal(key, (64, 10))   # 64 samples, 10 features
+y_batch = random.randint(key, (64,), 0, 5)  # 64 labels
+
+per_sample_grads = batch_grads_fn(params, X_batch, y_batch)
+print(f'Per-sample grad W: {per_sample_grads[&quot;W&quot;].shape}')  # (64, 10, 5)
+
+# For DP-SGD: clip each per-sample gradient, then aggregate
+max_norm = 1.0
+clipped_W = jnp.clip(
+    per_sample_grads['W'],
+    -max_norm / jnp.sqrt(10 * 5),
+    max_norm / jnp.sqrt(10 * 5)
+)
+mean_grad_W = clipped_W.mean(axis=0)
+print(f'Clipped mean grad W: {mean_grad_W.shape}')  # (10, 5)
+</code></pre>
+<h2>pmap for Multi-Device Data Parallelism</h2>
+<p>pmap maps a function over the first axis of each array, distributing slices across all available devices. Each device runs the same computation on its data slice, with collective operations (like lax.pmean) to synchronize.</p>
+<pre><code class="language-python">import jax
+import jax.numpy as jnp
+from jax import pmap, random
+from jax.lax import pmean
+
+n_devices = jax.device_count()
+print(f'Available devices: {n_devices}')
+
+# Replicate params across all devices
+def replicate(x):
+    return jnp.broadcast_to(x, (n_devices,) + x.shape)
+
+key = random.PRNGKey(42)
+params_rep = {
+    'W': replicate(random.normal(key, (10, 5))),
+    'b': replicate(jnp.zeros(5))
+}
+
+@pmap
+def parallel_train_step(params, x_shard, y_shard):
+    def loss_fn(p):
+        logit = x_shard @ p['W'] + p['b']
+        return jnp.mean((logit - y_shard) ** 2)
+    grads = jax.grad(loss_fn)(params)
+    # Average gradients across devices (allreduce)
+    grads = jax.tree_util.tree_map(lambda g: pmean(g, axis_name='batch'), grads)
+    return grads
+
+print(f'pmap distributes batch axis over {n_devices} device(s)')
+</code></pre>
+<hr />
+<h2>JAX vs PyTorch Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Aspect</th>
+<th>PyTorch</th>
+<th>JAX</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Programming model</td>
+<td>Object-oriented (nn.Module, state in object)</td>
+<td>Functional — state passed explicitly as pytrees</td>
+</tr>
+<tr>
+<td>Autodiff</td>
+<td>Dynamic graph, eager backward()</td>
+<td>Composable transforms: grad, value_and_grad</td>
+</tr>
+<tr>
+<td>Vectorization</td>
+<td>Manual loop or torch.vmap (newer)</td>
+<td>vmap — first-class, composes with grad</td>
+</tr>
+<tr>
+<td>Parallelism</td>
+<td>DistributedDataParallel, FSDP</td>
+<td>pmap — elegant but limited to one host</td>
+</tr>
+<tr>
+<td>Debugging</td>
+<td>Eager mode, pdb-friendly</td>
+<td>Harder — traced functions can't print inside jit</td>
+</tr>
+<tr>
+<td>Ecosystem</td>
+<td>Massive (HuggingFace, timm, etc.)</td>
+<td>Growing (Flax, Haiku, Optax, Equinox)</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>JAX's Pure Function Requirement</strong>: JAX traces functions by running them with abstract values, not real data. Any Python side effect inside a jit-compiled function (print, global mutation, randomness without explicit key splitting) produces incorrect behavior — the side effect only happens during tracing, not at runtime. Always pass jax.random.PRNGKey explicitly and split keys for each operation that needs randomness.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<ul>
+<li>jit compiles via XLA — first call traces, subsequent calls run compiled kernel; no model changes needed</li>
+<li>grad differentiates any pure Python function — composes with jit and vmap freely</li>
+<li>vmap vectorizes a per-element function over a batch dimension — replaces Python loops</li>
+<li>pmap parallelizes over multiple accelerators with collective operations for gradient averaging</li>
+<li>Pure functions required: no side effects, explicit state passing, explicit PRNG key splitting</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

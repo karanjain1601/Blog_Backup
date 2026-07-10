@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PyTorch Internals — Strides, Contiguous Memory, and Dispatch | Notes Backup</title>
+  <meta name="description" content="Under the hood of PyTorch: tensor storage layout, strides, non-contiguous tensors, the dispatcher, custom autograd Functions, TorchScript, and torch.fx." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>PyTorch Internals — Strides, Contiguous Memory, and Dispatch</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Under the hood of PyTorch: tensor storage layout, strides, non-contiguous tensors, the dispatcher, custom autograd Functions, TorchScript, and torch.fx.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>PyTorch Internals — Strides, Contiguous Memory, and Dispatch</h1>
+<p>Most PyTorch users never need to think about tensor strides or the dispatcher — until performance degrades unexpectedly or a custom CUDA kernel must be integrated. Understanding how PyTorch stores tensors in memory, routes operations to backends, and traces computation graphs is essential for optimizing and extending the framework.</p>
+<h2>Tensor Storage: Strides and Contiguity</h2>
+<p>A PyTorch tensor is not just data — it is a view into a contiguous memory block defined by: storage (raw memory), offset (start position), shape (size per dimension), and strides (step size in memory to advance one element along each dimension).</p>
+<ul>
+<li>Contiguous tensor: strides[i] = product of shape[i+1:] — elements stored in row-major (C) order</li>
+<li>After transpose: strides swap — the data is the same, but the view is different (non-contiguous)</li>
+<li>After narrow/slice: strides unchanged, offset shifts — another non-contiguous view</li>
+<li>.is_contiguous() returns True only if strides match the expected C-order layout</li>
+<li>.contiguous() forces a copy to a new contiguous allocation — needed before operations that require contiguous input</li>
+<li>view() requires contiguous input; reshape() uses view if possible, otherwise copies</li>
+</ul>
+<h2>Strides in Practice</h2>
+<p>Understanding strides helps diagnose why certain operations are slow (non-contiguous memory access) and when reshape vs contiguous+view is needed.</p>
+<pre><code class="language-python">import torch
+
+# Contiguous tensor: shape (3, 4)
+x = torch.arange(12).reshape(3, 4)
+print(f'Shape:          {x.shape}')
+print(f'Strides:        {x.stride()}')   # (4, 1) — row-major
+print(f'Is contiguous:  {x.is_contiguous()}')
+
+# Transpose: same data, swapped strides
+x_t = x.T
+print(f'\nTransposed strides: {x_t.stride()}')  # (1, 4) — non-contiguous
+print(f'Is contiguous:      {x_t.is_contiguous()}')
+
+# view() fails on non-contiguous tensor
+try:
+    x_t.view(6, 2)
+except RuntimeError as e:
+    print(f'\nview() error: {e}')
+
+# contiguous() creates a copy with correct strides
+x_t_contig = x_t.contiguous()
+print(f'\nAfter contiguous(), strides: {x_t_contig.stride()}')
+x_t_contig.view(6, 2)  # now works
+
+# reshape() = view if contiguous, else copy
+x_reshaped = x_t.reshape(6, 2)
+print(f'x_reshaped shares storage: {x_reshaped.storage().data_ptr() == x_t.storage().data_ptr()}')
+</code></pre>
+<h2>Custom Autograd Functions</h2>
+<p>When a numerically stable or fused operation is needed that autograd cannot handle automatically, torch.autograd.Function lets you define both the forward computation and the exact backward (gradient) formula.</p>
+<pre><code class="language-python">import torch
+from torch.autograd import Function
+
+class StableSigmoid(Function):
+    &quot;&quot;&quot;Numerically stable sigmoid with saved output for backward.&quot;&quot;&quot;
+
+    @staticmethod
+    def forward(ctx, x: torch.Tensor) -&gt; torch.Tensor:
+        # Numerically stable: use negative exponential for positive x
+        sig = torch.where(x &gt;= 0,
+                          1 / (1 + torch.exp(-x)),
+                          torch.exp(x) / (1 + torch.exp(x)))
+        ctx.save_for_backward(sig)  # save output for backward pass
+        return sig
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -&gt; torch.Tensor:
+        sig, = ctx.saved_tensors
+        # d/dx sigmoid(x) = sigmoid(x) * (1 - sigmoid(x))
+        return grad_output * sig * (1 - sig)
+
+# Register as a callable function
+stable_sigmoid = StableSigmoid.apply
+
+# Test: compare with torch.sigmoid
+x = torch.randn(5, requires_grad=True)
+out_custom = stable_sigmoid(x)
+out_custom.sum().backward()
+print('Custom gradient:', x.grad)
+
+x2 = x.detach().clone().requires_grad_(True)
+torch.sigmoid(x2).sum().backward()
+print('Torch gradient: ', x2.grad)
+print('Match:', torch.allclose(x.grad, x2.grad, atol=1e-6))
+</code></pre>
+<h2>TorchScript — Tracing vs Scripting</h2>
+<p>TorchScript compiles Python code to a portable IR (intermediate representation) that can be serialized, optimized, and deployed without a Python interpreter — essential for mobile and C++ serving. Two modes: trace (records operations on a sample input) and script (analyzes Python source code statically).</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class SimpleNet(nn.Module):
+    def __init__(self, dim: int):
+        super().__init__()
+        self.fc = nn.Linear(dim, dim)
+
+    def forward(self, x: torch.Tensor) -&gt; torch.Tensor:
+        return torch.relu(self.fc(x))
+
+model = SimpleNet(64)
+model.eval()
+
+# Method 1: torch.jit.trace — records operations on a sample input
+sample = torch.randn(1, 64)
+traced = torch.jit.trace(model, sample)
+traced.save('model_traced.pt')  # portable serialized model
+print('Traced output:', traced(sample).shape)
+
+# Method 2: torch.jit.script — analyzes Python AST, supports control flow
+@torch.jit.script
+def conditional_op(x: torch.Tensor, flag: bool) -&gt; torch.Tensor:
+    if flag:  # control flow preserved in scripted IR
+        return torch.relu(x)
+    else:
+        return torch.sigmoid(x)
+
+print('Script with flag=True: ', conditional_op(torch.randn(3), True))
+print('Script with flag=False:', conditional_op(torch.randn(3), False))
+
+# Load and run traced model in a new session (no model definition needed)
+loaded = torch.jit.load('model_traced.pt')
+print('Loaded model output:', loaded(sample).shape)
+</code></pre>
+<h2>torch.fx — Graph Capture and Manipulation</h2>
+<p>torch.fx captures the symbolic execution trace of a nn.Module as an explicit graph (FX IR). This graph can be inspected, transformed, and compiled — the foundation for torch.compile's Dynamo tracing.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.fx as fx
+
+class SmallNet(nn.Module):
+    def forward(self, x: torch.Tensor) -&gt; torch.Tensor:
+        x = torch.relu(x)
+        x = x * 2.0
+        return x.sum(dim=-1)
+
+model = SmallNet()
+
+# Capture the FX graph by symbolic tracing
+graph_module = fx.symbolic_trace(model)
+
+print('=== FX Graph Nodes ===')
+for node in graph_module.graph.nodes:
+    print(f'  {node.op:&lt;15} {node.name:&lt;20} target={node.target}')
+
+# Example transformation: replace relu with gelu
+for node in graph_module.graph.nodes:
+    if node.op == 'call_function' and node.target == torch.relu:
+        node.target = torch.nn.functional.gelu
+        print(f'\nReplaced relu -&gt; gelu in node: {node.name}')
+
+graph_module.recompile()  # regenerate Python code from modified graph
+x_test = torch.randn(4, 8)
+out = graph_module(x_test)
+print(f'Output after transformation: {out.shape}')
+</code></pre>
+<hr />
+<h2>Tensor Operations: Views vs Copies</h2>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>Copies Data</th>
+<th>Stride Change</th>
+<th>Requires Contiguous</th>
+<th>When to Use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>view(shape)</td>
+<td>No — zero-copy</td>
+<td>Yes (recomputed)</td>
+<td>Yes</td>
+<td>Reshape contiguous tensors efficiently</td>
+</tr>
+<tr>
+<td>reshape(shape)</td>
+<td>Only if needed</td>
+<td>Yes</td>
+<td>No (copies if needed)</td>
+<td>General reshape — prefer over view</td>
+</tr>
+<tr>
+<td>transpose(d0, d1)</td>
+<td>No — zero-copy</td>
+<td>Yes (swapped)</td>
+<td>No</td>
+<td>Swap two dimensions; check contiguity after</td>
+</tr>
+<tr>
+<td>permute(dims)</td>
+<td>No — zero-copy</td>
+<td>Yes (reordered)</td>
+<td>No</td>
+<td>Arbitrary dimension reordering</td>
+</tr>
+<tr>
+<td>contiguous()</td>
+<td>Yes if needed</td>
+<td>Reset to C-order</td>
+<td>N/A</td>
+<td>Before view() or kernel requiring contig input</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Non-Contiguous Tensors and Kernel Performance</strong>: CUDA kernels assume contiguous memory for maximum throughput. Operating on a non-contiguous tensor (e.g., after transpose) forces PyTorch to either copy the tensor first or use a slower generic kernel. Profile with torch.profiler if you observe unexpected slowdowns — a single .contiguous() call before a compute-heavy operation often resolves it.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<ul>
+<li>Tensors are (storage, offset, shape, strides) — transpose and slice create non-contiguous views without copying</li>
+<li>.contiguous() forces a copy to C-order memory — required before view() and many CUDA kernels</li>
+<li>Custom autograd Functions: define forward + backward explicitly with ctx.save_for_backward</li>
+<li>TorchScript trace records operations on a sample; script parses Python AST — script supports control flow, trace does not</li>
+<li>torch.fx captures the execution graph as an editable IR — foundation for compile-time optimizations</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

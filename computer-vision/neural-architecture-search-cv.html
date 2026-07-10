@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Neural Architecture Search for Vision: DARTS, EfficientDet, and One-Shot NAS | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Neural Architecture Search for Vision: DARTS, EfficientDet, and One-Shot NAS</h1>
+      
+      <h1>Neural Architecture Search for Vision: DARTS, EfficientDet, and One-Shot NAS</h1>
+<h2>Overview</h2>
+<p>Neural Architecture Search (NAS) automates the design of neural network architectures, removing the need for manual engineering. In computer vision, NAS has produced state-of-the-art models like EfficientNet and EfficientDet by searching over cell structures, connectivity patterns, and scaling coefficients within a defined search space.</p>
+<p>Three main NAS paradigms have emerged: reinforcement-learning-based search, differentiable search (DARTS), and one-shot weight-sharing. Each makes a different tradeoff between search cost, final accuracy, and ease of implementation. Understanding these tradeoffs is essential for practitioners who want to apply NAS in real projects.</p>
+<h2>Search Space Design</h2>
+<p>The search space defines which architectures NAS can discover. A well-designed space prunes impossible configurations while preserving the best candidates. Cell-based spaces define a small repeated unit (a DAG of operations) and stack copies to form the full network — this dramatically reduces the search problem size.</p>
+<p>Common primitive operations in vision NAS search spaces include 3×3 and 5×5 separable convolutions, 3×3 dilated convolutions, 3×3 max pooling, 3×3 average pooling, skip connections, and zero (no connection). The choice of primitives strongly determines what architectures are reachable and how the final model will perform on target hardware.</p>
+<h2>DARTS: Differentiable NAS</h2>
+<p>DARTS (Differentiable Architecture Search) relaxes the discrete search problem into a continuous one by replacing each candidate operation with a weighted mixture. Architecture parameters are jointly optimized with network weights using bi-level optimization: weights on training loss, architecture params on validation loss.</p>
+<pre><code># DARTS mixed operation\nops = [conv3x3, conv5x5, skip, maxpool]\nweights = softmax(arch_params)  # shape: [num_ops]\noutput = sum(w * op(x) for w, op in zip(weights, ops))\n\n# Bi-level optimization\n# Step 1: update weights w with train loss\nloss_train = criterion(model(x_train), y_train)\nloss_train.backward(); optimizer_w.step()\n\n# Step 2: update arch_params alpha with val loss\nloss_val = criterion(model(x_val), y_val)\nloss_val.backward(); optimizer_alpha.step()
+</code></pre>
+<p>After the search phase, DARTS discretizes the learned architecture by selecting the operation with the highest softmax weight on each edge. The discrete architecture is then retrained from scratch with randomly initialized weights. This two-phase approach — search then retrain — is standard across most NAS methods.</p>
+<pre><code># Discretize DARTS after search\nfinal_op = ops[arch_params.argmax()]\n# Replace all mixed ops with single chosen op\n# Then retrain from scratch for fair evaluation\nfor cell in model.cells:\n    for edge in cell.edges:\n        edge.op = edge.mixed_op.ops[\n            edge.mixed_op.arch_params.argmax()\n        ]\nmodel.reset_parameters()  # retrain from scratch
+</code></pre>
+<blockquote>
+<p>****: DARTS suffers from performance collapse — the softmax operation biases toward skip connections during search because they have zero loss. Fix with DARTS+ (clamp arch params) or use one-shot NAS which avoids the architecture parameter coupling entirely.</p>
+</blockquote>
+<h2>One-Shot and Weight Sharing</h2>
+<p>One-shot NAS trains a single supernet that contains all candidate architectures as subgraphs. Each training step samples a random path (architecture) through the supernet and updates only the weights on that path. After supernet training, a search algorithm (evolutionary, random, or gradient) evaluates candidate architectures using the shared weights as a proxy for their true performance.</p>
+<pre><code># One-shot supernet training\nfor epoch in range(num_epochs):\n    for x, y in dataloader:\n        # Sample one path (architecture)\n        path = sample_random_architecture(supernet)\n        # Forward only through sampled path\n        output = supernet.forward(x, path=path)\n        loss = criterion(output, y)\n        loss.backward()\n        optimizer.step()\n# Search: evaluate all paths with shared weights\nbest = max(candidates, key=lambda p: eval(supernet, p))
+</code></pre>
+<p>Once-for-All (OFA) extends one-shot NAS by training a supernet that supports elastic kernel sizes, depths, and widths. Given any hardware constraint (latency, memory), OFA can extract a specialized sub-network without any retraining. This enables deployment of the same trained supernet across phones, servers, and edge devices simultaneously.</p>
+<h2>AutoML in Practice</h2>
+<p>EfficientDet applies NAS to find the BiFPN (Bi-directional Feature Pyramid Network) neck architecture, then uses compound scaling to uniformly scale resolution, depth, and width with a single coefficient phi. This compound scaling law — rather than scaling one dimension in isolation — achieves better accuracy-efficiency tradeoffs across the D0–D7 model family.</p>
+<pre><code># EfficientDet NAS compound scaling\n# BiFPN neck found by NAS; compound scaling coefficients:\n# depth: d = 1.3^phi\n# width: w = 1.1^phi\n# resolution: r = 512 + 128*phi\n\nfor phi in range(8):  # D0 to D7\n    depth = 1.3 ** phi\n    width = 1.1 ** phi\n    resolution = 512 + 128 * phi\n    # Train and evaluate EfficientDet-D{phi}\n    # Pick best accuracy/latency tradeoff per device
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Search cost (GPU-days)</th>
+<th>CIFAR-10 Error %</th>
+<th>ImageNet Top-1 %</th>
+<th>Mobile-friendly</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DARTS</td>
+<td>4</td>
+<td>2.76</td>
+<td>73.1</td>
+<td>No</td>
+</tr>
+<tr>
+<td>P-DARTS</td>
+<td>0.3</td>
+<td>2.50</td>
+<td>75.6</td>
+<td>Partial</td>
+</tr>
+<tr>
+<td>SNAS</td>
+<td>1.5</td>
+<td>2.85</td>
+<td>72.7</td>
+<td>No</td>
+</tr>
+<tr>
+<td>Once-for-All</td>
+<td>40 (once)</td>
+<td>—</td>
+<td>76.0</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>EfficientNet-NAS</td>
+<td>3800</td>
+<td>—</td>
+<td>84.3</td>
+<td>Yes</td>
+</tr>
+</tbody>
+</table>
+<h2>Key Takeaways</h2>
+<p>DARTS is cheap and easy to implement but suffers from collapse artifacts — use P-DARTS or DARTS+ in production. One-shot methods like OFA amortize search cost over all target hardware profiles, making them the pragmatic choice when you need to deploy across many device types from a single training run.</p>
+<p>EfficientDet's compound scaling insight is applicable beyond NAS: any family of models benefits from jointly scaling depth, width, and resolution rather than tuning one axis. For most practitioners, starting with a pretrained EfficientDet or EfficientNet checkpoint and fine-tuning is preferable to running NAS from scratch, which requires thousands of GPU-hours.</p>
+<p>When evaluating NAS methods, always compare on the same training recipe and budget. Many published NAS results use stronger augmentation, longer schedules, or better regularization than their baselines — making the architecture improvement appear larger than it actually is. Reproduce results with matched settings before drawing conclusions.</p>
+<p>Hardware-aware NAS incorporates latency lookup tables or on-device profiling directly into the search objective. This is critical for mobile deployment: a model with 10% lower FLOPs does not always run 10% faster due to memory bandwidth, cache pressure, and op-level hardware support. Always benchmark final models on target hardware, not just FLOPs.</p>
+<p>The field is moving toward zero-cost NAS proxies — metrics like synflow, jacobian covariance, and NASWOT that estimate architecture quality at initialization without any training. These enable searching thousands of architectures in minutes, though proxy accuracy varies significantly across search spaces and datasets.</p>
+<p>For production deployments, prefer well-supported architectures (EfficientNet, MobileNetV3) with publicly available pretrained weights over novel NAS results. The marginal accuracy gain from custom NAS rarely justifies the engineering overhead unless you have unusual hardware constraints or very large scale inference requirements.</p>
+    </article>
+  </main>
+</body>
+</html>

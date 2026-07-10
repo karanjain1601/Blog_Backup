@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>WGAN-GP — Gradient Penalty for Lipschitz Constraint | Notes Backup</title>
+  <meta name="description" content="WGAN-GP (Gulrajani 2017) replaces WGAN weight clipping with a gradient penalty that enforces the 1-Lipschitz constraint on the critic, dramatically improving training stability and enabling conditional GAN architectures that require LayerNorm instead of BatchNorm." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>WGAN-GP — Gradient Penalty for Lipschitz Constraint</h1>
+      <ul class='note-meta'><li><strong>description:</strong> WGAN-GP (Gulrajani 2017) replaces WGAN weight clipping with a gradient penalty that enforces the 1-Lipschitz constraint on the critic, dramatically improving training stability and enabling conditional GAN architectures that require LayerNorm instead of BatchNorm.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>WGAN-GP — Gradient Penalty for Lipschitz Constraint</h1>
+<p>Wasserstein GAN (Arjovsky et al. 2017) replaced the JS-divergence objective of standard GANs with the Earth Mover (Wasserstein-1) distance, which provides meaningful gradients even when generator and real distributions do not overlap. The critic f_w must be 1-Lipschitz: |f_w(x) - f_w(y)| ≤ ||x - y|| for all x, y. The original WGAN enforced this by clipping all critic weights to [-c, c]. WGAN-GP (Gulrajani et al. 2017) discards clipping and directly penalises the gradient norm of the critic at interpolated points between real and fake samples.</p>
+<h2>Problems with Weight Clipping</h2>
+<p>Weight clipping enforces the Lipschitz constraint but introduces significant side effects. When the clipping range c is too small, gradients vanish in deeper critics because the weight magnitude limits the function's sensitivity. When c is too large, the constraint is too loose and the Wasserstein estimate becomes unreliable. Most critically, clipping biases the critic toward simple functions: with clipped weights, the optimal critic for many distributions is a near-binary step function that saturates quickly, limiting the quality of the gradient signal provided to the generator.</p>
+<ul>
+<li>Weight clipping to [-c, c] forces critic weights toward extremes (±c), producing near-binary activations.</li>
+<li>Small c causes vanishing gradients in deeper critics; large c weakens the Lipschitz constraint.</li>
+<li>Clipped critics prefer degenerate solutions that are hard to diagnose from training loss alone.</li>
+<li>WGAN-GP directly penalises the gradient norm, avoiding all of these issues with a single added loss term.</li>
+<li>The interpolation scheme samples uniformly along straight lines between real and fake — not just in empty space.</li>
+</ul>
+<h2>The Gradient Penalty Formulation</h2>
+<p>The optimal critic under the Wasserstein objective satisfies ||∇<em x̂="x̂">x D(x)||₂ = 1 almost everywhere on the support of p_data and p_g, and along straight lines connecting them. WGAN-GP enforces this by adding a penalty term to the critic loss: L_GP = λ · E</em> D(x̂)||₂ - 1)²]. The interpolated points x̂ = ε · x_real + (1 - ε) · x_fake where ε ~ U[0, 1] sample uniformly along the straight line between real and fake data pairs. The penalty coefficient λ = 10 is the standard value. Because the penalty operates on individual samples rather than batch statistics, BatchNorm cannot be used in the critic. Use LayerNorm or no normalisation in the critic instead.}[(||∇_{x̂</p>
+<h2>Gradient Penalty Implementation</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.autograd as autograd
+
+def compute_gradient_penalty(critic, real_samples, fake_samples, device, lambda_gp=10.0):
+    &quot;&quot;&quot;WGAN-GP gradient penalty: interpolate real/fake, penalise gradient norm.&quot;&quot;&quot;
+    B = real_samples.size(0)
+    # Sample epsilon uniformly for interpolation
+    eps = torch.rand(B, 1, 1, 1, device=device)  # (B,1,1,1) for image data
+    eps = eps.expand_as(real_samples)
+    # Interpolate between real and fake
+    x_hat = (eps * real_samples + (1 - eps) * fake_samples).requires_grad_(True)
+    # Critic score at interpolated points
+    d_hat = critic(x_hat)
+    # Compute gradient of critic output w.r.t. interpolated input
+    gradients = autograd.grad(
+        outputs=d_hat,
+        inputs=x_hat,
+        grad_outputs=torch.ones_like(d_hat),
+        create_graph=True,   # needed to differentiate through penalty for critic update
+        retain_graph=True,
+        only_inputs=True
+    )[0]
+    # Flatten gradients and compute L2 norm per sample
+    gradients = gradients.view(B, -1)                       # (B, C*H*W)
+    grad_norm = gradients.norm(2, dim=1)                    # (B,)
+    gradient_penalty = lambda_gp * ((grad_norm - 1) ** 2).mean()
+    return gradient_penalty
+
+# Minimal critic (no BatchNorm — use LayerNorm or no norm)
+class Critic(nn.Module):
+    def __init__(self, channels=1, img_size=28):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(channels, 64, 4, 2, 1), nn.LeakyReLU(0.2),
+            nn.Conv2d(64, 128, 4, 2, 1), nn.LeakyReLU(0.2),
+            nn.Flatten(),
+            nn.Linear(128 * (img_size // 4) ** 2, 1)
+        )
+    def forward(self, x):
+        return self.net(x)
+
+critic = Critic()
+real = torch.randn(8, 1, 28, 28)
+fake = torch.randn(8, 1, 28, 28)
+gp = compute_gradient_penalty(critic, real, fake, device='cpu')
+print(f'Gradient penalty: {gp.item():.4f}  (should shrink toward 0 as critic trains)')
+</code></pre>
+<h2>Complete WGAN-GP Training Loop</h2>
+<p>The critic is updated n_critic = 5 times per generator step. This asymmetry exists because the Wasserstein distance estimate requires the critic to be near-optimal before the generator gradient is meaningful. More critic steps give a better Wasserstein estimate but slow overall training. The optimizer for both critic and generator uses Adam with β₁ = 0.0 — zero first moment is important because momentum can cause the Wasserstein estimate to oscillate when the generator distribution changes rapidly. β₂ = 0.9 is kept for second moment smoothing.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.autograd as autograd
+
+class Generator(nn.Module):
+    def __init__(self, latent_dim=100, img_channels=1, base=64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.ConvTranspose2d(latent_dim, base * 4, 4, 1, 0), nn.BatchNorm2d(base * 4), nn.ReLU(),
+            nn.ConvTranspose2d(base * 4, base * 2, 4, 2, 1), nn.BatchNorm2d(base * 2), nn.ReLU(),
+            nn.ConvTranspose2d(base * 2, base, 4, 2, 1), nn.BatchNorm2d(base), nn.ReLU(),
+            nn.ConvTranspose2d(base, img_channels, 4, 2, 1), nn.Tanh()
+        )
+    def forward(self, z):
+        return self.net(z.view(*z.shape, 1, 1))
+
+class WGANGPCritic(nn.Module):  # NO BatchNorm in critic
+    def __init__(self, img_channels=1, base=64):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(img_channels, base, 4, 2, 1), nn.LeakyReLU(0.2),
+            nn.Conv2d(base, base * 2, 4, 2, 1), nn.LayerNorm([base * 2, 8, 8]), nn.LeakyReLU(0.2),
+            nn.Conv2d(base * 2, base * 4, 4, 2, 1), nn.LayerNorm([base * 4, 4, 4]), nn.LeakyReLU(0.2),
+            nn.Flatten(), nn.Linear(base * 4 * 4 * 4, 1)
+        )
+    def forward(self, x):
+        return self.net(x)
+
+def train_wgan_gp(G, C, dataloader, n_epochs=5, n_critic=5, lam=10.0, lr=1e-4):
+    device = next(G.parameters()).device
+    opt_G = torch.optim.Adam(G.parameters(), lr=lr, betas=(0.0, 0.9))
+    opt_C = torch.optim.Adam(C.parameters(), lr=lr, betas=(0.0, 0.9))
+    for epoch in range(n_epochs):
+        for real_batch, _ in dataloader:
+            real = real_batch.to(device)
+            B = real.size(0)
+            for _ in range(n_critic):
+                z = torch.randn(B, 100, device=device)
+                fake = G(z).detach()
+                eps = torch.rand(B, 1, 1, 1, device=device).expand_as(real)
+                x_hat = (eps * real + (1 - eps) * fake).requires_grad_(True)
+                d_hat = C(x_hat)
+                grads = autograd.grad(d_hat, x_hat, torch.ones_like(d_hat),
+                                      create_graph=True, retain_graph=True)[0]
+                gp = lam * ((grads.view(B, -1).norm(2, dim=1) - 1) ** 2).mean()
+                loss_C = C(fake).mean() - C(real).mean() + gp
+                opt_C.zero_grad(); loss_C.backward(); opt_C.step()
+            z = torch.randn(B, 100, device=device)
+            loss_G = -C(G(z)).mean()
+            opt_G.zero_grad(); loss_G.backward(); opt_G.step()
+        print(f'Epoch {epoch+1}: L_C={loss_C.item():.4f}  L_G={loss_G.item():.4f}')
+
+print('WGAN-GP: critic updated 5x per generator step, Adam with betas=(0.0, 0.9)')
+</code></pre>
+<h2>R1 Gradient Penalty — Simpler Alternative</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.autograd as autograd
+
+def r1_gradient_penalty(critic, real_samples, gamma=10.0):
+    &quot;&quot;&quot;R1 regularisation: penalise gradient norm at real data only (Mescheder 2018).
+
+    Simpler than WGAN-GP: no interpolation needed, only real samples used.
+    Stable for standard GAN (non-saturating) loss with gradient penalty.
+    L = E[softplus(-D(real))] + E[softplus(D(fake))] + gamma/2 * E[||grad_D(real)||^2]
+    &quot;&quot;&quot;
+    real = real_samples.requires_grad_(True)
+    d_real = critic(real)
+    grads = autograd.grad(
+        outputs=d_real.sum(),
+        inputs=real,
+        create_graph=True,
+        only_inputs=True
+    )[0]
+    r1_penalty = (gamma / 2.0) * (grads.view(grads.size(0), -1).norm(2, dim=1) ** 2).mean()
+    return r1_penalty
+
+class SimpleDiscriminator(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(28 * 28, 256), nn.LeakyReLU(0.2),
+            nn.Linear(256, 128), nn.LeakyReLU(0.2),
+            nn.Linear(128, 1)
+        )
+    def forward(self, x):
+        return self.net(x)
+
+D = SimpleDiscriminator()
+real_data = torch.randn(16, 1, 28, 28)
+r1 = r1_gradient_penalty(D, real_data, gamma=10.0)
+print(f'R1 penalty: {r1.item():.4f}')
+print('R1 advantage: no fake-sample interpolation, lower compute, used in StyleGAN2')
+</code></pre>
+<p>R1 regularisation differs from WGAN-GP in a key way: it only penalises gradients at real data points, not at interpolated points between real and fake. This makes R1 simpler to implement (no interpolation step) and slightly cheaper (one fewer backward pass). It is used as the default in StyleGAN, StyleGAN2, and StyleGAN-XL. WGAN-GP is preferred when the generator is far from the data distribution (early training) because penalising interpolants provides gradient information in regions between real and fake. For most practical applications where training is well-initialised, R1 is the recommended default.</p>
+<h2>WGAN Clipping vs WGAN-GP: Loss Curves</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+
+def run_toy_wgan(use_gp=True, n_steps=300, seed=0):
+    torch.manual_seed(seed)
+    G = nn.Sequential(nn.Linear(1, 32), nn.ReLU(), nn.Linear(32, 1))
+    C = nn.Sequential(nn.Linear(1, 32), nn.LeakyReLU(0.2), nn.Linear(32, 1))
+    opt_G = torch.optim.Adam(G.parameters(), lr=1e-3, betas=(0.0, 0.9))
+    opt_C = torch.optim.Adam(C.parameters(), lr=1e-3, betas=(0.0, 0.9))
+    w_dists = []
+    for step in range(n_steps):
+        real = torch.randn(64, 1) * 0.5 + 2.0
+        for _ in range(5):
+            z = torch.randn(64, 1)
+            fake = G(z).detach()
+            if use_gp:
+                eps = torch.rand(64, 1)
+                xhat = (eps * real + (1 - eps) * fake).requires_grad_(True)
+                d_xhat = C(xhat)
+                grads = torch.autograd.grad(d_xhat.sum(), xhat, create_graph=True)[0]
+                gp = 10.0 * ((grads.norm(2, dim=1) - 1) ** 2).mean()
+                loss_C = C(fake).mean() - C(real).mean() + gp
+            else:
+                loss_C = C(fake).mean() - C(real).mean()
+            opt_C.zero_grad(); loss_C.backward(); opt_C.step()
+            if not use_gp:
+                for p in C.parameters():
+                    p.data.clamp_(-0.01, 0.01)
+        z = torch.randn(64, 1)
+        loss_G = -C(G(z)).mean()
+        opt_G.zero_grad(); loss_G.backward(); opt_G.step()
+        if step % 10 == 0:
+            with torch.no_grad():
+                w_dists.append(abs(loss_C.item()))
+    return w_dists
+
+gp_curve   = run_toy_wgan(use_gp=True)
+clip_curve = run_toy_wgan(use_gp=False)
+print(f'WGAN-GP   final W-dist proxy: {gp_curve[-1]:.4f}')
+print(f'WGAN-clip final W-dist proxy: {clip_curve[-1]:.4f}')
+print('WGAN-GP converges more smoothly; clipping causes oscillation/slow convergence')
+</code></pre>
+<h2>Removing BatchNorm from the Critic</h2>
+<p>BatchNorm normalises activations across the batch, making each sample's gradient depend on every other sample in the batch. This violates the per-sample Lipschitz constraint that WGAN-GP enforces — the gradient penalty targets the gradient at individual interpolated points, but BatchNorm coupling means the gradient depends on what other samples are in the batch. The fix is simple: replace BatchNorm in the critic with LayerNorm (normalises per sample across channels) or InstanceNorm (normalises per sample per channel), or omit normalisation entirely in the critic. The generator can still use BatchNorm normally.</p>
+<blockquote>
+<p><strong>BatchNorm Breaks Gradient Penalty</strong>: Never use BatchNorm in the WGAN-GP critic. The per-sample gradient at x_hat must be independent of other batch members, but BatchNorm normalises across the batch, coupling all gradients. Use LayerNorm, InstanceNorm, or no normalisation in the critic. The generator is unaffected and can use BatchNorm as usual.</p>
+</blockquote>
+<h2>Hyperparameters and Practical Tips</h2>
+<p>The standard WGAN-GP recipe from Gulrajani et al. is: λ = 10, n_critic = 5 (critic steps per generator step), Adam with lr = 1e-4 and betas = (0.0, 0.9). The zero first moment (β₁ = 0) is important — momentum can destabilise Wasserstein training. The critic is trained to convergence before each generator update, approximated by n_critic steps. Increasing n_critic improves critic quality but slows training. The gradient penalty adds one additional backward pass per critic step (through create_graph=True) which roughly doubles critic computation. On conditional GANs, WGAN-GP is the standard choice because it allows arbitrary critic architectures without normalisation constraints.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Lipschitz Enforcement</th>
+<th>BatchNorm in Critic</th>
+<th>Stability</th>
+<th>Compute Overhead</th>
+<th>FID (typical)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Standard GAN</td>
+<td>None (JS divergence)</td>
+<td>Allowed</td>
+<td>Low — mode collapse, vanishing grads</td>
+<td>None</td>
+<td>Varies widely</td>
+</tr>
+<tr>
+<td>WGAN (clipping)</td>
+<td>Weight clipping to [-c, c]</td>
+<td>Not recommended</td>
+<td>Moderate — biases toward simple functions</td>
+<td>Minimal</td>
+<td>Better than GAN</td>
+</tr>
+<tr>
+<td>WGAN-GP</td>
+<td>Gradient penalty on interpolants</td>
+<td>Not allowed (use LayerNorm)</td>
+<td>High — stable across architectures</td>
+<td>~2x critic backward</td>
+<td>Strong baseline</td>
+</tr>
+<tr>
+<td>R1-GAN</td>
+<td>Gradient penalty at real data only</td>
+<td>Allowed in generator</td>
+<td>High — simpler, less compute</td>
+<td>~1.5x critic backward</td>
+<td>Comparable to WGAN-GP</td>
+</tr>
+<tr>
+<td>SN-GAN</td>
+<td>Spectral norm on all critic weights</td>
+<td>Allowed</td>
+<td>High — no extra backward pass</td>
+<td>Minimal (SVD per layer)</td>
+<td>Competitive FID</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>Use torch.autograd.grad with create_graph=True to compute the gradient penalty — standard backward() cannot be used because you need gradients of gradients.</li>
+<li>lambda=10 is robust across image resolutions; tuning is rarely needed. Lower lambda (~1) may help if the penalty dominates early training.</li>
+<li>R1 regularisation (penalise gradient at real data only) is simpler, computationally cheaper, and used in StyleGAN2 — prefer it for new projects.</li>
+<li>WGAN-GP critic loss should decrease and eventually plateau near a small positive value — if it oscillates or grows, reduce the learning rate.</li>
+<li>The Wasserstein distance estimate (negative critic loss) is a meaningful training signal: decreasing W-distance corresponds to improving generation quality.</li>
+<li>Monitor gradient norms at interpolated points: they should hover near 1 after a few hundred training steps if the penalty is working correctly.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

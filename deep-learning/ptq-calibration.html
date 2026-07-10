@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PTQ Calibration: Choosing Representative Data | Notes Backup</title>
+  <meta name="description" content="How calibration datasets and calibration algorithms (MinMax, percentile, MSE, KL divergence) affect the quality of post-training quantization." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>PTQ Calibration: Choosing Representative Data</h1>
+      <ul class='note-meta'><li><strong>description:</strong> How calibration datasets and calibration algorithms (MinMax, percentile, MSE, KL divergence) affect the quality of post-training quantization.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>PTQ Calibration: Choosing Representative Data</h1>
+<p>Post-training quantization (PTQ) converts a floating-point model to a lower-bit representation without retraining. Unlike quantization-aware training (QAT), PTQ has no opportunity to adjust weights to compensate for quantization error — it must find the best quantization parameters (scale and zero-point) solely from a small set of calibration data passed through the model before deployment. The calibration step determines the activation range for each layer: how wide a range of values needs to be represented, and therefore how coarse the quantization grid must be. A poor calibration dataset or algorithm leads directly to higher perplexity in the deployed model.</p>
+<h2>Overview</h2>
+<p>The quantization of activations (as opposed to weights) is the primary reason PTQ requires calibration. Weight distributions are fixed after training and can be analysed offline. Activation distributions depend on the input: they differ across domains, tasks, and sequence lengths. Calibration runs a set of representative inputs through the model in float32, records the activation distribution at each quantization node, and fits quantization parameters that minimize the error introduced by mapping that distribution to a discrete integer grid. The number of calibration samples, the domain of those samples, and the fitting algorithm all substantially affect the final INT8 model's quality.</p>
+<h2>Why Calibration Matters</h2>
+<p>Activation tensors in transformer LLMs exhibit heavy tails: most values are small, but a small fraction of dimensions carry extremely large magnitudes (outliers). These outliers expand the required quantization range, wasting resolution on values that rarely appear. A scale chosen by MinMax (the simplest calibration method) is dominated by these outliers and quantizes the dense body of the distribution at low precision. Percentile, MSE, and KL-divergence methods all trade off clipping those outliers against increased saturation error — the error from values that exceed the clipping threshold. The best calibration method depends on the model's outlier severity, which grows with model size.</p>
+<ul>
+<li>Activation outliers grow with model size: LLaMA-65B has more severe outliers than LLaMA-7B — KL or MSE calibration matters more at scale.</li>
+<li>Domain mismatch: calibrating on wikitext-2 and deploying on code reduces INT8 accuracy by 2–5 perplexity points on code benchmarks.</li>
+<li>Calibration sample count: 128–512 samples are typically sufficient; more samples give diminishing returns beyond 512 for most models.</li>
+<li>Per-channel vs per-tensor: per-channel calibration fits separate scale/zero-point per output channel — essential for weights, beneficial for activations.</li>
+<li>Static vs dynamic calibration: static calibration fixes scales at export; dynamic calibration recomputes per-token at inference (higher quality, higher latency).</li>
+</ul>
+<h2>MinMax Calibration</h2>
+<p>MinMax calibration sets the quantization range to [min(x), max(x)] over all calibration samples. This guarantees no saturation error — every observed activation value can be represented — but wastes quantization bins on outliers. For a symmetric INT8 range of [-128, 127], the scale is max(|min|, |max|) / 127. MinMax is the fastest calibration method (one pass, no optimization) and is the default in most quantization toolkits. It is acceptable for weight quantization but often suboptimal for activations due to outlier sensitivity.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+import numpy as np
+from scipy.stats import entropy as scipy_entropy
+
+def collect_activations(model, dataloader, layer_name: str, n_batches: int = 64):
+    &quot;&quot;&quot;Collect activation tensors from a named layer for calibration.&quot;&quot;&quot;
+    activations = []
+    hook_handle = None
+    target_layer = dict(model.named_modules())[layer_name]
+
+    def hook(module, input, output):
+        activations.append(output.detach().float().cpu())
+
+    hook_handle = target_layer.register_forward_hook(hook)
+    model.eval()
+    with torch.no_grad():
+        for i, batch in enumerate(dataloader):
+            if i &gt;= n_batches:
+                break
+            _ = model(**{k: v.to(next(model.parameters()).device) for k, v in batch.items()})
+    hook_handle.remove()
+    return torch.cat([a.flatten() for a in activations])
+
+def calibrate_minmax(x: torch.Tensor, bits: int = 8, symmetric: bool = True):
+    x_min, x_max = x.min().item(), x.max().item()
+    if symmetric:
+        amax = max(abs(x_min), abs(x_max))
+        scale = amax / (2 ** (bits - 1) - 1)
+        zero_point = 0
+    else:
+        scale = (x_max - x_min) / (2 ** bits - 1)
+        zero_point = round(-x_min / scale)
+    return scale, zero_point
+
+def calibrate_percentile(x: torch.Tensor, bits: int = 8, percentile: float = 99.9):
+    lo = torch.quantile(x, (100 - percentile) / 100).item()
+    hi = torch.quantile(x, percentile / 100).item()
+    amax = max(abs(lo), abs(hi))
+    scale = amax / (2 ** (bits - 1) - 1)
+    return scale, 0
+
+def calibrate_mse(x: torch.Tensor, bits: int = 8, n_candidates: int = 100):
+    amax = x.abs().max().item()
+    best_scale, best_mse = None, float('inf')
+    for clip_ratio in np.linspace(0.5, 1.0, n_candidates):
+        candidate_amax = amax * clip_ratio
+        scale = candidate_amax / (2 ** (bits - 1) - 1)
+        x_q = torch.clamp(torch.round(x / scale), -(2**(bits-1)), 2**(bits-1)-1) * scale
+        mse = F.mse_loss(x_q, x).item()
+        if mse &lt; best_mse:
+            best_mse, best_scale = mse, scale
+    return best_scale, 0
+
+def calibrate_kl(x: torch.Tensor, bits: int = 8, n_bins: int = 2048):
+    hist, bin_edges = np.histogram(x.numpy(), bins=n_bins)
+    best_scale, best_kl = None, float('inf')
+    for threshold_idx in range(bits * 8, n_bins):
+        threshold = bin_edges[threshold_idx]
+        scale = threshold / (2 ** (bits - 1) - 1)
+        quantized = np.clip(np.round(x.numpy() / scale), -(2**(bits-1)), 2**(bits-1)-1) * scale
+        hist_q, _ = np.histogram(quantized, bins=n_bins, range=(bin_edges[0], bin_edges[-1]))
+        p = hist.astype(float) + 1e-8
+        q = hist_q.astype(float) + 1e-8
+        kl = scipy_entropy(p / p.sum(), q / q.sum())
+        if kl &lt; best_kl:
+            best_kl, best_scale = kl, scale
+    return best_scale, 0
+
+# Compare all four methods on a sample activation tensor
+torch.manual_seed(42)
+# Simulate LLM activations: mostly small values with heavy tails
+base = torch.randn(50000) * 2.0
+outliers = torch.randn(500) * 40.0
+x_sample = torch.cat([base, outliers])
+
+for name, fn, kwargs in [
+    (&quot;MinMax&quot;,      calibrate_minmax,     {}),
+    (&quot;Percentile&quot;,  calibrate_percentile, {&quot;percentile&quot;: 99.9}),
+    (&quot;MSE&quot;,         calibrate_mse,        {&quot;n_candidates&quot;: 50}),
+    (&quot;KL-Diverge&quot;,  calibrate_kl,         {}),
+]:
+    scale, zp = fn(x_sample, **kwargs)
+    print(f&quot;{name:&lt;12} scale={scale:.5f}  zero_point={zp}  range=[{-scale*127:.2f}, {scale*127:.2f}]&quot;)
+</code></pre>
+<h2>Percentile and MSE Calibration</h2>
+<p>Percentile calibration clips the quantization range at the p-th and (100-p)-th percentiles of the observed activation distribution. The 99th or 99.9th percentile is a common choice: it discards the top 0.1–1% of values (typically outliers) and fits the quantization grid to the dense body of the distribution. MSE calibration directly optimizes the quantization scale to minimize mean squared error between the original and quantized tensor, searching over a grid of candidate clip thresholds. MSE calibration is more compute-intensive than percentile but usually delivers slightly lower error because it optimizes the metric that matters directly.</p>
+<h2>KL-Divergence Calibration</h2>
+<p>KL-divergence calibration (used by TensorRT and NVIDIA's quantization toolkit) fits the quantization threshold by minimizing the KL divergence between the floating-point and quantized activation histograms. The intuition is that a good quantization should preserve the shape of the activation distribution, not just minimize pointwise error. KL calibration tends to perform best on activations with strongly multi-modal or heavy-tailed distributions. It requires computing a histogram (typically 2048 bins) over the calibration data and iterating over threshold candidates, making it the most compute-intensive calibration method.</p>
+<table>
+<thead>
+<tr>
+<th>Calibration Method</th>
+<th>Samples Needed</th>
+<th>Compute Cost</th>
+<th>Typical PPL Delta</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MinMax</td>
+<td>64–128</td>
+<td>Trivial (one pass)</td>
+<td>+0.3 – 1.5</td>
+<td>Dominated by outliers; worst for large models with heavy-tailed activations</td>
+</tr>
+<tr>
+<td>99th Percentile</td>
+<td>128–256</td>
+<td>Low (quantile op)</td>
+<td>+0.1 – 0.5</td>
+<td>Robust to outliers; good default when MSE/KL is too slow</td>
+</tr>
+<tr>
+<td>MSE</td>
+<td>128–512</td>
+<td>Medium (grid search over clip ratios)</td>
+<td>+0.05 – 0.2</td>
+<td>Directly minimizes quantization error; best for symmetric distributions</td>
+</tr>
+<tr>
+<td>KL-Divergence</td>
+<td>256–512</td>
+<td>High (histogram + threshold scan)</td>
+<td>+0.05 – 0.15</td>
+<td>Best for multi-modal and heavy-tailed activations; used by TensorRT</td>
+</tr>
+<tr>
+<td>GPTQ Hessian</td>
+<td>128 (Hessian-weighted)</td>
+<td>High (second-order)</td>
+<td>+0.01 – 0.1</td>
+<td>Weight-only quantization; uses Hessian to minimize layer-wise output error</td>
+</tr>
+</tbody>
+</table>
+<h2>Calibration Data Selection</h2>
+<p>The calibration dataset must represent the deployment distribution. A model calibrated on wikitext-2 (formal English prose) and deployed on Python code or multilingual text will have systematically miscalibrated activation scales for the token distributions it encounters at inference. The recommended practice is to construct a mixed calibration set: sample from multiple domains (natural language, code, math, multilingual) weighted by expected deployment usage. For general-purpose models, c4 is a better default calibration source than wikitext-2 because it covers a broader web-text distribution.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+from datasets import load_dataset
+from transformers import AutoTokenizer, AutoModelForCausalLM
+
+def evaluate_ptq_perplexity(
+    model_name: str,
+    calibration_sources: list,
+    n_calib_samples: int = 256,
+    n_eval_tokens: int = 4096
+) -&gt; dict:
+    &quot;&quot;&quot;
+    Sweep calibration datasets and measure resulting INT8 model perplexity.
+    Uses torch.ao.quantization for static INT8 quantization.
+    &quot;&quot;&quot;
+    import torch.ao.quantization as tq
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    results = {}
+
+    for source_name, dataset_id, subset, split in calibration_sources:
+        print(f&quot;\nCalibration source: {source_name}&quot;)
+        # Load calibration data
+        ds = load_dataset(dataset_id, subset, split=split, streaming=True)
+        calib_texts = []
+        for item in ds:
+            text = item.get(&quot;text&quot;) or item.get(&quot;content&quot;) or &quot;&quot;
+            if len(text) &gt; 200:
+                calib_texts.append(text[:512])
+            if len(calib_texts) &gt;= n_calib_samples:
+                break
+        # Tokenize calibration batch
+        calib_enc = tokenizer(
+            calib_texts, return_tensors=&quot;pt&quot;, truncation=True,
+            max_length=512, padding=True
+        )
+        # Load fresh float model for each calibration experiment
+        model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float32)
+        model.eval()
+        # Collect activation statistics (simplified: log input range per layer)
+        activation_ranges = {}
+        hooks = []
+        for name, module in model.named_modules():
+            if isinstance(module, torch.nn.Linear):
+                def make_hook(n):
+                    def hook(m, inp, out):
+                        t = out.detach().float()
+                        activation_ranges[n] = (t.min().item(), t.max().item())
+                    return hook
+                hooks.append(module.register_forward_hook(make_hook(name)))
+        with torch.no_grad():
+            _ = model(**calib_enc)
+        for h in hooks:
+            h.remove()
+        avg_range = np.mean([hi - lo for lo, hi in activation_ranges.values()])
+        results[source_name] = {&quot;avg_activation_range&quot;: avg_range, &quot;n_layers&quot;: len(activation_ranges)}
+        print(f&quot;  Avg activation range: {avg_range:.3f}  ({len(activation_ranges)} layers)&quot;)
+        del model
+    return results
+
+# Define calibration sources to sweep
+calibration_sources = [
+    (&quot;wikitext-2&quot;,  &quot;wikitext&quot;,       &quot;wikitext-2-raw-v1&quot;, &quot;train&quot;),
+    (&quot;c4&quot;,          &quot;allenai/c4&quot;,     &quot;en&quot;,                &quot;train&quot;),
+    (&quot;code&quot;,        &quot;bigcode/the-stack-smol&quot;, &quot;data/python&quot;, &quot;train&quot;),
+]
+print(&quot;Calibration data sweep — measuring activation range per source.&quot;)
+print(&quot;(Full perplexity eval requires a quantized model checkpoint.)&quot;)
+</code></pre>
+<blockquote>
+<p><strong>Domain Mismatch Warning</strong>: Using only 128 calibration samples from a single domain (e.g., wikitext-2) for a model intended for code or multilingual use causes domain mismatch — always use diverse calibration data matching the deployment distribution. Domain mismatch can inflate perplexity by 2–5 points on out-of-distribution tasks even when in-domain perplexity looks acceptable.</p>
+</blockquote>
+<h2>Smoothing and Outlier Handling</h2>
+<p>SmoothQuant (Xiao et al., 2022) addresses the fundamental problem of activation outliers in LLMs by mathematically migrating the quantization difficulty from activations to weights. The key insight is that for a linear layer Y = X W^T, any positive per-channel scale vector s can be applied as Y = (X / s) (W * s)^T — the output is unchanged. SmoothQuant chooses s to reduce the dynamic range of activations (making them easier to quantize) while proportionally increasing the range of weights (which are easier to quantize because they are static and can use per-channel scales). This migration is controlled by a hyperparameter α ∈ [0, 1] that balances how much difficulty is shifted to weights.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+def compute_smoothquant_scales(
+    act_scales: dict,
+    weight_scales: dict,
+    alpha: float = 0.5
+) -&gt; dict:
+    &quot;&quot;&quot;
+    Compute per-channel SmoothQuant migration scales.
+    act_scales: {layer_name: tensor of shape (d_in,)} — max abs activation per channel.
+    weight_scales: {layer_name: tensor of shape (d_in,)} — max abs weight per in-channel.
+    alpha: migration strength; 0.5 is the recommended default.
+    &quot;&quot;&quot;
+    smooth_scales = {}
+    for name in act_scales:
+        if name not in weight_scales:
+            continue
+        a = act_scales[name]   # (d_in,)
+        w = weight_scales[name]  # (d_in,)
+        # s_i = max_act_i^alpha / max_weight_i^(1-alpha)
+        s = (a.pow(alpha) / w.pow(1 - alpha)).clamp(min=1e-5)
+        smooth_scales[name] = s
+    return smooth_scales
+
+def apply_smoothquant(
+    model: nn.Module,
+    smooth_scales: dict,
+    layer_name_map: dict
+) -&gt; nn.Module:
+    &quot;&quot;&quot;Apply SmoothQuant scales: divide activations by s, multiply weight rows by s.&quot;&quot;&quot;
+    with torch.no_grad():
+        for linear_name, scale in smooth_scales.items():
+            if linear_name not in layer_name_map:
+                continue
+            linear = layer_name_map[linear_name]
+            # Weight rows scaled by s: W_new[i, :] = W[i, :] * s[i]
+            linear.weight.data = linear.weight.data * scale.unsqueeze(1)
+            if linear.bias is not None:
+                linear.bias.data = linear.bias.data * scale
+    return model
+
+# Visualize before/after activation range
+torch.manual_seed(0)
+act_before = torch.cat([torch.randn(10000) * 1.5,
+                         torch.randn(50) * 30.0])  # heavy-tailed
+print(f&quot;Before SmoothQuant: max={act_before.abs().max():.1f}, &quot;
+      f&quot;std={act_before.std():.2f}, p99={torch.quantile(act_before.abs(), 0.99):.2f}&quot;)
+# Simulate smoothing by dividing by per-channel scale
+scale = act_before.abs().pow(0.5)  # alpha=0.5 per-element demo
+act_after = act_before / scale.clamp(min=0.1)
+print(f&quot;After  SmoothQuant: max={act_after.abs().max():.1f}, &quot;
+      f&quot;std={act_after.std():.2f}, p99={torch.quantile(act_after.abs(), 0.99):.2f}&quot;)
+</code></pre>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+def detect_and_suppress_outliers(
+    x: torch.Tensor,
+    n_sigma: float = 6.0,
+    strategy: str = &quot;clip&quot;
+) -&gt; tuple:
+    &quot;&quot;&quot;
+    Detect activation outliers beyond n_sigma standard deviations.
+    Strategies: 'clip' (hard clip to threshold), 'migrate' (move outlier
+    magnitude to weight scaling, keeping tensor values bounded).
+    Returns: (suppressed tensor, outlier mask, quantization error reduction).
+    &quot;&quot;&quot;
+    mu = x.mean()
+    sigma = x.std()
+    threshold = n_sigma * sigma
+    outlier_mask = x.abs() &gt; (mu.abs() + threshold)
+    outlier_frac = outlier_mask.float().mean().item()
+    print(f&quot;Outliers (&gt;{n_sigma}σ): {outlier_frac*100:.3f}% of values&quot;)
+    print(f&quot;  Max outlier magnitude: {x[outlier_mask].abs().max():.2f}&quot; if outlier_mask.any() else &quot;  No outliers&quot;)
+
+    if strategy == &quot;clip&quot;:
+        x_clean = x.clamp(-(mu.abs() + threshold), mu.abs() + threshold)
+    elif strategy == &quot;migrate&quot;:
+        # Scale outlier channels down; would scale corresponding weight up
+        scale_per_channel = x.abs().max(dim=0).values.clamp(min=1.0)
+        x_clean = x / scale_per_channel.unsqueeze(0)
+    else:
+        x_clean = x
+
+    # Measure quantization error before vs after suppression
+    scale_before = x.abs().max().item() / 127.0
+    scale_after = x_clean.abs().max().item() / 127.0
+    x_q_before = torch.round(x / scale_before).clamp(-128, 127) * scale_before
+    x_q_after = torch.round(x_clean / scale_after).clamp(-128, 127) * scale_after
+    err_before = (x_q_before - x).pow(2).mean().sqrt().item()
+    err_after = (x_q_after - x_clean).pow(2).mean().sqrt().item()
+    print(f&quot;  RMSE before suppression: {err_before:.5f}&quot;)
+    print(f&quot;  RMSE after  suppression: {err_after:.5f}&quot;)
+    print(f&quot;  Error reduction: {(1 - err_after/err_before)*100:.1f}%&quot;)
+    return x_clean, outlier_mask, (err_before - err_after)
+
+torch.manual_seed(42)
+x_test = torch.cat([torch.randn(9900) * 2.0, torch.randn(100) * 50.0])
+for strat in [&quot;clip&quot;, &quot;migrate&quot;]:
+    print(f&quot;\nStrategy: {strat}&quot;)
+    detect_and_suppress_outliers(x_test, n_sigma=6.0, strategy=strat)
+</code></pre>
+<h2>Key Takeaways</h2>
+<ul>
+<li>MinMax calibration is fast but dominated by outliers; use percentile or MSE for better INT8 quality on LLMs.</li>
+<li>KL-divergence calibration (TensorRT default) minimizes distributional shift; best for heavy-tailed activation profiles.</li>
+<li>MSE calibration directly optimizes what matters — mean squared quantization error — and is a reliable default for most models.</li>
+<li>128–256 calibration samples are sufficient for most models; gains from &gt;512 samples are marginal.</li>
+<li>Calibration data domain must match deployment domain; mixing wikitext-2, c4, and code data is a safe default for general models.</li>
+<li>SmoothQuant (α=0.5) migrates outlier difficulty from activations to weights, reducing INT8 perplexity by 1–3 points on large models.</li>
+<li>Per-channel weight quantization is essential; per-tensor weight quantization causes measurable accuracy loss on all model sizes.</li>
+<li>GPTQ uses Hessian-weighted calibration for weight-only quantization and achieves near-lossless quality at 4-bit for 7B+ models.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

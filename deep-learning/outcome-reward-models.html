@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Outcome Reward Models (ORMs) | Notes Backup</title>
+  <meta name="description" content="Training reward models that score complete solutions rather than individual steps, used in best-of-N selection and RLHF to distinguish correct from incorrect final answers." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Outcome Reward Models (ORMs)</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Training reward models that score complete solutions rather than individual steps, used in best-of-N selection and RLHF to distinguish correct from incorrect final answers.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Outcome Reward Models (ORMs)</h1>
+<p>Outcome Reward Models (ORMs) are sequence-level classifiers trained to predict whether a complete solution to a problem is correct or incorrect. Unlike Process Reward Models, which score individual reasoning steps, ORMs treat the entire solution as a single unit and output a scalar reward reflecting the probability that the final answer is correct. ORMs are central to two critical applications: (1) best-of-N selection, where N candidate solutions are generated and the highest-scoring one is returned; and (2) reinforcement learning from human feedback, where ORM scores provide training signal for policy optimisation. The key advantage of ORMs is their simplicity — they require only binary labels (correct/incorrect) on complete solutions, which can be obtained automatically for problems with verifiable ground truth such as mathematics, code execution, and logic puzzles, without any human annotation cost.</p>
+<h2>Overview</h2>
+<p>An ORM is typically implemented by fine-tuning a large language model with an additional scalar regression head added after the final transformer layer. The model receives a concatenated (problem, solution) sequence and outputs a single scalar reward score — higher scores indicate higher predicted correctness probability. Training uses contrastive pairs: for each problem, a set of generated solutions is labelled correct or incorrect via a symbolic verifier, and the ORM is trained to assign higher scores to correct solutions than to incorrect ones using the Bradley-Terry loss: L = -log sigmoid(r_chosen - r_rejected). ORMs trained on large datasets of (problem, solution, label) triples achieve strong calibration: their scores correlate reliably with actual solution correctness and serve as effective selection criteria for test-time compute scaling. The ORM backbone is typically initialised from the same model used for generation, sharing the same tokeniser and vocabulary, which allows it to parse diverse solution formats without additional prompt engineering.</p>
+<h2>ORM Architecture and Training</h2>
+<p>The ORM architecture adds a single linear layer on top of the final hidden state of a language model, projecting from the model hidden dimension (e.g., 4096 for Llama-2-7B) to a scalar. The scalar head is initialised from a linear projection of the last token hidden state — the end-of-sequence (EOS) token, which aggregates information from the entire sequence via causal attention. The backbone is initialised from a pretrained LM and fine-tuned end-to-end on the reward learning objective. A small learning rate (1e-5 to 5e-5) prevents catastrophic forgetting of language understanding, which the ORM needs to parse diverse solution formats. Training proceeds on batches of contrastive pairs: each batch contains B (problem, chosen_solution, rejected_solution) triples, and the Bradley-Terry loss is computed over the difference of the ORM scores assigned to the chosen and rejected completions. The training dataset typically contains 50K–2M preference pairs depending on the problem domain.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from torch.optim import AdamW
+
+class OutcomeRewardModel(nn.Module):
+    # LM backbone with scalar reward head — scores (problem, solution) pairs.
+    def __init__(self, model_name: str = &quot;meta-llama/Llama-2-7b-hf&quot;):
+        super().__init__()
+        self.backbone = AutoModelForCausalLM.from_pretrained(
+            model_name, torch_dtype=torch.bfloat16)
+        hidden = self.backbone.config.hidden_size
+        self.reward_head = nn.Linear(hidden, 1, bias=False)
+
+    def forward(self, input_ids, attention_mask):
+        out  = self.backbone(input_ids=input_ids, attention_mask=attention_mask,
+                             output_hidden_states=True)
+        last = out.hidden_states[-1]                   # (B, T, H)
+        eos  = attention_mask.sum(dim=1) - 1           # last real token index
+        h    = last[torch.arange(last.shape[0]), eos]  # (B, H)
+        return self.reward_head(h).squeeze(-1)         # (B,) scalar rewards
+
+def bt_loss(r_chosen, r_rejected):
+    # Bradley-Terry: -log sigmoid(r_chosen - r_rejected)
+    return -F.logsigmoid(r_chosen - r_rejected).mean()
+</code></pre>
+<h2>Training Data: Preference Pairs</h2>
+<p>The quality of an ORM depends critically on its training data. The standard pipeline generates a large pool of candidate solutions per problem, labels them correct or incorrect via a symbolic verifier, then constructs contrastive pairs by pairing each correct solution with one or more incorrect solutions from the same problem. Two key design choices govern ORM quality: diversity of the solution pool (solutions sampled at higher temperature T=0.8-1.0 expose the ORM to a wider range of error patterns) and the correctness rate per problem (problems where models nearly always succeed or always fail produce non-informative pairs). The optimal correctness rate per problem lies in the range 10-60% — problems at the boundary of model capability produce the most discriminative training signal. For mathematical benchmarks such as MATH and GSM8K, a pool of 100-256 solutions per problem sampled at temperature=1.0 is the standard configuration. The final dataset contains B contrastive pairs, typically in the range 200K-2M depending on the number of problems and solutions per problem.</p>
+<pre><code class="language-python">import re
+import random
+from typing import List, Dict, Optional
+from openai import OpenAI
+
+client = OpenAI()
+
+def generate_solutions(problem: str, n: int = 100,
+                        temperature: float = 1.0) -&gt; List[str]:
+    # Sample n solutions from the LLM for a math problem.
+    return [
+        client.chat.completions.create(
+            model=&quot;gpt-4o-mini&quot;, temperature=temperature,
+            messages=[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: f&quot;Solve step by step: {problem}&quot;}]
+        ).choices[0].message.content for _ in range(n)
+    ]
+
+def extract_answer(text: str) -&gt; Optional[float]:
+    nums = re.findall(r&quot;[-+]?\d*\.?\d+&quot;, text.replace(&quot;,&quot;, &quot;&quot;))
+    return float(nums[-1]) if nums else None
+
+def build_pairs(problem: str, solutions: List[str], gold: float) -&gt; List[Dict]:
+    correct   = [s for s in solutions
+                 if (a := extract_answer(s)) is not None and abs(a - gold) &lt; 1e-6]
+    incorrect = [s for s in solutions if s not in correct]
+    pct = 100 * len(correct) / max(len(solutions), 1)
+    print(f&quot;  {len(solutions)} solutions: {len(correct)} correct ({pct:.1f}%)&quot;)
+    return [{&quot;problem&quot;: problem, &quot;chosen&quot;: c, &quot;rejected&quot;: random.choice(incorrect)}
+            for c in correct if incorrect]
+</code></pre>
+<h2>Bradley-Terry Model</h2>
+<p>The Bradley-Terry (BT) model provides the theoretical basis for ORM training. Given two items A and B with latent quality scores r_A and r_B, the BT model defines the probability that A is preferred over B as P(A preferred) = sigmoid(r_A - r_B). The ORM loss is the negative log-likelihood of this preference model: L_BT = -E[log sigmoid(r_chosen - r_rejected)]. Minimising this loss encourages the model to assign higher rewards to correct solutions and lower rewards to incorrect solutions, with a margin proportional to the BT probability. The BT model makes a simple assumption — preference probability depends only on the score difference — that is empirically well-calibrated for solution quality in mathematical reasoning. It also yields a convex objective in the reward differences, leading to stable training dynamics. An important extension replaces the pair-wise BT loss with a list-wise version when K solutions are available per problem, treating the correctness signal as a soft label and computing cross-entropy over the K-way softmax of ORM scores.</p>
+<p>$$P(\text{chosen} \succ \text{rejected}) = \sigma(r_{\text{chosen}} - r_{\text{rejected}}), \quad \mathcal{L}<em _text_chosen="\text{chosen">{\text{BT}} = -\mathbb{E}!\left[\log \sigma(r</em>)\right]$$}} - r_{\text{rejected}</p>
+<h2>ORM vs Process RM</h2>
+<p>The fundamental distinction between ORMs and Process Reward Models (PRMs) is the granularity of feedback. ORMs assign a single scalar to a complete (problem, solution) pair, requiring only a binary correct/incorrect label for the entire solution — a signal available for free via symbolic verification of the final answer. PRMs assign a scalar to each intermediate reasoning step, requiring step-level supervision collected by human annotators or a trained classifier judging each step. PRMs can provide denser training signal and in principle enable finer-grained selection of reasoning paths, but they are substantially more expensive to train. Empirically, well-trained ORMs achieve 80-90% of the selection benefit of PRMs on mathematical benchmarks at a fraction of the data collection cost. The PRM+ORM combination, which uses the PRM to select among high-ORM-scoring candidates, consistently outperforms either model alone and is the state-of-the-art configuration for test-time compute scaling on MATH and AIME competitions.</p>
+<table>
+<thead>
+<tr>
+<th>Reward Model</th>
+<th>MATH best-of-4</th>
+<th>MATH best-of-64</th>
+<th>Calibration (AUROC)</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Random selection</td>
+<td>31%</td>
+<td>55%</td>
+<td>0.50</td>
+<td>Baseline: no reward model</td>
+</tr>
+<tr>
+<td>Majority vote</td>
+<td>46%</td>
+<td>62%</td>
+<td>n/a</td>
+<td>Self-consistency; no ORM needed</td>
+</tr>
+<tr>
+<td>ORM trained on gold</td>
+<td>58%</td>
+<td>76%</td>
+<td>0.89</td>
+<td>Labels from ground-truth solutions</td>
+</tr>
+<tr>
+<td>ORM trained on synthetic</td>
+<td>54%</td>
+<td>71%</td>
+<td>0.85</td>
+<td>Labels from LLM verifier; cheaper</td>
+</tr>
+<tr>
+<td>PRM (step-level)</td>
+<td>62%</td>
+<td>79%</td>
+<td>0.91</td>
+<td>Expensive step-level annotation</td>
+</tr>
+<tr>
+<td>PRM + ORM combo</td>
+<td>65%</td>
+<td>82%</td>
+<td>0.93</td>
+<td>Best-of-breed; reranks PRM shortlist with ORM</td>
+</tr>
+</tbody>
+</table>
+<h2>Calibration and Reliability</h2>
+<p>A well-calibrated ORM should assign scores that are monotonically related to the probability of correctness across the population of solutions. Calibration is measured by comparing the ORM score distribution for correct versus incorrect solutions — a well-calibrated ORM shows clear separation between these distributions. The Area Under the ROC Curve (AUROC) is the standard metric: AUROC = 1.0 indicates perfect separation, while 0.5 indicates random performance. High-quality ORMs trained on diverse datasets achieve AUROC values of 0.85-0.92 on held-out problems from the same distribution. However, ORMs can be systematically miscalibrated — assigning high scores to solutions that are well-formatted and confidently written but numerically incorrect, or low scores to correct solutions that use non-standard notation. Calibration degrades significantly under distribution shift: an ORM trained on GSM8K evaluates MATH competition problems poorly. Periodic recalibration and out-of-distribution testing are essential for production deployments.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.metrics import roc_auc_score, roc_curve
+from typing import List, Tuple
+
+def evaluate_orm_calibration(scores: List[float],
+                              labels: List[bool]) -&gt; dict:
+    # Compute AUROC and find optimal threshold via Youden's J statistic.
+    y_scores = np.array(scores, dtype=np.float32)
+    y_true   = np.array(labels,  dtype=np.int32)
+    auroc    = roc_auc_score(y_true, y_scores)
+    fpr, tpr, thresholds = roc_curve(y_true, y_scores)
+    j_stat   = tpr - fpr
+    best_idx = np.argmax(j_stat)
+    opt_thr  = thresholds[best_idx]
+    correct_scores   = y_scores[y_true == 1]
+    incorrect_scores = y_scores[y_true == 0]
+    print(f&quot;AUROC            : {auroc:.4f}&quot;)
+    print(f&quot;Optimal threshold: {opt_thr:.4f}&quot;)
+    print(f&quot;Correct   mean   : {correct_scores.mean():.3f} +/- {correct_scores.std():.3f}&quot;)
+    print(f&quot;Incorrect mean   : {incorrect_scores.mean():.3f} +/- {incorrect_scores.std():.3f}&quot;)
+    overlap = float(np.mean(incorrect_scores &gt; opt_thr))
+    print(f&quot;False-positive rate at opt threshold: {overlap:.3f}&quot;)
+    return {&quot;auroc&quot;: auroc, &quot;threshold&quot;: float(opt_thr),
+            &quot;tpr&quot;: float(tpr[best_idx]), &quot;fpr&quot;: float(fpr[best_idx])}
+
+np.random.seed(42)
+correct_scr   = np.random.normal(0.72, 0.18, 500).clip(0, 1).tolist()
+incorrect_scr = np.random.normal(0.38, 0.22, 500).clip(0, 1).tolist()
+evaluate_orm_calibration(correct_scr + incorrect_scr,
+                          [True]*500 + [False]*500)
+</code></pre>
+<blockquote>
+<p><strong>Reward Hacking Risk</strong>: ORMs can be gamed — models trained with RL against an ORM learn to produce solutions that score high on the reward model without being correct, especially when the ORM is over-trained on narrow data. Solutions become verbose, repeat confident-sounding phrasing, and exploit the EOS token pooling to game the scalar head. Monitor ORM score vs actual accuracy on held-out problems throughout RL training; if scores rise but accuracy stagnates, the model is hacking the reward. Retrain the ORM on model-generated examples and use held-out verifiers for ground truth.</p>
+</blockquote>
+<h2>ORM for Best-of-N</h2>
+<p>Best-of-N selection with an ORM is the most direct application of test-time compute scaling: generate N candidate solutions and return the one with the highest ORM score. This strategy is trivially parallelisable (all N generations proceed simultaneously), requires no search structure, and provides monotonically increasing accuracy as N grows in expectation. The accuracy of ORM-based best-of-N lies between two bounds: the oracle pass@N rate (fraction of problems where at least one of N solutions is correct, the upper bound) and the pass@1 rate (accuracy with a single solution, the lower bound). A perfect ORM would achieve oracle pass@N; random selection achieves pass@1 on average. Empirically, high-quality ORMs capture 70-85% of the gap between pass@1 and oracle pass@N, which translates to substantial accuracy improvements on hard benchmarks. The accuracy-compute trade-off is approximately a power law: accuracy scales as O(log N) for fixed model size, with diminishing returns beyond N=64 for most problems.</p>
+<pre><code class="language-python">import torch
+import asyncio
+from typing import List, Optional, Tuple
+from dataclasses import dataclass
+from openai import AsyncOpenAI
+
+aclient = AsyncOpenAI()
+
+@dataclass
+class BestOfNResult:
+    best_solution: str
+    best_score: float
+    all_scores: List[float]
+    oracle_correct: Optional[bool]   # any candidate correct?
+    selected_correct: Optional[bool] # did ORM pick a correct one?
+
+async def score_with_orm(orm, tokenizer, problem, solution, device):
+    text = f&quot;Problem: {problem}\nSolution: {solution}&quot;
+    enc  = tokenizer(text, return_tensors=&quot;pt&quot;, truncation=True,
+                     max_length=2048).to(device)
+    with torch.no_grad():
+        return orm(**enc).item()
+
+async def best_of_n_orm(problem, orm, tokenizer, n=64,
+                         gold=None, device=&quot;cpu&quot;) -&gt; BestOfNResult:
+    tasks = [aclient.chat.completions.create(
+        model=&quot;gpt-4o-mini&quot;, temperature=1.0,
+        messages=[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: f&quot;Solve: {problem}&quot;}]
+    ) for _ in range(n)]
+    resps     = await asyncio.gather(*tasks)
+    solutions = [r.choices[0].message.content for r in resps]
+    scores    = [await score_with_orm(orm, tokenizer, problem, s, device)
+                 for s in solutions]
+    best_i    = max(range(n), key=lambda i: scores[i])
+    return BestOfNResult(solutions[best_i], scores[best_i], scores, None, None)
+</code></pre>
+<h2>Key Takeaways</h2>
+<p>Outcome Reward Models are a practical and powerful component of the test-time compute scaling toolkit. They require only binary correct/incorrect labels on complete solutions — a free signal for problems with verifiable ground truth — and train efficiently on contrastive pairs using the Bradley-Terry loss. High-quality ORMs achieve AUROC values of 0.85-0.92, capturing 70-85% of the oracle pass@N improvement when used for best-of-N selection. Their primary failure mode is reward hacking: RL-trained policies exploit ORM weaknesses, producing solutions that score high without being genuinely correct. Defense strategies include ORM ensemble methods, out-of-distribution evaluation, and periodic ORM retraining on model-generated solutions. For research and production use, ORMs remain the default starting point before considering the more expensive process reward model approach, and the ORM+PRM combination is the recommended architecture when step-level annotations are available.</p>
+<ul>
+<li>Fine-tune any LM backbone with a scalar head using BT loss: L = -log sigmoid(r_chosen - r_rejected)</li>
+<li>Generate 100-256 solutions per problem at temperature=1.0; label via symbolic verifier for free training data</li>
+<li>AUROC measures calibration quality: aim for &gt;= 0.85 on held-out problems from the same distribution</li>
+<li>Best-of-N with ORM captures 70-85% of oracle pass@N improvement over pass@1 selection</li>
+<li>ORMs are cheaper to train than PRMs: no step-level annotation required, only final-answer binary labels</li>
+<li>Reward hacking risk increases with RL training: monitor ORM score vs actual accuracy on held-out sets</li>
+<li>ORM+PRM combo achieves best-of-breed accuracy: PRM scores steps, ORM validates final answer quality</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

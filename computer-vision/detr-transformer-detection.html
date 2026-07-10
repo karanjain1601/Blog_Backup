@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DETR: End-to-End Detection with Transformers | Notes Backup</title>
+  <meta name="description" content="Detection as set prediction — DETR removes anchors and NMS using learned object queries, bipartite matching (Hungarian algorithm), and a transformer encoder-decoder over image features." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>DETR: End-to-End Detection with Transformers</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Detection as set prediction — DETR removes anchors and NMS using learned object queries, bipartite matching (Hungarian algorithm), and a transformer encoder-decoder over image features.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>DETR: End-to-End Detection with Transformers</h1>
+<h2>Overview</h2>
+<p>Detection Transformer (DETR) eliminates two hand-crafted components that have defined object detectors for a decade: anchor boxes and non-maximum suppression (NMS). Instead, DETR treats detection as direct set prediction. A fixed set of learned queries attends to image features via a transformer decoder, and each query produces exactly one object prediction. No post-processing required.</p>
+<p>DETR was introduced by Carion et al. at Facebook AI Research in 2020. Its elegance lies in removing the heuristic-heavy components of prior detectors. The tradeoff is slow convergence — DETR needs 500 epochs on COCO to match Faster R-CNN trained for 12 epochs. Follow-up work (Deformable DETR, DAB-DETR, DN-DETR, RT-DETR) has largely closed this gap.</p>
+<h2>Detection as Set Prediction</h2>
+<p>Traditional detectors produce hundreds of overlapping candidate boxes then use NMS to select the best ones. This creates a non-differentiable post-processing step and requires careful tuning of IoU thresholds. DETR instead outputs exactly N predictions (typically N=100) and uses bipartite matching during training to assign each prediction to at most one ground-truth object. Unmatched predictions learn to predict 'no object'.</p>
+<p>The set prediction formulation requires a loss that is permutation-invariant: the same set of ground truths must produce the same loss regardless of the order of predictions. Hungarian matching provides this by finding the optimal one-to-one assignment between predictions and targets that minimizes a combined classification + localization cost. This makes the loss both permutation-invariant and encouraging of diversity among queries.</p>
+<h2>Architecture: Encoder + Decoder</h2>
+<p>DETR's architecture has three stages: (1) a CNN backbone (typically ResNet-50) extracts a feature map at 1/32 resolution; (2) a transformer encoder refines these features with global self-attention; (3) a transformer decoder takes N learned object queries and attends to encoder outputs to produce N (class, box) predictions. The 2D positional encoding added to backbone features is crucial for spatial awareness.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import math
+
+class DETR_Encoder(nn.Module):
+    def __init__(self, d_model=256, nhead=8, num_layers=6):
+        super().__init__()
+        self.input_proj = nn.Conv2d(2048, d_model, 1)  # ResNet C5: 2048ch
+        encoder_layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward=2048)
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers)
+
+    def forward(self, backbone_feat, pos_embed):
+        B, C, H, W = backbone_feat.shape
+        feat = self.input_proj(backbone_feat)  # [B, 256, H, W]
+        feat_flat = feat.flatten(2).permute(2, 0, 1)   # [HW, B, 256]
+        pos_flat = pos_embed.flatten(2).permute(2, 0, 1)
+        memory = self.encoder(feat_flat + pos_flat)    # [HW, B, 256]
+        return memory
+</code></pre>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class DETR_Decoder(nn.Module):
+    def __init__(self, d_model=256, nhead=8, num_layers=6, num_queries=100, num_classes=91):
+        super().__init__()
+        self.query_embed = nn.Embedding(num_queries, d_model)
+        decoder_layer = nn.TransformerDecoderLayer(d_model, nhead, dim_feedforward=2048)
+        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers)
+        self.class_head = nn.Linear(d_model, num_classes + 1)  # +1 for no-object
+        self.box_head = nn.Sequential(
+            nn.Linear(d_model, d_model), nn.ReLU(),
+            nn.Linear(d_model, d_model), nn.ReLU(),
+            nn.Linear(d_model, 4), nn.Sigmoid())
+
+    def forward(self, memory, B):
+        queries = self.query_embed.weight.unsqueeze(1).repeat(1, B, 1)  # [N, B, d]
+        out = self.decoder(queries, memory)                              # [N, B, d]
+        return self.class_head(out), self.box_head(out)                  # classes, boxes
+</code></pre>
+<h2>Hungarian Matching</h2>
+<p>During training, DETR uses the Hungarian algorithm to find the minimum cost bipartite matching between the N predicted boxes and M ground-truth boxes (M ≤ N). The cost matrix combines three terms: (1) negative log-probability of the correct class, (2) L1 distance between predicted and target box coordinates, and (3) negative generalized IoU (GIoU) between boxes. GIoU is crucial for handling non-overlapping boxes where L1 and IoU gradients vanish.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+from scipy.optimize import linear_sum_assignment
+
+def hungarian_match(pred_logits, pred_boxes, gt_labels, gt_boxes, cls_weight=1, l1_weight=5, giou_weight=2):
+    &quot;&quot;&quot;
+    pred_logits: [N, num_classes+1], pred_boxes: [N, 4] (cx,cy,w,h normalized)
+    gt_labels: [M], gt_boxes: [M, 4]
+    Returns: matched (pred_idx, gt_idx) pairs
+    &quot;&quot;&quot;
+    N, M = len(pred_logits), len(gt_labels)
+    # Classification cost: -log_softmax for target classes
+    cls_cost = -pred_logits.softmax(-1)[:, gt_labels]  # [N, M]
+    # L1 cost
+    l1_cost = torch.cdist(pred_boxes, gt_boxes, p=1)   # [N, M]
+    # Combine (GIoU omitted here for brevity)
+    cost = cls_weight * cls_cost + l1_weight * l1_cost
+    row_idx, col_idx = linear_sum_assignment(cost.detach().cpu().numpy())
+    return torch.as_tensor(row_idx), torch.as_tensor(col_idx)
+</code></pre>
+<h2>DETR Training and Convergence</h2>
+<p>DETR's slow convergence stems from the cross-attention mechanism in the decoder — queries must learn to attend to specific image regions from random initialization, which takes many epochs. The encoder must also learn to represent objects as coherent entities in its feature space. Analysis shows that attention maps only become object-specific after ~150 epochs, explaining the gap versus RPN-based two-stage detectors.</p>
+<blockquote>
+<p>****: DETR trains slowly — it needs 500 epochs vs 12 for Faster R-CNN to converge. Deformable DETR and RT-DETR fix this with deformable attention and improved matching.</p>
+</blockquote>
+<pre><code class="language-python">from transformers import DetrForObjectDetection, DetrImageProcessor
+from PIL import Image
+import requests
+import torch
+
+processor = DetrImageProcessor.from_pretrained('facebook/detr-resnet-50')
+model = DetrForObjectDetection.from_pretrained('facebook/detr-resnet-50')
+
+image = Image.open('image.jpg')
+inputs = processor(images=image, return_tensors='pt')
+outputs = model(**inputs)
+
+# Post-process: filter 100 query predictions by confidence
+results = processor.post_process_object_detection(
+    outputs, threshold=0.7, target_sizes=[image.size[::-1]])[0]
+
+for score, label, box in zip(results['scores'], results['labels'], results['boxes']):
+    print(f'{model.config.id2label[label.item()]}: {score:.2f} at {box.tolist()}')
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Detector</th>
+<th>Anchors</th>
+<th>NMS</th>
+<th>Convergence</th>
+<th>COCO mAP</th>
+<th>Speed</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Faster R-CNN</td>
+<td>Yes (RPN)</td>
+<td>Yes</td>
+<td>12 epochs</td>
+<td>42.0</td>
+<td>~25 FPS</td>
+</tr>
+<tr>
+<td>RetinaNet</td>
+<td>Yes (dense)</td>
+<td>Yes</td>
+<td>12 epochs</td>
+<td>40.8</td>
+<td>~18 FPS</td>
+</tr>
+<tr>
+<td>DETR</td>
+<td>No</td>
+<td>No</td>
+<td>500 epochs</td>
+<td>42.0</td>
+<td>~28 FPS</td>
+</tr>
+<tr>
+<td>Deformable DETR</td>
+<td>No</td>
+<td>No</td>
+<td>50 epochs</td>
+<td>46.2</td>
+<td>~19 FPS</td>
+</tr>
+<tr>
+<td>RT-DETR</td>
+<td>No</td>
+<td>No</td>
+<td>72 epochs</td>
+<td>53.1</td>
+<td>~114 FPS</td>
+</tr>
+<tr>
+<td>DAB-DETR</td>
+<td>No</td>
+<td>No</td>
+<td>50 epochs</td>
+<td>45.7</td>
+<td>~20 FPS</td>
+</tr>
+</tbody>
+</table>
+<h2>Key Takeaways</h2>
+<p>DETR's architectural contributions extend beyond detection. Object queries as a mechanism for set prediction have been adapted for panoptic segmentation (Mask2Former), 3D object detection (DETR3D), multi-object tracking (TrackFormer), and video understanding. The Hungarian matching training paradigm is now used in many tasks requiring one-to-one prediction, from keypoint detection to caption generation.</p>
+<p>For practitioners: use RT-DETR (from Baidu / Ultralytics) if you need transformer-based detection in production — it matches DETR's elegance while training in 72 epochs and achieving 53+ mAP at 114 FPS. Use Deformable DETR for research baselines. Avoid vanilla DETR for new projects — its 500-epoch training requirement makes iteration expensive, and its successors are strictly superior on all metrics.</p>
+    </article>
+  </main>
+</body>
+</html>

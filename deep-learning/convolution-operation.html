@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Convolution Operation — Cross-Correlation, Padding, Stride, Dilation | Notes Backup</title>
+  <meta name="description" content="Derive 2D convolution from first principles, contrast it with cross-correlation, and master stride, padding, dilation, and multi-channel extensions with FLOP analysis." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Convolution Operation — Cross-Correlation, Padding, Stride, Dilation</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Derive 2D convolution from first principles, contrast it with cross-correlation, and master stride, padding, dilation, and multi-channel extensions with FLOP analysis.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Convolution Operation — Cross-Correlation, Padding, Stride, Dilation</h1>
+<p>Convolution is the core building block of every convolutional neural network. In signal processing, convolution is defined as (f★g)[n] = Σₖ f[k]·g[n-k], where the kernel is flipped before sliding. Deep learning frameworks implement cross-correlation — the kernel is NOT flipped — but the operation is still called convolution because the network learns the kernel anyway. Understanding the mathematics behind output size, receptive field, and computational cost is essential for designing efficient architectures.</p>
+<h2>Cross-Correlation vs True Convolution</h2>
+<p>True convolution flips the kernel: (f★g)[i,j] = ΣₕΣw f[h,w]·g[i-h, j-w]. Cross-correlation does not flip: (f⋆g)[i,j] = ΣₕΣw f[i+h, j+w]·g[h,w]. For a learned kernel the distinction is irrelevant — the network can absorb the flip into the learned weights. PyTorch's nn.Conv2d and F.conv2d implement cross-correlation. The mathematical convolution theorem (convolution in spatial domain = multiplication in frequency domain) applies to true convolution; in practice CNNs are designed around cross-correlation and the term 'convolution' is used loosely throughout the field.</p>
+<h2>2D Convolution from Scratch</h2>
+<p>For a single-channel input of shape H×W and a kernel of shape k×k, the output at position (i,j) is: output[i,j] = ΣₕΣw input[i·s+h, j·s+w] · kernel[h,w], where s is the stride. With padding p zeros added on each side, the output spatial dimensions are: H_out = (H + 2p - k) // s + 1, W_out = (W + 2p - k) // s + 1. For multi-channel inputs (C_in channels), each output channel has one kernel per input channel and the results are summed: the parameter count per output channel is k×k×C_in, and for C_out output channels the total is k×k×C_in×C_out + C_out (bias).</p>
+<pre><code class="language-python">import numpy as np
+
+def conv2d_scratch(x, kernel, stride=1, padding=0):
+    &quot;&quot;&quot;Cross-correlation (what DL frameworks call 'convolution').&quot;&quot;&quot;
+    if padding &gt; 0:
+        x = np.pad(x, [(0,0),(0,0),(padding,padding),(padding,padding)])
+    N, C_in, H, W = x.shape
+    C_out, _, k, _ = kernel.shape
+    H_out = (H - k) // stride + 1
+    W_out = (W - k) // stride + 1
+    out = np.zeros((N, C_out, H_out, W_out))
+    for n in range(N):
+        for co in range(C_out):
+            for ci in range(C_in):
+                for i in range(H_out):
+                    for j in range(W_out):
+                        patch = x[n, ci,
+                                  i*stride:i*stride+k,
+                                  j*stride:j*stride+k]
+                        out[n, co, i, j] += (patch * kernel[co, ci]).sum()
+    return out
+
+np.random.seed(0)
+x = np.random.randn(1, 3, 8, 8)       # (N, C_in, H, W)
+k = np.random.randn(16, 3, 3, 3)      # (C_out, C_in, kH, kW)
+out = conv2d_scratch(x, k, stride=1, padding=1)
+print('Input: ', x.shape)
+print('Kernel:', k.shape)
+print('Output:', out.shape)  # (1, 16, 8, 8) — same padding
+</code></pre>
+<h2>Padding and Stride</h2>
+<p>Padding controls output size relative to input. Valid padding (p=0): no zeros added, output shrinks by k-1 per side. Same padding (p=(k-1)/2 for odd k): output has the same H×W as input. Stride s controls the step size of the sliding window: stride 2 halves the spatial dimensions (cheaper than pooling, learnable). Combining stride and padding: H_out = ⌊(H+2p-k)/s⌋ + 1. In practice, k=3, p=1, s=1 is the workhorse (preserves size); k=3, p=1, s=2 or k=1, p=0, s=2 is used for downsampling.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+x = torch.randn(1, 3, 32, 32)
+
+configs = [
+    dict(kernel_size=3, stride=1, padding=0, dilation=1),   # valid
+    dict(kernel_size=3, stride=1, padding=1, dilation=1),   # same
+    dict(kernel_size=3, stride=2, padding=1, dilation=1),   # stride-2 down
+    dict(kernel_size=3, stride=1, padding=2, dilation=2),   # dilated
+    dict(kernel_size=5, stride=1, padding=2, dilation=1),   # 5x5 same
+    dict(kernel_size=1, stride=1, padding=0, dilation=1),   # pointwise
+]
+
+print(f'{'Config':&lt;40} Output shape')
+for cfg in configs:
+    conv = nn.Conv2d(3, 16, **cfg)
+    out = conv(x)
+    k, s, p, d = cfg['kernel_size'], cfg['stride'], cfg['padding'], cfg['dilation']
+    label = f'k={k} s={s} p={p} d={d}'
+    print(f'{label:&lt;40} {tuple(out.shape)}')
+</code></pre>
+<h2>Dilation — Expanding Receptive Field for Free</h2>
+<p>Dilation (atrous convolution) inserts d-1 zeros between kernel elements. A 3×3 kernel with dilation d=2 samples 5×5 regions; with d=3 it samples 7×7. The effective kernel size is (k-1)·d + 1, but the parameter count remains k×k×C_in×C_out. This is hugely valuable for semantic segmentation (DeepLab) and audio generation (WaveNet) where large context is needed without strided downsampling. Hybrid dilated convolution (HDC) stacks layers with growing dilation rates (1, 2, 5) to avoid the 'gridding artefact' where dilated convolutions miss input pixels.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def effective_rf(kernel_size, dilation):
+    &quot;&quot;&quot;Effective receptive field size for a single dilated conv layer.&quot;&quot;&quot;
+    return (kernel_size - 1) * dilation + 1
+
+dilations = [1, 2, 4, 8, 16]
+print(f'{'Dilation':&lt;10} {'Eff. kernel':&lt;14} {'RF covered':&lt;12} Params (3x3, 64-&gt;64)')
+for d in dilations:
+    eff = effective_rf(3, d)
+    params = 3 * 3 * 64 * 64 + 64  # fixed regardless of dilation
+    print(f'{d:&lt;10} {eff}x{eff:&lt;10} {eff*eff:&lt;12} {params:,}')
+
+# Compare output shapes
+x = torch.randn(1, 1, 16, 16)
+for d in [1, 2, 4]:
+    conv = nn.Conv2d(1, 1, kernel_size=3, padding=d, dilation=d)
+    print(f'dilation={d}: out {tuple(conv(x).shape)} (same-size with p=d)')
+</code></pre>
+<h2>Visualising Learned Kernels</h2>
+<p>First-layer kernels of a network trained on natural images learn Gabor-like filters — oriented edge detectors, colour blobs, and frequency detectors — because these are the most efficient basis for natural image statistics. Visualising them confirms the network is learning meaningful features rather than noise. For deeper layers, activation maximisation or feature inversion is needed. Weight initialisation matters: He/Kaiming init sets std = sqrt(2/fan_in) for ReLU networks, preventing vanishing/exploding activations.</p>
+<pre><code class="language-python">import torch
+import torchvision.models as models
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
+
+# Load pretrained ResNet-18 and extract first conv layer kernels
+model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+kernels = model.conv1.weight.data.clone()  # (64, 3, 7, 7)
+
+# Normalize each kernel for visualization
+def normalize(t):
+    t = t - t.min()
+    return t / (t.max() + 1e-8)
+
+fig, axes = plt.subplots(4, 8, figsize=(12, 6))
+for idx, ax in enumerate(axes.flat):
+    if idx &lt; 32:
+        k = normalize(kernels[idx].permute(1, 2, 0).numpy())
+        ax.imshow(k)
+    ax.axis('off')
+plt.suptitle('First 32 of 64 ResNet-18 conv1 kernels (7x7, RGB)')
+plt.tight_layout()
+plt.savefig('kernels.png', dpi=80)
+print(f'conv1 kernel shape: {tuple(kernels.shape)}')
+print(f'Params in conv1: {kernels.numel():,} (+ {model.conv1.bias is None and 0} bias)')
+</code></pre>
+<h2>Computational Cost Analysis</h2>
+<p>The floating-point operations (FLOPs) for a convolution layer are: FLOPs ≈ 2 × H_out × W_out × C_in × C_out × k². The factor 2 accounts for multiply-accumulate (MAC = 1 multiply + 1 add). For a typical ResNet-50 layer with H_out=56, W_out=56, C_in=64, C_out=64, k=3: FLOPs ≈ 2×56×56×64×64×9 ≈ 2.3 GFLOPs for that single layer. Memory bandwidth often bottlenecks throughput before compute does, especially for large feature maps. Reducing C_in or C_out by 2× saves 4× FLOPs; reducing k from 3 to 1 saves 9× FLOPs at the cost of no spatial mixing.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def conv_flops(H_in, W_in, C_in, C_out, k, s=1, p=0):
+    H_out = (H_in + 2*p - k) // s + 1
+    W_out = (W_in + 2*p - k) // s + 1
+    # 2 ops per MAC (multiply + add), k*k MACs per output element per input channel
+    flops = 2 * H_out * W_out * C_in * C_out * k * k
+    params = C_out * C_in * k * k + C_out
+    return H_out, W_out, flops, params
+
+layers = [
+    ('conv1 k=7',  224, 224, 3,   64,  7, 2, 3),
+    ('layer1 k=3', 56,  56,  64,  64,  3, 1, 1),
+    ('layer1 k=1', 56,  56,  64,  64,  1, 1, 0),
+    ('layer4 k=3', 7,   7,   512, 512, 3, 1, 1),
+    ('pw  k=1',    14,  14,  256, 1024,1, 1, 0),
+]
+print(f'{'Layer':&lt;14} {'HxW out':&lt;10} {'GFLOPs':&gt;8} {'Params':&gt;10}')
+for name, H, W, Ci, Co, k, s, p in layers:
+    Ho, Wo, fl, pa = conv_flops(H, W, Ci, Co, k, s, p)
+    print(f'{name:&lt;14} {Ho}x{Wo:&lt;6} {fl/1e9:&gt;8.3f} {pa:&gt;10,}')
+</code></pre>
+<blockquote>
+<p><strong>Weight Sharing = Translation Equivariance</strong>: The same kernel is applied at every spatial location — this is weight sharing. It means a feature detector trained on a cat in the upper-left works equally well in the lower-right. Formally, if T_d denotes a shift-by-d operator, convolution satisfies f(T_d x) = T_d(f(x)): shifting the input shifts the output by the same amount. This inductive bias dramatically reduces the parameters needed and is why CNNs generalise so well on images.</p>
+</blockquote>
+<h2>Multi-Channel Extension and Parameter Count</h2>
+<p>For an input with C_in channels and C_out output channels, the kernel tensor has shape (C_out, C_in, k, k). Each output channel is produced by convolving the full C_in-channel input with one (C_in, k, k) kernel and summing across channels. The parameter count is C_out × C_in × k × k + C_out (bias). For k=3, C_in=256, C_out=256: 256×256×9 + 256 = 590,080 parameters. Compare: a fully-connected layer mapping the same 256×7×7 = 12,544 features to 12,544 outputs would need 12,544² ≈ 157M parameters — 266× more.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Effect on Output Size</th>
+<th>Effect on Receptive Field</th>
+<th>Effect on Params</th>
+<th>Effect on FLOPs</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Kernel size k↑</td>
+<td>(H+2p-k)//s+1 shrinks</td>
+<td>Grows linearly with k</td>
+<td>×k² per layer</td>
+<td>×k²</td>
+</tr>
+<tr>
+<td>Stride s↑</td>
+<td>Divides by s (downsamples)</td>
+<td>Multiplies all downstream RF</td>
+<td>Unchanged</td>
+<td>÷s²</td>
+</tr>
+<tr>
+<td>Padding p↑</td>
+<td>+(2p) before division</td>
+<td>No effect</td>
+<td>Unchanged</td>
+<td>Slightly ↑</td>
+</tr>
+<tr>
+<td>Dilation d↑</td>
+<td>Unchanged (with p=d)</td>
+<td>×d per layer</td>
+<td>Unchanged</td>
+<td>Unchanged</td>
+</tr>
+<tr>
+<td>C_in↑</td>
+<td>Unchanged</td>
+<td>Unchanged</td>
+<td>×C_in</td>
+<td>×C_in</td>
+</tr>
+<tr>
+<td>C_out↑</td>
+<td>More output channels</td>
+<td>Unchanged</td>
+<td>×C_out</td>
+<td>×C_out</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>Valid padding (p=0): output shrinks by k-1 each side — use when reducing spatial size intentionally.</li>
+<li>Same padding (p=(k-1)//2): output matches input size — standard in residual blocks.</li>
+<li>SAME vs VALID in TensorFlow: SAME adds asymmetric padding; PyTorch requires manual specification.</li>
+<li>Grouped convolution (groups=g): reduces params and FLOPs by factor g — covered in the next note.</li>
+<li>Bias can be omitted (bias=False) when BatchNorm follows — BN has its own learnable shift parameter.</li>
+<li>Output channel ordering: PyTorch uses (N, C, H, W); TensorFlow defaults to (N, H, W, C).</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

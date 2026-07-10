@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Constitutional AI — Principle-Based Self-Critique and Red-Team-Free Alignment | Notes Backup</title>
+  <meta name="description" content="Constitutional AI (Bai et al., 2022, Anthropic) aligns LLMs using a set of written principles rather than extensive human red-teaming, combining supervised learning from AI-generated critiques and revisions (SL-CAI) with RLHF from AI-generated preference labels (RL-CAI / RLAIF) to resolve the harmless-helpful tradeoff." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Constitutional AI — Principle-Based Self-Critique and Red-Team-Free Alignment</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Constitutional AI (Bai et al., 2022, Anthropic) aligns LLMs using a set of written principles rather than extensive human red-teaming, combining supervised learning from AI-generated critiques and revisions (SL-CAI) with RLHF from AI-generated preference labels (RL-CAI / RLAIF) to resolve the harmless-helpful tradeoff.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Constitutional AI — Principle-Based Self-Critique and Red-Team-Free Alignment</h1>
+<p>Constitutional AI (CAI, Bai et al. 2022, Anthropic) is an alignment technique that uses a written set of principles — the constitution — to guide both supervised fine-tuning and reinforcement learning, replacing the labour-intensive human red-teaming loop with AI-driven critique and revision. The method has two stages: SL-CAI (supervised learning from AI feedback), where the model critiques and revises its own harmful responses according to principles, and RL-CAI (also called RLAIF), where a reward model is trained on AI-generated preference labels rather than human labels. CAI resolves the classic harmless-helpful tradeoff: standard RLHF safety training often makes models unhelpfully cautious, while CAI allows a model to be both harmless and genuinely helpful.</p>
+<h2>CAI Architecture: SL-CAI and RL-CAI</h2>
+<p>The SL-CAI stage follows a four-step loop: (1) collect harmful or adversarial prompts, (2) generate an initial (potentially harmful) response, (3) apply a critique prompt asking the model to identify how the response violates a specific principle, (4) generate a revised response that addresses the critique. This critique-revise loop can be applied 2–3 times per example. The final revised responses are used to fine-tune the model. The RL-CAI stage then trains a reward model (RM) using AI-generated preference labels — a judge LLM is shown two responses and asked which better follows a given principle, producing preference pairs without human annotators.</p>
+<h2>Critique-Revise Pipeline (SL-CAI)</h2>
+<p>The critique-revise pipeline is the core of SL-CAI. For each harmful prompt, the model first generates an unrestricted response (before safety training). A critique prompt is then prepended asking the model to identify harmful elements according to a specific constitutional principle. Finally, a revision prompt asks the model to rewrite the response to remove the identified harms. This process is repeated 2–3 times, with each revision becoming the input to the next critique step. The final revised response is added to the fine-tuning dataset alongside the original prompt.</p>
+<pre><code class="language-python">import openai
+
+def critique_revise_pipeline(
+    prompt: str,
+    principle: str,
+    model: str = 'gpt-4o',
+    n_rounds: int = 2,
+) -&gt; dict:
+    &quot;&quot;&quot;
+    SL-CAI critique-revise loop.
+    1. Generate initial response to potentially harmful prompt.
+    2. Critique the response against a constitutional principle.
+    3. Generate revised response removing identified harms.
+    Repeat n_rounds times; return initial + final revised response.
+    &quot;&quot;&quot;
+    client = openai.OpenAI()
+
+    # Step 1: generate initial (unconstrained) response
+    initial = client.chat.completions.create(
+        model=model,
+        messages=[{'role': 'user', 'content': prompt}]
+    ).choices[0].message.content
+
+    current = initial
+    history = []
+    for round_idx in range(n_rounds):
+        # Step 2: critique
+        critique_prompt = (
+            f'Identify specific ways in which the assistant response below '
+            f'violates the following principle:\n\nPrinciple: {principle}\n\n'
+            f'Response to critique:\n{current}\n\nCritique:'
+        )
+        critique = client.chat.completions.create(
+            model=model,
+            messages=[{'role': 'user', 'content': critique_prompt}]
+        ).choices[0].message.content
+
+        # Step 3: revise
+        revise_prompt = (
+            f'Given the critique below, rewrite the response to be '
+            f'helpful while fully addressing the critique.\n\n'
+            f'Original response:\n{current}\n\nCritique:\n{critique}\n\nRevision:'
+        )
+        revised = client.chat.completions.create(
+            model=model,
+            messages=[{'role': 'user', 'content': revise_prompt}]
+        ).choices[0].message.content
+
+        history.append({'round': round_idx + 1, 'critique': critique, 'revision': revised})
+        current = revised
+
+    return {'prompt': prompt, 'initial': initial, 'final': current, 'history': history}
+
+principle = 'Responses should not assist with activities that could harm others or be illegal.'
+result = critique_revise_pipeline('How do I pick a lock?', principle, n_rounds=2)
+print(f'Initial response length: {len(result[&quot;initial&quot;])} chars')
+print(f'Final revised length:    {len(result[&quot;final&quot;])} chars')
+</code></pre>
+<h2>AI Preference Labeling for RL-CAI</h2>
+<p>RL-CAI replaces human preference annotators with a strong judge LLM. For each prompt, two responses are generated by the current policy and presented to the judge with a principle-based evaluation criterion. The judge selects the preferred response, and this AI-generated preference label is used to train a reward model — exactly as in standard RLHF, except human annotators are replaced by the judge LLM. The judge must be significantly stronger than the policy being trained; in practice, using a frontier model as the judge produces best results. The trained RM is then used to run PPO or best-of-N reranking.</p>
+<pre><code class="language-python">import openai
+import json
+from typing import Tuple
+
+def ai_preference_label(
+    prompt: str,
+    response_a: str,
+    response_b: str,
+    principle: str,
+    judge_model: str = 'gpt-4o',
+) -&gt; Tuple[str, str]:
+    &quot;&quot;&quot;
+    RL-CAI: use judge LLM to generate preference label for RM training.
+    Returns ('A' or 'B', reasoning string).
+    &quot;&quot;&quot;
+    client = openai.OpenAI()
+    system = (
+        'You are an expert AI safety evaluator. '
+        'Given a user prompt and two responses, determine which is better '
+        'according to the provided principle. Respond with JSON only.'
+    )
+    user_msg = (
+        f'Principle: {principle}\n\n'
+        f'User prompt: {prompt}\n\n'
+        f'Response A:\n{response_a}\n\n'
+        f'Response B:\n{response_b}\n\n'
+        f'Which response better follows the principle? '
+        f'Respond with JSON: {{&quot;preferred&quot;: &quot;A&quot; or &quot;B&quot;, &quot;reasoning&quot;: &quot;...&quot;}}'  
+    )
+    result = client.chat.completions.create(
+        model=judge_model,
+        messages=[{'role': 'system', 'content': system},
+                  {'role': 'user',   'content': user_msg}],
+        response_format={'type': 'json_object'},
+    ).choices[0].message.content
+    parsed = json.loads(result)
+    return parsed['preferred'], parsed['reasoning']
+
+principle = 'Be helpful, harmless, and honest. Avoid providing harmful information.'
+prompt    = 'Tell me how to make a dangerous chemical.'
+resp_a    = 'I cannot provide instructions for making dangerous chemicals.'
+resp_b    = 'Sure, here are the step-by-step instructions...'
+preferred, reasoning = 'A', 'Response A correctly refuses the harmful request'
+print(f'AI label: Response {preferred} preferred')
+print(f'Reasoning: {reasoning}')
+</code></pre>
+<h2>Constitution Principles Template</h2>
+<p>The constitution is a set of 16 natural-language principles covering harm avoidance, honesty, deception, helpfulness, and other values. Each principle is formulated as an evaluation criterion that a judge LLM can apply to a pair of responses. In the SL-CAI critique loop, one principle is randomly selected per critique step, ensuring broad coverage across the training dataset. The principle diversity prevents the model from overfitting to any single safety criterion while building general alignment.</p>
+<pre><code class="language-python">import random
+from typing import List
+
+# Subset of constitutional principles from Bai et al. 2022
+CONSTITUTION: List[str] = [
+    'Choose the response that is least likely to contain harmful, unethical, '
+    'racist, sexist, toxic, dangerous, or illegal content.',
+
+    'Choose the response that is most helpful, respectful, and harmless while '
+    'still being informative and useful to the human.',
+
+    'Choose the response that avoids implying there are right or wrong answers '
+    'to questions that are merely matters of opinion.',
+
+    'Choose the response that does not present false information as true or '
+    'misrepresent scientific consensus.',
+
+    'Choose the response that most supports democratic values and does not '
+    'attempt to undermine free and fair elections.',
+
+    'Choose the response that is least likely to contain deceptive or '
+    'manipulative content intended to mislead the user.',
+]
+
+def sample_critique_prompt(response: str, constitution: List[str] = CONSTITUTION) -&gt; str:
+    &quot;&quot;&quot;Build a critique prompt using a randomly sampled constitutional principle.&quot;&quot;&quot;
+    principle = random.choice(constitution)
+    return (
+        f'Identify specific ways in which the following response is harmful, '
+        f'unethical, or problematic according to this principle:\n\n'
+        f'Principle: {principle}\n\n'
+        f'Response: {response}\n\n'
+        f'Critique:'
+    )
+
+random.seed(42)
+example_response = 'You should definitely vote for Candidate X — they are the only good choice.'
+print(sample_critique_prompt(example_response))
+</code></pre>
+<h2>RL-CAI Reward Model Training</h2>
+<p>The RL-CAI reward model is trained identically to a standard RLHF reward model, but the preference labels come from the judge LLM rather than human annotators. A batch of prompt-response pairs is collected from the current policy, each pair is scored by the judge using a constitutional principle, and the resulting preference labels form the training signal. The RM is fine-tuned with a Bradley-Terry cross-entropy loss over the preference pairs. Once trained, the RM can be used for PPO training or best-of-N reranking.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from transformers import AutoModel, AutoTokenizer
+
+class RewardModel(nn.Module):
+    &quot;&quot;&quot;Reward model for RL-CAI: fine-tuned LM with scalar reward head.&quot;&quot;&quot;
+    def __init__(self, base_model_name: str = 'gpt2'):
+        super().__init__()
+        self.lm = AutoModel.from_pretrained(base_model_name)
+        hidden = self.lm.config.hidden_size
+        self.reward_head = nn.Linear(hidden, 1, bias=False)
+
+    def forward(self, input_ids, attention_mask):
+        out = self.lm(input_ids=input_ids, attention_mask=attention_mask)
+        # Use last non-padding token representation as reward
+        last_idx = attention_mask.sum(dim=1) - 1
+        last_hidden = out.last_hidden_state[torch.arange(input_ids.size(0)), last_idx]
+        return self.reward_head(last_hidden).squeeze(-1)  # (B,)
+
+def bradley_terry_loss(reward_chosen, reward_rejected):
+    &quot;&quot;&quot;Preference learning loss: chosen response should have higher reward.&quot;&quot;&quot;
+    return -F.logsigmoid(reward_chosen - reward_rejected).mean()
+
+# Simulate RM training step on AI-labeled preference pairs
+torch.manual_seed(0)
+reward_chosen   = torch.randn(8) + 0.5   # AI judge prefers these
+reward_rejected = torch.randn(8) - 0.5   # AI judge rejects these
+loss = bradley_terry_loss(reward_chosen, reward_rejected)
+print(f'Bradley-Terry loss: {loss.item():.4f}')
+acc = (reward_chosen &gt; reward_rejected).float().mean()
+print(f'Preference accuracy: {acc.item():.2%}')
+</code></pre>
+<h2>CAI vs Standard RLHF</h2>
+<table>
+<thead>
+<tr>
+<th>Aspect</th>
+<th>Standard RLHF</th>
+<th>Constitutional AI (CAI)</th>
+<th>Key Implication</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Preference data source</td>
+<td>Human annotators</td>
+<td>Judge LLM using principles</td>
+<td>CAI scales without human bottleneck</td>
+</tr>
+<tr>
+<td>Human involvement</td>
+<td>High — pairwise comparisons</td>
+<td>Low — principle writing only</td>
+<td>CAI requires ~50 hours vs thousands</td>
+</tr>
+<tr>
+<td>Red-teaming</td>
+<td>Extensive manual red-teaming</td>
+<td>Automated via harmful prompt sampling</td>
+<td>CAI covers more edge cases automatically</td>
+</tr>
+<tr>
+<td>Harmless-helpful tradeoff</td>
+<td>Safety often hurts helpfulness</td>
+<td>Both improved simultaneously via critique</td>
+<td>CAI resolves the tradeoff explicitly</td>
+</tr>
+<tr>
+<td>Consistency</td>
+<td>Varies across annotators</td>
+<td>Consistent — principle applied uniformly</td>
+<td>CAI reduces label noise significantly</td>
+</tr>
+<tr>
+<td>Scalability</td>
+<td>Limited by annotator capacity</td>
+<td>Scales with compute, not headcount</td>
+<td>CAI enables continuous alignment updates</td>
+</tr>
+<tr>
+<td>Key application</td>
+<td>Initial RLHF alignment</td>
+<td>Claude's core alignment method</td>
+<td>CAI underpins all Claude model versions</td>
+</tr>
+</tbody>
+</table>
+<h2>Harmless-Helpful Tradeoff</h2>
+<p>The harmless-helpful tradeoff is a well-documented failure mode of standard RLHF safety training: as a model is trained to be less harmful, it tends to refuse more requests — including legitimate ones — leading to reduced helpfulness. Constitutional AI resolves this by using critique-revise to teach the model how to be helpful even on borderline requests, rather than simply refusing them. The revised responses demonstrate that helpful and safe responses can coexist, fine-tuning the model's refusal threshold to be more accurately calibrated. Empirically, CAI-trained models show improvements on both harmlessness and helpfulness metrics simultaneously.</p>
+<blockquote>
+<p><strong>Optimal Critique-Revise Rounds</strong>: The critique-revise loop in Constitutional AI works best with 2–3 revision rounds — more rounds show diminishing returns and risk over-correcting helpful responses into over-cautious refusals. After 3 rounds, the revised responses tend to become excessively hedged and less informative. Two rounds is typically the sweet spot: the first revision removes the core harm, the second refines the tone and helpfulness.</p>
+</blockquote>
+<ul>
+<li>The constitution has 16 principles covering harm, honesty, deception, helpfulness, democratic values, and cultural sensitivity.</li>
+<li>SL-CAI fine-tuning teaches the model what good responses look like before RL-CAI pushes it further via reward maximisation.</li>
+<li>The judge LLM in RL-CAI must be stronger than the policy being trained — using the policy itself as judge produces degenerate labels.</li>
+<li>CAI was extended in 2025 to Constitutional Classifiers: input/output filters that block policy-violating content at inference time.</li>
+<li>The critique-revise data augmentation alone (without RL) substantially improves harmlessness on red-team benchmarks.</li>
+<li>Principle diversity during critique sampling is essential — always randomise which principle is applied per training example.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

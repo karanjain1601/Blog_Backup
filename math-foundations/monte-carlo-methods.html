@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Monte Carlo Methods | Notes Backup</title>
+  <meta name="description" content="Monte Carlo integration, the O(1/sqrt(N)) convergence rate, variance reduction techniques (control variates, antithetic sampling, stratified sampling), quasi-Monte Carlo with Sobol sequences, and Monte Carlo policy evaluation for RL." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Monte Carlo Methods</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Monte Carlo integration, the O(1/sqrt(N)) convergence rate, variance reduction techniques (control variates, antithetic sampling, stratified sampling), quasi-Monte Carlo with Sobol sequences, and Monte Carlo policy evaluation for RL.</li><li><strong>topic:</strong> math-foundations</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Monte Carlo Methods</h1>
+<p>Monte Carlo methods use random sampling to solve deterministic and stochastic problems that are analytically intractable. Their killer feature is dimension-independence: classical quadrature (trapezoidal rule, Gaussian quadrature) achieves O(N^{-k/d}) convergence where k is the order of the method and d is the dimension — this becomes catastrophically slow in high dimensions. Monte Carlo achieves O(1/√N) convergence independent of dimension, making it the only practical integration method for the high-dimensional integrals that appear throughout probabilistic ML, Bayesian inference, and reinforcement learning.</p>
+<h2>Core Definition — Monte Carlo Integration</h2>
+<p>To estimate E_p[f(X)] = ∫ f(x) p(x) dx, draw N independent samples x₁, …, xₙ ~ p(X) and compute:</p>
+<p>Ê[f] = (1/N) Σᵢ f(xᵢ)</p>
+<p>By the Law of Large Numbers, Ê[f] → E[f] as N → ∞. By the Central Limit Theorem:</p>
+<p>√N (Ê[f] − E[f]) → N(0, Var_p[f(X)])</p>
+<p>So the standard error of the Monte Carlo estimate is:</p>
+<p>SE = √(Var_p[f(X)] / N) = σ_f / √N</p>
+<p>This O(1/√N) convergence rate is slow — to halve the error you need 4× as many samples — but crucially, it is independent of dimension d. For d = 100 features, classical numerical integration with 10 grid points per dimension requires 10^100 function evaluations; Monte Carlo needs the same N regardless of d.</p>
+<pre><code class="language-python">import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+
+rng = np.random.default_rng(42)
+
+# Monte Carlo integration: E[X^2] where X ~ Uniform(0,1)
+# True value: integral_0^1 x^2 dx = 1/3
+true_val = 1.0 / 3.0
+print(&quot;=== MC Integration: E[X^2], X~Uniform(0,1) ===&quot;)
+print(f&quot;True value: {true_val:.8f}&quot;)
+
+for N in [100, 1_000, 10_000, 100_000, 1_000_000]:
+    samples = rng.uniform(0, 1, N)
+    estimate = np.mean(samples**2)
+    se = np.std(samples**2, ddof=1) / np.sqrt(N)
+    error = abs(estimate - true_val)
+    print(f&quot;  N={N:&gt;9,}: estimate={estimate:.6f}  SE={se:.2e}  error={error:.2e}&quot;)
+
+# Convergence rate: error ~ 1/sqrt(N)
+print(&quot;\n=== Convergence Rate Verification ===&quot;)
+N_vals = [100, 1000, 10000, 100000]
+errors = []
+for N in N_vals:
+    n_reps = 200
+    ests = [np.mean(rng.uniform(0,1,N)**2) for _ in range(n_reps)]
+    errors.append(np.std(ests))
+
+for N, err in zip(N_vals, errors):
+    print(f&quot;  N={N:&gt;7,}: empirical SE={err:.4e}  theory={1/(3*np.sqrt(N)):.4e}&quot;)
+
+# MC estimate of pi: fraction of points inside unit circle
+print(&quot;\n=== Monte Carlo for pi ===&quot;)
+N = 1_000_000
+x, y = rng.uniform(-1, 1, N), rng.uniform(-1, 1, N)
+pi_est = 4 * np.mean(x**2 + y**2 &lt;= 1)
+print(f&quot;pi estimate (N={N:,}): {pi_est:.6f}  (true: {np.pi:.6f})&quot;)
+</code></pre>
+<h2>Variance Reduction Techniques</h2>
+<p>The Monte Carlo SE = σ_f / √N can be reduced by decreasing σ_f rather than increasing N. Several techniques achieve this:</p>
+<p><strong>Control variates</strong>: if we know E[g(X)] analytically and g is correlated with f, use the estimator:
+Ê_CV[f] = (1/N) Σ [f(xᵢ) − c(g(xᵢ) − E[g(X)])]
+The optimal constant c* = Cov(f, g) / Var(g) achieves variance reduction of factor 1 − ρ²(f,g).</p>
+<p><strong>Antithetic variates</strong>: use pairs (xᵢ, x̃ᵢ) where x̃ᵢ is the 'reflection' of xᵢ (e.g., for uniform samples, x̃ᵢ = 1 − xᵢ). If f(x) and f(x̃) are negatively correlated, Var(f(x) + f(x̃))/2 &lt; Var(f(x)).</p>
+<p><strong>Stratified sampling</strong>: divide the domain into K strata and draw N/K samples from each. Variance of the estimator is reduced by eliminating between-stratum variability.</p>
+<p><strong>Rao-Blackwellization</strong>: condition on a sufficient statistic to reduce variance without introducing bias: E[f(X,Y)|Y] uses the conditional expectation, which always has variance ≤ Var(f(X,Y)).</p>
+<pre><code class="language-python">import numpy as np
+
+rng = np.random.default_rng(42)
+
+# Target: E[exp(X)] where X~Uniform(0,1)
+# True value: integral_0^1 exp(x) dx = e - 1 ≈ 1.71828
+true_val = np.e - 1.0
+f = np.exp
+
+print(&quot;=== Variance Reduction for E[exp(X)], X~U(0,1) ===&quot;)
+print(f&quot;True value: {true_val:.8f}&quot;)
+
+N = 10_000
+
+# 1. Standard MC
+x_mc = rng.uniform(0, 1, N)
+mc_est = np.mean(f(x_mc))
+mc_se  = np.std(f(x_mc)) / np.sqrt(N)
+print(f&quot;\nStandard MC:      est={mc_est:.6f}  SE={mc_se:.4e}&quot;)
+
+# 2. Antithetic variates: pair x with (1-x)
+x_anti = rng.uniform(0, 1, N // 2)
+y_anti = 1 - x_anti
+anti_vals = (f(x_anti) + f(y_anti)) / 2
+anti_est  = np.mean(anti_vals)
+anti_se   = np.std(anti_vals) / np.sqrt(N // 2)
+print(f&quot;Antithetic:       est={anti_est:.6f}  SE={anti_se:.4e}  &quot;
+      f&quot;speedup={mc_se/anti_se:.1f}x&quot;)
+
+# 3. Control variate: g(x) = x, E[g] = 0.5
+x_cv = rng.uniform(0, 1, N)
+f_cv = f(x_cv)
+g_cv = x_cv
+E_g  = 0.5
+# Optimal c*: regress f on g
+c_star = np.cov(f_cv, g_cv)[0,1] / np.var(g_cv)
+cv_vals = f_cv - c_star * (g_cv - E_g)
+cv_est  = np.mean(cv_vals)
+cv_se   = np.std(cv_vals) / np.sqrt(N)
+print(f&quot;Control variate:  est={cv_est:.6f}  SE={cv_se:.4e}  &quot;
+      f&quot;speedup={mc_se/cv_se:.1f}x  c*={c_star:.4f}&quot;)
+
+# 4. Stratified sampling: 10 strata
+K = 10
+x_strat = np.concatenate([rng.uniform(k/K, (k+1)/K, N//K) for k in range(K)])
+strat_est = np.mean(f(x_strat))
+strat_se  = np.std([np.mean(f(rng.uniform(k/K, (k+1)/K, N//K))) for k in range(K)]) / np.sqrt(K)
+print(f&quot;Stratified:       est={strat_est:.6f}  SE={strat_se:.4e}  speedup={mc_se/strat_se:.1f}x&quot;)
+</code></pre>
+<h2>Quasi-Monte Carlo and Low-Discrepancy Sequences</h2>
+<p>Standard Monte Carlo uses pseudo-random samples that can cluster or leave gaps by chance, even with good random number generators. Quasi-Monte Carlo (QMC) replaces random samples with deterministic low-discrepancy sequences — sequences designed to cover the domain as uniformly as possible.</p>
+<p>Sobol sequences are the most widely used: they achieve discrepancy O((log N)^d / N), leading to convergence rates approaching O(1/N) for smooth integrands — much faster than O(1/√N). However, the advantage diminishes in high dimensions (d &gt; 20 or so) because the (log N)^d factor becomes large.</p>
+<p>Halton sequences use different primes for each dimension. Lattice rules (rank-1 lattices) are popular for Bayesian integration. PyTorch includes torch.quasirandom.SobolEngine for QMC sampling, making it easy to use in ML experiments (hyperparameter search, integration in normalizing flows).</p>
+<pre><code class="language-python">import numpy as np
+from scipy.stats.qmc import Sobol, Halton
+import warnings; warnings.filterwarnings('ignore')
+
+rng = np.random.default_rng(42)
+
+# Compare random MC vs Sobol QMC for pi estimation
+def estimate_pi(samples_2d):
+    x, y = samples_2d[:, 0], samples_2d[:, 1]
+    return 4 * np.mean(x**2 + y**2 &lt;= 1)
+
+print(&quot;=== MC vs QMC: estimating pi ===&quot;)
+for N in [256, 1024, 4096, 16384]:
+    # Random MC
+    mc_samples  = rng.uniform(0, 1, (N, 2))
+    mc_pi       = estimate_pi(mc_samples)
+    mc_err      = abs(mc_pi - np.pi)
+
+    # Sobol QMC
+    sobol = Sobol(d=2, scramble=True, seed=42)
+    qmc_samples = sobol.random(N)
+    qmc_pi  = estimate_pi(qmc_samples)
+    qmc_err = abs(qmc_pi - np.pi)
+
+    print(f&quot;  N={N:&gt;6,}: MC_err={mc_err:.4f}  QMC_err={qmc_err:.4f}  ratio={mc_err/qmc_err:.1f}x&quot;)
+
+# Sobol for hyperparameter search (better coverage than random grid)
+print(&quot;\n=== Sobol for 3D Hyperparameter Search ===&quot;)
+sobol3 = Sobol(d=3, scramble=True, seed=0)
+hp_samples = sobol3.random(16)  # 16 configs in [0,1]^3
+# Map to actual hyperparameter ranges
+lr     = 10 ** (hp_samples[:, 0] * (-4) + (-2))  # [1e-4, 1e-2] log-scale
+wd     = 10 ** (hp_samples[:, 1] * (-6) + (-2))  # [1e-6, 1e-2] log-scale
+drop   = hp_samples[:, 2] * 0.5                   # [0, 0.5]
+for i in range(4):
+    print(f&quot;  config {i}: lr={lr[i]:.2e}  wd={wd[i]:.2e}  dropout={drop[i]:.3f}&quot;)
+</code></pre>
+<h2>Monte Carlo Policy Evaluation (RL)</h2>
+<p>In reinforcement learning, Monte Carlo (MC) policy evaluation estimates the value function V^π(s) = E[G_t | S_t = s] by averaging the actual returns G_t observed from state s when following policy π. Unlike temporal difference (TD) methods, MC uses full episode returns and does not bootstrap.</p>
+<p>For episodic MDPs:
+1. Generate episode: S₀, A₀, R₁, S₁, A₁, R₂, …, S_T following policy π
+2. Compute returns: G_t = R_{t+1} + γ R_{t+2} + … + γ^{T-t-1} R_T
+3. Update: V(S_t) ← V(S_t) + α(G_t − V(S_t))  [incremental mean]</p>
+<p>Every-visit MC averages over all visits to state s in all episodes. First-visit MC averages only the first visit per episode (gives unbiased estimate of V^π(s)). MC is unbiased but high-variance; TD is biased but lower-variance. The bias-variance tradeoff between MC and TD is controlled by n-step returns and λ in TD(λ).</p>
+<pre><code class="language-python">import numpy as np
+
+# Simple GridWorld MDP for Monte Carlo policy evaluation
+class GridWorld:
+    &quot;&quot;&quot;4x4 grid, absorbing corners at (0,0) and (3,3), reward -1 per step.&quot;&quot;&quot;
+    def __init__(self, size=4):
+        self.size = size
+        self.terminal = {(0,0), (size-1, size-1)}
+        self.actions = [(0,1),(0,-1),(1,0),(-1,0)]  # R,L,D,U
+
+    def step(self, state, action):
+        if state in self.terminal:
+            return state, 0.0, True
+        r, c = state
+        dr, dc = action
+        nr, nc = np.clip(r+dr, 0, self.size-1), np.clip(c+dc, 0, self.size-1)
+        new_state = (nr, nc)
+        done = new_state in self.terminal
+        return new_state, -1.0, done
+
+def generate_episode(env, policy, max_steps=200):
+    &quot;&quot;&quot;Generate one episode following policy.&quot;&quot;&quot;
+    s = (np.random.randint(env.size), np.random.randint(env.size))
+    while s in env.terminal:
+        s = (np.random.randint(env.size), np.random.randint(env.size))
+    trajectory = []
+    for _ in range(max_steps):
+        a = policy(s)
+        s_next, r, done = env.step(s, a)
+        trajectory.append((s, a, r))
+        s = s_next
+        if done: break
+    return trajectory
+
+def mc_policy_evaluation(env, policy, n_episodes=5000, gamma=0.99):
+    &quot;&quot;&quot;First-visit Monte Carlo policy evaluation.&quot;&quot;&quot;
+    V = {}; returns = {}
+    for ep in range(n_episodes):
+        traj = generate_episode(env, policy)
+        G = 0.0
+        visited = set()
+        for s, a, r in reversed(traj):
+            G = r + gamma * G
+            if s not in visited:  # first-visit
+                visited.add(s)
+                returns.setdefault(s, []).append(G)
+                V[s] = np.mean(returns[s])
+    return V
+
+np.random.seed(42)
+env = GridWorld(4)
+# Random policy: uniform over 4 actions
+policy = lambda s: env.actions[np.random.randint(4)]
+
+V = mc_policy_evaluation(env, policy, n_episodes=10000)
+print(&quot;=== Value Function (random policy, gamma=0.99) ===&quot;)
+grid = np.zeros((4, 4))
+for (r, c), v in V.items():
+    grid[r, c] = v
+for i, row in enumerate(grid):
+    print(f&quot;  row {i}: {[f'{v:6.1f}' for v in row]}&quot;)
+print(&quot;  (0,0) and (3,3) are terminal states with value 0)&quot;)
+</code></pre>
+<h2>Pitfalls</h2>
+<p>Common Monte Carlo mistakes:</p>
+<ol>
+<li>
+<p><strong>Insufficient samples for high-variance integrands</strong>: if f(x) has heavy tails, the empirical variance estimate is unreliable and SE estimates are too optimistic. Check for outliers.</p>
+</li>
+<li>
+<p><strong>Correlated samples without accounting for it</strong>: MCMC samples are correlated. Treating them as independent underestimates the true SE by up to √(2τ) where τ is the autocorrelation time.</p>
+</li>
+<li>
+<p><strong>Using QMC when samples are not i.i.d.</strong>: Sobol and Halton sequences are designed for integration, not for probabilistic sampling. Using them as 'random' samples in probabilistic algorithms (e.g., Bayesian optimisation acquisition) can give overconfident estimates.</p>
+</li>
+<li>
+<p><strong>Forgetting that 1/√N convergence is slow</strong>: going from 1% to 0.1% error requires 100× more samples. Variance reduction techniques or better estimators are often more cost-effective than brute-force sample increase.</p>
+</li>
+</ol>
+<h2>Practical Guidance</h2>
+<p>Guidelines for Monte Carlo in ML:</p>
+<ul>
+<li><strong>Always estimate the SE</strong>: report SE = std(f(xᵢ)) / √N alongside the estimate. If SE &gt; desired accuracy, increase N or apply variance reduction.</li>
+<li><strong>For hyperparameter search</strong>: use Sobol sequences instead of random search — same number of evaluations, better coverage, especially for d ≤ 20 dimensions.</li>
+<li><strong>For integration in deep learning</strong> (ELBO estimation, policy gradient): use control variates (e.g., baseline subtraction in REINFORCE) to reduce gradient variance.</li>
+<li><strong>For MCMC</strong>: compute the effective sample size ESS = N / (1 + 2 Σₖ ρₖ) where ρₖ is the lag-k autocorrelation. ESS &lt;&lt; N indicates poor mixing and inflated SE.</li>
+</ul>
+<blockquote>
+<p><strong>TIP: Control Variates in REINFORCE</strong></p>
+<p>The REINFORCE gradient estimator ∇θ E[R] = E[R ∇θ log π(a|s,θ)] has high variance. Subtracting a baseline b(s) (control variate): ∇θ E[R] = E[(R − b(s)) ∇θ log π(a|s,θ)]. The baseline does not bias the gradient because E[b(s) ∇θ log π] = 0. A common choice is the value function estimate V(s) as the baseline — this is the advantage actor-critic method.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Convergence</th>
+<th>Strengths</th>
+<th>Weaknesses</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Standard MC</td>
+<td>O(1/√N)</td>
+<td>Simple, unbiased, dimension-free</td>
+<td>High variance for smooth integrands</td>
+</tr>
+<tr>
+<td>Control variates</td>
+<td>Better O(1/√N)</td>
+<td>Can give 10x+ speedup</td>
+<td>Requires correlated estimator with known mean</td>
+</tr>
+<tr>
+<td>Antithetic variates</td>
+<td>Better O(1/√N)</td>
+<td>Easy to implement</td>
+<td>Only works for monotone integrands</td>
+</tr>
+<tr>
+<td>Stratified sampling</td>
+<td>O(1/N) for 1D</td>
+<td>Guaranteed coverage</td>
+<td>Hard to extend to high dimensions</td>
+</tr>
+<tr>
+<td>Sobol QMC</td>
+<td>~O(1/N)</td>
+<td>Best for d&lt;20, smooth f</td>
+<td>Not probabilistically valid samples</td>
+</tr>
+<tr>
+<td>MCMC (Metropolis)</td>
+<td>O(1/√N_eff)</td>
+<td>Can sample from unnormalised p</td>
+<td>Correlated samples; slow mixing</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>Key Takeaways</h2>
+<ul>
+<li>MC integration: Ê[f] = (1/N) Σ f(xᵢ) with xᵢ~p converges at O(1/√N) independent of dimension — the key advantage over classical quadrature.</li>
+<li>SE = σ_f / √N: to halve the error requires 4× samples; variance reduction is often more cost-effective than increasing N.</li>
+<li>Control variates (subtract a term with known expectation), antithetic variates (use paired reflections), and stratified sampling all reduce variance without increasing N.</li>
+<li>Sobol quasi-Monte Carlo achieves ~O(1/N) convergence for smooth d&lt;20 integrands by replacing random samples with low-discrepancy deterministic sequences.</li>
+<li>In RL, first-visit Monte Carlo policy evaluation averages full episode returns from each first visit to a state — unbiased but high variance compared to TD methods.</li>
+<li>Always report SE alongside MC estimates; for MCMC samples compute ESS to account for autocorrelation before interpreting the SE.</li>
+<li>Control variates appear in RL as baselines (advantage actor-critic), in variational inference as variance reduction for ELBO gradient estimates.</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

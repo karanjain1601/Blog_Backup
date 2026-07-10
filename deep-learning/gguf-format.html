@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GGUF Format and llama.cpp Quantization | Notes Backup</title>
+  <meta name="description" content="The GGUF file format for portable LLM quantization and the quantization types Q2_K through Q8_0 used by llama.cpp for CPU and GPU inference." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>GGUF Format and llama.cpp Quantization</h1>
+      <ul class='note-meta'><li><strong>description:</strong> The GGUF file format for portable LLM quantization and the quantization types Q2_K through Q8_0 used by llama.cpp for CPU and GPU inference.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>GGUF Format and llama.cpp Quantization</h1>
+<p>GGUF (GPT-Generated Unified Format) is the binary file format used by llama.cpp to store quantized large language models. Introduced in August 2023 as the successor to GGML, GGUF resolves the backwards-compatibility problems of its predecessor by embedding all model metadata — tokenizer vocabulary, hyperparameters, tensor names, and quantization type — directly in the file header. A single GGUF file is fully self-contained: you can load it on any platform supported by llama.cpp without separately downloading a config or tokenizer. This portability has made GGUF the dominant format for running quantized LLMs locally on consumer hardware.</p>
+<h2>Overview</h2>
+<p>llama.cpp implements a family of quantization schemes ranging from 2-bit (Q2_K) to 8-bit (Q8_0), each trading model size and speed against perplexity degradation. The K-quant family (Q2_K, Q3_K_M, Q4_K_M, Q5_K_M, Q6_K) uses a two-level super-block structure and mixed-precision blocks to achieve better accuracy than the legacy integer quants at similar bit rates. The typical workflow is: (1) download or train a model in HuggingFace format; (2) convert to F16 GGUF using convert_hf_to_gguf.py; (3) quantize to a target type using the llama-quantize binary; (4) run inference with llama-cli or via the llama-cpp-python Python bindings.</p>
+<h2>GGUF File Structure</h2>
+<p>A GGUF file starts with a fixed header: a 4-byte magic number (0x46554747, i.e. 'GGUF'), a uint32 version field (currently 3), and counts of tensors and key-value metadata entries. The metadata section stores arbitrary typed key-value pairs — model architecture, context length, rope parameters, tokenizer vocabulary, special token IDs, and more. Tensors are listed in a tensor info section (name, shape, dtype, byte offset) before the actual tensor data, which is stored contiguously and aligned to 32 bytes. This alignment allows memory-mapping the file directly for zero-copy loading on supported systems.</p>
+<ul>
+<li>Magic: 0x46554747 ('GGUF') — identifies the file as GGUF regardless of extension.</li>
+<li>Version: uint32, currently 3 — GGUF v1/v2 files from 2023 require conversion for modern llama.cpp.</li>
+<li>n_tensors / n_kv: counts used to parse the tensor info and metadata sections.</li>
+<li>Metadata KV pairs: general.architecture, general.name, llama.context_length, tokenizer.ggml.model, tokenizer.ggml.tokens, tokenizer.ggml.scores.</li>
+<li>Tensor data section: 32-byte aligned; amenable to mmap for fast load and partial GPU offload.</li>
+<li>Quantization type stored per tensor: each tensor independently records its ggml_type enum value.</li>
+</ul>
+<h2>Quantization Types: Q4_K_M and Friends</h2>
+<p>The llama.cpp quantization type system distinguishes legacy quants (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0) from the modern K-quants (Q2_K, Q3_K_M/S, Q4_K_M/S, Q5_K_M/S, Q6_K). Legacy quants use a flat block of 32 weights with a single scale and optional bias. K-quants group 256 weights into a super-block, within which 8 sub-blocks of 32 each carry their own scale; the super-block scales are stored at higher precision. This hierarchical structure captures local variation in weight magnitude better than a single global scale. The M/S suffixes (medium/small) in K-quants control which tensor layers get the higher-precision quantization treatment: M keeps attention and feed-forward output matrices at slightly higher quality.</p>
+<table>
+<thead>
+<tr>
+<th>Quant Type</th>
+<th>Bits/Weight</th>
+<th>Size (7B)</th>
+<th>PPL Increase vs F16</th>
+<th>Use Case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Q2_K</td>
+<td>2.63</td>
+<td>~2.7 GB</td>
+<td>+5.0 – 8.0</td>
+<td>Extreme compression, acceptable quality loss, very constrained RAM</td>
+</tr>
+<tr>
+<td>Q3_K_M</td>
+<td>3.35</td>
+<td>~3.4 GB</td>
+<td>+1.5 – 3.0</td>
+<td>RAM-limited devices where Q4 does not fit; noticeable quality degradation</td>
+</tr>
+<tr>
+<td>Q4_K_M</td>
+<td>4.50</td>
+<td>~4.6 GB</td>
+<td>+0.1 – 0.2</td>
+<td>Community default; best accuracy/size tradeoff for most 7B–13B models</td>
+</tr>
+<tr>
+<td>Q5_K_M</td>
+<td>5.50</td>
+<td>~5.7 GB</td>
+<td>+0.05 – 0.1</td>
+<td>High quality; use when RAM permits and Q4_K_M PPL is measurably worse</td>
+</tr>
+<tr>
+<td>Q6_K</td>
+<td>6.56</td>
+<td>~6.7 GB</td>
+<td>+0.01 – 0.05</td>
+<td>Near-lossless; justified only on very large models or sensitive tasks</td>
+</tr>
+<tr>
+<td>Q8_0</td>
+<td>8.50</td>
+<td>~8.7 GB</td>
+<td>~0.0</td>
+<td>Reference quality for benchmarking; rarely needed over Q6_K in practice</td>
+</tr>
+<tr>
+<td>F16</td>
+<td>16.00</td>
+<td>~14.0 GB</td>
+<td>0.0 (baseline)</td>
+<td>Full precision; GPU inference, fine-tuning starting point, conversion source</td>
+</tr>
+</tbody>
+</table>
+<h2>K-Quants vs Legacy</h2>
+<p>Legacy quants (Q4_0, Q5_0) use a simple block size of 32 with one float32 scale per block. K-quants use a super-block of 256 weights subdivided into 8 blocks of 32, with scales stored at 6-bit precision in the super-block header. The critical difference is that K-quants allow the quantization grid to adapt to local weight statistics within the super-block, rather than assuming a single scale works for all 256 weights. Empirically, Q4_K_M delivers 0.2–0.5 lower perplexity than Q4_0 on Llama-2 7B at nearly the same model size. For new GGUF files, legacy quants exist mainly for compatibility with older inference engines; the K-quant variants are strictly better and should be the default choice.</p>
+<h2>Conversion from HuggingFace</h2>
+<p>Converting a HuggingFace checkpoint to GGUF is a two-step process. First, convert_hf_to_gguf.py (in the llama.cpp repo) reads the HuggingFace model directory and writes an F16 GGUF file — this is lossless. Second, the llama-quantize binary reads the F16 GGUF and writes a quantized GGUF to a target quant type. The quantize step is fast (minutes on CPU) and operates entirely on the GGUF file, so the original HuggingFace weights can be deleted after conversion.</p>
+<pre><code class="language-python">import subprocess
+import os
+from pathlib import Path
+
+def convert_and_quantize(
+    hf_model_dir: str,
+    output_dir: str,
+    quant_type: str = &quot;Q4_K_M&quot;,
+    llama_cpp_dir: str = &quot;/opt/llama.cpp&quot;
+) -&gt; str:
+    &quot;&quot;&quot;Convert a HuggingFace model to GGUF and quantize to target type.&quot;&quot;&quot;
+    llama_path = Path(llama_cpp_dir)
+    out_path = Path(output_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    # Step 1: HF -&gt; F16 GGUF (lossless)
+    f16_gguf = out_path / &quot;model-f16.gguf&quot;
+    convert_script = llama_path / &quot;convert_hf_to_gguf.py&quot;
+    print(f&quot;[1/2] Converting {hf_model_dir} -&gt; {f16_gguf}&quot;)
+    result = subprocess.run(
+        [&quot;python3&quot;, str(convert_script), hf_model_dir,
+         &quot;--outfile&quot;, str(f16_gguf), &quot;--outtype&quot;, &quot;f16&quot;],
+        capture_output=True, text=True, check=True
+    )
+    f16_size = f16_gguf.stat().st_size / 1e9
+    print(f&quot;    F16 GGUF: {f16_size:.2f} GB&quot;)
+
+    # Step 2: F16 GGUF -&gt; quantized GGUF
+    quant_gguf = out_path / f&quot;model-{quant_type}.gguf&quot;
+    quantize_bin = llama_path / &quot;build&quot; / &quot;bin&quot; / &quot;llama-quantize&quot;
+    print(f&quot;[2/2] Quantizing to {quant_type} -&gt; {quant_gguf}&quot;)
+    result = subprocess.run(
+        [str(quantize_bin), str(f16_gguf), str(quant_gguf), quant_type],
+        capture_output=True, text=True, check=True
+    )
+    q_size = quant_gguf.stat().st_size / 1e9
+    ratio = f16_size / q_size
+    print(f&quot;    Quantized: {q_size:.2f} GB  (compression {ratio:.1f}x)&quot;)
+    return str(quant_gguf)
+
+if __name__ == &quot;__main__&quot;:
+    out = convert_and_quantize(&quot;./mistral-7b-v0.1&quot;, &quot;./gguf-out&quot;, &quot;Q4_K_M&quot;)
+    print(f&quot;Done: {out}&quot;)
+</code></pre>
+<h2>Running with llama.cpp</h2>
+<p>The llama-cpp-python package provides Python bindings for llama.cpp, enabling loading GGUF models directly in Python. The Llama class accepts the model path plus hardware parameters: n_gpu_layers controls how many transformer layers are offloaded to GPU (Metal on Apple Silicon, CUDA on NVIDIA). Setting n_gpu_layers=-1 offloads all layers. The n_ctx parameter sets the context window size. Generation returns token-by-token with optional streaming.</p>
+<pre><code class="language-python">import time
+from llama_cpp import Llama
+
+def load_and_generate(
+    model_path: str,
+    prompt: str,
+    n_gpu_layers: int = 0,
+    n_ctx: int = 2048,
+    max_tokens: int = 128
+) -&gt; dict:
+    &quot;&quot;&quot;Load a GGUF model and run generation, reporting tokens/second.&quot;&quot;&quot;
+    print(f&quot;Loading {model_path} (n_gpu_layers={n_gpu_layers})...&quot;)
+    llm = Llama(
+        model_path=model_path,
+        n_gpu_layers=n_gpu_layers,
+        n_ctx=n_ctx,
+        verbose=False
+    )
+    # Warmup pass
+    _ = llm(prompt, max_tokens=4, echo=False)
+
+    # Timed generation
+    t0 = time.perf_counter()
+    output = llm(prompt, max_tokens=max_tokens, echo=False, temperature=0.0)
+    elapsed = time.perf_counter() - t0
+
+    n_tokens = output[&quot;usage&quot;][&quot;completion_tokens&quot;]
+    tps = n_tokens / elapsed
+    text = output[&quot;choices&quot;][0][&quot;text&quot;]
+    print(f&quot;Generated {n_tokens} tokens in {elapsed:.2f}s ({tps:.1f} tok/s)&quot;)
+    print(f&quot;Output: {text[:120]}...&quot;)
+    return {&quot;tokens_per_second&quot;: tps, &quot;text&quot;: text}
+
+if __name__ == &quot;__main__&quot;:
+    result = load_and_generate(
+        model_path=&quot;./gguf-out/model-Q4_K_M.gguf&quot;,
+        prompt=&quot;Explain quantization in one paragraph:&quot;,
+        n_gpu_layers=35
+    )
+    print(f&quot;Throughput: {result['tokens_per_second']:.1f} tok/s&quot;)
+</code></pre>
+<pre><code class="language-python">import time
+import math
+from llama_cpp import Llama
+
+# Benchmark multiple quant types — perplexity estimation via log-likelihood
+QUANT_TYPES = [&quot;Q2_K&quot;, &quot;Q3_K_M&quot;, &quot;Q4_K_M&quot;, &quot;Q5_K_M&quot;, &quot;Q8_0&quot;]
+MODEL_DIR = &quot;./gguf-out&quot;
+
+SAMPLE_TEXT = (
+    &quot;The transformer architecture relies on self-attention mechanisms &quot;
+    &quot;to capture long-range dependencies in sequences. Each attention head &quot;
+    &quot;independently learns to focus on different positions, and their outputs &quot;
+    &quot;are concatenated and projected back to the model dimension.&quot;
+)
+
+results = []
+for qtype in QUANT_TYPES:
+    model_path = f&quot;{MODEL_DIR}/model-{qtype}.gguf&quot;
+    try:
+        llm = Llama(model_path=model_path, n_ctx=512, verbose=False)
+        # Log-likelihood of sample text as PPL proxy
+        tokens = llm.tokenize(SAMPLE_TEXT.encode())
+        log_likelihood = llm.score(tokens, add_bos=True)
+        ppl_estimate = math.exp(-log_likelihood / max(len(tokens) - 1, 1))
+        # Measure generation speed
+        t0 = time.perf_counter()
+        _ = llm(SAMPLE_TEXT[:80], max_tokens=32, echo=False)
+        tps = 32 / (time.perf_counter() - t0)
+        results.append((qtype, ppl_estimate, tps))
+        print(f&quot;{qtype:&lt;12} PPL={ppl_estimate:6.2f}  {tps:6.1f} tok/s&quot;)
+        del llm
+    except FileNotFoundError:
+        print(f&quot;{qtype:&lt;12} model not found at {model_path}&quot;)
+
+print(&quot;\nSummary (sorted by PPL):&quot;)
+for qtype, ppl, tps in sorted(results, key=lambda x: x[1]):
+    print(f&quot;  {qtype}: PPL={ppl:.2f}, speed={tps:.1f} tok/s&quot;)
+</code></pre>
+<pre><code class="language-python">import time
+from llama_cpp import Llama
+
+def benchmark_gpu_offload(
+    model_path: str,
+    prompt: str = &quot;The capital of France is&quot;,
+    max_tokens: int = 64
+):
+    &quot;&quot;&quot;Compare CPU-only, partial GPU, and full GPU offload throughput.&quot;&quot;&quot;
+    configs = [
+        {&quot;label&quot;: &quot;CPU only&quot;,      &quot;n_gpu_layers&quot;: 0},
+        {&quot;label&quot;: &quot;Partial GPU&quot;,   &quot;n_gpu_layers&quot;: 16},
+        {&quot;label&quot;: &quot;Full GPU&quot;,      &quot;n_gpu_layers&quot;: -1},
+    ]
+    results = []
+    for cfg in configs:
+        llm = Llama(
+            model_path=model_path,
+            n_gpu_layers=cfg[&quot;n_gpu_layers&quot;],
+            n_ctx=512, verbose=False
+        )
+        # Warmup
+        _ = llm(prompt, max_tokens=4, echo=False)
+        t0 = time.perf_counter()
+        out = llm(prompt, max_tokens=max_tokens, echo=False, temperature=0.0)
+        elapsed = time.perf_counter() - t0
+        n_tok = out[&quot;usage&quot;][&quot;completion_tokens&quot;]
+        tps = n_tok / elapsed
+        results.append((cfg[&quot;label&quot;], cfg[&quot;n_gpu_layers&quot;], tps))
+        print(f&quot;{cfg['label']:&lt;14} layers={cfg['n_gpu_layers']:&gt;3}  {tps:6.1f} tok/s&quot;)
+        del llm
+    best = max(results, key=lambda x: x[2])
+    print(f&quot;\nBest: {best[0]} at {best[2]:.1f} tok/s&quot;)
+    return results
+
+benchmark_gpu_offload(&quot;./gguf-out/model-Q4_K_M.gguf&quot;)
+</code></pre>
+<h2>Memory and Speed Tradeoffs</h2>
+<p>The dominant factor in GGUF model performance is whether the entire model fits in GPU VRAM. When all layers are offloaded to GPU, inference runs at GPU memory bandwidth (typically 400–900 GB/s on modern consumer GPUs), delivering 50–150 tokens/second for a 7B model. When layers spill to CPU RAM, each layer transition incurs PCIe bandwidth overhead (typically 32–64 GB/s), dropping throughput substantially. On Apple Silicon, the unified memory architecture eliminates this distinction: Metal-backed llama.cpp runs GGUF models in unified RAM with GPU-like bandwidth. For CPU-only inference on x86, Q4_K_M is usually the fastest quant type because its 4.5-bit representation maximises the amount of model that fits in L3 cache relative to compute time.</p>
+<blockquote>
+<p><strong>Q4_K_M Community Default</strong>: Q4_K_M is the community default for good reason: it hits the sweet spot of 4.5 bits per weight on average while keeping perplexity within 0.1–0.2 of FP16 for most models. Unless you are severely RAM-constrained (use Q3_K_M) or need near-lossless quality (use Q6_K), Q4_K_M is the right choice for 7B and 13B models.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<ul>
+<li>GGUF is self-contained: tokenizer, architecture metadata, and quantized tensors are all in one file — no separate config download.</li>
+<li>Conversion is two steps: HF -&gt; F16 GGUF (convert_hf_to_gguf.py), then F16 GGUF -&gt; quantized GGUF (llama-quantize).</li>
+<li>K-quants outperform legacy quants at the same bit rate; always prefer Q4_K_M over Q4_0 for new GGUF files.</li>
+<li>Q4_K_M: 4.5 bits/weight, ~4.6 GB for 7B models, PPL within 0.1–0.2 of F16 — the community default.</li>
+<li>Use n_gpu_layers=-1 in llama-cpp-python to offload all layers to GPU; partial offload is useful when VRAM is insufficient.</li>
+<li>On Apple Silicon (Metal), llama.cpp uses unified memory — Q4_K_M 7B models run at 50–80 tok/s on M1/M2 without a discrete GPU.</li>
+<li>Q8_0 is a lossless-quality reference quant; only justified for benchmarking or when GPU VRAM exceeds model size in F16.</li>
+<li>Monitor RAM usage with n_ctx: a 7B Q4_K_M model uses ~4.6 GB for weights plus context KV cache (~0.5 GB per 2048 tokens at fp16).</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

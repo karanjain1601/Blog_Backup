@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Task Arithmetic — Adding and Negating Fine-Tuned Weight Deltas | Notes Backup</title>
+  <meta name="description" content="Task vectors encode task-specific knowledge as the weight difference between a fine-tuned and pretrained model. Covers task vector addition for multi-task capability, scaling with lambda, negation for capability removal, analogy operations, and orthogonality analysis explaining low interference." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Task Arithmetic — Adding and Negating Fine-Tuned Weight Deltas</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Task vectors encode task-specific knowledge as the weight difference between a fine-tuned and pretrained model. Covers task vector addition for multi-task capability, scaling with lambda, negation for capability removal, analogy operations, and orthogonality analysis explaining low interference.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Task Arithmetic — Adding and Negating Fine-Tuned Weight Deltas</h1>
+<p>Task arithmetic (Ilharco et al., 2023) defines a task vector τ = θ_fine-tuned − θ_pretrained: the element-wise difference between a task-specific fine-tuned model and the original pretrained checkpoint. These vectors live in the same weight space as the model parameters and can be combined algebraically. Adding a task vector to the pretrained model recovers (approximately) the fine-tuned model; adding multiple task vectors endows the pretrained model with multiple capabilities simultaneously; negating a task vector reduces that capability. The surprising finding is that these operations compose more cleanly than expected.</p>
+<h2>Task Vectors — Definition and Extraction</h2>
+<p>For a pretrained model with parameters θ₀, and a model fine-tuned on task T with parameters θ_T, the task vector is τ_T = θ_T − θ₀. This is a vector of the same dimensionality as the model: if the model has 7B parameters, each task vector has 7B elements. Task vectors are dense (not sparse) over all parameter groups — encoder layers, attention projections, FFN weights, and layer norms all accumulate task-specific deltas during fine-tuning. The magnitude of the task vector (‖τ_T‖) reflects the total drift from pretrained to fine-tuned weights.</p>
+<pre><code class="language-python">import torch
+from collections import OrderedDict
+
+def extract_task_vectors(base_state_dict, finetuned_state_dicts, names=None):
+    &quot;&quot;&quot;Compute tau_i = theta_ft_i - theta_base for each fine-tuned model.&quot;&quot;&quot;
+    task_vectors = []
+    for i, ft_sd in enumerate(finetuned_state_dicts):
+        tau = OrderedDict()
+        for key in base_state_dict:
+            tau[key] = ft_sd[key].float() - base_state_dict[key].float()
+        task_vectors.append(tau)
+    return task_vectors
+
+def task_vector_stats(task_vectors, names=None):
+    for i, tv in enumerate(task_vectors):
+        name = names[i] if names else f&quot;Task {i+1}&quot;
+        total_norm = sum(v.norm().item() for v in tv.values())
+        max_delta = max(v.abs().max().item() for v in tv.values())
+        print(f&quot;{name}: total_norm={total_norm:.4f}, max_delta={max_delta:.4f}, layers={len(tv)}&quot;)
+
+torch.manual_seed(42)
+base = {&quot;enc.w&quot;: torch.zeros(8, 8), &quot;head.w&quot;: torch.zeros(4, 8)}
+ft_dicts = [
+    {&quot;enc.w&quot;: base[&quot;enc.w&quot;] + torch.randn(8,8)*0.15, &quot;head.w&quot;: base[&quot;head.w&quot;] + torch.randn(4,8)*0.2},
+    {&quot;enc.w&quot;: base[&quot;enc.w&quot;] + torch.randn(8,8)*0.12, &quot;head.w&quot;: base[&quot;head.w&quot;] + torch.randn(4,8)*0.18},
+    {&quot;enc.w&quot;: base[&quot;enc.w&quot;] + torch.randn(8,8)*0.10, &quot;head.w&quot;: base[&quot;head.w&quot;] + torch.randn(4,8)*0.22},
+]
+tvs = extract_task_vectors(base, ft_dicts)
+task_vector_stats(tvs, names=[&quot;Sentiment&quot;, &quot;NER&quot;, &quot;QA&quot;])
+print(&quot;Task vectors: each encodes task drift from the shared pretrained base.&quot;)
+</code></pre>
+<h2>Task Vector Addition — Multi-Task Composition</h2>
+<p>Adding task vectors combines capabilities: θ_multi = θ₀ + λ₁τ₁ + λ₂τ₂ + ... + λ_nτ_n. The scalar λ controls how strongly each task is incorporated. At λ=0 the base model is unchanged; at λ=1 the full task vector is applied; at λ&gt;1 the task is extrapolated beyond the fine-tuned optimum. In practice, λ in [0.5, 1.0] works well for most tasks; values above 1.5 often overshoot and degrade general capabilities. The key insight from Ilharco et al. is that task vectors for semantically distinct NLP tasks (sentiment, NER, QA) are approximately orthogonal, so their sum has low interference.</p>
+<pre><code class="language-python">import torch
+from collections import OrderedDict
+
+def apply_task_arithmetic(base_sd, task_vectors, lambdas):
+    &quot;&quot;&quot;Apply task arithmetic: theta = theta_base + sum(lambda_i * tau_i).&quot;&quot;&quot;
+    assert len(task_vectors) == len(lambdas)
+    merged = OrderedDict()
+    for key in base_sd:
+        delta = sum(lam * tv[key].float() for lam, tv in zip(lambdas, task_vectors))
+        merged[key] = base_sd[key].float() + delta
+    return merged
+
+def task_benchmark(model_sd, task_name, metric_fn):
+    score = metric_fn(model_sd)
+    print(f&quot;  [{task_name}]: {score:.4f}&quot;)
+    return score
+
+torch.manual_seed(0)
+base = {&quot;w&quot;: torch.zeros(6)}
+tau_code = {&quot;w&quot;: torch.tensor([0.5, 0.3, -0.1, 0.2, 0.4, 0.1])}
+tau_math = {&quot;w&quot;: torch.tensor([0.2, -0.1, 0.6, 0.3, -0.2, 0.4])}
+
+print(&quot;Sweeping lambda for single-task addition:&quot;)
+for lam in [0.0, 0.25, 0.5, 1.0, 1.5]:
+    result = apply_task_arithmetic(base, [tau_code], [lam])
+    print(f&quot;  lambda={lam}: w={[round(v,3) for v in result['w'].tolist()]}&quot;)
+
+print(&quot;\nMulti-task addition (lambda=1.0 for both):&quot;)
+multi = apply_task_arithmetic(base, [tau_code, tau_math], [1.0, 1.0])
+print(f&quot;  combined w={[round(v,3) for v in multi['w'].tolist()]}&quot;)
+print(&quot;Sum of orthogonal task vectors composes with low interference.&quot;)
+</code></pre>
+<h2>Scaling and Extrapolation</h2>
+<p>The scalar λ is a continuous knob over task strength. At λ=0, the model is the pretrained base. At λ=1, the model equals the fine-tuned checkpoint (in the weight-space approximation). At λ&gt;1, the task is extrapolated: the model is pushed further along the direction of the task vector than the fine-tuned model itself reached. Extrapolation (λ&gt;1) sometimes yields better performance on in-distribution tasks than the fine-tuned model, because it amplifies the task-specific direction while suppressing generalist features. However, extrapolation degrades robustness on out-of-distribution inputs and is sensitive to λ.</p>
+<h2>Negation — Unlearning a Capability</h2>
+<p>Subtracting a task vector removes the corresponding capability: θ_negated = θ₀ − λ · τ_harmful. This is useful for alignment: if a model has a harmful capability (e.g., producing toxic text), you can fine-tune a small dataset to extract the harmful task vector, then subtract it from the aligned model. The result reduces harmful outputs without requiring full retraining. The antidote approach adds a negated harmful task vector to an aligned model rather than retraining with filtered data. Ilharco et al. show that negating a task vector for sentiment classification reduces accuracy on sentiment benchmarks by 20–30% while leaving unrelated tasks largely unaffected.</p>
+<pre><code class="language-python">import torch
+from collections import OrderedDict
+
+def negate_capability(base_sd, task_vector, scale=1.0):
+    &quot;&quot;&quot;Subtract task vector: theta = theta_base - scale * tau (capability removal).&quot;&quot;&quot;
+    negated = OrderedDict()
+    for key in base_sd:
+        negated[key] = base_sd[key].float() - scale * task_vector[key].float()
+    return negated
+
+def measure_capability(model_sd, probe_key, probe_direction):
+    &quot;&quot;&quot;Proxy: dot product with probe direction measures task alignment.&quot;&quot;&quot;
+    w = model_sd[probe_key].float().flatten()
+    return (w * probe_direction).sum().item()
+
+torch.manual_seed(7)
+base = {&quot;w&quot;: torch.randn(8)}
+tau_harmful = {&quot;w&quot;: torch.randn(8) * 0.4}
+probe = tau_harmful[&quot;w&quot;] / tau_harmful[&quot;w&quot;].norm()  # probe aligned with harmful direction
+
+print(&quot;Capability score (higher = more harmful alignment):&quot;)
+print(f&quot;  Base model: {measure_capability(base, 'w', probe):.4f}&quot;)
+for scale in [0.5, 1.0, 1.5, 2.0]:
+    neg = negate_capability(base, tau_harmful, scale=scale)
+    print(f&quot;  After negation (scale={scale:.1f}): {measure_capability(neg, 'w', probe):.4f}&quot;)
+print(&quot;Negation progressively removes the capability; scale controls aggressiveness.&quot;)
+</code></pre>
+<h2>Orthogonality Analysis — Why Addition Works</h2>
+<p>Task arithmetic addition is interference-free when task vectors are orthogonal: if τ_A · τ_B = 0, then ‖τ_A + τ_B‖² = ‖τ_A‖² + ‖τ_B‖². In practice, task vectors for NLP tasks with different label spaces (sentiment vs NER vs QA) have pairwise cosine similarities below 0.1 — nearly orthogonal. This near-orthogonality breaks down for semantically related tasks (e.g., two different sentiment datasets) where vectors align strongly. Measuring pairwise cosine similarities before merging is a good diagnostic: high similarity (&gt;0.3) predicts low interference; low similarity (&lt;0.1) predicts effective composition.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def cosine_similarity_matrix(task_vectors, names=None):
+    &quot;&quot;&quot;Compute pairwise cosine similarity between flattened task vectors.&quot;&quot;&quot;
+    n = len(task_vectors)
+    flat = [
+        torch.cat([v.float().flatten() for v in tv.values()])
+        for tv in task_vectors
+    ]
+    sim = torch.zeros(n, n)
+    for i in range(n):
+        for j in range(n):
+            sim[i, j] = F.cosine_similarity(flat[i].unsqueeze(0), flat[j].unsqueeze(0))
+    if names:
+        header = f&quot;{'':&gt;14}&quot; + &quot;&quot;.join(f&quot;{name:&gt;14}&quot; for name in names)
+        print(header)
+        for i, name in enumerate(names):
+            row = f&quot;{name:&gt;14}&quot; + &quot;&quot;.join(f&quot;{sim[i,j].item():&gt;14.3f}&quot; for j in range(n))
+            print(row)
+    off_diag = (sim.sum() - sim.trace()) / (n * (n - 1))
+    print(f&quot;Off-diagonal mean cosine similarity: {off_diag.item():.4f}&quot;)
+    return sim
+
+torch.manual_seed(99)
+tvs = [
+    {&quot;enc&quot;: torch.randn(32, 32), &quot;head&quot;: torch.randn(8, 32)}
+    for _ in range(4)
+]
+names = [&quot;Sentiment&quot;, &quot;NER&quot;, &quot;QA&quot;, &quot;Summarization&quot;]
+sim = cosine_similarity_matrix(tvs, names)
+print(&quot;Low off-diagonal values confirm near-orthogonality =&gt; low addition interference.&quot;)
+</code></pre>
+<h2>Limitations and Extensions</h2>
+<p>Task arithmetic degrades as more task vectors are added. With 2–3 tasks, interference is typically below 2% absolute; with 8+ tasks, interference can exceed 10%. The degradation is worse when tasks share similar features — for example, adding 5 different code generation task vectors produces high mutual interference. TIES and DARE extend task arithmetic to reduce this interference. The analogy operation τ_A − τ_B + τ_C transfers task structure: if τ_A is 'English→French translation' and τ_B is 'English→Spanish translation', then τ_C = τ_A − τ_B + τ_Spanish-text captures the translation direction without Spanish-specific bias.</p>
+<ul>
+<li>Task vectors are dense over all parameter groups — not just LoRA-adapted layers; apply to full fine-tunes or merge LoRA BA products first.</li>
+<li>Scaling range: λ ∈ [0.3, 1.0] is safe for most tasks; λ &gt; 1.5 risks degrading general capabilities.</li>
+<li>Orthogonality diagnostic: measure pairwise cosine similarities before merging; &gt;0.3 means high interference risk.</li>
+<li>Negation scale: λ=1.0 for full capability removal; λ=0.5 for partial reduction while preserving related capabilities.</li>
+<li>Analogy (A-B+C): transfers relational task structure; requires τ_A and τ_B to encode the same type of transformation.</li>
+<li>Extension: TIES/DARE improve upon simple task vector addition for cross-task merging with 4+ models.</li>
+</ul>
+<h2>Task Arithmetic Operations Summary</h2>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>Formula</th>
+<th>Effect</th>
+<th>λ Range</th>
+<th>Interference Risk</th>
+<th>Use Case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Addition</td>
+<td>θ₀ + λτ_A</td>
+<td>Add task A capability to base</td>
+<td>0.5–1.0</td>
+<td>Low if orthogonal</td>
+<td>Multi-task composition</td>
+</tr>
+<tr>
+<td>Scaling</td>
+<td>θ₀ + λτ_A (vary λ)</td>
+<td>Tune task strength continuously</td>
+<td>0–1.5</td>
+<td>Low</td>
+<td>Task strength control</td>
+</tr>
+<tr>
+<td>Negation</td>
+<td>θ₀ − λτ_harmful</td>
+<td>Remove or reduce capability</td>
+<td>0.5–1.5</td>
+<td>Low (subtractive)</td>
+<td>Alignment / capability removal</td>
+</tr>
+<tr>
+<td>Multi-add</td>
+<td>θ₀ + Σλᵢτᵢ</td>
+<td>Combine N tasks simultaneously</td>
+<td>0.3–0.8 each</td>
+<td>Grows with N</td>
+<td>Up to ~4 tasks cleanly</td>
+</tr>
+<tr>
+<td>Analogy A-B+C</td>
+<td>θ₀ + τ_A − τ_B + τ_C</td>
+<td>Transfer relational structure</td>
+<td>1.0 each</td>
+<td>Moderate</td>
+<td>Cross-lingual / domain transfer</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Near-Orthogonality Explains Task Arithmetic's Low Interference</strong>: Task vectors for different NLP tasks (sentiment, NER, QA) are approximately orthogonal (cosine similarity &lt; 0.1) — this near-orthogonality explains why task arithmetic addition is often interference-free for the first 2–3 added tasks, but degrades beyond that. Measure pairwise cosine similarities before merging: if any pair exceeds 0.25, expect measurable interference and prefer TIES or DARE instead of simple task arithmetic addition.</p>
+</blockquote>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

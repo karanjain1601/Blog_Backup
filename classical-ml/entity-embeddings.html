@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Entity Embeddings — Learning Representations for Categorical Variables | Notes Backup</title>
+  <meta name="description" content="Entity embeddings learn dense vector representations for high-cardinality categorical features — capturing similarity structure and dramatically outperforming one-hot encoding." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Entity Embeddings — Learning Representations for Categorical Variables</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Entity embeddings learn dense vector representations for high-cardinality categorical features — capturing similarity structure and dramatically outperforming one-hot encoding.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Entity Embeddings — Learning Representations for Categorical Variables</h1>
+<p>One-hot encoding for high-cardinality categorical columns (cities, products, users) produces extremely high-dimensional, sparse representations with no similarity structure. Entity embeddings (Guo &amp; Berkhahn 2016, popularized by the Rossman Kaggle competition winner) learn dense vector representations that encode semantic similarity — Paris and London end up nearby in embedding space.</p>
+<h2>The Problem with One-Hot Encoding</h2>
+<p>For a categorical column with 10,000 unique values (e.g., ZIP codes), one-hot encoding creates 10,000 binary features. The representation is (1) sparse, wasting memory and compute; (2) equally distant — ZIP code 90210 is exactly as distant from 90211 as from 10001, despite being geographically adjacent; (3) not learnable — there is no mechanism to push similar categories closer together.</p>
+<ul>
+<li>Dimensionality: |vocab| features per column — grows linearly with cardinality</li>
+<li>No similarity structure: all category pairs are equidistant in Hamming distance</li>
+<li>Sparse gradients: each training sample updates only one position of each one-hot column</li>
+<li>Heuristic embedding dim: k = ceil(|vocab|^0.25) or k = min(50, |vocab| // 2) are common choices</li>
+<li>End-to-end training: embeddings are learned jointly with the model, capturing task-relevant similarity</li>
+</ul>
+<h2>Entity Embedding Layer in PyTorch</h2>
+<p>An entity embedding is simply an nn.Embedding lookup table. Given an integer category index, it returns the corresponding dense vector. All embedding vectors are trained jointly with the rest of the neural network via backpropagation.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+class TabularModel(nn.Module):
+    &quot;&quot;&quot;Mixed model: entity embeddings for categoricals + MLP for numerics.&quot;&quot;&quot;
+    def __init__(self, cat_dims: list, emb_dims: list, n_cont: int,
+                 hidden_sizes: list, n_out: int, dropout: float = 0.3):
+        super().__init__()
+        # Entity embedding tables: one per categorical column
+        self.embeddings = nn.ModuleList([
+            nn.Embedding(n_cats, emb_dim)
+            for n_cats, emb_dim in zip(cat_dims, emb_dims)
+        ])
+        emb_total = sum(emb_dims)
+        in_dim = emb_total + n_cont  # concat embeddings + numeric features
+
+        # MLP on top of concatenated representation
+        layers = []
+        for h in hidden_sizes:
+            layers += [nn.Linear(in_dim, h), nn.BatchNorm1d(h),
+                       nn.ReLU(), nn.Dropout(dropout)]
+            in_dim = h
+        layers.append(nn.Linear(in_dim, n_out))
+        self.mlp = nn.Sequential(*layers)
+
+    def forward(self, x_cat: torch.Tensor, x_cont: torch.Tensor) -&gt; torch.Tensor:
+        cat_embs = [emb(x_cat[:, i]) for i, emb in enumerate(self.embeddings)]
+        x = torch.cat(cat_embs + [x_cont], dim=1)
+        return self.mlp(x)
+
+# Heuristic: embedding dim = min(50, ceil(vocab_size^0.25 * 6))
+def get_emb_dim(vocab_size: int) -&gt; int:
+    return min(50, int(np.ceil(vocab_size ** 0.25 * 6)))
+</code></pre>
+<h2>Visualizing Learned Embeddings</h2>
+<p>After training, t-SNE or UMAP projection of entity embeddings reveals the learned similarity structure. Similar categories cluster together in 2D — a visual sanity check that the embeddings are capturing meaningful relationships.</p>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.manifold import TSNE
+import torch
+
+def visualize_embeddings(embedding_layer, category_labels, title='Entity Embeddings'):
+    &quot;&quot;&quot;Project entity embeddings to 2D via t-SNE and plot.&quot;&quot;&quot;
+    weights = embedding_layer.weight.detach().cpu().numpy()  # (vocab_size, emb_dim)
+
+    if weights.shape[1] &gt; 2:
+        tsne = TSNE(n_components=2, random_state=42, perplexity=min(30, len(weights)//3))
+        coords = tsne.fit_transform(weights)
+    else:
+        coords = weights  # already 2D
+
+    fig, ax = plt.subplots(figsize=(10, 8))
+    ax.scatter(coords[:, 0], coords[:, 1], alpha=0.6, s=30)
+
+    for i, label in enumerate(category_labels[:30]):  # label top 30
+        ax.annotate(label, (coords[i, 0], coords[i, 1]),
+                    fontsize=8, alpha=0.8)
+
+    ax.set_title(title)
+    ax.set_xlabel('t-SNE dim 1')
+    ax.set_ylabel('t-SNE dim 2')
+    plt.tight_layout()
+    plt.savefig('embeddings_tsne.png', dpi=150)
+    return coords
+</code></pre>
+<h2>Hybrid: Embeddings as Features for XGBoost</h2>
+<p>A powerful pattern (used by the Rossman Kaggle winner): train an entity embedding network first, extract embeddings, then feed them as dense features to XGBoost. This gives tree models the benefit of learned categorical representations without end-to-end neural training.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+from sklearn.preprocessing import LabelEncoder
+import xgboost as xgb
+
+# Step 1: Encode categoricals as integers
+city_le = LabelEncoder()
+city_ids = city_le.fit_transform(['Paris', 'London', 'Paris', 'Berlin', 'London'])
+
+# Step 2: Train embedding network
+embedding = nn.Embedding(num_embeddings=len(city_le.classes_), embedding_dim=8)
+optimizer = torch.optim.Adam(embedding.parameters(), lr=1e-3)
+
+# (Normally: train within a larger model with backprop from task loss)
+# Here we simulate by using random targets as a stand-in
+city_tensor = torch.LongTensor(city_ids)
+for _ in range(100):
+    emb_out = embedding(city_tensor).mean(dim=0)  # aggregate
+    loss = -emb_out.sum()  # dummy loss for illustration
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+# Step 3: Extract learned embeddings
+with torch.no_grad():
+    city_embs = embedding.weight.numpy()  # (n_cities, 8)
+
+print(f'Embedding matrix shape: {city_embs.shape}')
+print('Now use city_embs[city_id] as dense features for XGBoost')
+</code></pre>
+<h2>Comparing Encoding Methods on High-Cardinality Features</h2>
+<p>On a high-cardinality column (1000 unique categories), one-hot encoding creates a 1000-column sparse matrix that overwhelms any model with noise. Target encoding leaks if not done within cross-validation folds. Entity embeddings outperform both when trained end-to-end.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import cross_val_score
+import torch
+import torch.nn as nn
+
+rng = np.random.default_rng(42)
+n, n_cats = 2000, 200  # high-cardinality: 200 unique categories
+
+# Simulate: category correlates with target
+cat_ids = rng.integers(0, n_cats, n)             # integer category column
+cat_effect = rng.normal(0, 1, n_cats)            # per-category effect
+y = (cat_effect[cat_ids] + rng.normal(0, 0.5, n) &gt; 0).astype(int)
+
+X_cat = cat_ids.reshape(-1, 1)  # (n, 1) integer column
+
+# Method 1: One-hot encoding
+one_hot = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
+pipe_ohe = Pipeline([('enc', one_hot),
+                      ('clf', LogisticRegression(max_iter=500, C=0.1))])
+scores_ohe = cross_val_score(pipe_ohe, X_cat, y, cv=5).mean()
+print(f'One-hot (200 cats): {scores_ohe:.4f}')
+
+# Method 2: Ordinal encoding (treats categories as numbers — wrong!)
+X_ord = cat_ids.reshape(-1, 1).astype(float)
+pipe_ord = Pipeline([('clf', LogisticRegression(max_iter=300))])
+scores_ord = cross_val_score(pipe_ord, X_ord, y, cv=5).mean()
+print(f'Ordinal (wrong):    {scores_ord:.4f}')
+print('Entity embeddings trained end-to-end typically outperform both')
+</code></pre>
+<hr />
+<h2>Categorical Encoding Methods Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Encoding</th>
+<th>Max Cardinality</th>
+<th>Similarity</th>
+<th>Leakage Risk</th>
+<th>Best Use Case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>One-hot</td>
+<td>Low-medium (&lt;50)</td>
+<td>None</td>
+<td>None</td>
+<td>Low-cardinality nominals, tree models</td>
+</tr>
+<tr>
+<td>Ordinal</td>
+<td>Any</td>
+<td>None (arbitrary)</td>
+<td>None</td>
+<td>Ordered categories only</td>
+</tr>
+<tr>
+<td>Target encoding</td>
+<td>Any</td>
+<td>Via target correlation</td>
+<td>High (needs CV)</td>
+<td>High-cardinality with strong target signal</td>
+</tr>
+<tr>
+<td>Entity embedding</td>
+<td>High (1k–1M)</td>
+<td>Learned, task-relevant</td>
+<td>None</td>
+<td>High-cardinality in neural models</td>
+</tr>
+<tr>
+<td>CatBoost native</td>
+<td>Very high</td>
+<td>Ordered target stats</td>
+<td>Low (ordered encoding)</td>
+<td>CatBoost-based pipelines</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Embedding Dimension Heuristic</strong>: A reliable rule of thumb: emb_dim = min(50, ceil(vocab_size^0.25 * 6)). This gives 6 for vocab=10, 15 for vocab=100, 37 for vocab=1000, 50 for vocab &gt;= 5000. Never use a dimension larger than the vocabulary size — that is wasteful and adds no expressive power.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<ul>
+<li>Entity embeddings replace sparse one-hot vectors with dense learned representations for categorical features</li>
+<li>Similar categories cluster together in embedding space — capturing geographic, semantic, or behavioral similarity</li>
+<li>Recommended dim: min(50, ceil(vocab^0.25 × 6)) balances expressivity and parameter efficiency</li>
+<li>Embeddings trained end-to-end are task-specific; they can also be pre-transferred to tree models as dense features</li>
+<li>CatBoost's native categorical handling is competitive with entity embeddings for tree-based models</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

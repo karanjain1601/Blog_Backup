@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Continuous Batching for LLM Serving | Notes Backup</title>
+  <meta name="description" content="Dynamically inserting and removing requests from the active batch at each decoding step to maximize GPU utilization, replacing static batching where all requests must finish together." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Continuous Batching for LLM Serving</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Dynamically inserting and removing requests from the active batch at each decoding step to maximize GPU utilization, replacing static batching where all requests must finish together.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Continuous Batching for LLM Serving</h1>
+<p>Continuous batching (also called iteration-level scheduling or in-flight batching) is the technique of dynamically adding new requests to and removing completed requests from the active batch at every single decode step. In static batching, the standard approach before continuous batching, all requests in a batch must start together and finish together: the batch waits for the longest request to complete before admitting new requests. This means GPU slots occupied by short requests sit idle once those requests finish, waiting for longer requests — a fundamental efficiency loss that scales with the variance in output lengths. Continuous batching eliminates this idle time: at each decode iteration (one forward pass that generates one token per active request), completed requests are immediately removed and new requests from the waiting queue are immediately admitted. The GPU batch is kept full throughout, achieving near-constant utilization regardless of output length variance. This technique, combined with PagedAttention, is the core of vLLM's serving architecture and has become the standard for production LLM serving.</p>
+<h2>Overview</h2>
+<p>The fundamental operation in continuous batching is the iteration-level forward pass: at each step, the model runs a single batched forward pass over all currently active requests, generating one new token per request. The scheduler is invoked at the start of every iteration to check: (1) which active requests have generated their final token (EOS or max_tokens reached) and should be removed; (2) which requests in the waiting queue can be admitted given available KV cache blocks. Since the batch composition changes at every iteration, the execution engine must support variable batch sizes and can never assume the same set of sequences will be active across steps. The forward pass itself is identical to a standard transformer forward pass — the change is purely at the scheduling layer. Prefill and decode are handled differently: when a new request is admitted mid-batch, its prefill (processing the full prompt) may be chunked into smaller prefill pieces to avoid delaying the decode steps of existing requests (chunked prefill).</p>
+<h2>Static Batching Inefficiency</h2>
+<p>In static batching, a fixed set of requests is assembled into a batch and processed until all complete. The batch runs for max_output_len steps, where max_output_len is the maximum output length across all requests in the batch. For a batch of 4 requests generating 30, 200, 80, and 500 tokens respectively, the batch runs for 500 steps. After step 30, the slot for the first request is idle (padding tokens). After step 80, two slots are idle. After step 200, three slots are idle. GPU slot utilization: (30+200+80+500) / (4×500) = 810 / 2000 = 40.5%. The variance in output length directly determines GPU waste: if all requests had the same length, static batching would be 100% efficient. In practice, output lengths follow a heavy-tailed distribution (many short responses, some very long ones), leading to 40-70% GPU waste with static batching on typical production workloads. Additionally, users waiting for short responses are stuck behind long responses in the same batch — increasing tail latency.</p>
+<pre><code class="language-python">import time
+import numpy as np
+
+def static_batching_simulation(requests, pad_token=-1):
+    &quot;&quot;&quot;
+    Static batching: all requests must start and finish together.
+    The batch runs for max_len steps, even if most requests finished early.
+    Idle time is proportional to the gap between shortest and longest request.
+    &quot;&quot;&quot;
+    max_len = max(r['output_len'] for r in requests)
+    batch_size = len(requests)
+    completed = [False] * batch_size
+    total_steps = max_len
+    idle_steps = 0  # steps where some slots are idle (request finished)
+    print(f&quot;Static batch: {batch_size} requests, max_len={max_len}&quot;)
+    print(f&quot;{'Step':&gt;5}  {'Active':&gt;8}  {'Idle slots':&gt;12}&quot;)
+    for step in range(total_steps):
+        active = sum(1 for i, r in enumerate(requests) if step &lt; r['output_len'])
+        idle = batch_size - active
+        idle_steps += idle
+        if step &lt; 8 or step &gt;= max_len - 3:
+            print(f&quot;{step:&gt;5}  {active:&gt;8}  {idle:&gt;12} {'&lt;-- idle' if idle &gt; 0 else ''}&quot;)
+    gpu_utilization = (total_steps * batch_size - idle_steps) / (total_steps * batch_size)
+    print(f&quot;\nTotal steps: {total_steps}, GPU utilization: {gpu_utilization:.1%}&quot;)
+    print(f&quot;Idle slot-steps: {idle_steps} / {total_steps*batch_size} total slot-steps&quot;)
+
+np.random.seed(42)
+requests = [{'req_id': i, 'output_len': int(np.random.choice([30, 200, 80, 500]))}
+            for i in range(4)]
+print(&quot;Requests:&quot;, [(r['req_id'], r['output_len']) for r in requests])
+print()
+static_batching_simulation(requests)
+</code></pre>
+<h2>Iteration-level Scheduling</h2>
+<p>Iteration-level scheduling changes the granularity of batch management from request-level to step-level. Instead of assembling a static batch of requests, the scheduler makes a new scheduling decision at every decode iteration. This requires tight integration between the scheduler and the model execution engine: the engine must notify the scheduler immediately when any request generates an EOS token, and the scheduler must be able to add new requests and their KV cache blocks within the same iteration. The key data structure is the active sequence set: a list of requests currently being decoded. At each iteration: (1) advance all active requests by one decode step; (2) remove requests that generated EOS or reached max_tokens; (3) admit new requests from the waiting queue up to max_num_seqs; (4) repeat. Chunked prefill (Agrawal et al., 2024) further improves scheduling by breaking long prompt prefills into CHUNK_SIZE-token pieces, interleaving them with decode steps of active requests. This prevents a large prefill from blocking decode steps for hundreds of milliseconds, keeping TTFT (time to first token) for existing requests low.</p>
+<pre><code class="language-python">import heapq
+import time
+from dataclasses import dataclass, field
+from typing import List, Optional, Deque
+from collections import deque
+
+@dataclass
+class Request:
+    req_id: int
+    output_len: int         # total tokens this request will generate
+    tokens_generated: int = 0  # how many tokens generated so far
+    admitted_at: int = 0    # step when this request entered the batch
+
+    def is_done(self) -&gt; bool:
+        return self.tokens_generated &gt;= self.output_len
+
+def continuous_batching_simulation(
+    all_requests: List[Request],
+    max_batch_size: int = 4,
+    arrival_steps: Optional[List[int]] = None,
+):
+    &quot;&quot;&quot;
+    Iteration-level scheduler: at each step, advance all active requests by 1 token.
+    Completed requests are immediately removed; new requests are added from the queue.
+    GPU utilization stays high because the batch is always full or near-full.
+    &quot;&quot;&quot;
+    if arrival_steps is None:
+        arrival_steps = [0] * len(all_requests)
+    # Assign arrival steps
+    for req, step in zip(all_requests, arrival_steps):
+        req.admitted_at = step
+    pending: Deque[Request] = deque()  # waiting to enter the batch
+    active: List[Request] = []
+    step = 0
+    total_slot_steps = 0
+    active_slot_steps = 0
+    print(f&quot;Continuous batching: max_batch={max_batch_size}&quot;)
+    while pending or active or any(s &lt;= step for s, _ in zip(arrival_steps, all_requests)):
+        # Admit newly arriving requests
+        for req, arr in zip(all_requests, arrival_steps):
+            if arr == step and req not in active and req not in pending:
+                pending.append(req)
+        # Fill batch up to max_batch_size
+        while len(active) &lt; max_batch_size and pending:
+            req = pending.popleft()
+            active.append(req)
+            print(f&quot;  step={step}: +req{req.req_id} (len={req.output_len}) admitted; batch_size={len(active)}&quot;)
+        if not active:
+            step += 1
+            continue
+        # Advance all active requests by 1 token
+        for req in active:
+            req.tokens_generated += 1
+        active_slot_steps += len(active)
+        total_slot_steps += max_batch_size
+        # Remove completed requests
+        completed = [r for r in active if r.is_done()]
+        for req in completed:
+            active.remove(req)
+            print(f&quot;  step={step}: -req{req.req_id} done after {req.output_len} tokens; batch_size={len(active)}&quot;)
+        step += 1
+        if step &gt; 1000:
+            break
+    print(f&quot;\nTotal steps: {step}, GPU utilization: {active_slot_steps/total_slot_steps:.1%}&quot;)
+
+from dataclasses import dataclass
+reqs = [Request(0, 30), Request(1, 200), Request(2, 80), Request(3, 500),
+        Request(4, 50),  Request(5, 120)]
+arrivals = [0, 0, 0, 0, 40, 60]  # requests 4,5 arrive mid-generation
+continuous_batching_simulation(reqs, max_batch_size=4, arrival_steps=arrivals)
+</code></pre>
+<h2>Preemption and Swap</h2>
+<p>When the GPU runs out of KV cache blocks (free block pool empty), the scheduler must preempt one or more active sequences to free memory. Two preemption strategies exist: swap and recompute. Swap: the preempted sequence's KV cache blocks are transferred from GPU HBM to CPU DRAM via PCIe, and those physical blocks are returned to the GPU free pool. The sequence is placed in a swap queue. When GPU memory becomes available again, the sequence is swapped back in. PCIe transfer speed (~16-64 GB/s bidirectional for PCIe 4.0) limits how quickly blocks can be swapped; swapping a 4K-token sequence for LLaMA-3-8B takes ~4ms. Recompute: the preempted sequence is simply dropped from the active batch; when it is re-admitted, its entire KV cache is recomputed from scratch (re-prefill). Recompute is simpler and avoids PCIe transfer overhead but wastes GPU compute for the re-prefill. vLLM uses swap by default; recompute is preferred when preempted sequences are short or PCIe bandwidth is limited.</p>
+<h2>FCFS vs Shortest-Job-First Scheduling</h2>
+<p>The order in which requests are admitted from the waiting queue affects both throughput and tail latency. First-Come-First-Served (FCFS): requests are admitted in arrival order. Simple and fair, FCFS is the default in vLLM. However, a long-context request that arrived first can block many short requests behind it, increasing tail latency for short requests. Shortest-Job-First (SJF): admit requests with the shortest expected output length first. Maximizes throughput (short jobs complete and free slots for more requests) but requires output length estimation. Output lengths are unknown a priori; speculative output length prediction (using the first few generated tokens) is an active research area. Priority scheduling: assign priorities based on SLA tiers (premium vs. standard users), estimated job length, or arrival time. In practice, most serving systems use FCFS with a max-batch-size cap, plus preemption for OOM situations.</p>
+<ul>
+<li>FCFS (default): simple, fair, no output length prediction needed; can cause head-of-line blocking for short requests.</li>
+<li>SJF: maximizes throughput at the cost of starvation for long requests; requires output length estimation.</li>
+<li>Least Attained Service (LAS): prioritize requests that have consumed the least GPU time; naturally favors short requests without requiring prediction.</li>
+<li>Preemptive scheduling: preempt long-running requests when short high-priority requests arrive; reduces p99 latency for premium users.</li>
+<li>Chunked prefill interleaving: split prefill into chunks to avoid blocking decode iterations; keeps p50 TTFT stable under high load.</li>
+<li>Max-batch-size cap: limit concurrent sequences to prevent KV cache OOM; tune based on available GPU memory and target sequence length distribution.</li>
+</ul>
+<h2>vLLM Scheduler</h2>
+<p>vLLM's scheduler maintains three queues: waiting (requests not yet started), running (requests currently being decoded), and swapped (requests whose KV blocks are on CPU). At each iteration, the scheduler runs a scheduling policy that decides: which running requests to continue, which waiting requests to admit, which running requests to preempt, and which swapped requests to resume. The scheduler communicates with the block manager to allocate/free physical KV blocks as sequences enter and leave the active batch. vLLM v0.5+ introduced a new prefix-caching-aware scheduler: if multiple requests share a common prefix (e.g., the same system prompt), the scheduler identifies shared blocks and marks them as shared, avoiding duplicate KV cache computation. The scheduler also handles chunked prefill: when a new request is admitted, instead of processing its entire prompt at once, the prompt is broken into PREFILL_CHUNK_SIZE-token chunks, and one chunk is processed per iteration while existing decode requests continue generating. This bounds the latency impact of admitting a new request on existing requests' TTFT.</p>
+<pre><code class="language-python">import asyncio
+import time
+from vllm import AsyncLLMEngine, AsyncEngineArgs, SamplingParams
+
+async def vllm_async_continuous_batching():
+    &quot;&quot;&quot;
+    vLLM's AsyncLLMEngine uses continuous batching internally.
+    Multiple concurrent requests are processed simultaneously at each decode step.
+    Outputs are streamed token-by-token as they are generated.
+    &quot;&quot;&quot;
+    engine_args = AsyncEngineArgs(
+        model=&quot;meta-llama/Llama-3-8B-Instruct&quot;,
+        gpu_memory_utilization=0.90,
+        max_num_seqs=64,       # max concurrent sequences per scheduler step
+        max_model_len=4096,
+    )
+    engine = AsyncLLMEngine.from_engine_args(engine_args)
+    prompts = [
+        (&quot;req-0&quot;, &quot;Explain transformer self-attention in three sentences.&quot;),
+        (&quot;req-1&quot;, &quot;Write a Python quicksort implementation.&quot;),
+        (&quot;req-2&quot;, &quot;What is the vanishing gradient problem?&quot;),
+        (&quot;req-3&quot;, &quot;Describe the difference between LSTM and GRU.&quot;),
+    ]
+    sampling = SamplingParams(temperature=0.7, max_tokens=150)
+    # Submit all requests concurrently -- engine batches them automatically
+    async def stream_request(req_id, prompt):
+        t0 = time.perf_counter()
+        first_token = None
+        tokens = 0
+        async for output in engine.generate(prompt, sampling, request_id=req_id):
+            if first_token is None:
+                first_token = time.perf_counter() - t0
+            tokens = len(output.outputs[0].token_ids)
+        elapsed = time.perf_counter() - t0
+        print(f&quot;{req_id}: TTFT={first_token*1000:.0f}ms  total={elapsed:.2f}s  {tokens} tokens&quot;)
+
+    await asyncio.gather(*[stream_request(rid, p) for rid, p in prompts])
+
+asyncio.run(vllm_async_continuous_batching())
+</code></pre>
+<blockquote>
+<p><strong>Tail Latency Under Continuous Batching</strong>: Continuous batching improves throughput but can increase tail latency for short requests that arrive while a large batch is processing. When the batch is full (max_num_seqs active), new short requests must wait in the queue. If several long-context requests are active, a short 50-token request could wait hundreds of milliseconds before being admitted. Monitor p99 TTFT (time to first token) separately from mean throughput. Mitigations: (1) set max_num_seqs conservatively to leave headroom for new arrivals; (2) implement priority scheduling for short or high-priority requests; (3) use chunked prefill to reduce HOL (head-of-line) blocking from new prefills.</p>
+</blockquote>
+<h2>Throughput vs Latency Tradeoffs</h2>
+<p>Throughput and latency in LLM serving have an inherent tension. Higher max_num_seqs (more concurrent sequences) increases GPU utilization and throughput: more tokens are generated per second because the GPU is busy more of the time and weight reads are amortized across more requests. However, larger batches increase the time any individual request waits to be admitted (queue time) and may increase time-to-first-token if the scheduler is busy processing many sequences. The optimal operating point depends on the SLA: if latency SLAs are tight (TTFT &lt; 200ms, TPOT &lt; 50ms per token), max_num_seqs should be set conservatively. If throughput is the primary metric (batch inference, async API), max_num_seqs should be maximized. The throughput-latency frontier is a Pareto curve: for a given model on given hardware, no setting dominates in both dimensions. Profiling across a range of max_num_seqs values and measuring p50/p95/p99 TTFT and tokens/sec is essential before production deployment.</p>
+<pre><code class="language-python">import time
+import numpy as np
+from vllm import LLM, SamplingParams
+
+def measure_throughput_latency(
+    model: str = &quot;meta-llama/Llama-3-8B-Instruct&quot;,
+    max_num_seqs_values = [1, 4, 16, 64, 256],
+    n_requests: int = 32,
+    output_tokens: int = 200,
+):
+    &quot;&quot;&quot;
+    Measure throughput (tokens/sec) and TTFT percentiles at different
+    max_num_seqs (max concurrent sequences = effective batch size).
+    Higher batch size: more throughput, higher TTFT for short requests.
+    &quot;&quot;&quot;
+    prompts = [&quot;Explain quantum entanglement briefly.&quot;] * n_requests
+    sampling = SamplingParams(temperature=0.0, max_tokens=output_tokens)
+    results = []
+    for max_seqs in max_num_seqs_values:
+        llm = LLM(model=model, max_num_seqs=max_seqs, gpu_memory_utilization=0.85)
+        ttft_list = []
+        t_total_start = time.perf_counter()
+        outputs = llm.generate(prompts, sampling)
+        total_elapsed = time.perf_counter() - t_total_start
+        total_tokens = sum(len(o.outputs[0].token_ids) for o in outputs)
+        throughput = total_tokens / total_elapsed
+        # Approximate TTFT from generation metrics (first token latency)
+        p50 = np.percentile([total_elapsed / output_tokens] * n_requests, 50) * 1000
+        p99 = np.percentile([total_elapsed / output_tokens] * n_requests, 99) * 1000
+        results.append((max_seqs, throughput, p50, p99))
+        del llm
+    print(f&quot;{'max_num_seqs':&gt;14} {'Throughput (tok/s)':&gt;20} {'p50 TTFT ms':&gt;13} {'p99 TTFT ms':&gt;13}&quot;)
+    print(&quot;-&quot; * 65)
+    for max_seqs, tput, p50, p99 in results:
+        print(f&quot;{max_seqs:&gt;14} {tput:&gt;20.0f} {p50:&gt;13.1f} {p99:&gt;13.1f}&quot;)
+    return results
+
+measure_throughput_latency()
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Batching Strategy</th>
+<th>GPU Utilization</th>
+<th>Throughput</th>
+<th>p50 TTFT</th>
+<th>p99 TTFT</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Static batch (size=1)</td>
+<td>5-15%</td>
+<td>Baseline (1x)</td>
+<td>Low (~50ms)</td>
+<td>Low (~50ms)</td>
+</tr>
+<tr>
+<td>Static batch (size=32)</td>
+<td>40-55%</td>
+<td>3-5x</td>
+<td>Low-Med (~100ms)</td>
+<td>High (&gt;1s waiting)</td>
+</tr>
+<tr>
+<td>Continuous batching</td>
+<td>70-85%</td>
+<td>6-12x</td>
+<td>Med (~200ms)</td>
+<td>Med (~500ms)</td>
+</tr>
+<tr>
+<td>Continuous + PagedAttention</td>
+<td>90-95%</td>
+<td>10-20x</td>
+<td>Low-Med (~150ms)</td>
+<td>Med (~400ms)</td>
+</tr>
+</tbody>
+</table>
+<h2>Key Takeaways</h2>
+<ul>
+<li>Continuous batching keeps GPU batch slots full by admitting new requests immediately as old ones finish -- no waiting for the whole batch.</li>
+<li>GPU utilization improves from 20-55% (static batching) to 70-95% (continuous batching) on typical mixed-length workloads.</li>
+<li>Prefill and decode have different compute profiles; chunked prefill interleaves new prefills with active decodes to prevent HOL blocking.</li>
+<li>Preemption (swap to CPU or recompute) handles GPU OOM; tune swap threshold and max_num_seqs together for your hardware and workload.</li>
+<li>FCFS is the default scheduling policy; SJF improves throughput when output lengths are predictable; priority scheduling manages SLA tiers.</li>
+<li>Throughput and p99 TTFT trade off against each other -- profile across max_num_seqs settings and pick the operating point that satisfies SLA requirements.</li>
+<li>vLLM's scheduler integrates prefix caching (shared system prompt blocks), chunked prefill, swap, and recompute in a single cohesive scheduling loop.</li>
+<li>In production, monitor p99 TTFT and tokens/sec simultaneously; optimize for throughput only when SLA budgets allow larger queuing delays.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

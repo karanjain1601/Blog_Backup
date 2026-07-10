@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Acquisition Functions — EI, UCB, Thompson Sampling, and PI | Notes Backup</title>
+  <meta name="description" content="Acquisition functions balance exploration and exploitation in Bayesian optimization to select the next query point." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Acquisition Functions — EI, UCB, Thompson Sampling, and PI</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Acquisition functions balance exploration and exploitation in Bayesian optimization to select the next query point.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Acquisition Functions — EI, UCB, Thompson Sampling, and PI</h1>
+<p>In Bayesian optimization (BO), the surrogate model — typically a Gaussian process — provides a posterior distribution p(f|D) over the objective. After each observation, the acquisition function α(x) maps the GP posterior (μ(x), σ(x)) to a scalar utility quantifying how valuable it would be to query x next. BO alternates between fitting the GP and maximizing α(x) over the search space to select the next evaluation point. The choice of acquisition function determines the exploration–exploitation trade-off and directly controls convergence speed on expensive black-box objectives.</p>
+<h2>What Is an Acquisition Function?</h2>
+<p>Let f* = max{f(x₁), …, f(xₙ)} be the best observed value after n evaluations. The acquisition function α : X → ℝ assigns a score to each candidate point x, balancing exploration (querying regions with high uncertainty σ(x)) and exploitation (querying regions with high predicted value μ(x)). The next query is x_{n+1} = argmax_{x∈X} α(x). Since α involves only GP predictions — not the expensive true objective f — maximizing α is cheap relative to evaluating f. The inner optimization over α is typically solved via multi-start gradient descent, L-BFGS-B, or evolutionary strategies over a dense candidate grid.</p>
+<h2>Expected Improvement (EI)</h2>
+<p>Expected Improvement (EI) is the most widely used acquisition function. EI computes the expected gain over the current best f<em>: EI(x) = E[max(f(x) − f</em>, 0)]. Under a GP posterior where f(x) ~ N(μ(x), σ²(x)), EI has a closed-form expression. Define Z = (μ(x) − f<em>) / σ(x). Then EI(x) = (μ(x) − f</em>)Φ(Z) + σ(x)φ(Z), where Φ is the standard normal CDF and φ is the PDF. The first term rewards exploitation (high μ); the second rewards exploration (high σ). EI is zero when σ = 0 (known location) and proportional to σ in uncertain regions far from observations.</p>
+<p>$$\text{EI}(x) = (\mu(x) - f^<em>)\,\Phi(Z) + \sigma(x)\,\phi(Z), \quad Z = \frac{\mu(x) - f^</em>}{\sigma(x)}$$</p>
+<p>A jitter parameter ξ ≥ 0 shifts Z to (μ − f* − ξ)/σ, encouraging more exploration. EI is differentiable in x through μ and σ, so gradient-based inner-loop optimization works well. The closed form makes EI O(1) to evaluate per candidate after O(n³) GP inference. EI has no frequentist regret guarantees but performs excellently in practice on smooth objectives and is the default choice in most BO libraries (BoTorch, GPyOpt, Spearmint).</p>
+<h2>Probability of Improvement and UCB</h2>
+<p>Probability of Improvement (PI) is the simplest acquisition function: PI(x) = P(f(x) &gt; f<em>) = Φ((μ(x) − f</em>)/σ(x)). PI asks only whether x improves over f*, ignoring the magnitude. This makes PI greedy — it prefers a point with a 51% chance of a tiny improvement over one with a 40% chance of a large gain. PI can stall in local exploitation loops. In practice PI is rarely preferred over EI unless computational budget is extremely tight and the overhead of the CDF+PDF computation matters.</p>
+<p>Upper Confidence Bound (UCB) avoids the CDF entirely: UCB(x) = μ(x) + κσ(x). The parameter κ ≥ 0 controls exploration: κ = 0 is pure exploitation, κ → ∞ is pure exploration. UCB has theoretical sublinear regret bounds via the GP-UCB framework (Srinivas et al., 2010): with κ chosen as sqrt(2 log(|X| t² π² / 6δ)), cumulative regret R_T = O(sqrt(T γ_T log T/δ)) where γ_T is the maximum information gain of the kernel. This makes UCB the most theoretically justified acquisition function for discrete search spaces with RBF or Matérn kernels.</p>
+<p>$$\text{PI}(x) = \Phi!\left(\frac{\mu(x)-f^*}{\sigma(x)}\right), \qquad \text{UCB}(x) = \mu(x) + \kappa\,\sigma(x)$$</p>
+<blockquote>
+<p><strong>Choosing κ for UCB</strong>: A practical default is κ = 2.0, corresponding roughly to a 95% confidence upper bound. For high-dimensional spaces or noisy objectives, increase κ (more exploration). Anneal κ from a large value (e.g., 5.0) down to 0.2 over the optimization budget to shift from exploration early on to exploitation late — this κ-annealing strategy often outperforms a fixed κ in practice without requiring the theoretically prescribed schedule.</p>
+</blockquote>
+<h2>Thompson Sampling and Entropy Search</h2>
+<p>Thompson Sampling (TS) takes a fully Bayesian approach: sample a function f̃ from the GP posterior, then choose x_{n+1} = argmax f̃(x). Practically, sample f̃ at a finite candidate grid by drawing from the joint multivariate normal f̃ ~ N(μ, Σ). TS naturally explores because uncertain regions have wide posteriors, and samples from those regions can take high values. TS is embarrassingly parallelizable — draw B independent samples and query all B argmaxes simultaneously, giving a natural batch BO strategy. Entropy Search (ES) selects x to maximize the expected reduction in entropy about the location of the global optimum x<em> = argmax f(x). ES is the most principled acquisition but requires approximating a distribution over x</em> via expectation propagation or Monte Carlo, making it significantly more expensive per iteration than EI or UCB. Predictive Entropy Search (PES) offers a more tractable approximation.</p>
+<h2>Portfolio Strategy and Noisy EI</h2>
+<p>No single acquisition function dominates all problem classes. The portfolio (hedge) strategy maintains multiple acquisitions — EI, PI, UCB, TS — and allocates credit to each using a bandit algorithm (e.g., Exp3 or UCB1 over acquisitions). At each iteration the hedge selects proportionally to historical gains, concentrating mass on whichever acquisition has performed best so far. For noisy objectives (observation noise σ_noise &gt; 0), standard EI is overoptimistic because f<em> is a noisy maximum that may be a noise artifact. Noisy EI replaces f</em> with the predicted value at the best observed point: f*<em best="best">noisy = μ(x</em>), and uses the full noisy predictive variance. This prevents over-exploitation of spurious maxima in the training data.</p>
+<h2>Code Examples</h2>
+<pre><code class="language-python">import numpy as np
+from scipy.stats import norm
+
+def rbf_kernel(X1, X2, ell=1.0):
+    d2 = np.sum((X1[:, None] - X2[None, :])**2, axis=-1)
+    return np.exp(-d2 / (2 * ell**2))
+
+def gp_posterior(X_tr, y_tr, X_te, noise=1e-4):
+    K = rbf_kernel(X_tr, X_tr) + noise * np.eye(len(X_tr))
+    Ks, Kss = rbf_kernel(X_tr, X_te), rbf_kernel(X_te, X_te)
+    L = np.linalg.cholesky(K)
+    alpha = np.linalg.solve(L.T, np.linalg.solve(L, y_tr))
+    v = np.linalg.solve(L, Ks)
+    return Ks.T @ alpha, np.diag(Kss - v.T @ v)
+
+def acq_ei(mu, sig, f_best, xi=0.01):
+    Z = (mu - f_best - xi) / (sig + 1e-9)
+    return (mu - f_best - xi) * norm.cdf(Z) + sig * norm.pdf(Z)
+
+def acq_pi(mu, sig, f_best, xi=0.01):
+    return norm.cdf((mu - f_best - xi) / (sig + 1e-9))
+
+def acq_ucb(mu, sig, kappa=2.0): return mu + kappa * sig
+def acq_ts(mu, var, seed=42): return np.random.RandomState(seed).normal(mu, np.sqrt(np.maximum(var, 0)))
+
+X_tr = np.array([[-2.5], [-1.0], [0.3], [1.8], [2.9]])
+y_tr = np.sin(X_tr.ravel()); f_best = y_tr.max()
+X_te = np.linspace(-3, 3, 200)[:, None]
+mu, var = gp_posterior(X_tr, y_tr, X_te)
+sig = np.sqrt(np.maximum(var, 0))
+acqs = {'EI': acq_ei(mu, sig, f_best), 'PI': acq_pi(mu, sig, f_best),
+        'UCB': acq_ucb(mu, sig), 'TS': acq_ts(mu, var)}
+for name, a in acqs.items():
+    print(f'{name}: next x = {X_te[a.argmax(), 0]:.3f}, acq_max = {a.max():.4f}')
+</code></pre>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import norm
+
+def rbf_kernel(X1, X2, ell=1.0):
+    d2 = np.sum((X1[:, None] - X2[None, :])**2, axis=-1)
+    return np.exp(-d2 / (2 * ell**2))
+
+def gp_posterior(X_tr, y_tr, X_te, noise=1e-4):
+    K = rbf_kernel(X_tr, X_tr) + noise * np.eye(len(X_tr))
+    Ks, Kss = rbf_kernel(X_tr, X_te), rbf_kernel(X_te, X_te)
+    L = np.linalg.cholesky(K)
+    v = np.linalg.solve(L, Ks)
+    return Ks.T @ np.linalg.solve(L.T, np.linalg.solve(L, y_tr)), np.diag(Kss - v.T @ v)
+
+X_tr = np.array([[-2.5], [-1.0], [0.3], [1.8], [2.9]])
+y_tr = np.sin(X_tr.ravel())
+X_te = np.linspace(-3, 3, 300)[:, None]; x = X_te.ravel()
+mu, var = gp_posterior(X_tr, y_tr, X_te)
+sig = np.sqrt(np.maximum(var, 0)); f_best = y_tr.max(); xi = 0.01
+Z = (mu - f_best - xi) / (sig + 1e-9)
+acqs = {'EI': (mu-f_best-xi)*norm.cdf(Z)+sig*norm.pdf(Z),
+        'PI': norm.cdf(Z), 'UCB (k=2)': mu+2*sig,
+        'Thompson': np.random.RandomState(0).normal(mu, sig)}
+fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+for ax, (name, a) in zip(axes.flat, acqs.items()):
+    ax.fill_between(x, mu-2*sig, mu+2*sig, alpha=0.2, label='95% CI')
+    ax.plot(x, mu, 'b-', lw=1.5); ax.scatter(X_tr, y_tr, c='k', zorder=5)
+    ax2 = ax.twinx(); ax2.plot(x, a, 'r--', lw=1.5)
+    ax2.axvline(x[a.argmax()], color='r', ls=':', label=f'next x={x[a.argmax()]:.2f}')
+    ax.set_title(name); ax2.set_ylabel('Acquisition value')
+plt.tight_layout(); plt.savefig('acquisition_viz.png', dpi=100)
+print('Saved acquisition_viz.png -- 4-panel comparison of EI, PI, UCB, Thompson')
+</code></pre>
+<pre><code class="language-python">import numpy as np
+from scipy.stats import norm
+
+def branin(x):
+    x1, x2 = x[0]*15 - 5, x[1]*15
+    return (x2 - 5.1*x1**2/(4*np.pi**2) + 5*x1/np.pi - 6)**2 + 10*(1-1/(8*np.pi))*np.cos(x1)+10
+
+def rbf_k(X1, X2, ell=0.5):
+    return np.exp(-np.sum((X1[:,None]-X2[None,:])**2, axis=-1)/(2*ell**2))
+
+def gp_post(Xtr, ytr, Xte, noise=0.1):
+    K = rbf_k(Xtr,Xtr)+noise*np.eye(len(Xtr)); Ks=rbf_k(Xtr,Xte)
+    L=np.linalg.cholesky(K); v=np.linalg.solve(L,Ks)
+    alpha=np.linalg.solve(L.T,np.linalg.solve(L,ytr))
+    return Ks.T@alpha, np.maximum(1-np.sum(v**2,axis=0),0)
+
+def acq_ei(mu, sig, f_best):
+    Z=(f_best-mu)/(sig+1e-9); return (f_best-mu)*norm.cdf(Z)+sig*norm.pdf(Z)
+
+rng=np.random.RandomState(0)
+X_obs=rng.uniform(0,1,(6,2)); y_obs=np.array([branin(x) for x in X_obs])
+cands=rng.uniform(0,1,(400,2))
+best_ei=[y_obs.min()]; best_rand=[y_obs.min()]
+for _ in range(20):
+    mu,var=gp_post(X_obs,-y_obs,cands); sig=np.sqrt(var)
+    bx=cands[acq_ei(mu,sig,-y_obs.min()).argmax()]
+    y_new=branin(bx); X_obs=np.vstack([X_obs,[bx]]); y_obs=np.append(y_obs,y_new)
+    best_ei.append(y_obs.min()); best_rand.append(branin(rng.uniform(0,1,2)))
+rand_best=np.minimum.accumulate(best_rand)
+print(f'EI best Branin    = {best_ei[-1]:.3f}  (global min approx 0.397)')
+print(f'Random best       = {rand_best[-1]:.3f}')
+</code></pre>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+
+def rbf_k(X1, X2, ell=0.8):
+    return np.exp(-np.sum((X1[:,None]-X2[None,:])**2, axis=-1)/(2*ell**2))
+
+def gp_post(Xtr, ytr, Xte, noise=0.05):
+    K=rbf_k(Xtr,Xtr)+noise*np.eye(len(Xtr)); Ks=rbf_k(Xtr,Xte)
+    L=np.linalg.cholesky(K); v=np.linalg.solve(L,Ks)
+    alpha=np.linalg.solve(L.T,np.linalg.solve(L,ytr))
+    return Ks.T@alpha, np.maximum(1-np.sum(v**2,axis=0),0)
+
+def kappa_anneal(t, T, k_max=5.0, k_min=0.2):
+    return k_max * (k_min/k_max)**(t/max(T-1,1))
+
+rng=np.random.RandomState(1)
+f_true = lambda x: float(np.sin(3*x)*np.exp(-0.5*x))
+X_obs=rng.uniform(-3,3,(4,1)); y_obs=np.array([f_true(x[0]) for x in X_obs])
+X_te=np.linspace(-3,3,200)[:,None]; T=20; kappas=[]; bests=[]
+for t in range(T):
+    kappa=kappa_anneal(t,T); kappas.append(kappa)
+    mu,var=gp_post(X_obs,y_obs,X_te)
+    ucb=mu+kappa*np.sqrt(var); next_x=X_te[[ucb.argmax()]]
+    y_new=f_true(next_x[0,0])
+    X_obs=np.vstack([X_obs,next_x]); y_obs=np.append(y_obs,y_new); bests.append(y_obs.max())
+print(f'UCB kappa-annealing over {T} steps, final best = {bests[-1]:.4f}')
+print(f'Kappa schedule: {kappas[0]:.2f} (explore) -&gt; {kappas[-1]:.2f} (exploit)')
+for i in range(0, T, 5):
+    print(f'  iter {i:2d}: kappa={kappas[i]:.2f}, best_so_far={bests[i]:.4f}')
+</code></pre>
+<h2>Acquisition Function Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Acquisition</th>
+<th>Formula</th>
+<th>Exploration</th>
+<th>Closed Form</th>
+<th>Regret Bound</th>
+<th>Cost</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>EI</td>
+<td>(μ−f<em>)Φ(Z)+σφ(Z), Z=(μ−f</em>)/σ</td>
+<td>Moderate (via σφ(Z) term)</td>
+<td>Yes</td>
+<td>None proven</td>
+<td>O(n³) GP + O(1) eval</td>
+</tr>
+<tr>
+<td>PI</td>
+<td>Φ((μ−f*)/σ)</td>
+<td>Low (ignores improvement magnitude)</td>
+<td>Yes</td>
+<td>None proven</td>
+<td>O(n³) GP + O(1) eval</td>
+</tr>
+<tr>
+<td>UCB</td>
+<td>μ(x)+κσ(x)</td>
+<td>High (κ scales exploration)</td>
+<td>Yes</td>
+<td>Sublinear (GP-UCB)</td>
+<td>O(n³) GP + O(1) eval</td>
+</tr>
+<tr>
+<td>Thompson Sampling</td>
+<td>argmax of GP posterior sample</td>
+<td>Natural (posterior spread)</td>
+<td>No (sampling required)</td>
+<td>None proven</td>
+<td>O(n³) GP + O(n²) sample</td>
+</tr>
+<tr>
+<td>Entropy Search</td>
+<td>max information gain about x*</td>
+<td>Principled global exploration</td>
+<td>No (EP/MC approx)</td>
+<td>None in practice</td>
+<td>O(n³) GP + O(heavy approx)</td>
+</tr>
+</tbody>
+</table>
+<p>EI is the practical default: closed-form, differentiable, well-calibrated exploration. UCB is preferred when theoretical guarantees matter or when κ can be tuned via the GP-UCB schedule. Thompson Sampling shines in parallel batch settings — draw B samples, evaluate B candidates simultaneously. Entropy Search is reserved for problems where the budget is very small (single-digit evaluations) and maximally informative queries justify the overhead. For noisy objectives, replace EI with Noisy EI using μ(x_{best}) in place of the raw f* maximum. The portfolio hedge strategy avoids committing to a single acquisition and is a strong baseline when the problem class is unknown.</p>
+    </article>
+  </main>
+</body>
+</html>

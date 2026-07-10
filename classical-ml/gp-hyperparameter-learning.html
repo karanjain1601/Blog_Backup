@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GP Hyperparameter Learning — Type-II MLE and Marginal Likelihood | Notes Backup</title>
+  <meta name="description" content="Optimising GP kernel hyperparameters by maximising the log marginal likelihood: derivation, gradient computation via Cholesky, Bayesian Occam&#x27;s razor, and ARD for feature selection." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>GP Hyperparameter Learning — Type-II MLE and Marginal Likelihood</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Optimising GP kernel hyperparameters by maximising the log marginal likelihood: derivation, gradient computation via Cholesky, Bayesian Occam&#x27;s razor, and ARD for feature selection.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>GP Hyperparameter Learning — Type-II MLE and Marginal Likelihood</h1>
+<h2>What Are GP Hyperparameters?</h2>
+<p>Every GP kernel has hyperparameters θ that must be set before inference. For the RBF kernel: length-scale ℓ controls correlation range, signal variance σ²_f controls function amplitude, and noise variance σ²_n separates observation noise from signal. Setting these by hand (cross-validation grid search) is expensive and ignores the principled Bayesian alternative: maximising the log marginal likelihood, also called Type-II Maximum Likelihood (Type-II MLE) or evidence maximisation.</p>
+<ul>
+<li>Length-scale ℓ: the single most important hyperparameter — controls function smoothness</li>
+<li>Signal variance σ²_f: scales K, controlling function amplitude</li>
+<li>Noise variance σ²_n: added to diagonal of K, separates signal from noise</li>
+<li>Mean function params: constant, linear, or polynomial terms for global trend</li>
+<li>ARD length-scales: one ℓ_d per input dimension for automatic feature relevance</li>
+<li>Type-II MLE (evidence maximisation): optimise all θ jointly via marginal likelihood</li>
+</ul>
+<h2>Log Marginal Likelihood Derivation</h2>
+<p>Integrating out the latent function f gives the marginal likelihood p(y|X,θ) = ∫p(y|f)p(f|X,θ)df = N(y | m(X), K_θ + σ²_n I). The log marginal likelihood decomposes into three interpretable terms: log p(y|X,θ) = −½ yᵀ(K+σ²_nI)⁻¹y − ½ log|K+σ²_nI| − n/2 log(2π). The first term is a data-fit term (large when the model explains y well). The second is a complexity penalty (large when K is large/complex). The third is a constant. Jointly they implement Bayesian Occam's razor: simpler models that still explain the data are preferred.</p>
+<pre><code class="language-python">import numpy as np
+from scipy.optimize import minimize
+
+def rbf_kernel(X1, X2, ell, sf2):
+    X1 = np.atleast_2d(X1).reshape(-1,1)
+    X2 = np.atleast_2d(X2).reshape(-1,1)
+    return sf2 * np.exp(-0.5*(X1-X2.T)**2/ell**2)
+
+def log_marginal_likelihood(params, X, y):
+    log_ell, log_sf2, log_sn2 = params
+    ell = np.exp(log_ell); sf2 = np.exp(log_sf2); sn2 = np.exp(log_sn2)
+    n = len(y)
+    K = rbf_kernel(X, X, ell, sf2) + sn2*np.eye(n)
+    try:
+        L = np.linalg.cholesky(K)
+    except np.linalg.LinAlgError:
+        return 1e10
+    alpha = np.linalg.solve(L.T, np.linalg.solve(L, y))
+    log_det = 2*np.sum(np.log(np.diag(L)))
+    lml = -0.5*(y @ alpha) - 0.5*log_det - 0.5*n*np.log(2*np.pi)
+    return -lml   # return negative for minimisation
+
+np.random.seed(42)
+X = np.linspace(-5, 5, 40)
+y = np.sin(X) + 0.2*np.random.randn(40)
+
+# Optimise hyperparameters from multiple restarts
+best_val, best_params = np.inf, None
+for _ in range(5):
+    x0 = np.log(np.random.uniform([0.1, 0.1, 0.01], [5.0, 5.0, 1.0]))
+    res = minimize(log_marginal_likelihood, x0, args=(X, y), method='L-BFGS-B')
+    if res.fun &lt; best_val:
+        best_val, best_params = res.fun, res.x
+
+ell_opt, sf2_opt, sn2_opt = np.exp(best_params)
+print(f'Optimised: ℓ={ell_opt:.3f}, σ²_f={sf2_opt:.3f}, σ²_n={sn2_opt:.4f}')
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Hyperparameter</th>
+<th>Role</th>
+<th>Diagnosis When Wrong</th>
+<th>Typical Range</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Length-scale ℓ</td>
+<td>Controls correlation range</td>
+<td>Too small → wiggly, overfit; too large → underfit</td>
+<td>0.1 × data_range – 2 × data_range</td>
+</tr>
+<tr>
+<td>Signal variance σ²_f</td>
+<td>Function amplitude</td>
+<td>Too small → mean near zero; too large → wild extrapolation</td>
+<td>Matched to output std: 0.1–10</td>
+</tr>
+<tr>
+<td>Noise variance σ²_n</td>
+<td>Observation noise</td>
+<td>Too small → interpolation; too large → smooth but misfit</td>
+<td>0.001–1.0 (as fraction of output variance)</td>
+</tr>
+<tr>
+<td>Mean params (if linear/const mean)</td>
+<td>Capture global trend</td>
+<td>Ignored baseline → biased extrapolation</td>
+<td>Fit from data; often zero works</td>
+</tr>
+</tbody>
+</table>
+<h2>GPyTorch Marginal Likelihood Optimisation</h2>
+<p>GPyTorch computes the exact marginal log likelihood (ExactMarginalLogLikelihood) and its gradient through automatic differentiation. A standard training loop uses Adam or L-BFGS with 100–200 iterations. Log-parameterising hyperparameters (working in log space) ensures positivity and better-conditioned gradients. GPyTorch's ParameterConstraint system handles this automatically.</p>
+<pre><code class="language-python">import torch
+import gpytorch
+import numpy as np
+import matplotlib.pyplot as plt
+
+class GPModel(gpytorch.models.ExactGP):
+    def __init__(self, train_x, train_y, likelihood):
+        super().__init__(train_x, train_y, likelihood)
+        self.mean_module  = gpytorch.means.ZeroMean()
+        self.covar_module = gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel())
+    def forward(self, x):
+        return gpytorch.distributions.MultivariateNormal(
+            self.mean_module(x), self.covar_module(x))
+
+np.random.seed(0)
+X_np = np.linspace(-5, 5, 50)
+y_np = np.sin(X_np) + 0.2*np.random.randn(50)
+train_x = torch.tensor(X_np, dtype=torch.float32)
+train_y = torch.tensor(y_np, dtype=torch.float32)
+
+likelihood = gpytorch.likelihoods.GaussianLikelihood()
+model = GPModel(train_x, train_y, likelihood)
+model.train(); likelihood.train()
+mll = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.1)
+for i in range(150):
+    optimizer.zero_grad()
+    loss = -mll(model(train_x), train_y)
+    loss.backward(); optimizer.step()
+
+ell = model.covar_module.base_kernel.lengthscale.item()
+sf2 = model.covar_module.outputscale.item()
+sn2 = likelihood.noise.item()
+print(f'Learned: ℓ={ell:.3f}, σ²_f={sf2:.3f}, σ²_n={sn2:.4f}')
+</code></pre>
+<h2>Marginal Likelihood Landscape and Bayesian Occam's Razor</h2>
+<p>The marginal likelihood surface over (ℓ, σ²_f) is typically unimodal for simple datasets but can have multiple local optima for complex or noisy data. The data-fit term favours complex models (many parameters, small ℓ); the complexity penalty log|K+σ²_nI| penalises them. Their sum — the marginal likelihood — peaks at the simplest model that still explains the data. This automatic complexity control is the Bayesian Occam's razor.</p>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import minimize
+
+def rbf_kernel(X1, X2, ell, sf2):
+    X1 = np.atleast_2d(X1).reshape(-1,1)
+    X2 = np.atleast_2d(X2).reshape(-1,1)
+    return sf2 * np.exp(-0.5*(X1-X2.T)**2/ell**2)
+
+def lml_grid(X, y, ell, sf2, sn2=0.05):
+    n = len(y)
+    K = rbf_kernel(X, X, ell, sf2) + sn2*np.eye(n)
+    try:
+        L = np.linalg.cholesky(K)
+        alpha = np.linalg.solve(L.T, np.linalg.solve(L, y))
+        log_det = 2*np.sum(np.log(np.diag(L)))
+        return -0.5*(y@alpha) - 0.5*log_det - 0.5*n*np.log(2*np.pi)
+    except Exception:
+        return np.nan
+
+np.random.seed(5)
+X = np.linspace(-5, 5, 30)
+y = np.sin(X) + 0.15*np.random.randn(30)
+
+ells  = np.logspace(-1, 1, 40)
+sf2s  = np.logspace(-1, 1, 40)
+Z = np.array([[lml_grid(X, y, e, s) for e in ells] for s in sf2s])
+
+plt.figure(figsize=(8,6))
+plt.contourf(np.log10(ells), np.log10(sf2s), Z, levels=30, cmap='viridis')
+plt.colorbar(label='Log Marginal Likelihood')
+plt.xlabel('log₁₀(ℓ)'); plt.ylabel('log₁₀(σ²_f)')
+plt.title('Marginal Likelihood Landscape')
+plt.tight_layout(); plt.show()
+</code></pre>
+<blockquote>
+<p><strong>Multiple Restarts Avoid Local Optima</strong>: The marginal likelihood objective is non-convex. Run L-BFGS-B from 5–20 random initialisations in log-parameter space and take the optimum with the highest log marginal likelihood. This is especially important for high-dimensional or compositional kernels with many hyperparameters.</p>
+</blockquote>
+<h2>ARD — Automatic Relevance Determination</h2>
+<p>Automatic Relevance Determination (ARD) extends the scalar length-scale ℓ to a separate ℓ_d per input dimension d. The ARD kernel is k(x,x') = σ²_f exp(−Σ_d (xd−x'd)²/(2ℓ_d²)). After marginal likelihood optimisation, small ℓ_d → dimension d is relevant (function varies sharply with it); large ℓ_d → dimension d is irrelevant (function is flat). ARD provides automatic, continuous feature selection embedded in the GP.</p>
+<pre><code class="language-python">import torch
+import gpytorch
+import numpy as np
+
+np.random.seed(42)
+n, d = 100, 6
+X_np = np.random.randn(n, d)
+# Only first 2 features matter
+y_np = np.sin(X_np[:,0]) + 0.5*X_np[:,1] + 0.1*np.random.randn(n)
+
+train_x = torch.tensor(X_np, dtype=torch.float32)
+train_y = torch.tensor(y_np, dtype=torch.float32)
+
+likelihood = gpytorch.likelihoods.GaussianLikelihood()
+model_ard = gpytorch.models.ExactGP(train_x, train_y, likelihood)
+model_ard.mean_module  = gpytorch.means.ZeroMean()
+model_ard.covar_module = gpytorch.kernels.ScaleKernel(
+    gpytorch.kernels.RBFKernel(ard_num_dims=d))
+model_ard.forward = lambda x: gpytorch.distributions.MultivariateNormal(
+    model_ard.mean_module(x), model_ard.covar_module(x))
+
+model_ard.train(); likelihood.train()
+mll = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model_ard)
+opt = torch.optim.Adam(model_ard.parameters(), lr=0.1)
+for _ in range(200):
+    opt.zero_grad(); (-mll(model_ard(train_x), train_y)).backward(); opt.step()
+
+ells = model_ard.covar_module.base_kernel.lengthscale.detach().numpy()[0]
+for i, l in enumerate(ells):
+    print(f'Feature {i}: ℓ = {l:.3f}  {&quot;&lt;-- relevant&quot; if l &lt; 1.0 else &quot;irrelevant&quot;}')
+</code></pre>
+<h2>Key Takeaways</h2>
+<p>Type-II MLE optimises GP hyperparameters by maximising the log marginal likelihood log p(y|X,θ). The objective balances data-fit against model complexity (Bayesian Occam's razor) without a held-out validation set. Optimisation uses gradient-based methods (L-BFGS-B or Adam) in log-parameter space with multiple restarts. ARD extends scalar length-scales to per-dimension values, providing automatic feature selection. For large n, gradient computation through Cholesky remains the standard approach.</p>
+<blockquote>
+<p><strong>Marginal Likelihood ≠ Predictive Accuracy</strong>: Maximising the marginal likelihood is not the same as minimising prediction error. The complexity penalty can cause the optimiser to choose a simpler model than what gives best test RMSE, especially for small datasets. When pure predictive accuracy matters, compare with cross-validated hyperparameter selection.</p>
+</blockquote>
+<ul>
+<li>Log marginal likelihood = data fit − complexity penalty − constant</li>
+<li>Three terms: −½yᵀ(K+σ²I)⁻¹y, −½log|K+σ²I|, −n/2 log(2π)</li>
+<li>Gradient through Cholesky: ∂LML/∂θ via matrix derivatives — automatic in GPyTorch</li>
+<li>L-BFGS-B with 5–20 random restarts avoids local optima</li>
+<li>ARD: separate ℓ_d per dimension gives automatic relevance determination</li>
+<li>Bayesian Occam's razor: marginal likelihood prefers simpler models that fit the data</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

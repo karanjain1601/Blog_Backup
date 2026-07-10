@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Noisy GP Regression — Signal vs Noise Separation | Notes Backup</title>
+  <meta name="description" content="Observation model y=f(x)+ε, learning noise variance from data, heteroskedastic GPs, and the signal-to-noise ratio diagnostic for diagnosing overfitting vs underfitting." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Noisy GP Regression — Signal vs Noise Separation</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Observation model y=f(x)+ε, learning noise variance from data, heteroskedastic GPs, and the signal-to-noise ratio diagnostic for diagnosing overfitting vs underfitting.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Noisy GP Regression — Signal vs Noise Separation</h1>
+<h2>The Observation Model</h2>
+<p>In GP regression the observation model is y(x) = f(x) + ε, where f ~ GP(m, k) is the latent function and ε ~ N(0, σ²_n) is independent observation noise. The combined covariance of observations at two inputs x, x' is k_y(x,x') = k_f(x,x') + σ²_n δ(x,x'). Adding σ²_n to the diagonal of the kernel matrix K has two effects: it smooths the posterior mean (does not interpolate exactly) and it stabilises the matrix inversion numerically (improves condition number).</p>
+<ul>
+<li>Latent function f ~ GP(m, k): the true underlying signal being estimated</li>
+<li>Observation noise ε ~ N(0, σ²_n): independent per-observation measurement error</li>
+<li>Combined observation covariance: K_y = K_f + σ²_n I (noise on diagonal only)</li>
+<li>σ²_n &gt; 0: smoothed posterior, improved numerical conditioning</li>
+<li>σ²_n = 0: exact interpolation, numerically fragile — always add at least a jitter</li>
+<li>Signal-to-Noise Ratio (SNR) = σ²_f / σ²_n — key model health diagnostic</li>
+</ul>
+<blockquote>
+<p><strong>Noise vs Jitter — Two Distinct Roles</strong>: Observation noise σ²_n is a modelling choice that reflects real measurement uncertainty. Jitter (typically 1e-6) is a pure numerical device added to guarantee positive definiteness regardless of σ²_n. When σ²_n is already large, jitter is irrelevant; for noiseless models σ²_n=0 the jitter becomes critical.</p>
+</blockquote>
+<h2>Noisy vs Noiseless Posterior Behaviour</h2>
+<p>With noise σ²_n &gt; 0: posterior mean is a smoothed estimate of f that does not pass through observations; posterior variance at training inputs is positive (≈ σ²_n for well-fitted models). With noise σ²_n = 0 (or very small jitter): posterior is an exact interpolant through training points; posterior variance is 0 at training inputs. Noiseless models are appropriate only for deterministic simulators or computer experiments where observations carry no measurement error.</p>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+
+def rbf_kernel(X1, X2, ell=1.0, sf2=1.0):
+    X1 = np.atleast_2d(X1).reshape(-1,1)
+    X2 = np.atleast_2d(X2).reshape(-1,1)
+    return sf2 * np.exp(-0.5*(X1-X2.T)**2/ell**2)
+
+def gp_predict(X_tr, y_tr, X_te, ell, sf2, sn2):
+    n = len(X_tr)
+    K    = rbf_kernel(X_tr, X_tr, ell, sf2) + sn2*np.eye(n)
+    K_s  = rbf_kernel(X_tr, X_te, ell, sf2)
+    K_ss = rbf_kernel(X_te, X_te, ell, sf2)
+    L    = np.linalg.cholesky(K)
+    alpha = np.linalg.solve(L.T, np.linalg.solve(L, y_tr))
+    mu   = K_s.T @ alpha
+    v    = np.linalg.solve(L, K_s)
+    var  = np.maximum(np.diag(K_ss - v.T@v), 0)
+    return mu, np.sqrt(var)
+
+np.random.seed(1)
+X_tr = np.sort(np.random.uniform(-4,4,12))
+y_tr = np.sin(X_tr) + 0.4*np.random.randn(12)
+X_te = np.linspace(-5, 5, 300)
+
+fig, axes = plt.subplots(1, 2, figsize=(13,4), sharey=True)
+for ax, sn2, lbl in zip(axes, [1e-6, 0.3],
+    ['Noiseless (σ²_n=0) — interpolation', 'Noisy (σ²_n=0.3) — smoothing']):
+    mu, std = gp_predict(X_tr, y_tr, X_te, ell=1.0, sf2=1.0, sn2=sn2)
+    ax.fill_between(X_te, mu-2*std, mu+2*std, alpha=0.25)
+    ax.plot(X_te, mu, lw=2)
+    ax.scatter(X_tr, y_tr, c='r', zorder=5, s=60)
+    ax.set_title(lbl); ax.set_xlabel('x')
+axes[0].set_ylabel('y'); plt.tight_layout(); plt.show()
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Noiseless GP (σ_n≈0)</th>
+<th>Noisy GP (σ_n&gt;0)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Passes through training data</td>
+<td>Yes — exact interpolation</td>
+<td>No — smooth fit</td>
+</tr>
+<tr>
+<td>Posterior variance at X_train</td>
+<td>0</td>
+<td>Approx σ²_n</td>
+</tr>
+<tr>
+<td>Numerical stability</td>
+<td>Poor (nearly singular K)</td>
+<td>Good (diagonal regularisation)</td>
+</tr>
+<tr>
+<td>Use case</td>
+<td>Deterministic simulators, exact data</td>
+<td>Real-world sensor/measurement data</td>
+</tr>
+<tr>
+<td>Marginal likelihood</td>
+<td>Tends to overfit (sharp peak)</td>
+<td>Balanced fit-complexity trade-off</td>
+</tr>
+</tbody>
+</table>
+<h2>Learning Noise Level from Data</h2>
+<p>The noise variance σ²_n should be learned from data via marginal likelihood optimisation rather than set by hand. The marginal likelihood automatically assigns a noise level consistent with the observed scatter. If σ²_n is too small, the model interpolates and overfits; if too large, the mean function is over-smoothed. The learned SNR = σ²_f / σ²_n provides a useful diagnostic: SNR &lt; 1 means the model sees more noise than signal.</p>
+<pre><code class="language-python">import numpy as np
+from scipy.optimize import minimize
+import matplotlib.pyplot as plt
+
+def rbf_kernel(X1, X2, ell, sf2):
+    X1 = np.atleast_2d(X1).reshape(-1,1)
+    X2 = np.atleast_2d(X2).reshape(-1,1)
+    return sf2 * np.exp(-0.5*(X1-X2.T)**2/ell**2)
+
+def neg_lml(params, X, y):
+    ell, sf2, sn2 = np.exp(params)
+    n = len(y)
+    K = rbf_kernel(X, X, ell, sf2) + sn2*np.eye(n)
+    try:
+        L = np.linalg.cholesky(K)
+        alpha = np.linalg.solve(L.T, np.linalg.solve(L, y))
+        return 0.5*(y@alpha) + np.sum(np.log(np.diag(L))) + 0.5*n*np.log(2*np.pi)
+    except Exception:
+        return 1e10
+
+np.random.seed(7)
+X = np.sort(np.random.uniform(-5,5,60))
+true_snr_scenario = {'low_noise': 0.1, 'high_noise': 1.0}
+for scenario, sn in true_snr_scenario.items():
+    y = np.sin(X) + sn*np.random.randn(60)
+    res = minimize(neg_lml, [0,0,-2], args=(X,y), method='L-BFGS-B')
+    ell, sf2, sn2 = np.exp(res.x)
+    print(f'{scenario}: ℓ={ell:.3f}, σ²_f={sf2:.3f}, σ²_n={sn2:.4f}, SNR={sf2/sn2:.2f}')
+</code></pre>
+<blockquote>
+<p><strong>SNR as a Model Health Diagnostic</strong>: After optimisation, compute SNR = σ²_f / σ²_n. SNR &gt;&gt; 1 (e.g., 10+): model is dominated by signal — check for overfitting if the posterior fits training data too tightly. SNR ≈ 1: signal and noise are comparable — typical for real-world data. SNR &lt;&lt; 1: noise dominates — data may be too noisy for the model to extract signal, or length-scale is misconfigured.</p>
+</blockquote>
+<h2>Heteroskedastic GP — Input-Dependent Noise</h2>
+<p>Homoskedastic GPs assume constant σ²_n everywhere. Real signals often have input-dependent noise (heteroskedasticity) — e.g., measurement uncertainty varies with sensor load, or financial volatility clusters in time. Heteroskedastic GPs model the noise as a function of x, often by placing a second GP over log σ²_n(x) or by using a warped likelihood. A simple approximation: binned noise estimation followed by a fixed diagonal noise matrix.</p>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+
+def rbf_kernel(X1, X2, ell=1.0, sf2=1.0):
+    X1 = np.atleast_2d(X1).reshape(-1,1)
+    X2 = np.atleast_2d(X2).reshape(-1,1)
+    return sf2 * np.exp(-0.5*(X1-X2.T)**2/ell**2)
+
+np.random.seed(4)
+X_tr = np.sort(np.random.uniform(-5,5,60))
+# Noise grows with |x|
+noise_std = 0.1 + 0.3*np.abs(X_tr)
+y_tr = np.sin(X_tr) + noise_std*np.random.randn(60)
+
+X_te = np.linspace(-6,6,300)
+
+def gp_hetero(X_tr, y_tr, X_te, noise_vec, ell=1.5, sf2=1.0):
+    K    = rbf_kernel(X_tr,X_tr,ell,sf2) + np.diag(noise_vec**2)
+    K_s  = rbf_kernel(X_tr,X_te,ell,sf2)
+    K_ss = rbf_kernel(X_te,X_te,ell,sf2)
+    L    = np.linalg.cholesky(K)
+    alpha = np.linalg.solve(L.T,np.linalg.solve(L,y_tr))
+    mu   = K_s.T@alpha
+    v    = np.linalg.solve(L,K_s)
+    return mu, np.sqrt(np.maximum(np.diag(K_ss-v.T@v),0))
+
+mu, std = gp_hetero(X_tr, y_tr, X_te, noise_std)
+plt.figure(figsize=(10,4))
+plt.fill_between(X_te,mu-2*std,mu+2*std,alpha=0.25,label='±2σ (homoskedastic post.)')
+plt.plot(X_te, mu, lw=2, label='Posterior mean')
+plt.errorbar(X_tr, y_tr, yerr=2*noise_std, fmt='r.', alpha=0.4, ms=4, label='Obs ±2σ_n(x)')
+plt.title('Heteroskedastic GP (known input-dependent noise)')
+plt.xlabel('x'); plt.ylabel('y'); plt.legend(); plt.tight_layout(); plt.show()
+</code></pre>
+<h2>Model Selection via Marginal Likelihood</h2>
+<p>The log marginal likelihood can compare different noise assumptions without a held-out set. Models with unrealistically small σ²_n will have high data-fit but a large complexity penalty from the almost-singular kernel matrix; the marginal likelihood penalises this. Comparing LML values across model variants (different kernels, different noise models) implements formal Bayesian model selection.</p>
+<pre><code class="language-python">import numpy as np
+from scipy.optimize import minimize
+
+def rbf_kernel(X1, X2, ell, sf2):
+    X1=np.atleast_2d(X1).reshape(-1,1); X2=np.atleast_2d(X2).reshape(-1,1)
+    return sf2*np.exp(-0.5*(X1-X2.T)**2/ell**2)
+
+def fit_and_score(X, y, fixed_sn2=None):
+    def neg_lml(params):
+        if fixed_sn2 is None:
+            ell,sf2,sn2 = np.exp(params)
+        else:
+            ell,sf2 = np.exp(params); sn2 = fixed_sn2
+        n = len(y); K = rbf_kernel(X,X,ell,sf2)+sn2*np.eye(n)
+        try:
+            L=np.linalg.cholesky(K); a=np.linalg.solve(L.T,np.linalg.solve(L,y))
+            return 0.5*(y@a)+np.sum(np.log(np.diag(L)))+0.5*n*np.log(2*np.pi)
+        except: return 1e10
+    n_params = 2 if fixed_sn2 else 3
+    x0 = np.zeros(n_params)
+    res = minimize(neg_lml, x0, method='L-BFGS-B')
+    return -res.fun
+
+np.random.seed(99)
+X = np.sort(np.random.uniform(-5,5,50))
+y = np.sin(X)+0.2*np.random.randn(50)
+for label, sn in [('Interpolating (σ_n=1e-4)',1e-4),
+                  ('Learned noise', None),
+                  ('Over-smoothed (σ_n=2.0)',2.0)]:
+    lml = fit_and_score(X, y, fixed_sn2=sn if sn else None)
+    print(f'{label:&lt;35s}: LML = {lml:.2f}')
+</code></pre>
+<h2>Key Takeaways</h2>
+<p>The observation model y = f(x) + ε separates the latent signal f from measurement noise ε ~ N(0, σ²_n). Adding σ²_n to the diagonal of K regularises the matrix (numerical stability) and produces a smoothed posterior mean rather than exact interpolation. The noise level is best learned via marginal likelihood optimisation. SNR = σ²_f/σ²_n is a useful health diagnostic. Heteroskedastic extensions model input-dependent noise via a second GP over log noise.</p>
+<ul>
+<li>σ²_n on K diagonal: numerical stability + smoothed posterior</li>
+<li>Noiseless GP (σ²_n=0): interpolation, appropriate only for deterministic simulators</li>
+<li>Learn σ²_n from marginal likelihood — not cross-validation</li>
+<li>SNR = σ²_f/σ²_n: high → signal-dominated; low → noise-dominated</li>
+<li>Heteroskedastic GP: model σ²_n(x) as a function of input for non-constant noise</li>
+<li>Marginal likelihood formally compares noise models without held-out data</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

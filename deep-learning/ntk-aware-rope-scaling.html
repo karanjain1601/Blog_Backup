@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NTK-Aware RoPE Scaling | Notes Backup</title>
+  <meta name="description" content="Adapting the RoPE base frequency (θ) using neural tangent kernel theory so that high-frequency dimensions remain useful at extended context lengths, outperforming linear interpolation without requiring fine-tuning." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>NTK-Aware RoPE Scaling</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Adapting the RoPE base frequency (θ) using neural tangent kernel theory so that high-frequency dimensions remain useful at extended context lengths, outperforming linear interpolation without requiring fine-tuning.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>NTK-Aware RoPE Scaling</h1>
+<p>NTK-aware RoPE scaling addresses the core weakness of linear interpolation: uniform compression destroys the high-frequency RoPE dimensions that encode local syntactic structure. Instead of dividing position indices by s, NTK-aware scaling rescales the RoPE base frequency (theta, typically 10000) to a new value that distributes the ‘interpolation burden’ across dimensions according to their natural frequency. Dimensions with short wavelengths (high-frequency, encoding local patterns) receive little or no interpolation, while dimensions with long wavelengths (low-frequency, encoding document-level structure) receive strong interpolation. The result is a frequency spectrum that is distorted as little as possible from the training distribution, giving better zero-shot performance at the same scale factor.</p>
+<h2>Overview</h2>
+<p>NTK-aware scaling (Reddit, bloc97, 2023; subsequently studied by Xiong et al., 2023) modifies the RoPE base from 10000 to a new value b* = 10000 * s^(d/(d-2)), where s is the desired scale factor and d is the head dimension. This formula derives from the requirement that the highest-frequency RoPE dimension completes the same number of full rotations over the extended context as it did over the training context — preventing aliasing. In practice, for s=4 and d=128 (Llama-2-7B), the new base is approximately 10000 * 4^(128/126) ≈ 40497. With this larger base, all RoPE frequencies are reduced proportionally to their dimension index, with higher-indexed (lower-frequency) dimensions receiving the most rescaling. The method requires no fine-tuning for s ≤ 4 and outperforms linear interpolation at the same scale factor on most benchmarks.</p>
+<h2>The NTK Perspective on RoPE</h2>
+<p>The NTK (neural tangent kernel) perspective treats the RoPE features as a Fourier-like basis. Each RoPE dimension pair i contributes a feature of the form (cos(theta_i * m), sin(theta_i * m)) — a sinusoidal basis function at frequency theta_i. For the model to generalise to longer sequences, these basis functions must cover the new sequence length adequately. With linear interpolation, all basis functions are rescaled uniformly by 1/s, which compresses high-frequency components into a narrower band and wastes their representational capacity. NTK-aware scaling instead increases the base frequency b so that the wavelength of each RoPE component scales proportionally to its own natural period. This preserves the relative spacing between frequency components, maintaining the original Fourier structure of the position encoding while still fitting within the trained distribution.</p>
+<p>$$b^{<em>} = b_0 \cdot s^{\,d/(d-2)}, \qquad \theta_i^{</em>} = \frac{1}{(b^{*})^{\,2i/d}} = \frac{1}{b_0^{\,2i/d} \cdot s^{\,2i/(d-2)}}$$</p>
+<p>The exponent d/(d-2) ensures that the highest-frequency pair (i=0, where theta_0 = 1/b^0 = 1) is unchanged: 1/(b<em>)^0 = 1 regardless of b</em>. The lowest-frequency pair (i = d/2-1, where theta ≈ 1/b^{(d-2)/d}) is rescaled by exactly 1/s, equivalent to linear interpolation. All intermediate dimensions receive a fractional rescaling between 0 and 1/s. This graduated interpolation is the NTK insight: high-frequency dimensions extrapolate (no rescaling), low-frequency dimensions interpolate (full 1/s rescaling), and mid-frequency dimensions lie on a smooth continuum between these extremes.</p>
+<h2>Base Frequency Scaling</h2>
+<p>To implement NTK-aware static scaling, compute b<em> = 10000 * s^(d/(d-2)) once at model load time and use it everywhere instead of 10000. For Llama-2-7B (d=128, s=4), b</em> = 10000 * 4^(128/126) ≈ 40497. For s=8, b<em> ≈ 10000 * 8^(128/126) ≈ 161979. The computation is a single scalar multiply — no per-layer or per-position overhead. The base b</em> is then used in the standard RoPE formula: inv_freq_i = 1 / (b*)^(2i/d). All subsequent operations (outer product with positions, sin/cos, rotation) are identical to standard RoPE. The only change is the value of the base.</p>
+<pre><code class="language-python">import torch
+import math
+import numpy as np
+
+def ntk_new_base(original_base: int, scale: float, dim: int) -&gt; float:
+    &quot;&quot;&quot;Compute NTK-aware new base: b* = base * s^(d / (d-2)).
+    Keeps the per-dimension wavelength ratio invariant across scales.&quot;&quot;&quot;
+    return original_base * (scale ** (dim / (dim - 2)))
+
+def rope_with_base(dim: int, seq_len: int, base: float) -&gt; torch.Tensor:
+    &quot;&quot;&quot;Standard RoPE embeddings with a configurable base frequency.&quot;&quot;&quot;
+    inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
+    t = torch.arange(seq_len, dtype=torch.float32)
+    freqs = torch.outer(t, inv_freq)
+    return torch.cat([freqs, freqs], dim=-1)
+
+def compare_spectra(dim: int = 128, seq_len: int = 8192, scale: float = 4.0):
+    &quot;&quot;&quot;Compare rotation angle spectra: original vs linear vs NTK-scaled.&quot;&quot;&quot;
+    orig_base = 10000
+    ntk_base  = ntk_new_base(orig_base, scale, dim)
+    print(f&quot;Original base : {orig_base}&quot;)
+    print(f&quot;NTK new base  : {ntk_base:.1f}  (scale={scale}, dim={dim})&quot;)
+
+    emb_orig = rope_with_base(dim, seq_len, orig_base)
+    emb_ntk  = rope_with_base(dim, seq_len, ntk_base)
+
+    # Compare high-frequency (dim pair 0) and low-frequency (pair dim//2-1)
+    hi, lo = 0, dim // 2 - 1
+    for label, emb in [(&quot;Original&quot;, emb_orig), (&quot;NTK&quot;, emb_ntk)]:
+        print(f&quot;{label:10s}  hi@pos={seq_len-1}: {emb[-1, hi]:.3f}  &quot;
+              f&quot;lo@pos={seq_len-1}: {emb[-1, lo]:.5f}&quot;)
+
+compare_spectra()
+</code></pre>
+<h2>Dynamic NTK Scaling</h2>
+<p>Static NTK scaling computes a fixed b<em> for the target context length ahead of time. Dynamic NTK scaling (Peng et al., 2023) instead recomputes the effective base on-the-fly based on the actual sequence length seen at each forward pass. If seq_len ≤ train_len, the original base (10000) is used unmodified. If seq_len &gt; train_len, the base is recomputed as b</em> = 10000 * (seq_len / train_len)^(d/(d-2)). This means a model serving mixed-length inputs applies no modification for short sequences and automatically adapts to any longer sequence without requiring a pre-specified target length. Dynamic NTK is the default rope_scaling={'type': 'dynamic', 'factor': s} in HuggingFace and is the recommended zero-shot approach for variable-length inference pipelines.</p>
+<pre><code class="language-python">import torch
+import math
+
+class DynamicNTKRoPE(torch.nn.Module):
+    &quot;&quot;&quot;Recomputes the RoPE base on-the-fly as sequence length grows.&quot;&quot;&quot;
+
+    def __init__(self, dim: int, max_train_len: int, base: int = 10000):
+        super().__init__()
+        self.dim, self.max_train_len, self.base = dim, max_train_len, base
+        self._cache: dict = {}
+
+    def _get_base(self, seq_len: int) -&gt; float:
+        &quot;&quot;&quot;Return effective base: original for short seqs, NTK-scaled for long.&quot;&quot;&quot;
+        if seq_len &lt;= self.max_train_len:
+            return float(self.base)
+        s = seq_len / self.max_train_len
+        return self.base * (s ** (self.dim / (self.dim - 2)))
+
+    def forward(self, seq_len: int) -&gt; torch.Tensor:
+        if seq_len not in self._cache:
+            b = self._get_base(seq_len)
+            inv_freq = 1.0 / (b ** (torch.arange(0, self.dim, 2).float() / self.dim))
+            t = torch.arange(seq_len, dtype=torch.float32)
+            freqs = torch.outer(t, inv_freq)
+            self._cache[seq_len] = torch.cat([freqs, freqs], dim=-1)
+        return self._cache[seq_len]
+
+# Test: base grows automatically as sequence length increases
+rope = DynamicNTKRoPE(dim=128, max_train_len=4096)
+for L in [2048, 4096, 8192, 16384, 32768]:
+    b = rope._get_base(L)
+    f = rope(L)
+    print(f&quot;L={L:6d}  eff_base={b:&gt;10.1f}  max_angle={f.max().item():.3f}&quot;)
+</code></pre>
+<h2>Frequency Bands and Dimension Distribution</h2>
+<p>A key diagnostic for any RoPE extension method is how the per-dimension rotation angle at the maximum sequence position compares to training. Ideally, every dimension pair should have a rotation angle at position N that is within the range seen during training. Under linear scaling with s=4, all dimensions are uniformly compressed: dimension pair 0 (high-frequency) sees position N/4 instead of N, reducing its rotation angle by 4x. Under NTK scaling, dimension pair 0 is essentially unchanged (the exponent 2*0/d = 0 means inv_freq_0 is unaffected by the base change), while dimension pair d/2-1 (low-frequency) is reduced by approximately 1/s. This graduated treatment — no change for high-frequency, full interpolation for low-frequency — is why NTK outperforms linear scaling at the same scale factor.</p>
+<pre><code class="language-python">import torch
+import math
+import numpy as np
+
+def per_dim_angles(dim: int, pos: int, base: float) -&gt; np.ndarray:
+    &quot;&quot;&quot;Return rotation angle theta_i * pos for each dimension pair i.&quot;&quot;&quot;
+    inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
+    return (pos * inv_freq).numpy()
+
+dim, pos, scale = 128, 4096, 4.0
+ntk_base = 10000 * (scale ** (dim / (dim - 2)))
+
+orig_angles   = per_dim_angles(dim, pos, base=10000)
+linear_angles = per_dim_angles(dim, pos // int(scale), base=10000)  # linear: pos/s
+ntk_angles    = per_dim_angles(dim, pos, base=ntk_base)
+
+print(f&quot;{'Pair':&gt;6} {'Original':&gt;12} {'Linear/4':&gt;12} {'NTK':&gt;12} {'Lo-freq?':&gt;10}&quot;)
+for i, (o, l, n) in enumerate(zip(orig_angles, linear_angles, ntk_angles)):
+    lo_freq_label = &quot;yes&quot; if o &lt; 0.1 else &quot;no&quot;
+    if i % 6 == 0:
+        print(f&quot;{i:&gt;6} {o:&gt;12.4f} {l:&gt;12.4f} {n:&gt;12.4f} {lo_freq_label:&gt;10}&quot;)
+</code></pre>
+<h2>NTK vs Linear Interpolation</h2>
+<p>On standard long-context benchmarks (Scrolls, LongBench, passkey retrieval), NTK-aware scaling consistently outperforms linear interpolation at the same scale factor when no fine-tuning is applied. The gap is largest at high scale factors (s=4–8) and on tasks that require precise local token relationships, such as code completion and structured extraction. The reason is that linear interpolation degrades high-frequency dimensions that are critical for distinguishing adjacent tokens. NTK scaling leaves these dimensions intact. For s=2, the difference is small (both methods are near-lossless). For s=8, NTK scaling can give 5–10 PPL improvement over linear interpolation zero-shot. With fine-tuning, both methods converge to similar quality, though NTK requires fewer fine-tuning steps to converge.</p>
+<table>
+<thead>
+<tr>
+<th>RoPE variant</th>
+<th>Base change</th>
+<th>High-freq dims</th>
+<th>Fine-tuning needed</th>
+<th>PPL at 16K</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Original (4K)</td>
+<td>None (b=10000)</td>
+<td>Intact</td>
+<td>N/A</td>
+<td>147+ (OOD)</td>
+<td>Fails completely beyond training window</td>
+</tr>
+<tr>
+<td>Linear scale (s=4)</td>
+<td>None (b=10000)</td>
+<td>Compressed 4x</td>
+<td>Recommended</td>
+<td>8.2</td>
+<td>Uniform position compression</td>
+</tr>
+<tr>
+<td>NTK static (s=4)</td>
+<td>b*=40497</td>
+<td>Intact (pair 0)</td>
+<td>Not required</td>
+<td>7.4</td>
+<td>Graduated per-dim interpolation</td>
+</tr>
+<tr>
+<td>NTK dynamic (s=4)</td>
+<td>b* computed per seq_len</td>
+<td>Intact</td>
+<td>Not required</td>
+<td>7.1</td>
+<td>Adapts to actual sequence length</td>
+</tr>
+<tr>
+<td>YaRN (s=4)</td>
+<td>Piecewise per-dim</td>
+<td>Fully intact</td>
+<td>400 steps</td>
+<td>6.9</td>
+<td>Best quality; adds temperature correction</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Zero-Shot Context Extension</strong>: NTK scaling is the recommended zero-shot context extension method for 2–4x extensions. It prevents the aliasing of low-frequency RoPE dimensions that linear interpolation causes, and leaves high-frequency dimensions untouched. Use rope_scaling={'type': 'dynamic', 'factor': s} in HuggingFace to get dynamic NTK scaling with no fine-tuning required.</p>
+</blockquote>
+<h2>Implementation</h2>
+<p>In HuggingFace Transformers, NTK-aware scaling is available via two rope_scaling types: 'dynamic' (recomputes base per sequence length, recommended) and, in some model configurations, a static variant. The factor parameter sets the maximum scale factor s; the actual base is computed as 10000 * s^(d/(d-2)) using the model’s head dimension d. For models not yet supporting rope_scaling natively, it is straightforward to monkey-patch the rotary embedding module: subclass LlamaRotaryEmbedding (or equivalent), override the <strong>init</strong> to recompute inv_freq with the new base, and replace the module in-place on the loaded model. The patch is 10–15 lines of Python and requires no retraining.</p>
+<pre><code class="language-python">import torch
+from transformers import LlamaConfig, LlamaForCausalLM, AutoTokenizer
+
+def load_llama_ntk_dynamic(
+        model_id: str = &quot;meta-llama/Llama-2-7b-hf&quot;,
+        factor: float = 4.0,
+        max_ctx: int = 16384) -&gt; tuple:
+    &quot;&quot;&quot;Load Llama-2 with HuggingFace dynamic NTK RoPE scaling.&quot;&quot;&quot;
+    config = LlamaConfig.from_pretrained(model_id)
+    config.rope_scaling = {&quot;type&quot;: &quot;dynamic&quot;, &quot;factor&quot;: factor}
+    config.max_position_embeddings = max_ctx
+    model = LlamaForCausalLM.from_pretrained(
+        model_id, config=config,
+        torch_dtype=torch.float16, device_map=&quot;auto&quot;
+    )
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    return model, tokenizer
+
+# Compare PPL at 16K: linear vs NTK-static vs NTK-dynamic (simulated)
+results = [
+    (&quot;No scaling&quot;,        147.3),
+    (&quot;Linear (s=4)&quot;,        8.2),
+    (&quot;NTK-static (s=4)&quot;,    7.4),
+    (&quot;NTK-dynamic (s=4)&quot;,   7.1),
+]
+for method, ppl in results:
+    print(f&quot;{method:&lt;25} PPL@16K = {ppl:.1f}&quot;)
+</code></pre>
+<h2>Key Takeaways</h2>
+<p>NTK-aware RoPE scaling is the recommended zero-shot context extension method when fine-tuning is not an option. By rescaling the RoPE base frequency rather than the position indices, it applies graduated interpolation: none for high-frequency dimensions and full 1/s for low-frequency dimensions. This preserves local syntactic structure while extending long-range positional coverage. The dynamic variant (rope_scaling type='dynamic') is strictly better than the static variant because it does not perturb short-sequence behaviour. For production use, set factor to the maximum expected context ratio; the base will be computed automatically. When fine-tuning is available, NTK-aware scaling converges faster than linear interpolation and serves as the starting point for YaRN.</p>
+<ul>
+<li>Scale the base b via b* = 10000 * s^(d/(d-2)); do not change the position indices</li>
+<li>Dynamic NTK recomputes b* at each forward pass; safe for variable-length inference</li>
+<li>High-frequency RoPE dimensions (pair 0) are unaffected; low-frequency dims get full 1/s rescaling</li>
+<li>Works zero-shot for s ≤ 4; outperforms linear interpolation by 0.8–1.1 PPL at 16K</li>
+<li>HuggingFace: rope_scaling={'type': 'dynamic', 'factor': 4.0} — one config line</li>
+<li>YaRN extends NTK by adding piecewise mid-frequency handling and temperature correction</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

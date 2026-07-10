@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Beyond Chinchilla — Inference-Aware Training and the LLaMA Efficiency Insight | Notes Backup</title>
+  <meta name="description" content="Chinchilla optimizes training compute but ignores inference cost. When serving at scale, smaller models trained on far more tokens dominate — the insight behind LLaMA-1, LLaMA-3, and the broader shift to inference-optimal training." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Beyond Chinchilla — Inference-Aware Training and the LLaMA Efficiency Insight</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Chinchilla optimizes training compute but ignores inference cost. When serving at scale, smaller models trained on far more tokens dominate — the insight behind LLaMA-1, LLaMA-3, and the broader shift to inference-optimal training.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Beyond Chinchilla — Inference-Aware Training and the LLaMA Efficiency Insight</h1>
+<p>Chinchilla answers the question: given a fixed training compute budget C, how should you split it between model size N and training tokens D? The answer — N<em> proportional to C^0.5, D</em> = 20<em>N</em> — minimizes the final training loss. But this objective ignores what happens after training. At deployment scale, inference cost dwarfs training cost: a model serving 1 million queries per day runs more total FLOPs in a week of serving than were spent training it. The LLaMA insight (Touvron et al., 2023) was to optimize for inference efficiency by training smaller models on far more tokens than Chinchilla recommends.</p>
+<h2>Why Chinchilla Misses Half the Picture</h2>
+<p>The total cost of a deployed language model has two components: C_total = C_train + C_inf, where C_train = 6<em>N</em>D (training cost) and C_inf = 2<em>N</em>Q (inference cost, Q = total queries served). For a 70B model serving 1M queries per day, the daily inference cost is 2 * 70e9 * 1e6 = 1.4e17 FLOPs — equivalent to training a 1B parameter model for 700 billion tokens. After one year of deployment, inference has consumed 5e19 FLOPs — likely exceeding the training cost. A 7B model trained 10x more would serve each query at 10x lower FLOP cost, dramatically reducing C_inf while achieving comparable quality.</p>
+<ul>
+<li>C_train = 6<em>N</em>D: one-time cost, paid once before deployment</li>
+<li>C_inf = 2*N per query: scales linearly with total queries served, unbounded</li>
+<li>At 1M queries/day a 70B model spends ~5e19 FLOPs/year on inference alone</li>
+<li>A 7B model at same quality costs 10x less per query: 10x better inference economics</li>
+<li>LLaMA insight: train 7B on 1T tokens instead of 50B on 100B tokens for same training C</li>
+<li>LLaMA-3.1 8B trained on 15T tokens: 93x Chinchilla-optimal, optimized for serving</li>
+</ul>
+<h2>Code 1 — Inference-Optimal Allocation</h2>
+<pre><code class="language-python">import numpy as np
+from scipy.optimize import minimize_scalar
+
+E_CONST, A_CONST, B_CONST, ALPHA, BETA = 1.69, 406.4, 410.7, 0.34, 0.28
+
+def tokens_for_target_loss(N, target_loss=2.5):
+    '''Find D such that L(N, D) = target_loss using Chinchilla formula.'''
+    residual = target_loss - E_CONST - A_CONST * N ** (-ALPHA)
+    if residual &lt;= 0:
+        return np.inf  # model too small to reach target regardless of data
+    return (B_CONST / residual) ** (1.0 / BETA)
+
+def total_cost(N, Q_total, target_loss=2.5):
+    '''C_total = 6*N*D (training) + 2*N*Q (inference FLOPs).'''
+    D = tokens_for_target_loss(N, target_loss)
+    if np.isinf(D):
+        return np.inf
+    return 6.0 * N * D + 2.0 * N * Q_total
+
+N_range = np.logspace(8, 12, 300)  # 100M to 1T parameters
+
+query_scenarios = [
+    ('1K queries (dev)',   1e3),
+    ('1M queries (prod)',  1e6),
+    ('1B queries (scale)', 1e9),
+]
+
+print('{:&lt;22} {:&gt;14} {:&gt;20} {:&gt;8}'.format('Query Scale', 'Optimal N* (B)', 'Optimal D* (B tokens)', 'D/N'))
+print('-' * 68)
+for label, Q in query_scenarios:
+    costs = np.array([total_cost(N, Q) for N in N_range])
+    valid = np.isfinite(costs)
+    best_i = np.argmin(np.where(valid, costs, np.inf))
+    N_best = N_range[best_i]
+    D_best = tokens_for_target_loss(N_best)
+    print('{:&lt;22} {:&gt;14.2f} {:&gt;20.1f} {:&gt;8.1f}'.format(label, N_best/1e9, D_best/1e9, D_best/N_best))
+</code></pre>
+<h2>The LLaMA Insight</h2>
+<p>Touvron et al. (2023) observed that Chinchilla optimizes training compute but practitioners care more about inference cost at a target quality level. LLaMA-1 7B was trained on 1T tokens — approximately 7x the Chinchilla-optimal token count for a 7B model (which is ~140B tokens). This means LLaMA-1 7B achieves roughly the same quality as the Chinchilla-optimal model for a 50B parameter system, but runs inference at 7x lower cost per query. The model took longer to train (7x more tokens), but that one-time cost pays off after only a relatively small number of queries served.</p>
+<ul>
+<li>LLaMA-1 7B: 1T tokens (Chinchilla-optimal for 50B model) — 143 tokens/param</li>
+<li>LLaMA-3.1 8B: 15T tokens — approximately 1,875 tokens/param, 93x Chinchilla-optimal</li>
+<li>LLaMA-3.1 70B: 15T tokens — approximately 214 tokens/param, 10.7x Chinchilla-optimal</li>
+<li>Phi-3 Mini (3.8B, 3.3T tokens): 868 tokens/param — extreme data-to-param ratio</li>
+<li>Quality of over-trained small model often matches quality of Chinchilla-optimal larger model</li>
+<li>Break-even queries: (C_over_train - C_chin_train) / (C_inf_large - C_inf_small)</li>
+</ul>
+<h2>Code 2 — Cost Comparison at Deployment Scale</h2>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+
+E_CONST, A_CONST, B_CONST, ALPHA, BETA = 1.69, 406.4, 410.7, 0.34, 0.28
+
+def tokens_for_target(N, L_target=2.5):
+    '''Tokens needed to reach L_target with N parameters.'''
+    res = L_target - E_CONST - A_CONST * N ** (-ALPHA)
+    return (B_CONST / res) ** (1.0 / BETA) if res &gt; 0 else np.inf
+
+N_range   = np.logspace(8, 12, 150)  # 100M to 1T params
+scenarios = [
+    ('1K queries',  1e3,  '#3498db'),
+    ('1M queries',  1e6,  '#e67e22'),
+    ('1B queries',  1e9,  '#e74c3c'),
+]
+
+fig, ax = plt.subplots(figsize=(10, 6))
+for label, Q, color in scenarios:
+    costs = []
+    for N in N_range:
+        D = tokens_for_target(N)
+        costs.append(6.0 * N * D + 2.0 * N * Q if np.isfinite(D) else np.inf)
+    costs = np.array(costs)
+    valid = np.isfinite(costs)
+    ax.semilogy(N_range[valid] / 1e9, costs[valid], color=color, lw=2, label=label)
+    best_i = int(np.argmin(np.where(valid, costs, np.inf)))
+    ax.axvline(N_range[best_i] / 1e9, color=color, ls=':', alpha=0.7)
+
+ax.set_xlabel('Model Size N (billions of parameters)', fontsize=12)
+ax.set_ylabel('Total Cost (train + inference FLOPs)', fontsize=12)
+ax.set_title('Inference-Aware Total Cost vs Model Size at Different Deployment Scales', fontsize=11)
+ax.legend(fontsize=11)
+ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.savefig('inference_cost_comparison.png', dpi=150)
+plt.show()
+print('Dotted vertical lines mark inference-optimal N* for each deployment scale.')
+</code></pre>
+<h2>Multi-Epoch Training Effects</h2>
+<p>When a model is trained beyond the Chinchilla-optimal token count, it will inevitably revisit tokens if the unique data corpus is smaller than D*. Multiple epochs over the same data exhibit diminishing returns: the effective data contribution from repeated tokens scales sub-linearly (roughly as epochs^0.5 empirically). At very high epoch counts — say, 100 passes over the same data — loss degradation can become significant, as the model begins to memorize rather than generalize. The practical mitigation is aggressive data curation, deduplication, and mixing in synthetic data (as with Phi-3 and related models) to maintain data diversity even at high token counts.</p>
+<h2>Code 3 — Multi-Epoch Training Degradation</h2>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+
+def loss_with_repetition(N, D_unique, epochs,
+                         E=1.69, A=406.4, alpha=0.34, B=410.7, beta=0.28):
+    '''Model loss under data repetition: D_effective = D_unique * epochs^0.5
+    (sub-linear effective data gain from repeated tokens).'''
+    D_eff = D_unique * (epochs ** 0.5)
+    return E + A * N ** (-alpha) + B * D_eff ** (-beta)
+
+N        = 7e9    # 7B parameter model
+D_unique = 100e9  # 100B unique high-quality tokens
+epochs   = np.linspace(1.0, 25.0, 250)
+losses   = [loss_with_repetition(N, D_unique, e) for e in epochs]
+
+chinchilla_D     = 20.0 * N         # 140B = Chinchilla-optimal
+chinchilla_epoch = chinchilla_D / D_unique   # 1.4 epochs
+
+fig, ax = plt.subplots(figsize=(9, 5))
+ax.plot(epochs, losses, 'b-', lw=2, label='Test loss with data repetition')
+ax.axvline(chinchilla_epoch, color='g', ls='--', lw=2,
+           label='Chinchilla-optimal ({:.1f} epochs)'.format(chinchilla_epoch))
+ax.axhline(min(losses), color='gray', ls=':', lw=1.5, label='Best achievable loss')
+ax.set_xlabel('Training Epochs Over Unique Data', fontsize=12)
+ax.set_ylabel('Predicted Test Loss (nats)', fontsize=12)
+ax.set_title('Multi-Epoch Training: Diminishing Returns Past Chinchilla-Optimal', fontsize=12)
+ax.legend(fontsize=11)
+ax.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.savefig('multi_epoch_degradation.png', dpi=150)
+plt.show()
+</code></pre>
+<h2>Code 4 — LLaMA vs Chinchilla-Optimal Comparison</h2>
+<pre><code class="language-python">import numpy as np
+
+def chinchilla_optimal_tokens(N):
+    '''Chinchilla-optimal token count for N parameters: D* = 20 * N.'''
+    return 20.0 * N
+
+# Published model specs: (name, N_params, D_tokens_actual)
+published_models = [
+    ('LLaMA-1 7B',    7e9,    1.0e12),
+    ('LLaMA-3.1 8B',  8e9,   15.0e12),
+    ('LLaMA-2 70B',  70e9,    2.0e12),
+    ('LLaMA-3.1 70B',70e9,   15.0e12),
+    ('Mistral 7B',    7e9,    2.0e12),
+    ('Phi-3 Mini',    3.8e9,  3.3e12),
+]
+
+print('{:&lt;18} {:&gt;7} {:&gt;13} {:&gt;18} {:&gt;12} {:&gt;16}'.format(
+    'Model', 'N (B)', 'D actual (B)', 'D Chinchilla (B)', 'Multiplier', 'C_train (FLOPs)'))
+print('-' * 90)
+for name, N, D in published_models:
+    D_ch = chinchilla_optimal_tokens(N)
+    mult = D / D_ch
+    C    = 6.0 * N * D
+    print('{:&lt;18} {:&gt;7.1f} {:&gt;13.1f} {:&gt;18.1f} {:&gt;12.1f}x {:&gt;16.2e}'.format(
+        name, N/1e9, D/1e9, D_ch/1e9, mult, C))
+print('\nModels trained well beyond Chinchilla-optimal are inference-optimized for deployment.')
+</code></pre>
+<p>The table below summarizes the inference-aware picture for notable models — showing how far each deviates from Chinchilla-optimal and what deployment context that choice serves.</p>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Params (B)</th>
+<th>Tokens (B)</th>
+<th>D/N Ratio</th>
+<th>Chinchilla Multiplier</th>
+<th>Primary Use Case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>LLaMA-3.1 8B</td>
+<td>8</td>
+<td>15000</td>
+<td>1875</td>
+<td>93.75x</td>
+<td>Edge / on-device inference</td>
+</tr>
+<tr>
+<td>LLaMA-3.1 70B</td>
+<td>70</td>
+<td>15000</td>
+<td>214</td>
+<td>10.7x</td>
+<td>High-quality hosted inference</td>
+</tr>
+<tr>
+<td>Mistral 7B</td>
+<td>7</td>
+<td>2000</td>
+<td>286</td>
+<td>14.3x</td>
+<td>Efficient local deployment</td>
+</tr>
+<tr>
+<td>Phi-3 Mini</td>
+<td>3.8</td>
+<td>3300</td>
+<td>868</td>
+<td>43.4x</td>
+<td>Mobile / edge device inference</td>
+</tr>
+<tr>
+<td>Gemma 2 9B</td>
+<td>9</td>
+<td>8000</td>
+<td>889</td>
+<td>44.4x</td>
+<td>Efficient fine-tuning base</td>
+</tr>
+</tbody>
+</table>
+<p>The Sardana / Chinchilla-inf framework (Sardana &amp; Frankle, 2023) formalizes the inference-aware objective: minimize C_train + lambda * C_inf, where lambda represents the expected total query volume. Solving this modified optimization yields a new optimal N<em> that is strictly smaller than Chinchilla-optimal N</em> for any lambda &gt; 0. As lambda grows (more queries expected), the optimal model shrinks and the optimal token count grows. This explains the observed trend: frontier labs are converging on smaller, longer-trained models for public deployment.</p>
+<ul>
+<li>Sardana objective: minimize 6<em>N</em>D + lambda<em>2</em>N*Q subject to L(N,D) &lt;= L_target</li>
+<li>For lambda = 0 (no inference): recovers Chinchilla-optimal N<em> and D</em></li>
+<li>For large lambda: optimal N<em> shrinks, optimal D</em> grows proportionally</li>
+<li>Break-even: extra training cost / per-query savings = number of queries to recoup</li>
+<li>LLaMA-3.1 8B vs 70B: 8B costs ~9x less per query, worth training longer for high-volume APIs</li>
+<li>Synthetic data (Phi-3 approach) enables high token counts without web data repetition</li>
+</ul>
+<blockquote>
+<p><strong>Tip</strong>: If you expect to serve a model for millions of queries, training a 2-4x smaller model on 4-8x more tokens often gives better total cost (train + serve) than the Chinchilla-optimal model — smaller models are dramatically cheaper per inference query.</p>
+</blockquote>
+<h2>The Shifting Frontier</h2>
+<p>The field has moved decisively beyond Chinchilla-optimal training. LLaMA-3.1 8B (15T tokens, 93x Chinchilla-optimal) demonstrates that small models trained extremely long can match much larger Chinchilla-optimal models in quality while running at a fraction of the inference cost. The implication for practitioners: when choosing a base model for fine-tuning or deployment, prefer models that have been over-trained relative to Chinchilla — they will be smaller (cheaper to serve), faster (lower latency), and often comparable in quality to larger Chinchilla-optimal counterparts on standard benchmarks. The compute-optimal question is no longer just about training — it is about the full lifecycle cost from pre-training through millions of inference calls.</p>
+    </article>
+  </main>
+</body>
+</html>

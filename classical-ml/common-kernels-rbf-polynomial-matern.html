@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Common Kernels — RBF, Polynomial, and Matérn | Notes Backup</title>
+  <meta name="description" content="A practical guide to the most widely used kernel functions: RBF/Gaussian, polynomial, Matérn family, and periodic kernels. Covers smoothness properties, parameter effects, and which kernel to choose for different regression tasks." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Common Kernels — RBF, Polynomial, and Matérn</h1>
+      <ul class='note-meta'><li><strong>description:</strong> A practical guide to the most widely used kernel functions: RBF/Gaussian, polynomial, Matérn family, and periodic kernels. Covers smoothness properties, parameter effects, and which kernel to choose for different regression tasks.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Common Kernels — RBF, Polynomial, and Matérn</h1>
+<p>The choice of kernel function is the most consequential modeling decision in any kernel method or Gaussian process. The kernel encodes all prior assumptions about the function's smoothness, periodicity, and correlation structure. Understanding the mathematical form, smoothness class, and hyperparameters of each kernel is essential for selecting the right one for a given problem. This note covers the five most important kernel families with their mathematical properties and practical tradeoffs.</p>
+<h2>RBF (Gaussian) Kernel</h2>
+<p>The Radial Basis Function (RBF) or Gaussian kernel is the default choice for smooth, unknown functions. It measures similarity purely through Euclidean distance. Functions drawn from a GP with RBF covariance are infinitely differentiable (C∞ smooth) — this can be unrealistically smooth for physical processes. The RBF is a universal kernel: it can approximate any continuous function on a compact domain to arbitrary accuracy given enough data.</p>
+<p>$$k_{\text{RBF}}(x, z) = \sigma^2 \exp!\left(-\frac{|x - z|^2}{2\ell^2}\right)$$</p>
+<h2>Polynomial and Linear Kernels</h2>
+<p>The polynomial kernel of degree d corresponds to a finite-dimensional feature space containing all monomials up to degree d. For d=1 and c=0, it reduces to the linear kernel xᵀz. The offset c &gt; 0 adds lower-degree terms. Polynomial kernels are popular in text classification (bag-of-words features) and for problems where polynomial interactions between features are expected. Unlike RBF, polynomial kernels are not universal — they cannot represent arbitrary smooth functions.</p>
+<p>$$k_{\text{poly}}(x, z) = (x^\top z + c)^d, \quad c \geq 0, \; d \in \mathbb{Z}_{+}$$</p>
+<h2>Matérn Kernel Family</h2>
+<p>The Matérn family parameterizes smoothness through a non-negative parameter ν. A GP with Matérn-ν kernel has sample paths that are ⌊ν⌋ times differentiable. Key instances: ν=1/2 (Laplacian/exponential, continuous but nowhere differentiable), ν=3/2 (once differentiable), ν=5/2 (twice differentiable), ν→∞ (recovers the RBF). For most physical and engineering problems, Matérn-5/2 strikes the best balance: it allows twice-differentiable functions without assuming infinite smoothness like RBF.</p>
+<p>$$k_{\nu}(x, z) = \frac{2^{1-\nu}}{\Gamma(\nu)}\left(\frac{\sqrt{2\nu}\,r}{\ell}\right)^\nu K_\nu!\left(\frac{\sqrt{2\nu}\,r}{\ell}\right), \quad r = |x-z|$$</p>
+<blockquote>
+<p><strong>Why Matérn Is Often Preferred Over RBF</strong>: RBF functions are C∞ — infinitely smooth. Real physical processes (temperature fields, material properties, financial time series) are typically finitely smooth: twice or thrice differentiable at most. Fitting an RBF kernel to such data forces the model to be overconfident about smoothness between observations. Matérn-5/2 or Matérn-3/2 are better default choices for most real-world regression tasks because they make more realistic smoothness assumptions.</p>
+</blockquote>
+<h2>Periodic Kernel</h2>
+<p>The periodic kernel generates functions that repeat exactly with period p. It arises from mapping the input through (sin(πx/p), cos(πx/p)) and applying an RBF kernel in that embedding. The length-scale ℓ controls how quickly the function varies within each period. For time series with a known seasonality period (e.g., 24 hours, 7 days, 12 months), the periodic kernel directly encodes this structure rather than forcing the model to learn it from data.</p>
+<p>$$k_{\text{per}}(x, z) = \sigma^2 \exp!\left(-\frac{2\sin^2(\pi|x-z|/p)}{\ell^2}\right)$$</p>
+<h2>Length-Scale and Signal Variance</h2>
+<p>Every stationary kernel has at least two hyperparameters. The length-scale ℓ controls the range of correlation: small ℓ → correlation decays quickly → rapid variation; large ℓ → correlation decays slowly → smooth, slowly varying functions. The signal variance σ² scales the overall amplitude of the function. Both are learned by maximizing the marginal likelihood (type-II MLE) rather than cross-validation, which efficiently integrates over all functions consistent with the prior.</p>
+<h2>Code Examples</h2>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+
+def rbf_kernel(X, Y, ell=1.0, sigma2=1.0):
+    diff = X[:, None, :] - Y[None, :, :]
+    return sigma2 * np.exp(-np.sum(diff**2, axis=-1) / (2 * ell**2))
+
+def poly_kernel(X, Y, d=3, c=1.0):
+    return (X @ Y.T + c) ** d
+
+def linear_kernel(X, Y):
+    return X @ Y.T
+
+def matern52_kernel(X, Y, ell=1.0, sigma2=1.0):
+    diff = X[:, None, :] - Y[None, :, :]
+    r = np.sqrt(np.sum(diff**2, axis=-1)) / ell
+    return sigma2 * (1 + np.sqrt(5)*r + 5*r**2/3) * np.exp(-np.sqrt(5)*r)
+
+rng = np.random.RandomState(42)
+X = rng.randn(30, 2)
+kernels = [rbf_kernel, poly_kernel, linear_kernel, matern52_kernel]
+names = ['RBF', 'Polynomial (d=3)', 'Linear', 'Matern-5/2']
+
+fig, axes = plt.subplots(1, 4, figsize=(16, 4))
+for ax, kfn, name in zip(axes, kernels, names):
+    K = kfn(X, X)
+    im = ax.imshow(K, cmap='viridis')
+    ax.set_title(name)
+    plt.colorbar(im, ax=ax)
+plt.tight_layout()
+plt.savefig('gram_matrices.png', dpi=100)
+print('Gram matrices saved. Each shows correlation structure for 30 random points.')
+</code></pre>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+
+def sample_gp(x, kernel_fn, n_samples=4, seed=0):
+    X = x[:, None]
+    K = kernel_fn(X, X) + 1e-8 * np.eye(len(x))
+    L = np.linalg.cholesky(K)
+    rng = np.random.RandomState(seed)
+    return (L @ rng.randn(len(x), n_samples)).T
+
+x = np.linspace(-5, 5, 300)
+
+def rbf(X1, X2, ell=1.0):
+    r2 = np.sum((X1[:, None, :] - X2[None, :, :])**2, axis=-1)
+    return np.exp(-r2 / (2 * ell**2))
+
+def matern12(X1, X2, ell=1.0):
+    r = np.abs(X1[:, None, 0] - X2[None, :, 0]) / ell
+    return np.exp(-r)
+
+def matern52(X1, X2, ell=1.0):
+    r = np.abs(X1[:, None, 0] - X2[None, :, 0]) / ell
+    return (1 + np.sqrt(5)*r + 5*r**2/3) * np.exp(-np.sqrt(5)*r)
+
+fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+for ax, (name, kfn) in zip(axes, [
+    ('RBF ell=1 (C-inf smooth)', rbf),
+    ('Matern-1/2 ell=1 (rough)', matern12),
+    ('Matern-5/2 ell=1 (moderate)', matern52),
+]):
+    for s in sample_gp(x, kfn):
+        ax.plot(x, s, alpha=0.75)
+    ax.set_title(name)
+    ax.set_ylim(-3, 3)
+plt.tight_layout()
+plt.savefig('kernel_gp_samples.png', dpi=100)
+print('Saved kernel_gp_samples.png')
+</code></pre>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+
+def rbf_kernel_1d(x1, x2, ell, sigma2):
+    diff = np.subtract.outer(x1, x2)
+    return sigma2 * np.exp(-diff**2 / (2 * ell**2))
+
+def sample_from_kernel(x, K, seed):
+    K = K + 1e-8 * np.eye(len(x))
+    L = np.linalg.cholesky(K)
+    rng = np.random.RandomState(seed)
+    return L @ rng.randn(len(x))
+
+x = np.linspace(-5, 5, 200)
+configs = [
+    (0.3, 1.0, 'ell=0.3 sigma2=1 (short range)'),
+    (1.0, 1.0, 'ell=1.0 sigma2=1 (medium range)'),
+    (3.0, 1.0, 'ell=3.0 sigma2=1 (long range)'),
+    (1.0, 0.25, 'ell=1.0 sigma2=0.25 (low var)'),
+    (1.0, 1.0,  'ell=1.0 sigma2=1.00 (unit var)'),
+    (1.0, 4.0,  'ell=1.0 sigma2=4.00 (high var)'),
+]
+fig, axes = plt.subplots(2, 3, figsize=(14, 6))
+for ax, (ell, sigma2, title) in zip(axes.flat, configs):
+    K = rbf_kernel_1d(x, x, ell, sigma2)
+    for seed in range(4):
+        ax.plot(x, sample_from_kernel(x, K, seed), alpha=0.7)
+    ax.set_title(title, fontsize=9)
+plt.tight_layout()
+plt.savefig('rbf_length_scale.png', dpi=100)
+print('Saved rbf_length_scale.png')
+</code></pre>
+<pre><code class="language-python">import numpy as np
+from sklearn.kernel_ridge import KernelRidge
+from sklearn.model_selection import cross_val_score
+from sklearn.preprocessing import StandardScaler
+
+def make_datasets():
+    rng = np.random.RandomState(42)
+    x = np.linspace(0, 10, 100)[:, None]
+    y_smooth   = np.sin(x.ravel()) + rng.randn(100) * 0.1
+    y_periodic = np.sin(2 * np.pi * x.ravel() / 3) + rng.randn(100) * 0.1
+    y_rough    = np.abs(np.sin(x.ravel())) + rng.randn(100) * 0.2
+    return x, {'smooth': y_smooth, 'periodic': y_periodic, 'rough': y_rough}
+
+x, datasets = make_datasets()
+kernels = {
+    'rbf':       KernelRidge(kernel='rbf', alpha=0.1, gamma=1.0),
+    'poly':      KernelRidge(kernel='poly', alpha=0.1, degree=3, coef0=1),
+    'laplacian': KernelRidge(kernel='laplacian', alpha=0.1, gamma=1.0),
+}
+print(f'{&quot;Dataset&quot;:&lt;12} {&quot;Kernel&quot;:&lt;12} CV R2 mean +/- std')
+print('-' * 48)
+for ds_name, y in datasets.items():
+    for k_name, model in kernels.items():
+        scores = cross_val_score(model, x, y, cv=5, scoring='r2')
+        print(f'{ds_name:&lt;12} {k_name:&lt;12} {scores.mean():.3f} +/- {scores.std():.3f}')
+</code></pre>
+<h2>Kernel Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Kernel</th>
+<th>Smoothness Class</th>
+<th>Key Parameters</th>
+<th>Universal Approximator</th>
+<th>Best Use Case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>RBF (Gaussian)</td>
+<td>C∞ (infinitely differentiable)</td>
+<td>Length-scale ℓ, variance σ²</td>
+<td>Yes</td>
+<td>Smooth unknown functions, default GP</td>
+</tr>
+<tr>
+<td>Polynomial (degree d)</td>
+<td>C∞ but finite-rank RKHS</td>
+<td>Degree d, offset c</td>
+<td>No</td>
+<td>Text kernels, polynomial interactions</td>
+</tr>
+<tr>
+<td>Matérn-1/2 (Laplacian)</td>
+<td>C⁰ (continuous, not diff.)</td>
+<td>Length-scale ℓ</td>
+<td>Yes</td>
+<td>Rough physical processes, OU process</td>
+</tr>
+<tr>
+<td>Matérn-5/2</td>
+<td>C⁴ (twice differentiable)</td>
+<td>Length-scale ℓ</td>
+<td>Yes</td>
+<td>Most physical and engineering problems</td>
+</tr>
+<tr>
+<td>Periodic</td>
+<td>C∞ but periodic structure</td>
+<td>Period p, length-scale ℓ</td>
+<td>No (periodic only)</td>
+<td>Time series with known seasonality</td>
+</tr>
+</tbody>
+</table>
+<p>No single kernel is universally best. The RBF is a safe default for smooth functions, Matérn-5/2 for most real-world regression tasks, and the periodic kernel when periodicity is known. Kernel composition rules allow combining these primitives to handle more complex function classes.</p>
+<h2>Choosing the Right Kernel</h2>
+<p>A systematic approach to kernel selection: start with domain knowledge about smoothness (do you expect C∞ or finitely differentiable functions?), then validate by comparing marginal likelihoods on held-out data. Consider these practical guidelines:</p>
+<ul>
+<li>Unknown smooth function with no special structure → start with RBF or Matérn-5/2.</li>
+<li>Physical process (heat, fluid, materials) → Matérn-5/2 or Matérn-3/2 (avoid over-smooth RBF).</li>
+<li>Time series with known seasonality → periodic kernel or periodic × RBF composite.</li>
+<li>High-dimensional sparse data (text, genomics) → linear or polynomial kernel.</li>
+<li>Function with multiple length-scales → ARD kernel with per-dimension ℓᵢ.</li>
+<li>When uncertain → compare log marginal likelihoods across 2–3 candidate kernels.</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

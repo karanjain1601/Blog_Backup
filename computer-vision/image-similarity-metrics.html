@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Image Quality and Similarity Metrics | Notes Backup</title>
+  <meta name="description" content="PSNR, SSIM, LPIPS, and FID — measuring image reconstruction fidelity, perceptual similarity, and generative model quality for super-resolution, inpainting, and image generation tasks." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Image Quality and Similarity Metrics</h1>
+      <ul class='note-meta'><li><strong>description:</strong> PSNR, SSIM, LPIPS, and FID — measuring image reconstruction fidelity, perceptual similarity, and generative model quality for super-resolution, inpainting, and image generation tasks.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Image Quality and Similarity Metrics</h1>
+<p>Image quality metrics quantify how faithfully a reconstructed or generated image matches a reference. They fall into three tiers: pixel-level metrics like MSE and PSNR that compare raw intensities, structural metrics like SSIM that model luminance, contrast, and structure, and learned perceptual metrics like LPIPS and FID that align with human visual judgment.</p>
+<p>Choosing the right metric depends on the task. Super-resolution and compression use PSNR and SSIM for benchmarking, but perceptual quality demands LPIPS. Generative models — diffusion, GANs, VAEs — require distribution-level metrics like FID that evaluate diversity and realism across an entire dataset rather than image pairs.</p>
+<p>PSNR (Peak Signal-to-Noise Ratio) measures reconstruction fidelity as the ratio of maximum possible signal power to noise power introduced by distortion. It is derived from MSE — mean squared error between corresponding pixels. Higher PSNR means better quality: values above 40 dB indicate near-lossless reconstruction, while 30–35 dB is typical for compressed images.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def psnr_batch(pred: torch.Tensor, target: torch.Tensor) -&gt; torch.Tensor:
+    &quot;&quot;&quot;Compute PSNR for a batch of images in [0, 1].&quot;&quot;&quot;
+    mse = F.mse_loss(pred, target, reduction='none')
+    mse = mse.view(mse.size(0), -1).mean(dim=1)  # per-image MSE
+    psnr = 10.0 * torch.log10(1.0 / mse.clamp(min=1e-10))
+    return psnr  # shape: (B,), higher is better
+
+# Example usage
+pred = torch.rand(4, 3, 256, 256)
+target = torch.rand(4, 3, 256, 256)
+print(psnr_batch(pred, target))  # tensor of 4 PSNR values in dB
+</code></pre>
+<p>PSNR is simple, differentiable through MSE, and universally reported in compression and super-resolution papers. However, it treats all pixels equally regardless of spatial structure and can be misleading: a globally blurred image may score high PSNR, while a sharp but slightly shifted reconstruction scores low. Always pair PSNR with a perceptual metric.</p>
+<p>SSIM measures perceptual similarity by comparing three components: luminance (mean intensity), contrast (standard deviation), and structure (normalized cross-correlation) within local windows. The final score is a product of all three terms and ranges from −1 to 1, where 1 means identical images. SSIM better reflects human perception than PSNR for many distortion types.</p>
+<pre><code class="language-python">import numpy as np
+from skimage.metrics import structural_similarity, peak_signal_noise_ratio
+
+# Images should be float32 in [0, 1], shape (H, W, C)
+im1 = np.random.rand(256, 256, 3).astype(np.float32)
+im2 = np.random.rand(256, 256, 3).astype(np.float32)
+
+ssim_val = structural_similarity(im1, im2, channel_axis=2, data_range=1.0)
+psnr_val = peak_signal_noise_ratio(im1, im2, data_range=1.0)
+
+print(f&quot;SSIM: {ssim_val:.4f}&quot;)   # 1.0 = identical, higher is better
+print(f&quot;PSNR: {psnr_val:.2f} dB&quot;)  # higher is better
+</code></pre>
+<p>MS-SSIM (Multi-Scale SSIM) extends SSIM by evaluating similarity at multiple resolutions, weighting them by perceptual importance. It is generally preferred over single-scale SSIM for high-resolution images. Both variants are differentiable and used as auxiliary losses during training of image restoration networks alongside pixel-level L1 or L2 reconstruction losses.</p>
+<p>LPIPS (Learned Perceptual Image Patch Similarity) uses deep network activations — from AlexNet, VGG, or SqueezeNet — to compare images in a feature space that mirrors human perceptual judgments. Trained on human similarity ratings, it is far more aligned with subjective quality than PSNR or SSIM. Lower LPIPS means more similar images; the metric is fully differentiable.</p>
+<pre><code class="language-python">import torch
+import lpips
+
+# Load VGG-based perceptual loss (downloads weights on first use)
+loss_fn = lpips.LPIPS(net='vgg').cuda()
+
+# Images must be in [-1, 1], shape (B, C, H, W)
+img0 = torch.rand(1, 3, 256, 256).cuda() * 2 - 1
+img1 = torch.rand(1, 3, 256, 256).cuda() * 2 - 1
+
+dist = loss_fn(img0, img1)  # scalar tensor, lower = more similar
+print(f&quot;LPIPS distance: {dist.item():.4f}&quot;)  # 0.0 = identical
+</code></pre>
+<blockquote>
+<p>****: PSNR and SSIM correlate poorly with human perceptual quality — a blurry image can score higher SSIM than a sharp but slightly different reconstruction. Use LPIPS for perceptual tasks and FID for generative model comparison.</p>
+</blockquote>
+<p>FID (Fréchet Inception Distance) measures the distance between the distribution of real images and generated images in the feature space of InceptionV3. Both distributions are modeled as multivariate Gaussians. A lower FID means generated images are more realistic and diverse. FID requires large sample sets (at least 10,000 images) for reliable estimates and cannot be computed per-image.</p>
+<pre><code class="language-python">import numpy as np
+from scipy.linalg import sqrtm
+
+def frechet_distance(mu1, sigma1, mu2, sigma2):
+    &quot;&quot;&quot;Compute FID between two Gaussian distributions.&quot;&quot;&quot;
+    diff = mu1 - mu2
+    covmean = sqrtm(sigma1 @ sigma2)
+    if np.iscomplexobj(covmean):  # remove numerical artifacts
+        covmean = covmean.real
+    fid = diff @ diff + np.trace(sigma1 + sigma2 - 2 * covmean)
+    return float(fid)
+
+# Extract InceptionV3 pool3 features for real and generated sets,
+# compute mu/sigma per set, then call:
+# frechet_distance(mu_real, sigma_real, mu_gen, sigma_gen)
+</code></pre>
+<p>CLIP Score is an alternative to FID for text-to-image models. It measures cosine similarity between CLIP image and text embeddings, capturing prompt alignment rather than distributional realism. Unlike FID, CLIP Score is reference-free — it does not require a real image dataset — making it practical for evaluating open-ended generation with diverse text prompts.</p>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Measures</th>
+<th>Range</th>
+<th>Human Correlation</th>
+<th>Differentiable</th>
+<th>Use Case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MSE</td>
+<td>Pixel error</td>
+<td>[0, ∞)</td>
+<td>Low</td>
+<td>Yes</td>
+<td>Loss function</td>
+</tr>
+<tr>
+<td>PSNR</td>
+<td>Signal-to-noise ratio</td>
+<td>(0, ∞) dB</td>
+<td>Low</td>
+<td>Yes</td>
+<td>Compression / SR benchmark</td>
+</tr>
+<tr>
+<td>SSIM</td>
+<td>Luminance, contrast, structure</td>
+<td>[−1, 1]</td>
+<td>Medium</td>
+<td>Yes</td>
+<td>Image restoration</td>
+</tr>
+<tr>
+<td>LPIPS</td>
+<td>Deep feature distance</td>
+<td>[0, ∞)</td>
+<td>High</td>
+<td>Yes</td>
+<td>Perceptual quality</td>
+</tr>
+<tr>
+<td>FID</td>
+<td>Distribution distance</td>
+<td>[0, ∞)</td>
+<td>High</td>
+<td>No</td>
+<td>Generative model eval</td>
+</tr>
+<tr>
+<td>CLIP Score</td>
+<td>Text-image alignment</td>
+<td>[0, 1]</td>
+<td>High</td>
+<td>No</td>
+<td>Text-to-image eval</td>
+</tr>
+</tbody>
+</table>
+<p>No single metric captures all aspects of image quality. Pixel metrics (MSE, PSNR) are fast and differentiable but perceptually unreliable. SSIM adds structural awareness at low computational cost. LPIPS aligns best with human judgment for image pairs and should be the default for super-resolution, inpainting, and image translation benchmarks where perceptual quality matters.</p>
+<p>For generative models, FID remains the standard benchmark despite its sensitivity to sample count and InceptionV3 statistics. Newer alternatives like KID (Kernel Inception Distance) offer unbiased estimates with smaller sample sets. When evaluating text-to-image systems, pair FID with CLIP Score to jointly assess realism and prompt alignment across diverse generations.</p>
+<p>In practice, use MSE or L1 as a training loss, add LPIPS as a perceptual auxiliary loss, and evaluate checkpoints with PSNR, SSIM, and LPIPS together. For generative tasks, report FID at 30k or 50k samples using clean-fid to avoid evaluation artifacts. Standardize the evaluation pipeline — never compare FID values computed with different implementations.</p>
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Tokenizer-Free Models — Byte-Level and Patch-Based Approaches | Notes Backup</title>
+  <meta name="description" content="Tokenizer-free architectures operate on raw bytes or characters, eliminating BPE artifacts, OOV failures, and language-specific fertility imbalances. Covers ByT5 byte-level processing, MegaByte hierarchical patch models, CharFormer GBST soft tokenization, and CANINE character-level transformers." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Tokenizer-Free Models — Byte-Level and Patch-Based Approaches</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Tokenizer-free architectures operate on raw bytes or characters, eliminating BPE artifacts, OOV failures, and language-specific fertility imbalances. Covers ByT5 byte-level processing, MegaByte hierarchical patch models, CharFormer GBST soft tokenization, and CANINE character-level transformers.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Tokenizer-Free Models — Byte-Level and Patch-Based Approaches</h1>
+<p>Conventional language models interpose a tokenizer between raw text and the neural network: text is segmented into subword tokens drawn from a fixed vocabulary, then mapped to integer ids. This design introduces several failure modes: out-of-vocabulary characters degrade to byte-fallback with extreme fertility, pre-tokenization rules embed language-specific assumptions (spaces, hyphens, apostrophes), and token fertility imbalance disadvantages low-resource languages. Tokenizer-free architectures bypass this entirely by operating on raw bytes or characters, passing the segmentation problem to the neural network itself.</p>
+<h2>Why Eliminate the Tokenizer?</h2>
+<p>The four main motivations for tokenizer-free models are: (1) OOV elimination — a byte-level vocabulary of 256 values handles any Unicode text via UTF-8 encoding, with no unknown-token fallback; (2) language equality — each language's fertility is determined by its UTF-8 byte density, not by its representation in the tokenizer's training corpus; (3) character-level task performance — tasks like spelling correction, typo robustness, morphological analysis, and phonetic transcription require character-level access that subword tokenization obscures; (4) elimination of pre-tokenization rules — regex-based pre-tokenizers (e.g., GPT's handling of contractions and punctuation) embed English-centric assumptions that impair multilingual performance.</p>
+<h2>Byte-Level Input Pipeline</h2>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def text_to_byte_patches(text, patch_size=4, pad_id=0):
+    # Encode text to UTF-8 bytes
+    raw_bytes = list(text.encode('utf-8'))
+    n_bytes = len(raw_bytes)
+    # Pad to multiple of patch_size
+    pad_len = (patch_size - n_bytes % patch_size) % patch_size
+    raw_bytes = raw_bytes + [pad_id] * pad_len
+    byte_tensor = torch.tensor(raw_bytes, dtype=torch.long)
+    n_patches = len(raw_bytes) // patch_size
+    patches = byte_tensor.view(n_patches, patch_size)
+    attention_mask = torch.ones(n_patches, dtype=torch.long)
+    # Mask padding patches
+    for i in range(n_patches - 1, -1, -1):
+        if patches[i].sum() == 0:
+            attention_mask[i] = 0
+        else:
+            break
+    return patches, attention_mask
+
+samples = ['Hello world', 'こんにちは', 'مرحبا']
+for text in samples:
+    raw = text.encode('utf-8')
+    patches, mask = text_to_byte_patches(text, patch_size=4)
+    print(f'{text!r:&lt;20}: {len(raw)} bytes -&gt; {patches.shape[0]} patches')
+    print(f'  byte values: {list(raw[:12])}...')
+    print(f'  patch[0]:    {patches[0].tolist()}')
+</code></pre>
+<h2>MegaByte — Hierarchical Patch-Based Processing</h2>
+<p>MegaByte (Yu et al. 2023) uses a two-level hierarchical architecture to reduce the quadratic cost of attention over raw bytes. A global transformer model processes sequences of patch embeddings (each patch being P consecutive bytes). A local transformer operates within each patch to predict the next P bytes given the global context. With patch size P=4, sequence length is reduced P-fold compared to pure byte-level models. The global model captures long-range dependencies across patches; the local model handles fine-grained character-level generation within each patch. This achieves competitive perplexity to GPT-style BPE models at 1/P the effective sequence length.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class MegaByteLocal(nn.Module):
+    # Local model: given patch context, predict next byte in patch
+    def __init__(self, patch_size=4, d_model=128, n_heads=4, n_layers=2):
+        super().__init__()
+        self.patch_size = patch_size
+        self.byte_embed = nn.Embedding(256 + 1, d_model)  # 256 bytes + pad
+        self.pos_embed = nn.Embedding(patch_size, d_model)
+        encoder_layer = nn.TransformerEncoderLayer(d_model, n_heads, dim_feedforward=256, batch_first=True)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
+        self.out_proj = nn.Linear(d_model, 256)
+
+    def forward(self, byte_ids, global_context):
+        # byte_ids: (batch, patch_size); global_context: (batch, d_model)
+        B, P = byte_ids.shape
+        pos = torch.arange(P, device=byte_ids.device)
+        x = self.byte_embed(byte_ids) + self.pos_embed(pos).unsqueeze(0)
+        x = x + global_context.unsqueeze(1)  # inject global context
+        x = self.transformer(x)
+        return self.out_proj(x)  # (batch, patch_size, 256)
+
+class MegaByteGlobal(nn.Module):
+    # Global model: process patch embeddings to produce context vectors
+    def __init__(self, patch_size=4, d_model=128, n_heads=4, n_layers=3):
+        super().__init__()
+        self.patch_embed = nn.Linear(patch_size * d_model, d_model)
+        encoder_layer = nn.TransformerEncoderLayer(d_model, n_heads, dim_feedforward=256, batch_first=True)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
+
+    def forward(self, patch_embeddings):
+        x = self.transformer(patch_embeddings)
+        return x  # (batch, n_patches, d_model)
+
+# Demo
+B, N_patches, P, D = 2, 8, 4, 128
+byte_ids = torch.randint(0, 256, (B, P))
+global_ctx = torch.randn(B, D)
+local_model = MegaByteLocal(patch_size=P, d_model=D)
+logits = local_model(byte_ids, global_ctx)
+print(f'MegaByte local output: {logits.shape}  (batch, patch, vocab=256)')
+</code></pre>
+<h2>CharFormer GBST Soft Tokenization</h2>
+<p>CharFormer (Tay et al. 2021) introduces Gradient-Based Subword Tokenization (GBST), a differentiable module that learns to group characters into variable-length subword-like representations without a fixed vocabulary. A learnable scoring function assigns each character position a soft assignment over candidate block widths (1, 2, 3, ... characters). These soft assignments are learned end-to-end by gradient descent, allowing the model to discover optimal groupings for the task. The resulting representation has reduced sequence length (by roughly the mean block width) and is fully differentiable, unlike hard BPE segmentation.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class GBSTBlock(nn.Module):
+    # Simplified GBST: learn soft merging of characters into subword blocks
+    def __init__(self, d_model=64, max_block=4, downsample_factor=2):
+        super().__init__()
+        self.max_block = max_block
+        self.downsample_factor = downsample_factor
+        self.char_embed = nn.Embedding(256, d_model)
+        self.score_proj = nn.Linear(d_model, max_block)
+        self.block_proj = nn.ModuleList([nn.Linear(d_model * w, d_model) for w in range(1, max_block + 1)])
+
+    def forward(self, char_ids):
+        # char_ids: (batch, seq_len)
+        B, L = char_ids.shape
+        x = self.char_embed(char_ids)  # (B, L, d_model)
+        scores = self.score_proj(x)     # (B, L, max_block) -- block width scores
+        weights = F.softmax(scores, dim=-1)  # soft block width assignment
+        # Aggregate: for position i, collect weighted sum across block widths
+        out = x.clone()
+        for w_idx, w in enumerate(range(1, self.max_block + 1)):
+            if w == 1:
+                contribution = x * weights[:, :, w_idx:w_idx+1]
+            else:
+                padded = F.pad(x, (0, 0, 0, w - 1))
+                pooled = padded.unfold(1, w, 1).mean(-1)  # (B, L, d_model)
+                contribution = pooled * weights[:, :, w_idx:w_idx+1]
+            out = out + contribution
+        # Downsample by taking every downsample_factor-th position
+        out = out[:, ::self.downsample_factor, :]  # (B, L//ds, d_model)
+        return out
+
+gbst = GBSTBlock(d_model=64, max_block=4, downsample_factor=2)
+chars = torch.randint(0, 256, (2, 16))
+out = gbst(chars)
+print(f'Input:  {chars.shape}  (batch=2, seq_len=16 chars)')
+print(f'Output: {out.shape}   (batch=2, seq_len={out.shape[1]} after 2x downsample)')
+</code></pre>
+<h2>ByT5 Tokenizer Usage</h2>
+<pre><code class="language-python">from transformers import AutoTokenizer, T5Tokenizer
+import torch
+
+def compare_byt5_vs_t5(texts):
+    byt5_tok = AutoTokenizer.from_pretrained('google/byt5-small')
+    t5_tok = T5Tokenizer.from_pretrained('t5-small')
+    print(f'{&quot;Text&quot;:&lt;40} {&quot;ByT5 tokens&quot;:&gt;12} {&quot;T5 tokens&quot;:&gt;12} {&quot;Ratio&quot;:&gt;8}')
+    for text in texts:
+        byt5_ids = byt5_tok.encode(text)
+        t5_ids = t5_tok.encode(text)
+        ratio = len(byt5_ids) / max(len(t5_ids), 1)
+        short = text[:38] + '..' if len(text) &gt; 40 else text
+        print(f'{short:&lt;40} {len(byt5_ids):&gt;12} {len(t5_ids):&gt;12} {ratio:&gt;8.2f}x')
+    # Show byte-level tokens for a short text
+    sample = texts[0]
+    ids = byt5_tok.encode(sample)
+    decoded = [byt5_tok.decode([i]) for i in ids[:10]]
+    print(f'\nByT5 byte tokens for {repr(sample[:20])}:')
+    print(f'  ids={ids[:10]}  decoded={decoded}')
+
+texts = [
+    'Hello world',
+    'naïve café résumé',
+    'Speling mistaek correksion',
+    '日本語テキスト',
+    'مرحبا بالعالم',
+]
+compare_byt5_vs_t5(texts)
+</code></pre>
+<h2>Tokenizer-Free Architectures Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Architecture</th>
+<th>Approach</th>
+<th>Effective Vocab</th>
+<th>Seq Length Factor</th>
+<th>Key Strength</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ByT5</td>
+<td>Pure byte-level T5 encoder-decoder</td>
+<td>256 bytes + 3 special</td>
+<td>3–8× longer than BPE</td>
+<td>No OOV; equal language treatment; robust to noise</td>
+</tr>
+<tr>
+<td>MegaByte</td>
+<td>Patch-based: global model over patches + local over bytes</td>
+<td>256 bytes (local)</td>
+<td>~1/P of byte-level (P=4–16)</td>
+<td>Scales byte models to long sequences; competitive perplexity</td>
+</tr>
+<tr>
+<td>CharFormer (GBST)</td>
+<td>Differentiable soft character grouping</td>
+<td>256 chars; learned subword blocks</td>
+<td>~2–4× longer than BPE</td>
+<td>End-to-end differentiable tokenization; task-adaptive grouping</td>
+</tr>
+<tr>
+<td>CANINE</td>
+<td>Char-level with strided conv compression</td>
+<td>143,000+ Unicode code points</td>
+<td>~4× longer than BPE then compressed</td>
+<td>Multilingual with no script bias; hash-based embedding</td>
+</tr>
+<tr>
+<td>Byte-level BPE</td>
+<td>BPE applied to raw bytes instead of chars</td>
+<td>256–50,000 merged byte tokens</td>
+<td>Similar to subword BPE</td>
+<td>Eliminates OOV while keeping BPE merge efficiency</td>
+</tr>
+</tbody>
+</table>
+<h2>Tradeoffs vs Subword Models</h2>
+<p>The fundamental tradeoff of tokenizer-free models is sequence length versus generality. Operating on bytes or characters increases sequence length by 3–8× compared to BPE on the same text. Transformer self-attention scales quadratically with sequence length, making byte-level models proportionally more expensive. ByT5-small achieves comparable translation quality to T5-small on multilingual benchmarks but requires 3–5× more FLOPs per forward pass. Patch-based models like MegaByte reduce this cost by grouping bytes, but require a two-level architecture that complicates training and inference.</p>
+<blockquote>
+<p><strong>MegaByte Patch Models Reduce Sequence Length P-Fold</strong>: MegaByte-style patch-based models achieve competitive perplexity at 1/P the sequence length of pure byte models by grouping bytes into patches — the local model handles intra-patch generation while the global model captures long-range context. With patch size P=8, a 1000-byte document requires only 125 global attention steps instead of 1000, bringing the quadratic attention cost down by 64×. The local model's cost is constant per patch and parallelisable across patches, making overall training cost comparable to a standard transformer on the same text with subword tokenisation.</p>
+</blockquote>
+<p>Practical deployment considerations: ByT5 works best when the task is character-sensitive — spelling correction, transliteration, phonetic alignment, morphological analysis, or handling noisy user input with typos. For tasks where semantic content dominates and orthographic detail is irrelevant, BPE models are more efficient. CANINE and CharFormer are intermediate: they learn task-adaptive compression that reduces sequence length while retaining character-level access. For production multilingual systems where language equality matters more than inference cost, ByT5 or CANINE are strong baselines.</p>
+<ul>
+<li>ByT5 vocabulary: 256 raw bytes + 3 special tokens (pad, EOS, UNK) — the entire model is tokenizer-free.</li>
+<li>MegaByte patch size P: larger P reduces sequence length but makes the local model's task harder; P=4–8 is typical.</li>
+<li>CharFormer GBST is differentiable: the grouping is learned end-to-end, adapting to the task rather than text statistics.</li>
+<li>CANINE uses hash embeddings for Unicode code points, avoiding a fixed character vocabulary while covering all scripts.</li>
+<li>Byte-level BPE (used in GPT-2 and RoBERTa) is a hybrid: BPE merges applied to bytes, eliminating OOV at the cost of higher fertility for rare scripts.</li>
+<li>Tokenizer-free models excel on noisy text, code-switching, low-resource languages, and character-level tasks.</li>
+</ul>
+<p>Research directions for tokenizer-free models include learned patch-size selection (adapting P per input region), combining patch-based compression with sparse attention for very long documents, and distilling knowledge from BPE models into byte-level models to warm-start training. The field is converging toward hybrid approaches — soft tokenization modules that learn BPE-like groupings differentially — which may eventually supersede the hand-designed tokenization pipelines of current frontier models.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

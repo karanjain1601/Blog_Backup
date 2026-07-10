@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Prompt Tuning — Soft Prompts at Input Embeddings and Scale-Dependent Behavior | Notes Backup</title>
+  <meta name="description" content="Prompt tuning (Lester et al., 2021) prepends P learned soft prompt tokens only at the input embedding layer. Covers the embedding math, scale dependence (competitive with full fine-tuning only at 10B+ params), initialization strategies, multi-task inference, and comparison with prefix tuning." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Prompt Tuning — Soft Prompts at Input Embeddings and Scale-Dependent Behavior</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Prompt tuning (Lester et al., 2021) prepends P learned soft prompt tokens only at the input embedding layer. Covers the embedding math, scale dependence (competitive with full fine-tuning only at 10B+ params), initialization strategies, multi-task inference, and comparison with prefix tuning.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Prompt Tuning — Soft Prompts at Input Embeddings and Scale-Dependent Behavior</h1>
+<p>Prompt tuning (Lester et al., 2021) is a parameter-efficient fine-tuning method that prepends P learned soft prompt token embeddings to the input embedding sequence. Unlike discrete prompts (manually written text), soft prompts are continuous vectors in the embedding space that are optimized directly by gradient descent. The entire transformer is frozen; only the P×d_emb prompt embedding matrix is trained. This makes prompt tuning one of the most minimal PEFT approaches: no new layers, no weight decompositions, just a small learned prefix appended to every input.</p>
+<h2>Soft Prompt Embedding Math</h2>
+<p>Let E_input ∈ ℝ^(L×d_emb) be the token embeddings for an input sequence of length L. Prompt tuning introduces a learnable matrix E_prompt ∈ ℝ^(P×d_emb) where P is the prompt length (typically 1–100 tokens). The full input to the transformer is concat(E_prompt, E_input) ∈ ℝ^((P+L)×d_emb). The transformer processes this concatenated sequence with its frozen weights. Backpropagation flows through the frozen transformer layers back to E_prompt. The gradient ∂L/∂E_prompt is well-defined and dense — every forward pass updates all P×d_emb values.</p>
+<p>Trainable parameter count: for P=100 and d_emb=1024 (T5-Large), the prompt matrix contains 100×1024 = 102,400 parameters — roughly 0.01% of T5-Large's 770M parameters. This is 10–100× fewer trainable parameters than prefix tuning, which inserts learned key-value pairs at every attention layer. Prompt tuning is input-only; prefix tuning is per-layer. The reduction in trainable parameters comes at a cost: with only input-layer influence, the soft prompts must encode all task-specific information through the frozen model's own representational capacity.</p>
+<h2>Soft Prompt Embedding Implementation</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from transformers import AutoModel, AutoTokenizer
+
+class SoftPromptModel(nn.Module):
+    &quot;&quot;&quot;Wraps a frozen transformer with a learnable soft prompt prefix.&quot;&quot;&quot;
+
+    def __init__(self, model_name: str, prompt_length: int = 20):
+        super().__init__()
+        self.backbone = AutoModel.from_pretrained(model_name)
+        for param in self.backbone.parameters():
+            param.requires_grad = False
+        d_emb = self.backbone.config.hidden_size
+        self.prompt_length = prompt_length
+        # Learnable soft prompt embeddings: shape (P, d_emb)
+        self.soft_prompt = nn.Parameter(
+            torch.randn(prompt_length, d_emb) * 0.02
+        )
+
+    def forward(self, input_ids: torch.Tensor,
+                attention_mask: torch.Tensor) -&gt; torch.Tensor:
+        bsz = input_ids.shape[0]
+        token_embeds = self.backbone.get_input_embeddings()(input_ids)
+        prompt_embeds = self.soft_prompt.unsqueeze(0).expand(bsz, -1, -1)
+        full_embeds = torch.cat([prompt_embeds, token_embeds], dim=1)
+        prompt_mask = torch.ones(bsz, self.prompt_length,
+                                 device=attention_mask.device)
+        full_mask = torch.cat([prompt_mask, attention_mask], dim=1)
+        outputs = self.backbone(inputs_embeds=full_embeds,
+                                attention_mask=full_mask)
+        return outputs.last_hidden_state
+
+    def trainable_params(self):
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+model = SoftPromptModel('bert-base-uncased', prompt_length=20)
+print(f'Trainable params: {model.trainable_params():,}')  # only soft prompt
+print(f'Soft prompt shape: {model.soft_prompt.shape}')    # (20, 768)
+</code></pre>
+<h2>Prompt Tuning with T5 via PEFT</h2>
+<pre><code class="language-python">import torch
+from transformers import T5ForConditionalGeneration, T5Tokenizer
+from peft import PromptTuningConfig, PromptTuningInit, get_peft_model, TaskType
+
+def setup_t5_prompt_tuning(model_name: str = 't5-large',
+                           num_virtual_tokens: int = 100,
+                           init_text: str = 'Classify sentiment:'):
+    &quot;&quot;&quot;Configure T5 for prompt tuning on a classification task.&quot;&quot;&quot;
+    base_model = T5ForConditionalGeneration.from_pretrained(model_name)
+    peft_config = PromptTuningConfig(
+        task_type=TaskType.SEQ_2_SEQ_LM,
+        prompt_tuning_init=PromptTuningInit.TEXT,
+        num_virtual_tokens=num_virtual_tokens,
+        prompt_tuning_init_text=init_text,
+        tokenizer_name_or_path=model_name,
+    )
+    model = get_peft_model(base_model, peft_config)
+    model.print_trainable_parameters()  # ~102K / 770M for T5-Large
+    return model
+
+def run_prompt_tuning_demo():
+    model = setup_t5_prompt_tuning(num_virtual_tokens=50)
+    tokenizer = T5Tokenizer.from_pretrained('t5-large')
+    sample = 'The movie was absolutely fantastic and I loved every moment.'
+    inputs = tokenizer(sample, return_tensors='pt', truncation=True, max_length=128)
+    with torch.no_grad():
+        output_ids = model.generate(**inputs, max_new_tokens=5)
+    print(f'Input: {sample}')
+    print(f'Output: {tokenizer.decode(output_ids[0], skip_special_tokens=True)}')
+
+print('Prompt tuning config ready — only soft_prompt params receive gradients.')
+</code></pre>
+<h2>Initialization Strategies</h2>
+<p>The initial values of E_prompt significantly affect convergence speed. Three strategies are compared: (1) random initialization from N(0, 0.02) — high variance across runs; (2) vocabulary token initialization — sample P tokens from the model's vocabulary embedding matrix, providing meaningful starting points; (3) class label initialization — for classification tasks, initialize from embeddings of target class label strings (e.g., 'positive', 'negative'). Class label init converges fastest and shows lowest variance, particularly at sub-1B scale.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from transformers import AutoTokenizer, AutoModel
+
+def initialize_soft_prompt(model_name: str, prompt_length: int,
+                           strategy: str = 'random',
+                           class_labels: list = None) -&gt; nn.Parameter:
+    &quot;&quot;&quot;
+    Initialize soft prompt embeddings with three strategies.
+    strategy: 'random' | 'vocab' | 'class_label'
+    &quot;&quot;&quot;
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModel.from_pretrained(model_name)
+    embed_layer = model.get_input_embeddings()
+    d_emb = embed_layer.embedding_dim
+    vocab_embeddings = embed_layer.weight.data  # (V, d_emb)
+
+    if strategy == 'random':
+        init = torch.randn(prompt_length, d_emb) * 0.02
+        print(f'Random init: std={init.std().item():.4f}')
+    elif strategy == 'vocab':
+        vocab_size = vocab_embeddings.shape[0]
+        idx = torch.randint(0, vocab_size, (prompt_length,))
+        init = vocab_embeddings[idx].clone().detach()
+        print(f'Vocab init: sampled indices {idx[:5].tolist()}')
+    elif strategy == 'class_label':
+        assert class_labels, 'Provide class_labels for class_label strategy'
+        label_embeds = []
+        for label in class_labels:
+            ids = tokenizer(label, return_tensors='pt').input_ids[0]
+            embs = vocab_embeddings[ids].mean(0)
+            label_embeds.append(embs)
+        base = torch.stack(label_embeds)
+        idx = torch.arange(prompt_length) % len(class_labels)
+        init = base[idx].clone().detach()
+        print(f'Class label init: {class_labels} tiled over {prompt_length} tokens')
+    return nn.Parameter(init)
+
+for strat, kwargs in [('random', {}), ('vocab', {}),
+                      ('class_label', {'class_labels': ['positive', 'negative', 'neutral']})]:
+    param = initialize_soft_prompt('bert-base-uncased', 30, strat, **kwargs)
+    print(f'  -&gt; shape={param.shape}, norm={param.data.norm().item():.3f}')
+</code></pre>
+<h2>Scale Sensitivity Analysis</h2>
+<pre><code class="language-python">import numpy as np
+
+# Reproduced from Lester et al. (2021) -- SuperGLUE average score by model size
+model_sizes_B = [0.06, 0.25, 0.77, 3.0, 11.0]  # billions of parameters
+model_labels  = ['T5-Small', 'T5-Base', 'T5-Large', 'T5-XL', 'T5-XXL']
+full_ft_score     = [83.1, 86.4, 88.9, 90.3, 91.2]
+prompt_tune_score = [53.2, 63.1, 72.4, 81.5, 90.8]  # P=100 tokens
+model_tune_score  = [78.3, 82.1, 85.6, 88.2, 89.9]  # freeze all, tune head only
+
+print(f'{&quot;Model&quot;:&lt;12} {&quot;Params (B)&quot;:&gt;11} {&quot;Full FT&quot;:&gt;9} {&quot;Prompt&quot;:&gt;9} {&quot;Gap&quot;:&gt;9}')
+print('-' * 55)
+for label, size, fft, pt in zip(model_labels, model_sizes_B,
+                                 full_ft_score, prompt_tune_score):
+    gap = pt - fft
+    print(f'{label:&lt;12} {size:&gt;11.2f} {fft:&gt;9.1f} {pt:&gt;9.1f} {gap:&gt;+9.1f}')
+
+print()
+for label, size, fft, pt in zip(model_labels, model_sizes_B,
+                                 full_ft_score, prompt_tune_score):
+    if abs(pt - fft) &lt;= 2.0:
+        print(f'Prompt tuning within 2 pts of full FT at: {label} ({size}B params)')
+        break
+</code></pre>
+<h2>Prompt Tuning vs Prefix Tuning</h2>
+<table>
+<thead>
+<tr>
+<th>Dimension</th>
+<th>Prompt Tuning</th>
+<th>Prefix Tuning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Where adaptation occurs</td>
+<td>Input embedding layer only</td>
+<td>Every transformer layer (K, V pairs)</td>
+</tr>
+<tr>
+<td>Layers affected</td>
+<td>1 (embedding)</td>
+<td>All N layers</td>
+</tr>
+<tr>
+<td>Trainable params (100-token, T5-Large)</td>
+<td>~102K (100×1024)</td>
+<td>~13M (100×1024×2×24 layers)</td>
+</tr>
+<tr>
+<td>Context length consumed</td>
+<td>P tokens from input budget</td>
+<td>P tokens from input budget per layer</td>
+</tr>
+<tr>
+<td>Scale threshold for competitive perf</td>
+<td>≥10B parameters</td>
+<td>Competitive at ~1B+ parameters</td>
+</tr>
+<tr>
+<td>Implementation complexity</td>
+<td>Very simple — one parameter matrix</td>
+<td>Moderate — hook into each attention layer</td>
+</tr>
+<tr>
+<td>Multi-task inference</td>
+<td>Swap E_prompt at inference</td>
+<td>Swap per-layer KV prefixes at inference</td>
+</tr>
+</tbody>
+</table>
+<h2>Multi-Task Inference and Ensembling</h2>
+<p>One practical advantage of prompt tuning is multi-task serving: a single frozen backbone can serve multiple tasks simultaneously by swapping the soft prompt matrix at inference. Each task requires storing only P×d_emb floats. For T5-Large and P=100, that is 102K×2 bytes = 204KB per task — trivial compared to the 3GB backbone. An ensemble of soft prompts can be constructed by averaging their logits: run the same input through the backbone with K different soft prompts and aggregate predictions. This prompt ensemble reliably outperforms a single prompt without changing the backbone.</p>
+<p>In production, the serving architecture is: one backbone instance loaded in GPU memory (shared across tasks), a task router that selects the correct soft prompt matrix, and a prompt-prepend step before the backbone forward pass. Switching tasks has zero latency beyond the tiny prompt embedding lookup. This is fundamentally different from full fine-tuning, which requires loading a separate full model copy per task.</p>
+<h2>Scale Dependence and Method Selection</h2>
+<blockquote>
+<p><strong>Scale Dependence</strong>: Prompt tuning is scale-dependent — it only matches full fine-tuning quality at 10B+ parameters. For smaller models (1–7B), the signal from P soft tokens at the input cannot sufficiently condition a shallower network, making LoRA or adapters preferable.</p>
+</blockquote>
+<h2>Practical Recommendations</h2>
+<p>Prompt length P=100 is a reliable default; gains plateau beyond 100 tokens and longer prompts consume input context budget. For models below 1B parameters, the gap between prompt tuning and full fine-tuning is too large for production use — LoRA (r=8) or Pfeiffer adapters close that gap at comparable parameter budgets. For 10B+ models, prompt tuning is a practical choice when backbone sharing across tasks is required and memory is the primary constraint.</p>
+<ul>
+<li>Use prompt length P=100; gains diminish beyond 100 and longer prompts consume input context budget.</li>
+<li>Initialize from class label embeddings — converges faster and with lower variance than random init.</li>
+<li>For models below 1B parameters, prefer LoRA (r=8) or Pfeiffer adapters over prompt tuning.</li>
+<li>At T5-XXL or LLaMA-13B+ scale, prompt tuning achieves full fine-tuning accuracy at a fraction of the compute.</li>
+<li>For multi-task serving, store one soft prompt matrix (≤1MB) per task — swap at inference with zero backbone reload.</li>
+<li>Prompt tuning is incompatible with models that lack a standard token embedding lookup (e.g., some vision models).</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

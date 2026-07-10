@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ARIMA — AR, I, MA Components and Box-Jenkins Methodology | Notes Backup</title>
+  <meta name="description" content="Derive AR, MA, and ARIMA models from first principles, understand invertibility and stationarity conditions, walk through Box-Jenkins identification and MLE estimation, and apply automatic order selection with pmdarima." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>ARIMA — AR, I, MA Components and Box-Jenkins Methodology</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Derive AR, MA, and ARIMA models from first principles, understand invertibility and stationarity conditions, walk through Box-Jenkins identification and MLE estimation, and apply automatic order selection with pmdarima.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>ARIMA — AR, I, MA Components and Box-Jenkins Methodology</h1>
+<p>ARIMA — AutoRegressive Integrated Moving Average — is the workhorse model of classical time-series forecasting. It unifies three ideas: AR terms capture dependence on past values, MA terms capture dependence on past forecast errors, and the I (integrated) component handles non-stationarity by differencing. Box and Jenkins (1970) formalised a systematic methodology for identifying, estimating, and diagnosing ARIMA models that remains standard practice fifty years later.</p>
+<h2>AR(p) — Autoregressive Process</h2>
+<p>An AR(p) model expresses the current value as a linear combination of p past values plus white noise: yₜ = c + φ₁yₜ₋₁ + φ₂yₜ₋₂ + … + φₚyₜ₋ₚ + εₜ. Using the backshift operator B (Bʲyₜ = yₜ₋ⱼ), this is (1 − φ₁B − φ₂B² − … − φₚBᵖ)yₜ = c + εₜ. Stationarity requires all roots of the characteristic polynomial φ(z) = 1 − φ₁z − … − φₚzᵖ to lie strictly outside the unit circle in the complex plane. An AR(1) with φ₁ = 1 is the random walk (unit root, non-stationary).</p>
+<h2>MA(q) — Moving Average Process</h2>
+<p>An MA(q) model expresses the current value as a linear combination of q past errors: yₜ = μ + εₜ + θ₁εₜ₋₁ + … + θqεₜ₋q. MA processes are always stationary regardless of the θ values because they are finite sums of white noise. Invertibility — the condition that makes the MA representable as an infinite AR — requires roots of θ(z) = 1 + θ₁z + … + θqzq to lie outside the unit circle. Non-invertible MA models are statistically indistinguishable from invertible ones by their ACF, but give different forecasts; by convention we always choose the invertible representation.</p>
+<h2>ARIMA(p,d,q) — Integration and Differencing</h2>
+<p>ARIMA(p,d,q) applies d differences to yₜ before fitting an ARMA(p,q): let wₜ = Δᵈyₜ = (1−B)ᵈyₜ; then φ(B)wₜ = θ(B)εₜ. The d parameter is the number of unit roots in the original series. ARIMA(0,1,0) is the random walk; ARIMA(0,2,0) is the random acceleration (double-integrated random walk). Most economic and financial series require d = 1 or d = 0; over-differencing (using d = 2 when d = 1 suffices) introduces spurious MA structure.</p>
+<pre><code class="language-python">import numpy as np
+from statsmodels.tsa.stattools import acf
+
+np.random.seed(0)
+n = 300
+eps = np.random.randn(n + 5)
+
+# Simulate AR(2): phi1=0.7, phi2=-0.2
+y_ar2 = np.zeros(n)
+for t in range(2, n):
+    y_ar2[t] = 0.7*y_ar2[t-1] - 0.2*y_ar2[t-2] + eps[t]
+
+# Simulate MA(2): theta1=0.6, theta2=0.3
+y_ma2 = np.array([eps[t] + 0.6*eps[t-1] + 0.3*eps[t-2] for t in range(2, n+2)])
+
+# Simulate ARIMA(1,1,1): difference once to get stationary
+wt = np.zeros(n)
+for t in range(1, n):
+    wt[t] = 0.5*wt[t-1] + eps[t] + 0.4*eps[t-1]
+y_arima = np.cumsum(wt)  # integrate once: d=1
+
+print(&quot;Process statistics (all computed on stationary form):&quot;)
+print(f&quot;AR(2):  mean={y_ar2.mean():.3f}  std={y_ar2.std():.3f}&quot;)
+print(f&quot;MA(2):  mean={y_ma2.mean():.3f}  std={y_ma2.std():.3f}&quot;)
+print(f&quot;ARIMA(1,1,1) first-diff mean={np.diff(y_arima).mean():.3f}  std={np.diff(y_arima).std():.3f}&quot;)
+
+# Verify AR(2) stationarity via characteristic roots
+import numpy.polynomial.polynomial as P
+roots = np.roots([1, -0.7, 0.2])  # char poly: 1 - 0.7z - (-0.2)z^2... note sign
+print(f&quot;AR(2) char roots modulus: {np.abs(roots)}  (must be &gt; 1 for stationarity)&quot;)
+</code></pre>
+<h2>Box-Jenkins Methodology — Step by Step</h2>
+<p>Box-Jenkins is an iterative identification-estimation-diagnostic-forecast cycle. It requires the analyst to interact with the data at each stage: residual diagnostics feed back into model identification. Automated approaches (auto_arima) can mimic the cycle, but understanding the manual procedure is essential for diagnosing failures and handling unusual series.</p>
+<ol>
+<li>Identification: Plot the series, test for stationarity (ADF/KPSS), determine d. Then plot ACF and PACF of the differenced series to identify candidate (p, q).</li>
+<li>Estimation: Fit the ARIMA(p,d,q) by Maximum Likelihood. The likelihood is computed via the Kalman filter (or innovations algorithm) treating the model in state space form.</li>
+<li>Diagnostic checking: Plot residual ACF/PACF (should be white noise), run Ljung-Box test, check normality with Q-Q plot and Jarque-Bera test.</li>
+<li>Model selection: Compare candidate models by AIC = −2·log(L) + 2·k or BIC = −2·log(L) + k·log(n). AIC favours slightly more complex models; BIC is more parsimonious.</li>
+<li>Forecasting: Generate h-step-ahead point forecasts and prediction intervals. Interval width grows with horizon as forecast uncertainty accumulates.</li>
+</ol>
+<pre><code class="language-python">import numpy as np
+from statsmodels.tsa.arima.model import ARIMA
+from statsmodels.stats.diagnostic import acorr_ljungbox
+
+np.random.seed(42)
+n = 200
+eps = np.random.randn(n + 2)
+
+# True process: ARIMA(1,1,1)
+wt = np.zeros(n)
+for t in range(1, n):
+    wt[t] = 0.6*wt[t-1] + eps[t] + 0.3*eps[t-1]
+y = np.cumsum(wt)
+
+# Fit ARIMA(1,1,1)
+model = ARIMA(y, order=(1, 1, 1))
+fit   = model.fit()
+
+print(&quot;ARIMA(1,1,1) fit summary:&quot;)
+print(f&quot;  AR phi  = {fit.params['ar.L1']:.4f}&quot;)
+print(f&quot;  MA theta = {fit.params['ma.L1']:.4f}&quot;)
+print(f&quot;  sigma^2  = {fit.params['sigma2']:.4f}&quot;)
+print(f&quot;  AIC      = {fit.aic:.2f}&quot;)
+print(f&quot;  BIC      = {fit.bic:.2f}&quot;)
+
+# Residual diagnostics
+resid = fit.resid
+lb = acorr_ljungbox(resid[2:], lags=[10, 20], return_df=True)
+print(&quot;\nLjung-Box on residuals:&quot;)
+print(lb[['lb_stat', 'lb_pvalue']].to_string())
+</code></pre>
+<h2>Automatic Order Selection with auto_arima</h2>
+<p>Manual Box-Jenkins requires experience and can be ambiguous when ACF/PACF patterns are unclear. The auto_arima function (pmdarima) automates order selection: it searches a grid of (p, d, q) combinations, estimates each model via MLE, and returns the one with the lowest AIC or BIC. It also tests for stationarity internally (using ADF) to determine d automatically, and can handle seasonal orders. The search is made efficient by a stepwise algorithm that starts from a default model and explores neighbouring orders.</p>
+<pre><code class="language-python">import numpy as np
+import pmdarima as pm
+from statsmodels.tsa.arima.model import ARIMA
+
+np.random.seed(5)
+n = 300
+eps = np.random.randn(n + 3)
+
+# True ARIMA(2,1,1) process
+wt = np.zeros(n)
+for t in range(2, n):
+    wt[t] = 0.5*wt[t-1] - 0.2*wt[t-2] + eps[t] + 0.4*eps[t-1]
+y = np.cumsum(wt)
+
+# Auto-ARIMA search
+auto = pm.auto_arima(
+    y,
+    start_p=0, max_p=4,
+    start_q=0, max_q=4,
+    d=None,        # auto-determine via ADF test
+    information_criterion='aic',
+    stepwise=True,
+    seasonal=False,
+    error_action='ignore',
+    suppress_warnings=True
+)
+
+print(f&quot;Best order selected: ARIMA{auto.order}&quot;)
+print(f&quot;AIC={auto.aic():.2f}  BIC={auto.bic():.2f}&quot;)
+print(auto.summary())
+</code></pre>
+<h2>Forecasting and Prediction Intervals</h2>
+<pre><code class="language-python">import numpy as np
+from statsmodels.tsa.arima.model import ARIMA
+
+np.random.seed(10)
+n = 150
+eps = np.random.randn(n + 1)
+
+wt = np.zeros(n)
+for t in range(1, n):
+    wt[t] = 0.7*wt[t-1] + eps[t] + 0.2*eps[t-1]
+y = np.cumsum(wt)
+
+train, test = y[:120], y[120:]
+
+fit = ARIMA(train, order=(1, 1, 1)).fit()
+
+for h in [1, 5, 10, 20, 30]:
+    fc = fit.get_forecast(steps=h)
+    mean_fc  = fc.predicted_mean
+    ci       = fc.conf_int(alpha=0.05)
+    interval = ci.iloc[-1, 1] - ci.iloc[-1, 0]  # width at horizon h
+    print(f&quot;h={h:2d}: point={mean_fc.iloc[-1]:+7.3f}  95% CI width={interval:.3f}&quot;)
+
+print(&quot;\nInterval width grows with horizon -- uncertainty accumulates over time&quot;)
+print(&quot;For ARIMA(1,1,1), long-run forecast converges to a random walk pattern&quot;)
+</code></pre>
+<blockquote>
+<p><strong>ARIMA Prediction Intervals Assume Normal Errors</strong>: Prediction intervals for ARIMA are exact only when εₜ ~ N(0, σ²). For fat-tailed residuals (common in financial returns), the normal-based intervals under-cover at high significance levels. Check residual Q-Q plots: if tails are heavier than normal, consider bootstrapped prediction intervals or switch to a model with t-distributed innovations.</p>
+</blockquote>
+<h2>ARIMA Order Selection Guide</h2>
+<table>
+<thead>
+<tr>
+<th>ACF Pattern</th>
+<th>PACF Pattern</th>
+<th>ADF Result</th>
+<th>Suggested d</th>
+<th>Suggested p</th>
+<th>Suggested q</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Decays slowly, near 1</td>
+<td>Near 1 at lag 1 then drops</td>
+<td>Fail to reject (non-stat)</td>
+<td>1</td>
+<td>—</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Cuts off after lag 1</td>
+<td>Decays geometrically</td>
+<td>Reject H0 (stat)</td>
+<td>0</td>
+<td>0</td>
+<td>1</td>
+</tr>
+<tr>
+<td>Cuts off after lag 2</td>
+<td>Decays geometrically</td>
+<td>Reject H0</td>
+<td>0</td>
+<td>0</td>
+<td>2</td>
+</tr>
+<tr>
+<td>Decays geometrically</td>
+<td>Cuts off after lag 1</td>
+<td>Reject H0</td>
+<td>0</td>
+<td>1</td>
+<td>0</td>
+</tr>
+<tr>
+<td>Decays geometrically</td>
+<td>Cuts off after lag 2</td>
+<td>Reject H0</td>
+<td>0</td>
+<td>2</td>
+<td>0</td>
+</tr>
+<tr>
+<td>Both decay geometrically</td>
+<td>Both decay geometrically</td>
+<td>Reject H0</td>
+<td>0</td>
+<td>1–2</td>
+<td>1–2 (use AIC)</td>
+</tr>
+</tbody>
+</table>
+<p>When AIC and BIC disagree, prefer BIC for final model selection in large samples (it is model-selection consistent) and AIC when prediction accuracy at short horizons is paramount. Always refit the final model on the full sample before generating live forecasts — avoid relying on models estimated only on the training split.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

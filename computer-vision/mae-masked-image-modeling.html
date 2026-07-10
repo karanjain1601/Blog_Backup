@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MAE: Masked Autoencoders for Visual Pretraining | Notes Backup</title>
+  <meta name="description" content="Masked Autoencoders use a high masking ratio (75%) to pretrain ViT — encoder processes visible patches only, lightweight decoder reconstructs masked pixels, producing strong transfer features." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>MAE: Masked Autoencoders for Visual Pretraining</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Masked Autoencoders use a high masking ratio (75%) to pretrain ViT — encoder processes visible patches only, lightweight decoder reconstructs masked pixels, producing strong transfer features.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>MAE: Masked Autoencoders for Visual Pretraining</h1>
+<h2>Overview</h2>
+<p>Masked Autoencoders (MAE) adapt the masked language modeling paradigm (BERT) to vision. A random 75% of image patches are masked; the encoder processes only the visible 25%, and a lightweight decoder reconstructs the original pixel values for all masked patches. This asymmetric design makes pretraining efficient and forces the encoder to learn holistic scene understanding.</p>
+<p>MAE achieves 87.8% top-1 accuracy on ImageNet with ViT-H after fine-tuning — matching or exceeding supervised pretraining. Unlike contrastive methods, MAE requires no negative pairs, no momentum encoder, and no specialized augmentations. The reconstruction target is raw normalized pixel values, keeping the implementation simple while producing strong representations.</p>
+<h2>Asymmetric Encoder-Decoder</h2>
+<p>The encoder is a standard ViT applied only to visible (unmasked) patches. This means the encoder processes just 25% of the total patches, reducing computation by ~4×. Mask tokens are never introduced in the encoder, preventing the model from exploiting their positional information. Only in the lightweight decoder are mask tokens added back, along with positional embeddings, to reconstruct the full image.</p>
+<pre><code class="language-python">import torch
+
+def random_masking(x, mask_ratio=0.75):
+    # x: [B, N, D] patch embeddings
+    B, N, D = x.shape
+    num_keep = int(N * (1 - mask_ratio))
+    noise = torch.rand(B, N, device=x.device)
+    ids_shuffle = torch.argsort(noise, dim=1)
+    ids_restore = torch.argsort(ids_shuffle, dim=1)
+    ids_keep = ids_shuffle[:, :num_keep]
+    x_masked = torch.gather(x, 1, ids_keep.unsqueeze(-1).expand(-1, -1, D))
+    mask = torch.ones(B, N, device=x.device)
+    mask[:, :num_keep] = 0
+    mask = torch.gather(mask, 1, ids_restore)
+    return x_masked, mask, ids_restore
+</code></pre>
+<h2>High Masking Ratio</h2>
+<p>The 75% masking ratio is a deliberate design choice, not just a hyperparameter. At low ratios (e.g., 15% as in BERT), neighboring visible patches leak enough information to reconstruct masked patches through local interpolation. At 75%, the task requires understanding global structure, object semantics, and spatial relationships — forcing the encoder to build rich, holistic representations.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class MAEEncoder(nn.Module):
+    def __init__(self, vit_backbone):
+        super().__init__()
+        self.vit = vit_backbone
+        self.patch_embed = vit_backbone.patch_embed
+        self.cls_token = vit_backbone.cls_token
+        self.pos_embed = vit_backbone.pos_embed
+
+    def forward(self, x, ids_keep):
+        # embed patches, no mask tokens in encoder
+        x = self.patch_embed(x)  # [B, N, D]
+        x = x + self.pos_embed[:, 1:, :]  # add positional embeddings
+        # select only visible patches
+        B, N, D = x.shape
+        x = torch.gather(x, 1, ids_keep.unsqueeze(-1).expand(-1, -1, D))
+        cls = self.cls_token + self.pos_embed[:, :1, :]
+        x = torch.cat([cls.expand(B, -1, -1), x], dim=1)
+        x = self.vit.blocks(x)
+        return self.vit.norm(x)
+</code></pre>
+<blockquote>
+<p>****: MAE's high masking ratio (75%) is critical — low ratios make the task too easy (neighbors provide signal). 75% forces the model to learn holistic semantic understanding rather than local interpolation.</p>
+</blockquote>
+<h2>Pretraining Objective</h2>
+<p>The reconstruction target is the normalized pixel values within each masked patch. Per-patch mean and variance are computed and used to normalize the target, preventing the model from focusing on low-frequency color statistics rather than structure. The loss is MSE computed only on masked patches — visible patches are not penalized, focusing optimization entirely on what was hidden.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class MAEDecoder(nn.Module):
+    def __init__(self, encoder_dim=768, decoder_dim=512,
+                 n_blocks=8, patch_size=16, n_channels=3):
+        super().__init__()
+        self.proj = nn.Linear(encoder_dim, decoder_dim)
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, decoder_dim))
+        self.blocks = nn.Sequential(*[nn.TransformerEncoderLayer(
+            d_model=decoder_dim, nhead=16, batch_first=True)
+            for _ in range(n_blocks)])
+        self.pred = nn.Linear(decoder_dim, patch_size * patch_size * n_channels)
+
+    def forward(self, x, ids_restore):
+        x = self.proj(x)  # project encoder tokens
+        B, num_vis_plus_cls, D = x.shape
+        num_patches = ids_restore.shape[1]
+        mask_tokens = self.mask_token.expand(B, num_patches - (num_vis_plus_cls - 1), D)
+        x_ = torch.cat([x[:, 1:, :], mask_tokens], dim=1)
+        x_ = torch.gather(x_, 1, ids_restore.unsqueeze(-1).expand(-1, -1, D))
+        x = torch.cat([x[:, :1, :], x_], dim=1)
+        x = self.blocks(x)
+        return self.pred(x[:, 1:, :])
+</code></pre>
+<h2>MAE vs Contrastive Methods</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from timm.models.vision_transformer import VisionTransformer
+
+def build_mae_finetuning_model(encoder, num_classes=1000):
+    # discard decoder; attach classification head to encoder
+    class MAEFineTuner(nn.Module):
+        def __init__(self, enc, n_cls):
+            super().__init__()
+            self.encoder = enc
+            dim = enc.embed_dim
+            self.head = nn.Linear(dim, n_cls)
+            nn.init.trunc_normal_(self.head.weight, std=0.01)
+        def forward(self, x):
+            # use CLS token for classification
+            x = self.encoder(x)[:, 0]
+            return self.head(x)
+    return MAEFineTuner(encoder, num_classes)
+</code></pre>
+<p>MAE and contrastive methods (DINO, CLIP, SimCLR) learn complementary representations. Contrastive methods produce features that excel at linear probing and k-NN tasks because the contrastive objective directly structures the embedding space for similarity comparisons. MAE features often require fine-tuning to reach peak performance but then surpass contrastive baselines on tasks like detection and segmentation.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Loss</th>
+<th>Masking</th>
+<th>Linear Acc (%)</th>
+<th>Fine-tune Acc (%)</th>
+<th>Throughput</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MAE-B</td>
+<td>MSE (pixels)</td>
+<td>75%</td>
+<td>68.0</td>
+<td>83.6</td>
+<td>Fast</td>
+</tr>
+<tr>
+<td>MAE-L</td>
+<td>MSE (pixels)</td>
+<td>75%</td>
+<td>76.0</td>
+<td>85.9</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>MAE-H</td>
+<td>MSE (pixels)</td>
+<td>75%</td>
+<td>77.2</td>
+<td>87.8</td>
+<td>Slow</td>
+</tr>
+<tr>
+<td>BEiT</td>
+<td>Cross-entropy (tokens)</td>
+<td>40%</td>
+<td>56.7</td>
+<td>83.2</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>SimMIM</td>
+<td>MSE (pixels)</td>
+<td>60%</td>
+<td>65.7</td>
+<td>83.8</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>DINO-B</td>
+<td>Cross-entropy</td>
+<td>None</td>
+<td>80.1</td>
+<td>82.8</td>
+<td>Fast</td>
+</tr>
+</tbody>
+</table>
+<h2>Key Takeaways</h2>
+<p>MAE demonstrates that generative pretraining — reconstructing masked input — is a powerful and scalable self-supervised learning paradigm for vision. The asymmetric encoder-decoder design simultaneously improves compute efficiency and representation quality. MAE scales gracefully: ViT-H with MAE pretraining matches or exceeds all prior self-supervised methods on standard benchmarks.</p>
+<p>Practical advantages over contrastive methods: no need for negative pairs or large batches, no specialized augmentation pipelines (random crop + horizontal flip suffice), no momentum encoder, and lower memory usage during pretraining. The reconstruction objective is invariant to the number of categories, making MAE naturally suitable for domain-specific pretraining outside ImageNet.</p>
+<p>Downstream usage: discard the decoder after pretraining and fine-tune only the encoder with a task head. For detection (ViTDet), MAE-pretrained ViT-H achieves 61.3 AP on COCO. For segmentation (UPerNet), it achieves 53.6 mIoU on ADE20k. These results establish MAE as the de facto pretraining method for large ViT models in dense prediction tasks.</p>
+<p>Extensions and variants: VideoMAE applies the same paradigm to video with tube masking; Audio-MAE to spectrograms; Point-MAE to 3D point clouds. iBOT combines MAE-style patch token prediction with DINO's global CLS distillation for a hybrid objective that achieves strong performance on both linear probing and fine-tuning benchmarks without sacrificing either strength.</p>
+<p>Common implementation pitfalls: not normalizing pixel targets per-patch (model learns color statistics instead of structure), using too small a decoder (4 blocks, 256-dim), including mask tokens in the encoder (leaks positional information about masked locations), and using cosine similarity loss instead of MSE (less stable, no clear benefit). Use the exact decoder architecture from the original paper as a starting point.</p>
+<p>Scaling behavior: MAE shows strong scaling with both model size and pretraining duration. ViT-H pretrained for 1600 epochs consistently outperforms shorter schedules. Unlike supervised training, there is no clear sign of overfitting with longer pretraining on ImageNet-1k — MAE benefits from the increased number of masked patch reconstruction problems seen during training.</p>
+<p>Recommended configuration for practitioners: ViT-L/16 with MAE pretraining for 400 epochs on a domain-specific dataset provides strong initialization for fine-tuning on downstream tasks. The original FAIR implementation (github.com/facebookresearch/mae) is clean and well-documented. HuggingFace Transformers includes ViTMAEModel with pretrained weights for both ViT-B and ViT-L variants.</p>
+    </article>
+  </main>
+</body>
+</html>

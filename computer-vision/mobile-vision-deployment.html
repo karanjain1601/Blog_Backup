@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mobile Vision Deployment: MobileNet, Depthwise Separable, and Edge Inference | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Mobile Vision Deployment: MobileNet, Depthwise Separable, and Edge Inference</h1>
+      
+      <h1>Mobile Vision Deployment: MobileNet, Depthwise Separable, and Edge Inference</h1>
+<h2>Overview</h2>
+<p>Deploying computer vision on mobile and edge devices requires balancing model accuracy against strict constraints on latency, memory, and power consumption. MobileNet architectures, built on depthwise separable convolutions, have become the standard building block for efficient on-device vision — powering everything from real-time camera features to augmented reality applications.</p>
+<p>The MobileNet family has evolved through three major versions: V1 introduced depthwise separable convolutions, V2 added inverted residuals and linear bottlenecks, and V3 incorporated neural architecture search, squeeze-excitation attention, and hardware-aware activation functions. Each version improved the accuracy-efficiency frontier for mobile deployment.</p>
+<h2>Depthwise Separable Convolutions</h2>
+<p>A standard convolution applies a K×K filter across all C input channels simultaneously, costing H×W×C×C_out×K² FLOPs. Depthwise separable convolution splits this into two steps: a depthwise conv that applies one filter per channel (K² FLOPs per channel), followed by a pointwise 1×1 conv that mixes channels (C×C_out FLOPs). The total cost is H×W×C×(K²+C_out).</p>
+<pre><code>import torch.nn as nn\n\n# Depthwise separable convolution\nC, C_out = 64, 128\ndw = nn.Conv2d(C, C, 3, groups=C, padding=1)   # depthwise\npw = nn.Conv2d(C, C_out, 1)                      # pointwise\n\n# FLOPs: HW*C*(9 + C_out) vs HW*C*C_out*9 standard\n# Reduction factor: 1/C_out + 1/9 ≈ 1/9 for large C_out\ndef dw_sep_conv(x):\n    return pw(dw(x))
+</code></pre>
+<blockquote>
+<p>****: Depthwise separable convolutions reduce FLOPs by a factor of (1/C_out + 1/9) ≈ 8–9× for typical channel sizes. The spatial depthwise conv captures local structure; the pointwise conv mixes channels. Together they match standard conv accuracy at a fraction of the cost.</p>
+</blockquote>
+<h2>MobileNetV1 and V2</h2>
+<p>MobileNetV1 replaces all standard convolutions with depthwise separable pairs and introduces two hyperparameters: width multiplier alpha (scales channel counts) and resolution multiplier rho (scales input resolution). This gives a continuous accuracy-efficiency tradeoff without architectural redesign — multiply all channel counts by 0.75 for a 50% FLOP reduction with modest accuracy loss.</p>
+<p>MobileNetV2 introduces the inverted residual block: instead of bottlenecking channels before the depthwise conv, V2 expands channels by a factor t (typically 6) before the depthwise step, then projects back down. The residual connection bypasses the expansion and projection, connecting narrow bottleneck layers. A critical detail: no ReLU is applied after the final projection to preserve feature diversity.</p>
+<pre><code># Inverted Residual Block (MBConv) — MobileNetV2\nclass MBConv(nn.Module):\n    def __init__(self, C, C_out, t=6, stride=1):\n        super().__init__()\n        self.use_res = (stride == 1 and C == C_out)\n        mid = C * t\n        self.block = nn.Sequential(\n            nn.Conv2d(C, mid, 1), nn.BatchNorm2d(mid), nn.ReLU6(),\n            nn.Conv2d(mid, mid, 3, stride, 1, groups=mid),\n            nn.BatchNorm2d(mid), nn.ReLU6(),\n            nn.Conv2d(mid, C_out, 1), nn.BatchNorm2d(C_out)\n        )  # no activation after last BN\n    def forward(self, x):\n        return x + self.block(x) if self.use_res else self.block(x)
+</code></pre>
+<h2>MobileNetV3 and Squeeze-Excite</h2>
+<p>MobileNetV3 (Large and Small) was designed using a combination of NAS (to find the overall structure) and NetAdapt (to fine-tune individual layer sizes). It adds Squeeze-Excite (SE) blocks to selected layers, allowing the network to recalibrate channel responses based on global context, and replaces ReLU6 with h-swish in deeper layers for better representation power.</p>
+<pre><code># h-swish activation — approximates Swish without exp()\nimport torch\nimport torch.nn.functional as F\n\ndef hswish(x: torch.Tensor) -&gt; torch.Tensor:\n    # relu6(x+3)/6 * x — faster on mobile hardware than sigmoid\n    return x * F.relu6(x + 3.0) / 6.0\n\ndef hsigmoid(x: torch.Tensor) -&gt; torch.Tensor:\n    return F.relu6(x + 3.0) / 6.0\n\n# Squeeze-Excite recalibration\ndef se_block(x, se_ratio=0.25):\n    s = x.mean(dim=[-2,-1], keepdim=True)  # global avg pool\n    s = pw_fc1(s); s = hswish(s); s = pw_fc2(s); s = hsigmoid(s)\n    return x * s
+</code></pre>
+<p>The Squeeze-Excite block adds negligible FLOPs (global average pooling + two small FC layers) but measurably improves accuracy by letting the network attend to the most informative channels dynamically based on input content. V3-Small achieves 67.4% ImageNet top-1 at just 2.9M parameters and 56M FLOPs — a new accuracy-efficiency point for the smallest models.</p>
+<h2>Deployment on Edge Devices</h2>
+<p>Converting a PyTorch model for edge deployment involves three steps: export to an intermediate format (TorchScript or ONNX), optimize with hardware-specific tooling (CoreML Tools for iOS/macOS, TFLite for Android, TensorRT for NVIDIA edge), and quantize weights to INT8 for final speed. Each step can introduce accuracy loss that must be validated on a held-out set.</p>
+<pre><code># CoreML export for iOS/macOS deployment\nimport torch, coremltools as ct\nfrom torchvision.models import mobilenet_v3_small\n\nmodel = mobilenet_v3_small(pretrained=True).eval()\nexample = torch.rand(1, 3, 224, 224)\n\n# Trace and convert\ntraced = torch.jit.trace(model, example)\ncml = ct.convert(\n    traced,\n    inputs=[ct.ImageType(name='input', shape=(1,3,224,224),\n                         scale=1/255.0)],\n    minimum_deployment_target=ct.target.iOS16\n)\ncml.save('mobilenet_v3_small.mlpackage')
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Params (M)</th>
+<th>FLOPs (M)</th>
+<th>IN-1K Top-1 %</th>
+<th>Latency (ms, Pixel 6)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MobileNetV1</td>
+<td>4.2</td>
+<td>575</td>
+<td>70.6</td>
+<td>22</td>
+</tr>
+<tr>
+<td>MobileNetV2</td>
+<td>3.4</td>
+<td>300</td>
+<td>72.0</td>
+<td>14</td>
+</tr>
+<tr>
+<td>MobileNetV3-S</td>
+<td>2.9</td>
+<td>56</td>
+<td>67.4</td>
+<td>6</td>
+</tr>
+<tr>
+<td>MobileNetV3-L</td>
+<td>5.4</td>
+<td>219</td>
+<td>75.2</td>
+<td>11</td>
+</tr>
+<tr>
+<td>EfficientNet-B0</td>
+<td>5.3</td>
+<td>390</td>
+<td>77.1</td>
+<td>18</td>
+</tr>
+</tbody>
+</table>
+<h2>Key Takeaways</h2>
+<p>For most mobile vision tasks, start with a pretrained MobileNetV3-Small or MobileNetV3-Large from torchvision and fine-tune on your dataset. These models have been carefully optimized for mobile hardware and have wide framework support across CoreML, TFLite, and ONNX Runtime, saving significant engineering effort compared to training from scratch.</p>
+<p>INT8 quantization typically reduces model size by 4× and improves latency by 2–3× with less than 1% accuracy drop when applied with quantization-aware training (QAT). Post-training quantization (PTQ) is faster to apply but may cause larger accuracy drops for smaller models where the weight distributions are less Gaussian. Always validate quantized models with representative calibration data.</p>
+<p>Profiling on the target device is non-negotiable. FLOPs are a poor proxy for mobile latency because operations like depthwise convolution are memory-bandwidth-bound, not compute-bound. A model with 2× lower FLOPs may only be 1.2× faster if the bottleneck shifts to memory access. Use device-native profiling tools: Instruments on iOS, Android Studio Profiler on Android.</p>
+<p>The width multiplier (alpha) and resolution multiplier (rho) of MobileNetV1/V2 remain powerful knobs for hitting custom latency targets. Reducing alpha from 1.0 to 0.75 cuts FLOPs roughly in half while losing only 2–3% accuracy. For specialized tasks with small output spaces (binary classification, 5-class detection), aggressive width reduction often has negligible accuracy impact.</p>
+<p>When deploying with CoreML on Apple Silicon, enable the Neural Engine (ANE) by ensuring all operations are ANE-compatible: avoid dynamic shapes, use supported activation functions (relu, sigmoid, tanh), and keep tensor dimensions static. Models using h-swish can be ANE-accelerated with iOS 16+, which delivers the largest latency gains over CPU execution for MobileNetV3.</p>
+<p>For Android deployment, prefer TFLite with the GPU delegate for real-time inference. NNAPI delegation can be unreliable across chipsets — benchmark on representative target devices. EfficientNet-Lite variants (modified to remove squeeze-excite and h-swish for broader hardware compatibility) are often a better choice than MobileNetV3 when targeting a heterogeneous Android device fleet.</p>
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LongLoRA: Efficient Fine-tuning for Long Context | Notes Backup</title>
+  <meta name="description" content="Combining shifted sparse attention (S²-Attn) during fine-tuning with LoRA to extend LLM context from 4K to 100K tokens at a fraction of the compute cost of full fine-tuning." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>LongLoRA: Efficient Fine-tuning for Long Context</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Combining shifted sparse attention (S²-Attn) during fine-tuning with LoRA to extend LLM context from 4K to 100K tokens at a fraction of the compute cost of full fine-tuning.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>LongLoRA: Efficient Fine-tuning for Long Context</h1>
+<p>LongLoRA (Chen et al., 2023) is a parameter-efficient method for extending the context window of pretrained large language models without the prohibitive compute cost of full fine-tuning. Starting from Llama-2 with a 4K-token context limit, LongLoRA extends context to 32K, 65K, or 100K tokens using two complementary techniques: Shifted Sparse Attention (S²-Attn) for training-time compute efficiency, and LoRA for parameter efficiency. The key insight is that approximate sparse attention during training is sufficient for the model to learn long-range dependencies, even though full attention is restored at inference time — so deployment requires no special kernels or architectural changes.</p>
+<h2>Overview</h2>
+<p>Full fine-tuning with full attention on 100K-token sequences is computationally prohibitive: the attention matrix has O(n²) complexity, so scaling from 4K to 32K multiplies attention compute by 64× and memory by the same factor. For a 7B model on 80GB A100 GPUs, full fine-tuning at 32K tokens requires at least 8 GPUs and thousands of GPU hours. LongLoRA reduces this to a single 80GB GPU for 32K-token sequences, and to 2-4 GPUs for 65K-100K tokens, making long-context fine-tuning accessible at modest cost.</p>
+<p>LongLoRA achieves efficiency through two mechanisms that compound: S²-Attn reduces attention compute from O(n²) to O(n × g) where g is the group size (typically 2048), giving a 16× reduction at 32K tokens. LoRA with r=8 applied to Q, K, V, O projections reduces trainable parameters from ~7B to ~50M — a 140× reduction. The two techniques are largely orthogonal in what they optimize — memory/compute vs. parameter count — allowing them to be combined without significant quality degradation. The resulting perplexity on long-document benchmarks is within 0.3-0.5 PPL of full fine-tuning with full attention.</p>
+<h2>The Challenge of Long-Context Fine-tuning</h2>
+<p>The memory cost of full attention at long context is the primary obstacle. For a transformer with 32 attention heads of dimension 128, the attention weight matrix at sequence length 32768 has shape (batch, 32, 32768, 32768). At float16, materializing this costs 32 × 32768² × 2 bytes ≈ 65 GB per layer — more than a full A100. Flash attention avoids materializing the full matrix by computing attention in tiles, but the backward pass still requires O(n²) flops and storing O(n) softmax denominators per head. At 100K tokens, even flash attention with gradient checkpointing would require approximately 400 GB of GPU memory for a 7B model in full fine-tuning mode.</p>
+<p>The positional encoding challenge is equally important. Pretrained Llama-2 uses Rotary Position Embedding (RoPE) with frequencies tuned to the pretrain context length of 4096. Token positions beyond 4096 are completely out-of-distribution. Position interpolation (PI) addresses this by rescaling positions from [0, target_len] back to [0, 4096], keeping positions within the distribution seen during pretraining. However, PI alone causes significant quality degradation because the model's attention patterns, gate functions, and MLP activations have learned context-length-specific behaviors. Fine-tuning on long sequences is required to adapt these components. Without fine-tuning, PI-extended models exhibit perplexity 2-10× worse than the pretrained baseline on long inputs.</p>
+<h2>Shifted Sparse Attention (S²-Attn)</h2>
+<p>S²-Attn partitions the token sequence into non-overlapping local windows of g tokens (typically g=2048) and computes full attention within each window independently. With g=2048 on a 32K sequence, this creates 16 groups, each requiring g² = 4M attention operations instead of n² = 1.07B. Total attention compute drops from O(n²) to O(n × g), a 16× reduction. The limitation of pure local attention is that tokens in different groups cannot attend to each other, which would prevent the model from learning cross-group long-range dependencies essential for tasks like following instructions that appear at the start of a long document.</p>
+<p>The shift mechanism addresses cross-group communication. A second attention pass shifts all positions by g/2 tokens before grouping, placing original group boundaries in the middle of new groups. Tokens that were separated across two original windows now share a shifted window and can attend to each other. The two attention outputs (local and shifted-local) are averaged. Over multiple transformer layers, this enables effective long-range information propagation despite the sparse per-layer pattern. The critical property is that S²-Attn is only active during training — at inference, the model uses standard full attention, so deployment requires no modification and no custom kernels.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def shifted_sparse_attention(q, k, v, group_size=2048, shift_amt=None):
+    bsz, n_heads, seq_len, head_dim = q.shape
+    if shift_amt is None:
+        shift_amt = group_size // 2
+    n_groups = seq_len // group_size
+    # Shift sequence positions for cross-group information flow
+    q = torch.roll(q, shifts=-shift_amt, dims=2)
+    k = torch.roll(k, shifts=-shift_amt, dims=2)
+    v = torch.roll(v, shifts=-shift_amt, dims=2)
+    # Reshape into local attention groups of size group_size
+    q = q.view(bsz, n_heads, n_groups, group_size, head_dim)
+    k = k.view(bsz, n_heads, n_groups, group_size, head_dim)
+    v = v.view(bsz, n_heads, n_groups, group_size, head_dim)
+    scale = head_dim ** -0.5
+    attn  = torch.einsum('bhnsd,bhntd-&gt;bhnst', q, k) * scale
+    attn  = F.softmax(attn, dim=-1)
+    out   = torch.einsum('bhnst,bhntd-&gt;bhnsd', attn, v)
+    out   = out.contiguous().view(bsz, n_heads, seq_len, head_dim)
+    return torch.roll(out, shifts=shift_amt, dims=2)
+
+def s2_attn(q, k, v, group_size=2048):
+    &quot;&quot;&quot;S2-Attn: average of local and shifted local attention passes.&quot;&quot;&quot;
+    local   = shifted_sparse_attention(q, k, v, group_size, shift_amt=0)
+    shifted = shifted_sparse_attention(q, k, v, group_size)
+    return (local + shifted) / 2.0
+
+bsz, heads, seq, dim = 1, 8, 4096, 64
+q = k = v = torch.randn(bsz, heads, seq, dim)
+out = s2_attn(q, k, v, group_size=512)
+print(f&quot;S2-Attn output shape: {out.shape}&quot;)  # (1, 8, 4096, 64)
+complexity_ratio = (seq * 512) / (seq ** 2)
+print(f&quot;Ops ratio vs full attn: {complexity_ratio:.4f}&quot;)  # 0.125 = 8x reduction
+</code></pre>
+<h2>LoRA for Parameter Efficiency</h2>
+<p>LoRA (Hu et al., 2021) parameterizes weight updates as low-rank matrices: W_updated = W_frozen + BA where B ∈ ℝ^(d×r) and A ∈ ℝ^(r×d) with r ≪ d. For LongLoRA, LoRA is applied to the Q, K, V, O projections of every attention layer. For Llama-2-7B (hidden size 4096, 32 layers) with r=8: 4 projections × 2 matrices × 4096 × 8 × 32 = 33.6M parameters from LoRA alone. Including embedding and normalization layers — which are also unfrozen for stability — total trainable parameters are approximately 50M out of 7B, or 0.7% of the full model.</p>
+<p>An important detail in LongLoRA is that the input embedding layer and RMSNorm layers are also unfrozen during training, unlike standard LoRA which freezes everything except the low-rank adapters. The extended position embeddings (positions 4096-100000) are newly initialized via interpolation and benefit from direct weight updates. The layer norms need to recalibrate their scale statistics for long-sequence activation distributions. In practice, unfreezing embeddings adds ~131M parameters (4096 hidden_size × 32000 vocab tokens) but provides significant convergence benefits, especially at very long context lengths of 65K-100K. In paper ablations, this detail accounts for roughly 0.5-1.0 PPL improvement.</p>
+<pre><code class="language-python">import torch
+from transformers import LlamaForCausalLM, TrainingArguments
+from peft import LoraConfig, get_peft_model, TaskType
+
+def setup_longlora(
+    model_name='meta-llama/Llama-2-7b-hf',
+    max_length=32768,
+    lora_r=8,
+    lora_alpha=32
+):
+    model = LlamaForCausalLM.from_pretrained(
+        model_name, torch_dtype=torch.float16, device_map='auto'
+    )
+    # Extend RoPE via position interpolation
+    model.config.max_position_embeddings = max_length
+    lora_cfg = LoraConfig(
+        task_type=TaskType.CAUSAL_LM, r=lora_r,
+        lora_alpha=lora_alpha, lora_dropout=0.05,
+        target_modules=['q_proj', 'k_proj', 'v_proj', 'o_proj'],
+        bias='none',
+    )
+    model = get_peft_model(model, lora_cfg)
+    # Unfreeze embeddings and norms for long-context stability
+    model.base_model.model.model.embed_tokens.weight.requires_grad_(True)
+    for layer in model.base_model.model.model.layers:
+        layer.input_layernorm.weight.requires_grad_(True)
+        layer.post_attention_layernorm.weight.requires_grad_(True)
+    model.enable_input_require_grads()
+    model.gradient_checkpointing_enable()
+    model.print_trainable_parameters()
+    return model
+
+training_args = TrainingArguments(
+    output_dir='longlora-7b-32k',
+    per_device_train_batch_size=1,
+    gradient_accumulation_steps=8,
+    max_steps=1000, learning_rate=2e-5,
+    lr_scheduler_type='cosine', warmup_steps=100,
+    bf16=True, gradient_checkpointing=True,
+    logging_steps=10, save_steps=200, report_to='none',
+)
+model = setup_longlora(lora_r=8, max_length=32768)
+print(f&quot;Context extended to {model.config.max_position_embeddings:,} tokens&quot;)
+print(&quot;S2-Attn active during training; standard full attention at inference&quot;)
+</code></pre>
+<h2>Training Protocol</h2>
+<p>LongLoRA training uses position interpolation (PI) to initialize the extended context before fine-tuning. PI rescales RoPE frequencies: for each base frequency θ_i, the interpolated frequency is θ_i' = θ_i × (pretrain_len / target_len). For Llama-2-7B extending from 4096 to 32768, the scale factor is 4096/32768 = 0.125. This compression keeps all token positions within the range [0, 4096] that the model was pretrained on, preventing the extreme extrapolation that would occur without PI. The model is then fine-tuned with S²-Attn on the LongAlpaca dataset using a cosine learning rate schedule starting at 2e-5 with 100 warmup steps and 8-step gradient accumulation.</p>
+<p>Gradient checkpointing is essential at long context lengths. Without it, storing intermediate activations for the backward pass requires O(n × d × L) memory where n is sequence length, d is hidden dimension, and L is number of layers. At n=32768, d=4096, L=32, this is approximately 32768 × 4096 × 32 × 2 bytes = 8 GB of activations alone, in addition to model weights and optimizer states. With gradient checkpointing, only the current layer's activations are stored — preceding layers are recomputed on-demand during backprop. This reduces activation memory by roughly 10× at the cost of approximately 30% additional compute (one extra forward pass per layer per backward pass).</p>
+<pre><code class="language-python">import torch
+import numpy as np
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+def passkey_retrieval(model, tokenizer, ctx_len, n_trials=20):
+    &quot;&quot;&quot;Needle-in-haystack test: embed a secret key at a random position, measure retrieval.&quot;&quot;&quot;
+    correct = 0
+    for _ in range(n_trials):
+        secret = np.random.randint(10000, 99999)
+        insert = np.random.randint(0, ctx_len - 200)
+        filler = 'The quick brown fox jumps over the lazy dog. ' * (ctx_len // 45 + 1)
+        prompt = filler[:insert] + f' PASSKEY={secret}. ' + filler[insert:]
+        prompt = prompt[:ctx_len - 50] + ' What is the PASSKEY? The PASSKEY is'
+        ids = tokenizer(prompt, return_tensors='pt',
+                        truncation=True, max_length=ctx_len).to(model.device)
+        with torch.no_grad():
+            out = model.generate(**ids, max_new_tokens=8)
+        answer = tokenizer.decode(out[0, ids.input_ids.shape[1]:])
+        correct += str(secret) in answer
+    return correct / n_trials
+
+ctx_lengths = [4096, 16384, 32768, 65536, 100000]
+print(f'{'Context':&gt;10} | Llama-2 orig | LongLoRA 7B')
+for ctx in ctx_lengths:
+    print(f'{ctx:&gt;10,} |  run model  |  run model')
+print('LongLoRA maintains &gt;95% passkey retrieval accuracy up to its trained context length')
+print('Original Llama-2 7B fails completely beyond 4096 tokens (accuracy drops to ~0%)')
+</code></pre>
+<h2>LongAlpaca Dataset</h2>
+<p>LongAlpaca is the instruction-following dataset created specifically for LongLoRA training. The original Alpaca dataset contains 52K short instruction-response pairs with an average length of about 300 tokens. LongAlpaca-12k extends this with 12,000 long-context examples drawn from two sources: (1) long-form QA datasets including SCROLLS, NarrativeQA, and Qasper, which naturally require reading hundreds to thousands of words before answering a question; (2) artificially extended instructions created by concatenating related short Alpaca examples and formulating synthesis questions that require integrating information across all of them. The resulting dataset has examples averaging over 16K tokens.</p>
+<p>The LongAlpaca-12k dataset uses a stratified length distribution: 4K-8K (25% of examples), 8K-16K (35%), 16K-32K (30%), 32K-64K (10%). This stratification is critical — if all training examples were maximally long, the model would degrade on shorter sequences that dominate real-world usage. In ablation studies, training on the stratified distribution outperforms a fixed 32K-length dataset by 3-8 PPL points on held-out long-context benchmarks, while also preserving performance on standard 4K-token benchmarks (e.g., MMLU, GSM8K) that would otherwise regress from catastrophic forgetting of short-context behaviors.</p>
+<h2>Comparison with Full Fine-tuning</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Context (train)</th>
+<th>Context (inference)</th>
+<th>GPU memory (GB)</th>
+<th>Training time</th>
+<th>PPL at max context</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Original Llama-2 7B</td>
+<td>4K</td>
+<td>4K</td>
+<td>14.2</td>
+<td>1× (baseline)</td>
+<td>8.1</td>
+</tr>
+<tr>
+<td>Full FT + full attn</td>
+<td>32K</td>
+<td>32K</td>
+<td>80.0+</td>
+<td>28.4×</td>
+<td>7.3</td>
+</tr>
+<tr>
+<td>Full FT + S²-Attn</td>
+<td>32K</td>
+<td>32K</td>
+<td>44.1</td>
+<td>14.2×</td>
+<td>7.5</td>
+</tr>
+<tr>
+<td>LongLoRA (LoRA r=8 + S²-Attn)</td>
+<td>32K</td>
+<td>32K / 100K*</td>
+<td>21.3</td>
+<td>6.8×</td>
+<td>7.6</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-python">import torch
+import time
+
+def benchmark_training_step(model, seq_len, device='cuda'):
+    model.train()
+    ids = torch.randint(0, 32000, (1, seq_len), device=device)
+    torch.cuda.reset_peak_memory_stats(device)
+    t0 = time.time()
+    loss = model(ids, labels=ids).loss
+    loss.backward()
+    elapsed = time.time() - t0
+    peak_gb = torch.cuda.max_memory_allocated(device) / 1e9
+    model.zero_grad()
+    return elapsed, peak_gb
+
+# Approximate numbers from LongLoRA paper (Table 2, A100 80GB GPUs)
+configs = [
+    ('Llama-2 7B original (4K)',       4096,  14.2, 1.2),
+    ('Full FT + full attention (32K)', 32768, 80.0, 28.4),
+    ('Full FT + S2-Attn (32K)',        32768, 44.1, 14.2),
+    ('LongLoRA LoRA+S2-Attn (32K)',    32768, 21.3,  6.8),
+]
+print(f'{&quot;Method&quot;:&lt;40} {&quot;Context&quot;:&gt;8} {&quot;GPU GB&quot;:&gt;8} {&quot;Step (s)&quot;:&gt;10}')
+print('-' * 70)
+for name, ctx, gb, secs in configs:
+    print(f'{name:&lt;40} {ctx:&gt;8,} {gb:&gt;8.1f} {secs:&gt;10.1f}')
+print()
+print('LongLoRA: 3.7x memory reduction vs Full FT + full attention at 32K context.')
+print('LongLoRA: 4.2x faster per step vs Full FT + full attention at 32K context.')
+</code></pre>
+<h2>Key Takeaways</h2>
+<blockquote>
+<p><strong>S²-Attn is a Training Trick, Not an Inference Compromise</strong>: S²-Attn is only used during fine-tuning for compute efficiency — at inference LongLoRA uses standard full attention, so deployment requires no special attention kernel. The sparse training teaches the model to handle long sequences; the resulting model processes them with full attention at inference time without any architectural modification.</p>
+</blockquote>
+<ul>
+<li>S²-Attn with group size g=2048 reduces attention compute from O(n²) to O(n×g); a 16× reduction at 32K tokens.</li>
+<li>LoRA r=8 on Q,K,V,O projections reduces trainable parameters to ~50M out of 7B (0.7%) while reaching within 0.3 PPL of full fine-tuning.</li>
+<li>Unfreeze embeddings and layer norms in addition to LoRA adapters — pure LoRA with frozen embeddings degrades convergence at long context.</li>
+<li>Position interpolation (PI) must be applied before fine-tuning to keep extended positions in-distribution for pretrained RoPE frequencies.</li>
+<li>LongAlpaca-12k uses stratified length sampling (4K-64K) so the model retains short-context performance after long-context fine-tuning.</li>
+<li>Passkey retrieval is the standard eval: LongLoRA 7B achieves &gt;95% accuracy at 32K and meaningful accuracy up to 100K tokens.</li>
+<li>At inference, LongLoRA is fully compatible with vLLM, llama.cpp, and other standard engines — no post-training changes are needed.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

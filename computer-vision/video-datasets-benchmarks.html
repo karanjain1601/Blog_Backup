@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Video Understanding Datasets and Benchmarks: Kinetics, DAVIS, and Beyond | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Video Understanding Datasets and Benchmarks: Kinetics, DAVIS, and Beyond</h1>
+      
+      <h1>Video Understanding Datasets and Benchmarks: Kinetics, DAVIS, and Beyond</h1>
+<p>Video understanding benchmarks span action recognition, object segmentation, multi-object tracking, temporal grounding, and generation evaluation. Each benchmark tests specific model capabilities, and understanding their construction — clip sampling, annotation type, evaluation protocol — is essential for correctly interpreting published results across different video tasks.</p>
+<blockquote>
+<p>****: Something-Something-v2 requires understanding temporal order — 'pushing something left' and 'pushing something right' look identical without directionality. Models that rely on appearance shortcuts (scene context) fail on SSv2 but excel on Kinetics, revealing what temporal modeling they truly do.</p>
+</blockquote>
+<p>Kinetics-400 is the dominant action recognition benchmark with 400 action classes and approximately 240,000 training clips sourced from YouTube, each 10 seconds long. Models pretrained on Kinetics and fine-tuned for downstream tasks make it the ImageNet equivalent for video understanding. Top-1 accuracy exceeds 90% for large transformer-based video models.</p>
+<pre><code class="language-python"># Kinetics-400 data loader
+from torchvision.datasets import Kinetics
+
+dataset = Kinetics(
+    root='/data/kinetics400',
+    frames_per_clip=16,
+    step_between_clips=8,
+    split='train',
+    transform=transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.Normalize(mean, std)
+    ])
+)
+loader = DataLoader(dataset, batch_size=8, num_workers=4)
+</code></pre>
+<p>Something-Something-v2 (SSv2) contains 174 fine-grained action categories focusing on object-interaction gestures recorded against controlled backgrounds. Unlike Kinetics, SSv2 requires understanding temporal order — the direction of motion matters critically. Top-1 accuracy on SSv2 lags roughly 10 points behind Kinetics because scene-level appearance shortcuts fail completely.</p>
+<p>DAVIS (Densely Annotated Video Segmentation) provides pixel-precise object masks for short video clips, evaluating a model's ability to follow and segment objects through occlusion, fast motion, and appearance change. DAVIS-2016 is single-object; DAVIS-2017 and DAVIS-2019 extend to multiple objects with semi-supervised and unsupervised evaluation tracks.</p>
+<pre><code class="language-python"># DAVIS J&amp;F evaluation per sequence
+def evaluate_sequence(pred_masks, gt_masks):
+    # J: region similarity (mean IoU)
+    J_scores = [
+        iou(pred, gt)
+        for pred, gt in zip(pred_masks, gt_masks)
+    ]
+    J = np.mean(J_scores)
+    # F: contour boundary F-measure
+    F_scores = [
+        boundary_f1(pred, gt)
+        for pred, gt in zip(pred_masks, gt_masks)
+    ]
+    F = np.mean(F_scores)
+    return (J + F) / 2  # J&amp;F combined score
+</code></pre>
+<p>J (Jaccard index / mean IoU) measures region overlap between predicted and ground-truth masks. F (boundary F-measure) measures contour accuracy. J&amp;F is the standard combined DAVIS metric. DAVIS-2019 also includes an interactive track where models refine predictions from user-provided clicks, testing adaptability beyond pure feed-forward inference pipelines.</p>
+<p>MOT17 is the standard multi-object tracking benchmark, providing 7 sequences in diverse settings (pedestrian zones, moving cameras, crowded scenes) annotated at 25fps. Each sequence is provided with three public detections (DPM, FRCNN, SDP), enabling fair comparison of association algorithms independent of detector choice or confidence threshold tuning.</p>
+<pre><code class="language-python"># MOT17 evaluation using TrackEval
+import trackeval
+
+eval_config = trackeval.Evaluator.get_default_eval_config()
+ds_cls = trackeval.datasets.MotChallenge2DBox
+dataset_config = ds_cls.get_default_dataset_config()
+dataset_config['GT_FOLDER'] = '/data/MOT17/gt'
+dataset_config['TRACKERS_FOLDER'] = tracker_output_path
+
+evaluator = trackeval.Evaluator(eval_config)
+results, _ = evaluator.evaluate([dataset], [metrics])
+print(results['HOTA'], results['MOTA'], results['IDF1'])
+</code></pre>
+<p>TrackEval is the official evaluation library for MOT benchmarks, computing HOTA, MOTA, IDF1, and sub-metrics in a single pass. It supports MOT15, MOT16, MOT17, MOT20, and KITTI. Running evaluation locally before submitting to the server prevents wasted submissions and identifies formatting errors in tracker output files early in the development cycle.</p>
+<p>Temporal grounding benchmarks test whether models can localize events described by natural language queries within long videos. ActivityNet Captions provides dense temporal annotations for YouTube videos averaging 3 minutes. Ego4D's narrated video corpus enables first-person temporal grounding and natural language query retrieval at large scale with diverse real-world scenarios.</p>
+<table>
+<thead>
+<tr>
+<th>Dataset</th>
+<th>Task</th>
+<th>Size</th>
+<th>Classes</th>
+<th>Annotation Type</th>
+<th>Split</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Kinetics-400</td>
+<td>Action recognition</td>
+<td>240K clips</td>
+<td>400</td>
+<td>Video-level label</td>
+<td>Train/Val/Test</td>
+</tr>
+<tr>
+<td>Something-Something-v2</td>
+<td>Temporal reasoning</td>
+<td>220K clips</td>
+<td>174</td>
+<td>Video-level label</td>
+<td>Train/Val/Test</td>
+</tr>
+<tr>
+<td>DAVIS-2019</td>
+<td>Video segmentation</td>
+<td>90 seqs</td>
+<td>N/A</td>
+<td>Per-frame mask</td>
+<td>Train/Val</td>
+</tr>
+<tr>
+<td>MOT17</td>
+<td>Multi-object tracking</td>
+<td>14 seqs</td>
+<td>Pedestrian</td>
+<td>Per-frame bbox+ID</td>
+<td>Train/Test</td>
+</tr>
+<tr>
+<td>ActivityNet</td>
+<td>Temporal grounding</td>
+<td>20K videos</td>
+<td>200</td>
+<td>Temporal segment</td>
+<td>Train/Val/Test</td>
+</tr>
+<tr>
+<td>Ego4D</td>
+<td>Egocentric tasks</td>
+<td>3,670h</td>
+<td>N/A</td>
+<td>Narrations+segments</td>
+<td>Train/Val/Test</td>
+</tr>
+</tbody>
+</table>
+<p>Generation benchmarks are less standardized than recognition ones. UCF-101 FVD is common for comparing video diffusion models, but FVD scores are sensitive to the number of generated samples and the I3D feature extractor version used. Results across different papers are often not directly comparable without explicitly controlling these evaluation variables carefully.</p>
+<pre><code class="language-python"># Ego4D natural language query retrieval
+from ego4d.research.clep import TextEncoder, VideoEncoder
+
+query     = text_encoder(narration_query)  # (1, D)
+vid_feats = torch.stack([
+    video_encoder(clip) for clip in ego4d_clips
+])  # (N, D)
+
+# Cosine similarity for retrieval ranking
+scores = query @ vid_feats.T  # (1, N)
+top1   = scores.topk(1).indices
+R1     = (top1 == gt_clip_idx).float().mean()
+print(f'Recall@1: {R1:.3f}')
+</code></pre>
+<p>Recall@1 and Recall@5 are the standard metrics for temporal grounding retrieval tasks. R1 measures whether the ground-truth clip ranks first; R5 measures whether it appears in the top 5 results. Temporal IoU thresholds (0.3, 0.5, 0.7) determine whether a retrieved segment is correct, following the ActivityNet dense captioning challenge evaluation protocol.</p>
+<p>Benchmark selection determines what capabilities a model is actually tested on. Kinetics favors static appearance; SSv2 favors temporal reasoning; DAVIS favors spatial precision; MOT17 favors association under occlusion. Reporting results across multiple benchmarks spanning different axes gives a more complete picture of actual model capabilities and failure modes.</p>
+<p>Data loading efficiency is critical for video datasets, which can exceed 1TB in size. Decord and PyAV are faster than OpenCV for video decoding. Pre-extracted features stored in HDF5 or LMDB can accelerate training 5-10x when the model does not require raw pixels. Always benchmark your data pipeline before assuming GPU compute is the primary training bottleneck.</p>
+    </article>
+  </main>
+</body>
+</html>

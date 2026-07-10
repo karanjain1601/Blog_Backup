@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Structured Pruning — Filter, Channel, and Layer Removal | Notes Backup</title>
+  <meta name="description" content="Remove entire filters, channels, or layers to produce dense, hardware-acceleratable models. Covers L1-norm and Taylor expansion criteria, attention head pruning, layer pruning, iterative schedules, and reconstruction-based methods like HRank." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Structured Pruning — Filter, Channel, and Layer Removal</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Remove entire filters, channels, or layers to produce dense, hardware-acceleratable models. Covers L1-norm and Taylor expansion criteria, attention head pruning, layer pruning, iterative schedules, and reconstruction-based methods like HRank.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Structured Pruning — Filter, Channel, and Layer Removal</h1>
+<p>Unstructured pruning sets individual weights to zero, producing sparse weight matrices. Without specialized sparse-matrix hardware, these zero weights still consume memory and participate in matrix multiplications — yielding no wall-clock speedup on a standard GPU. Structured pruning solves this by removing entire filters, channels, or layers. The resulting model is dense and smaller; standard BLAS routines and GPU tensor cores immediately accelerate it without any special handling.</p>
+<h2>Why Structure Matters for Speedup</h2>
+<p>A convolutional layer with 256 output filters and 50% unstructured sparsity still performs 256 output-channel dot products — half the FLOPs are wasted on multiplying by zero, but the loop count is unchanged. Remove 128 entire filters and the layer now performs 128 dot products with no zero arithmetic. This gives a 2× FLOP reduction that translates directly to throughput on any hardware. Structured pruning therefore reduces FLOPS, not just parameter count.</p>
+<h2>Filter Pruning with L1-Norm Criterion</h2>
+<p>For a conv layer with weight tensor W ∈ ℝ^{C_out × C_in × k × k}, each output filter i has importance score s_i = ‖W_i‖₁ — the sum of absolute values across all elements of that filter. Filters with low L1-norm contribute little to the output feature map. After ranking all filters by s_i, the bottom p% are removed. The subsequent layer's input channels must be pruned correspondingly: removing filter i from layer l removes input channel i from layer l+1.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def prune_conv_layer(conv: nn.Conv2d, prune_ratio: float):
+    &quot;&quot;&quot;Prune bottom prune_ratio filters by L1 norm. Returns new Conv2d.&quot;&quot;&quot;
+    with torch.no_grad():
+        W = conv.weight.data  # (C_out, C_in, kH, kW)
+        scores = W.abs().sum(dim=(1, 2, 3))  # L1 norm per filter
+        n_keep = max(1, int(W.shape[0] * (1 - prune_ratio)))
+        keep_idx = scores.topk(n_keep).indices.sort().values
+
+        new_conv = nn.Conv2d(
+            in_channels=W.shape[1],
+            out_channels=n_keep,
+            kernel_size=conv.kernel_size,
+            stride=conv.stride,
+            padding=conv.padding,
+            bias=conv.bias is not None,
+        )
+        new_conv.weight.data = W[keep_idx]
+        if conv.bias is not None:
+            new_conv.bias.data = conv.bias.data[keep_idx]
+    return new_conv, keep_idx
+
+def prune_bn_layer(bn: nn.BatchNorm2d, keep_idx: torch.Tensor):
+    new_bn = nn.BatchNorm2d(len(keep_idx))
+    new_bn.weight.data = bn.weight.data[keep_idx]
+    new_bn.bias.data = bn.bias.data[keep_idx]
+    new_bn.running_mean = bn.running_mean[keep_idx]
+    new_bn.running_var = bn.running_var[keep_idx]
+    return new_bn
+
+# Demo
+conv = nn.Conv2d(64, 128, 3, padding=1)
+conv_pruned, kept = prune_conv_layer(conv, prune_ratio=0.4)
+print(f'Original: {conv.weight.shape}  -&gt; Pruned: {conv_pruned.weight.shape}')
+print(f'Kept filter indices (first 5): {kept[:5].tolist()}')
+</code></pre>
+<h2>Taylor Expansion Importance Score</h2>
+<p>The L1-norm criterion ignores gradient information. A filter with large weights but zero gradient contributes little to the loss. The Taylor expansion criterion approximates the change in loss when filter i is removed: ΔL ≈ Σ_j |g_j · w_j| where g_j = ∂L/∂w_j. This first-order approximation is computed in a single forward+backward pass over a calibration set and captures how sensitive the loss is to each filter's weights.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from collections import defaultdict
+
+class TaylorPruner:
+    def __init__(self, model: nn.Module):
+        self.model = model
+        self.scores = defaultdict(float)
+        self._hooks = []
+        self._register_hooks()
+
+    def _register_hooks(self):
+        for name, module in self.model.named_modules():
+            if isinstance(module, nn.Conv2d):
+                h = module.weight.register_hook(
+                    lambda grad, n=name, m=module: self._accumulate(n, grad, m)
+                )
+                self._hooks.append(h)
+
+    def _accumulate(self, name, grad, module):
+        with torch.no_grad():
+            # Taylor score per output filter: sum |grad * weight| over C_in, kH, kW
+            score = (grad * module.weight.data).abs().sum(dim=(1, 2, 3))
+            if name not in self.scores:
+                self.scores[name] = score
+            else:
+                self.scores[name] += score
+
+    def compute_rankings(self):
+        rankings = {}
+        for name, score in self.scores.items():
+            order = score.argsort()  # ascending: weakest filters first
+            rankings[name] = order
+        return rankings
+
+    def remove_hooks(self):
+        for h in self._hooks:
+            h.remove()
+
+# Usage
+model = nn.Sequential(nn.Conv2d(3, 32, 3), nn.ReLU(), nn.Conv2d(32, 64, 3))
+pruner = TaylorPruner(model)
+x = torch.randn(4, 3, 32, 32)
+loss = model(x).mean()
+loss.backward()
+rankings = pruner.compute_rankings()
+for name, rank in rankings.items():
+    print(f'{name}: top-3 weakest filters = {rank[:3].tolist()}')
+</code></pre>
+<h2>Attention Head Pruning in Transformers</h2>
+<p>Multi-head attention with H heads computes H parallel attention patterns and concatenates results. Not all heads are equally important — some heads attend to syntax, others to semantics, and some are nearly redundant. Head importance can be measured by the expected sensitivity ∂L/∂z for each head's contribution or by a simpler proxy: the L1 norm of the head's output projection slice. Removing a head sets its contribution to zero and removes the corresponding columns in W_O.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import math
+
+def compute_head_importance(attn_output_weights, head_dim, n_heads):
+    &quot;&quot;&quot;
+    attn_output_weights: (batch, n_heads, seq, seq)
+    Returns importance score per head (variance of attention distribution).
+    &quot;&quot;&quot;
+    # Higher entropy = more uniform = less specialized = lower importance
+    eps = 1e-9
+    entropy = -(attn_output_weights * (attn_output_weights + eps).log()).sum(-1)  # (B,H,S)
+    # Low entropy heads are more selective -&gt; higher importance
+    importance = -entropy.mean(dim=(0, 2))  # (H,)
+    return importance
+
+def prune_attention_heads(W_q, W_k, W_v, W_o, head_dim, heads_to_prune):
+    &quot;&quot;&quot;Zero out specified attention heads in W_q, W_k, W_v and matching W_o columns.&quot;&quot;&quot;
+    n_heads = W_q.shape[0] // head_dim
+    mask = torch.ones(n_heads, dtype=torch.bool)
+    mask[list(heads_to_prune)] = False
+    keep = mask.nonzero(as_tuple=True)[0]
+    print(f'Keeping {keep.numel()}/{n_heads} heads')
+    # Slice projection weights
+    kept_rows = torch.cat([torch.arange(h*head_dim, (h+1)*head_dim) for h in keep.tolist()])
+    W_q_p = W_q[kept_rows]
+    W_k_p = W_k[kept_rows]
+    W_v_p = W_v[kept_rows]
+    W_o_p = W_o[:, kept_rows]  # output projection: cols correspond to heads
+    return W_q_p, W_k_p, W_v_p, W_o_p
+
+n_heads, head_dim, d_model = 8, 64, 512
+W_q = torch.randn(n_heads * head_dim, d_model)
+W_k = torch.randn(n_heads * head_dim, d_model)
+W_v = torch.randn(n_heads * head_dim, d_model)
+W_o = torch.randn(d_model, n_heads * head_dim)
+Wq_p, Wk_p, Wv_p, Wo_p = prune_attention_heads(W_q, W_k, W_v, W_o, head_dim, heads_to_prune={2, 5})
+print(f'W_q: {W_q.shape} -&gt; {Wq_p.shape}')
+</code></pre>
+<h2>Layer Pruning and Depth Reduction</h2>
+<p>For Transformer models, entire encoder or decoder layers can be removed — depth pruning. Layer importance is measured by comparing the model's output distribution before and after removing the layer, or by the cosine similarity between the layer's input and output (high similarity = nearly identity = low importance). Shallow-layer removal tends to hurt more than removing upper layers; empirically, middle layers in BERT encoders are most redundant.</p>
+<h2>Iterative Pruning with Fine-Tuning</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.optim as optim
+
+def iterative_prune_and_finetune(
+    model, train_loader, criterion, device,
+    prune_steps=5, target_sparsity=0.5,
+    finetune_epochs=2, lr=1e-4
+):
+    &quot;&quot;&quot;
+    Iteratively prune prune_steps times, fine-tuning between steps.
+    Each step removes (target_sparsity / prune_steps) additional filters.
+    &quot;&quot;&quot;
+    sparsity_per_step = target_sparsity / prune_steps
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+
+    for step in range(prune_steps):
+        current_sparsity = sparsity_per_step * (step + 1)
+        print(f'\nStep {step+1}/{prune_steps}: pruning to {current_sparsity:.0%} sparsity')
+
+        # Prune all Conv2d layers
+        for name, module in list(model.named_modules()):
+            if isinstance(module, nn.Conv2d) and module.weight.shape[0] &gt; 4:
+                scores = module.weight.data.abs().sum(dim=(1, 2, 3))
+                threshold = scores.quantile(sparsity_per_step)
+                mask = scores &gt;= threshold
+                with torch.no_grad():
+                    module.weight.data[~mask] = 0.0  # soft zero (keep shape)
+
+        # Fine-tune for a few epochs
+        model.train()
+        for epoch in range(finetune_epochs):
+            total_loss = 0
+            for X_batch, y_batch in train_loader:
+                X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+                optimizer.zero_grad()
+                loss = criterion(model(X_batch), y_batch)
+                loss.backward()
+                optimizer.step()
+                total_loss += loss.item()
+            print(f'  Epoch {epoch+1}: avg loss = {total_loss/len(train_loader):.4f}')
+
+    return model
+
+print('Iterative pruning: prune -&gt; fine-tune -&gt; prune cycle defined.')
+</code></pre>
+<blockquote>
+<p><strong>Prune Then Fine-Tune, Not Fine-Tune Then Prune</strong>: Pruning abruptly lowers accuracy. Always fine-tune after each pruning step to recover lost performance. For structured pruning at 50% filter removal, even 1–2 epochs of fine-tuning at a reduced learning rate (10× smaller than original) typically recovers within 1% of the baseline. Larger pruning ratios need more recovery steps.</p>
+</blockquote>
+<h2>Reconstruction-Based Methods (HRank, CHIP)</h2>
+<p>Instead of weight-based scores, HRank measures the average rank of the feature maps produced by each filter over a batch of inputs. Low-rank feature maps carry less information and are pruned first. CHIP minimizes the L2 distance between the output feature maps of the pruned layer and the original layer, formulated as a least-squares channel selection problem. These reconstruction-based criteria are more accurate than L1-norm but require a calibration forward pass.</p>
+<ul>
+<li>HRank: prune filters producing low-rank feature maps (high rank = richer representation).</li>
+<li>CHIP: select subset of channels minimising ‖F_original - F_pruned‖₂ via greedy or OMP.</li>
+<li>Taylor criterion: one backward pass over calibration data, captures gradient × weight sensitivity.</li>
+<li>Activation statistics: prune filters whose activations are near-zero across the calibration set.</li>
+<li>Random pruning baseline: surprisingly competitive at low sparsity (&lt;30%), useful as sanity check.</li>
+</ul>
+<h2>Pruning Strategy Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>What Is Removed</th>
+<th>GPU Speedup</th>
+<th>Accuracy Impact</th>
+<th>Hardware Dependency</th>
+<th>Implementation Effort</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Unstructured</td>
+<td>Individual weights</td>
+<td>None (without SpMM HW)</td>
+<td>Low at &lt;80% sparsity</td>
+<td>Sparse tensor cores (A100)</td>
+<td>Low — apply threshold mask</td>
+</tr>
+<tr>
+<td>Filter pruning</td>
+<td>Entire output filters</td>
+<td>High — fewer conv outputs</td>
+<td>Medium — update next layer</td>
+<td>None — dense after pruning</td>
+<td>Medium — reshape consecutive layers</td>
+</tr>
+<tr>
+<td>Channel pruning</td>
+<td>Input+output channels jointly</td>
+<td>High — matches filter pruning</td>
+<td>Medium</td>
+<td>None</td>
+<td>High — both layers must be consistent</td>
+</tr>
+<tr>
+<td>Layer pruning</td>
+<td>Entire Transformer blocks</td>
+<td>Very high for large models</td>
+<td>High if too aggressive</td>
+<td>None</td>
+<td>Low — skip layers in forward</td>
+</tr>
+<tr>
+<td>Head pruning (Transformers)</td>
+<td>Attention heads</td>
+<td>Moderate (10–30%)</td>
+<td>Low at &lt;50% heads removed</td>
+<td>None</td>
+<td>Medium — slice projection matrices</td>
+</tr>
+</tbody>
+</table>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

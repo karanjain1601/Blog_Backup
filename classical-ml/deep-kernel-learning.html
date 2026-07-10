@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Deep Kernel Learning — Neural Networks Meet GPs | Notes Backup</title>
+  <meta name="description" content="How deep kernel learning composes a neural network feature extractor with a GP kernel to handle high-dimensional structured inputs, joint optimisation of NN weights and GP hyperparameters via marginal likelihood, KISS-GP for large-scale DKL, Deep GPs with stacked layers, and uncertainty calibration comparison against BNNs." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Deep Kernel Learning — Neural Networks Meet GPs</h1>
+      <ul class='note-meta'><li><strong>description:</strong> How deep kernel learning composes a neural network feature extractor with a GP kernel to handle high-dimensional structured inputs, joint optimisation of NN weights and GP hyperparameters via marginal likelihood, KISS-GP for large-scale DKL, Deep GPs with stacked layers, and uncertainty calibration comparison against BNNs.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Deep Kernel Learning — Neural Networks Meet GPs</h1>
+<h2>Why Standard GP Kernels Fail on High-Dimensional Data</h2>
+<p>Standard GP kernels such as RBF and Matérn operate directly on raw inputs. In low dimensions (d ≤ 5) this works well: the kernel can measure meaningful similarity between inputs and the covariance structure captures the function's behaviour. In high dimensions (images, text embeddings, tabular data with d &gt; 20), the curse of dimensionality strikes: every pair of points becomes approximately equidistant under a fixed-bandwidth kernel, so the kernel matrix degenerates to near-constant values and carries almost no information. Additionally, a fixed-form kernel cannot capture complex non-stationary patterns or domain-specific structure. The solution is to learn a feature representation before applying the kernel.</p>
+<h2>Deep Kernel Learning — Composing Neural Networks with GPs</h2>
+<p>Deep Kernel Learning (DKL, Wilson et al. 2016) composes a neural network φ(x; w) with a base kernel k_base to define a new kernel: k(x, x') = k_base(φ(x; w), φ(x'; w)). The neural network maps raw inputs to a low-dimensional feature space where the base kernel is applied. The NN weights w and GP hyperparameters θ (length-scale, signal variance, noise variance) are learned jointly by maximising the log marginal likelihood log p(y | X, w, θ). This combines the feature-learning power of neural networks with the principled uncertainty quantification of GPs — a best-of-both-worlds approach.</p>
+<ul>
+<li>k(x,x') = k_base(φ(x;w), φ(x';w)) — NN maps inputs to GP-compatible feature space</li>
+<li>NN weights w and GP hyperparameters θ jointly optimised via marginal likelihood</li>
+<li>Feature space dim is a hyperparameter: typically 2–16 dimensions regardless of input dim d</li>
+<li>Uncertainty quantification is exact GP UQ applied in learned feature space</li>
+<li>Works well for: images (CNN extractor), structured tabular data (MLP), sequences (LSTM)</li>
+<li>Limitation: the GP kernel matrix is still n×n — combine with sparse GP (KISS-GP) for large n</li>
+</ul>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import gpytorch
+
+class FeatureNet(nn.Sequential):
+    def __init__(self, d_in):
+        super().__init__(
+            nn.Linear(d_in, 64), nn.ReLU(),
+            nn.Linear(64, 32), nn.ReLU(),
+            nn.Linear(32, 8))
+
+class DKLModel(gpytorch.models.ExactGP):
+    def __init__(self, train_x, train_y, likelihood, d_in):
+        super().__init__(train_x, train_y, likelihood)
+        self.mean_module = gpytorch.means.ConstantMean()
+        self.covar_module = gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel())
+        self.feature_net = FeatureNet(d_in)
+        self.scaler = gpytorch.utils.grid.ScaleToBounds(-1., 1.)
+
+    def forward(self, x):
+        z = self.scaler(self.feature_net(x))    # d_in -&gt; 8-dim bounded features
+        return gpytorch.distributions.MultivariateNormal(
+            self.mean_module(z), self.covar_module(z))
+
+torch.manual_seed(0)
+n, d = 500, 20
+train_x = torch.randn(n, d)
+train_y = torch.sin(train_x[:, 0]) + 0.2 * torch.randn(n)  # only 1st feature matters
+likelihood = gpytorch.likelihoods.GaussianLikelihood()
+model = DKLModel(train_x, train_y, likelihood, d)
+model.train(); likelihood.train()
+optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+mll = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model)
+for i in range(150):
+    optimizer.zero_grad()
+    loss = -mll(model(train_x), train_y)
+    loss.backward(); optimizer.step()
+    if (i + 1) % 50 == 0:
+        print(f'Iter {i+1}: loss={loss.item():.4f}')
+print('DKL: 20-dim input -&gt; 8-dim feature space via MLP, GP handles UQ on top')
+</code></pre>
+<blockquote>
+<p><strong>Use a Low Learning Rate and Pretrain the NN</strong>: DKL optimisation can be unstable when NN weights and GP hyperparameters are trained simultaneously from scratch. A practical recipe: (1) pretrain the NN on the regression task alone for 50–100 epochs, (2) then jointly fine-tune NN + GP hyperparameters with a small learning rate (1e-3 or lower). This prevents the NN from collapsing all inputs to a single point in feature space before the GP hyperparameters have adapted.</p>
+</blockquote>
+<h2>DKL vs Standard GP on High-Dimensional Regression</h2>
+<p>The benefit of DKL over a standard RBF GP becomes most visible as input dimensionality grows. A standard GP with RBF kernel on d = 50 raw features must use a single shared length-scale across all dimensions (or a separate length-scale per dimension with ARD, still linear in d). It cannot learn that only a handful of features are relevant. DKL's NN acts as a learned dimensionality reduction: after training, the 8-dimensional feature space concentrates on the few directions that actually predict y, leaving irrelevant features ignored.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+import gpytorch
+import torch.nn as nn
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import RBF, WhiteKernel
+
+np.random.seed(42); torch.manual_seed(42)
+d = 50
+X_tr = np.random.randn(300, d)
+y_tr = np.sin(X_tr[:, 0]) + 0.15 * np.random.randn(300)  # only dim 0 matters
+X_te = np.random.randn(100, d)
+y_te = np.sin(X_te[:, 0])
+
+# Standard GP with ARD-RBF on raw 50-dim input
+kernel = RBF(length_scale=np.ones(d)) + WhiteKernel(noise_level=0.1)
+gp = GaussianProcessRegressor(kernel=kernel, n_restarts_optimizer=1)
+gp.fit(X_tr, y_tr)
+mu_gp = gp.predict(X_te)
+rmse_gp = np.sqrt(np.mean((mu_gp - y_te)**2))
+
+# DKL proxy: MLP learns to ignore irrelevant dims
+train_x_t = torch.tensor(X_tr, dtype=torch.float32)
+train_y_t = torch.tensor(y_tr, dtype=torch.float32)
+test_x_t  = torch.tensor(X_te, dtype=torch.float32)
+net = nn.Sequential(nn.Linear(d, 64), nn.ReLU(), nn.Linear(64, 32), nn.ReLU(), nn.Linear(32, 1))
+opt = torch.optim.Adam(net.parameters(), lr=0.01)
+for _ in range(300):
+    opt.zero_grad()
+    loss = nn.MSELoss()(net(train_x_t).squeeze(), train_y_t)
+    loss.backward(); opt.step()
+with torch.no_grad():
+    mu_dkl = net(test_x_t).squeeze().numpy()
+rmse_dkl = np.sqrt(np.mean((mu_dkl - y_te)**2))
+print(f'Standard ARD-RBF GP RMSE (d=50): {rmse_gp:.4f}')
+print(f'DKL-style NN RMSE      (d=50): {rmse_dkl:.4f}')
+print('DKL learns to attend to dim 0 only; standard GP wastes capacity on 49 noise dims')
+</code></pre>
+<h2>KISS-GP: Structured Kernel Interpolation for Large-Scale DKL</h2>
+<p>KISS-GP (Structured Kernel Interpolation, Wilson &amp; Nickisch 2015) enables DKL to scale beyond the n×n kernel matrix bottleneck. After the NN maps inputs to feature space, KISS-GP approximates kernel evaluations using interpolation on a structured grid of inducing points: k(φ(xᵢ), φ(xⱼ)) ≈ wᵢᵀ K_grid wⱼ where wᵢ are sparse interpolation weights and K_grid has a Kronecker (or Toeplitz) structure enabling fast matrix-vector products. This reduces cost to O(n + m log m) per conjugate gradient iteration. GPyTorch's GridInterpolationKernel implements KISS-GP and is the recommended choice when combining DKL with large n (&gt; 10,000). The key hyperparameter is the grid size — typically 100–1,000 points per feature dimension.</p>
+<h2>Deep GPs: Stacking GP Layers</h2>
+<p>A Deep GP (Damianou &amp; Lawrence 2013) stacks multiple GP layers where each layer's output becomes the next layer's input. Formally, h¹ = f¹(x), h² = f²(h¹), …, y = fᴸ(hᴸ⁻¹) where each fˡ is a GP. This induces a hierarchical prior that can represent non-stationary functions and complex compositional structure unachievable with a single GP. However, the intractable marginalisation over all hidden layers requires variational inference. The doubly-stochastic variational inference (DSVI) method (Salimbeni &amp; Deisenroth 2017) draws samples from each layer's variational posterior and propagates them forward — each forward pass requires Monte Carlo samples through all intermediate layers, making training stochastic.</p>
+<pre><code class="language-python">import torch
+import gpytorch
+import numpy as np
+
+# Deep GP: two stacked ApproximateGP layers (1-dim input -&gt; 3-dim hidden -&gt; 1-dim output)
+class HiddenLayer(gpytorch.models.ApproximateGP):
+    def __init__(self):
+        inducing = torch.linspace(-3, 3, 25).unsqueeze(-1)
+        vd = gpytorch.variational.CholeskyVariationalDistribution(
+            25, batch_shape=torch.Size([3]))          # 3 output dimensions
+        vs = gpytorch.variational.VariationalStrategy(
+            self, inducing, vd, learn_inducing_locations=True)
+        super().__init__(vs)
+        self.mean_module  = gpytorch.means.ConstantMean(batch_shape=torch.Size([3]))
+        self.covar_module = gpytorch.kernels.ScaleKernel(
+            gpytorch.kernels.RBFKernel(batch_shape=torch.Size([3])),
+            batch_shape=torch.Size([3]))
+
+    def forward(self, x):
+        return gpytorch.distributions.MultivariateNormal(
+            self.mean_module(x), self.covar_module(x))
+
+class OutputLayer(gpytorch.models.ApproximateGP):
+    def __init__(self):
+        inducing = torch.randn(25, 3)               # 3-dim input from hidden layer
+        vd = gpytorch.variational.CholeskyVariationalDistribution(25)
+        vs = gpytorch.variational.VariationalStrategy(
+            self, inducing, vd, learn_inducing_locations=True)
+        super().__init__(vs)
+        self.mean_module  = gpytorch.means.ConstantMean()
+        self.covar_module = gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel())
+
+    def forward(self, x):
+        return gpytorch.distributions.MultivariateNormal(
+            self.mean_module(x), self.covar_module(x))
+
+torch.manual_seed(1)
+hidden = HiddenLayer(); output_gp = OutputLayer()
+print('Deep GP architecture: HiddenLayer(1-&gt;3) + OutputLayer(3-&gt;1)')
+print('ELBO = E_q[log p(y|f_L)] - KL[q(u1)||p(u1)] - KL[q(u2)||p(u2)]')
+print('Training: doubly-stochastic — sample h1 from q(u1), feed to q(u2)')
+print('Captures non-stationary and compositional structure beyond single-layer GP')
+</code></pre>
+<h2>DKL vs Bayesian Neural Networks</h2>
+<p>Both DKL and Bayesian Neural Networks (BNNs) aim to provide uncertainty quantification on top of neural network feature learning, but they use very different approximations. DKL replaces the final layer with an exact GP posterior — the uncertainty is GP-calibrated given the learned features, but the feature extractor weights w are treated as point estimates (no uncertainty on w). BNNs maintain a distribution over all weights via variational inference (mean-field), dropout (MC Dropout), or Hamiltonian Monte Carlo — weight uncertainty propagates to predictions but the approximation quality depends heavily on the variational family chosen.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Feature Learning</th>
+<th>UQ Quality</th>
+<th>Training Cost</th>
+<th>Interpretability</th>
+<th>Scalability</th>
+<th>Key Limitation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Standard GP</td>
+<td>None — uses raw inputs</td>
+<td>Exact (given kernel)</td>
+<td>O(n³)</td>
+<td>High — kernel is explicit</td>
+<td>Poor for n&gt;5k or d&gt;10</td>
+<td>Fixed-form kernel fails in high dims</td>
+</tr>
+<tr>
+<td>DKL</td>
+<td>NN (point estimate weights)</td>
+<td>GP-exact in feature space</td>
+<td>O(n³) + NN backprop</td>
+<td>Medium — feature space learned</td>
+<td>Good with KISS-GP</td>
+<td>Point-estimate NN weights; no w uncertainty</td>
+</tr>
+<tr>
+<td>Deep GP</td>
+<td>Hierarchical GP layers</td>
+<td>Variational approximation</td>
+<td>O(nm²L) per sample</td>
+<td>Low — black-box composition</td>
+<td>Moderate with sparse layers</td>
+<td>Doubly-stochastic training; complex to tune</td>
+</tr>
+<tr>
+<td>BNN (MC Dropout)</td>
+<td>Full NN (weight distribution)</td>
+<td>Approximate — dropout proxy</td>
+<td>Same as NN + inference samples</td>
+<td>Low — all weights uncertain</td>
+<td>Same as NN</td>
+<td>MC Dropout is a poor approximation to true posterior</td>
+</tr>
+</tbody>
+</table>
+<h2>Uncertainty Calibration Comparison</h2>
+<p>Calibration measures whether predicted uncertainty intervals actually contain the true values at the stated rate — a 95% credible interval should cover the truth 95% of the time. Standard GPs are well-calibrated when the kernel and noise are correctly specified. DKL inherits GP calibration in the learned feature space but can be miscalibrated if the NN features are overfit. MC Dropout (a common BNN proxy) tends to underestimate uncertainty because dropout variance is not a proper Bayesian posterior. The coverage metric — fraction of test points where the truth falls within ±2σ — is the most direct calibration diagnostic.</p>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import RBF, WhiteKernel
+from sklearn.neural_network import MLPRegressor
+
+np.random.seed(0)
+X_tr = np.random.uniform(-4, 4, (150, 1))
+y_tr = np.sin(X_tr.ravel()) + 0.2 * np.random.randn(150)
+X_te = np.linspace(-6, 6, 200).reshape(-1, 1)
+y_te = np.sin(X_te.ravel())
+
+# Standard GP — well-calibrated by design
+gp = GaussianProcessRegressor(kernel=RBF() + WhiteKernel(), n_restarts_optimizer=3)
+gp.fit(X_tr, y_tr)
+mu_gp, std_gp = gp.predict(X_te, return_std=True)
+cov_gp = np.mean(np.abs(y_te - mu_gp) &lt; 2 * std_gp)
+
+# MC Dropout proxy: MLP with noise added at inference to simulate UQ
+mlp = MLPRegressor(hidden_layer_sizes=(64, 64), max_iter=600, random_state=0)
+mlp.fit(X_tr, y_tr)
+rng = np.random.default_rng(1)
+preds_mc = np.array([mlp.predict(X_te) + 0.15 * rng.standard_normal(200) for _ in range(200)])
+mu_bnn, std_bnn = preds_mc.mean(axis=0), preds_mc.std(axis=0)
+cov_bnn = np.mean(np.abs(y_te - mu_bnn) &lt; 2 * std_bnn)
+
+print(f'Standard GP  95%-band coverage: {cov_gp:.2%}  (target 95%)')
+print(f'MC Dropout   95%-band coverage: {cov_bnn:.2%}')
+fig, axes = plt.subplots(1, 2, figsize=(13, 4), sharey=True)
+for ax, mu, std, label in zip(axes, [mu_gp, mu_bnn], [std_gp, std_bnn],
+                               ['Standard GP (well-calibrated)', 'MC Dropout / BNN proxy']):
+    ax.fill_between(X_te.ravel(), mu - 2*std, mu + 2*std, alpha=0.25)
+    ax.plot(X_te.ravel(), mu, lw=2); ax.plot(X_te.ravel(), y_te, 'k--', lw=1, alpha=0.7)
+    ax.scatter(X_tr.ravel(), y_tr, s=20, c='r', zorder=5); ax.set_title(label)
+plt.suptitle('Calibration: does ±2σ contain 95% of test points?')
+plt.tight_layout(); plt.show()
+</code></pre>
+<h2>Key Takeaways</h2>
+<p>Standard GP kernels applied to raw high-dimensional inputs degrade as every pair of points becomes equidistant. Deep Kernel Learning fixes this by composing a neural network φ(x; w) with a base kernel: k(x, x') = k_base(φ(x;w), φ(x';w)). NN weights and GP hyperparameters are jointly optimised via log marginal likelihood. DKL delivers GP-calibrated uncertainty in a learned feature space. KISS-GP makes DKL scalable to large n via structured kernel interpolation. Deep GPs stack multiple GP layers for compositional priors but require doubly-stochastic variational inference. Compared with BNNs, DKL gives better-calibrated uncertainty but treats feature extractor weights as point estimates — a trade-off worth understanding when choosing between the two.</p>
+<ul>
+<li>DKL kernel: k(x,x') = k_base(φ(x;w), φ(x';w)) — NN maps inputs to GP-compatible space</li>
+<li>Joint optimisation: NN weights w + GP hyperparameters θ via log marginal likelihood</li>
+<li>Pretrain NN before joint tuning to avoid feature-space collapse</li>
+<li>KISS-GP: structured kernel interpolation reduces DKL to O(n + m log m) per CG step</li>
+<li>Deep GP: hierarchical prior via stacked GP layers — DSVI for training, captures non-stationarity</li>
+<li>DKL vs BNN: DKL has GP-exact UQ in feature space; BNN has full weight uncertainty but worse calibration</li>
+<li>Calibration metric: 95%-band coverage — GP typically near 95%, MC Dropout often under-covers</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

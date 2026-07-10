@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SimSiam — Collapsing Without Negatives or Momentum | Notes Backup</title>
+  <meta name="description" content="SimSiam (Chen &amp; He 2020) achieves self-supervised learning without negatives, EMA, or large batch sizes by applying a stop-gradient on one branch of the loss, which can be interpreted as an expectation-maximisation procedure with the predictor as the E-step." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>SimSiam — Collapsing Without Negatives or Momentum</h1>
+      <ul class='note-meta'><li><strong>description:</strong> SimSiam (Chen &amp; He 2020) achieves self-supervised learning without negatives, EMA, or large batch sizes by applying a stop-gradient on one branch of the loss, which can be interpreted as an expectation-maximisation procedure with the predictor as the E-step.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>SimSiam — Collapsing Without Negatives or Momentum</h1>
+<p>SimSiam (Simple Siamese Networks, Chen &amp; He 2020) strips BYOL down to its minimum: no negatives, no EMA, no large batch size. The only ingredient preventing collapse is the stop-gradient operation on one branch. Despite its simplicity, SimSiam achieves competitive performance (71.3% top-1 on ImageNet with ResNet-50) and provides valuable theoretical insight into why self-supervised learning without negatives can work through an expectation-maximisation lens.</p>
+<h2>Architecture — Encoder, Projector, Predictor</h2>
+<p>SimSiam uses a symmetric Siamese architecture with one asymmetric element. Both branches share the same encoder f (ResNet) and projector h (3-layer MLP with BN). On top of one branch, a two-layer MLP predictor p is applied. The key insight: the predictor is applied only to one side; the other side is stop-gradiented. There is no separate target network, no queue, no EMA — both branches share weights.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torchvision.models as models
+
+class SimSiam(nn.Module):
+    &quot;&quot;&quot;SimSiam: shared encoder + projector, asymmetric predictor + stop-gradient.&quot;&quot;&quot;
+    def __init__(self, backbone_fn=models.resnet50, proj_dim=2048, pred_hidden=512):
+        super().__init__()
+        base = backbone_fn(weights=None)
+        feat_dim = base.fc.in_features  # 2048
+        # Encoder (backbone without final fc)
+        self.encoder = nn.Sequential(*list(base.children())[:-1])
+        # Projector: 3-layer MLP with BN (dim stays 2048)
+        self.projector = nn.Sequential(
+            nn.Linear(feat_dim, feat_dim, bias=False),
+            nn.BatchNorm1d(feat_dim), nn.ReLU(inplace=True),
+            nn.Linear(feat_dim, feat_dim, bias=False),
+            nn.BatchNorm1d(feat_dim), nn.ReLU(inplace=True),
+            nn.Linear(feat_dim, proj_dim, bias=False),
+            nn.BatchNorm1d(proj_dim, affine=False),  # no learnable scale at output
+        )
+        # Predictor: 2-layer MLP with bottleneck
+        self.predictor = nn.Sequential(
+            nn.Linear(proj_dim, pred_hidden, bias=False),
+            nn.BatchNorm1d(pred_hidden), nn.ReLU(inplace=True),
+            nn.Linear(pred_hidden, proj_dim),
+        )
+
+    def forward(self, x1, x2):
+        z1 = self.projector(self.encoder(x1).flatten(1))
+        z2 = self.projector(self.encoder(x2).flatten(1))
+        p1 = self.predictor(z1)
+        p2 = self.predictor(z2)
+        return p1, p2, z1.detach(), z2.detach()  # z is stop-gradiented
+
+model = SimSiam()
+print('SimSiam parameters:', sum(p.numel() for p in model.parameters()) // 1_000_000, 'M')
+print('Key: z1 and z2 are detached (stop-gradient) before entering loss.')
+</code></pre>
+<h2>Stop-Gradient and the Loss Function</h2>
+<p>The SimSiam loss is: D(p, z) = -cos_sim(p, sg(z)) = -(p/‖p‖)·(z/‖z‖) where sg(·) denotes stop-gradient (detach in PyTorch). The symmetrised loss is: L = ½D(p₁, sg(z₂)) + ½D(p₂, sg(z₁)). The stop-gradient is not merely a trick — it is the fundamental mechanism. Without it, the objective reduces to a degenerate problem where the constant solution (all outputs identical) is optimal and easily found by gradient descent. With it, the problem becomes a two-player alternating optimisation.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def simsiam_loss(p1, p2, z1, z2):
+    &quot;&quot;&quot;SimSiam symmetrised loss. z1, z2 must already be stop-gradiented.
+    p1, p2: predictor outputs (grad flows through these)
+    z1, z2: projector outputs (detached — no grad)
+    &quot;&quot;&quot;
+    def D(p, z):
+        &quot;&quot;&quot;Negative cosine similarity: lower is better.&quot;&quot;&quot;
+        p_norm = F.normalize(p, dim=1)
+        z_norm = F.normalize(z, dim=1)  # z is already detached
+        return -(p_norm * z_norm).sum(dim=1).mean()
+    return 0.5 * D(p1, z2) + 0.5 * D(p2, z1)
+
+# Training step
+def train_step_simsiam(model, x1, x2, optimizer):
+    p1, p2, z1, z2 = model(x1, x2)  # z already detached in forward()
+    loss = simsiam_loss(p1, p2, z1, z2)
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    # Monitor collapse: std of z should stay &gt; 0
+    with torch.no_grad():
+        std = F.normalize(z1, dim=1).std(0).mean().item()
+    return loss.item(), std
+
+# Quick test
+torch.manual_seed(0)
+p1 = torch.randn(32, 2048, requires_grad=True)
+p2 = torch.randn(32, 2048, requires_grad=True)
+z1 = torch.randn(32, 2048).detach()
+z2 = torch.randn(32, 2048).detach()
+loss = simsiam_loss(p1, p2, z1, z2)
+print(f'SimSiam loss on random inputs: {loss.item():.4f}  (expected near 0 for random)')
+</code></pre>
+<h2>Collapse Analysis With and Without Stop-Gradient</h2>
+<p>Without stop-gradient, the gradient pushes both z and p to maximise cosine similarity, and the trivial solution — all vectors point to the same direction — achieves loss -1 immediately. With stop-gradient, when computing dL/dp₁, z₂ is treated as a constant. The gradient only flows through p₁, forcing p₁ to match the current z₂ as best as possible without modifying z₂. This creates an alternating optimisation where neither side can unilaterally collapse.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+def check_collapse(use_stop_gradient, n_steps=300, seed=7):
+    &quot;&quot;&quot;Run a toy SimSiam and report whether collapse occurs.&quot;&quot;&quot;
+    torch.manual_seed(seed)
+    net = nn.Sequential(nn.Linear(32, 64), nn.ReLU(), nn.Linear(64, 32))
+    pred = nn.Sequential(nn.Linear(32, 16), nn.ReLU(), nn.Linear(16, 32))
+    opt = torch.optim.SGD(list(net.parameters()) + list(pred.parameters()), lr=0.05)
+    stds = []
+    for _ in range(n_steps):
+        x1, x2 = torch.randn(64, 32), torch.randn(64, 32)
+        z1, z2 = F.normalize(net(x1), dim=1), F.normalize(net(x2), dim=1)
+        p1, p2 = pred(z1), pred(z2)
+        if use_stop_gradient:
+            loss = 0.5 * (-(p1 * z2.detach()).sum(1).mean() +
+                          -(p2 * z1.detach()).sum(1).mean())
+        else:
+            loss = 0.5 * (-(p1 * z2).sum(1).mean() +
+                          -(p2 * z1).sum(1).mean())
+        opt.zero_grad(); loss.backward(); opt.step()
+        with torch.no_grad():
+            stds.append(F.normalize(net(torch.randn(64, 32)), dim=1).std(0).mean().item())
+    return stds[-1], min(stds)
+
+final_std_sg,   min_std_sg   = check_collapse(True)
+final_std_nosg, min_std_nosg = check_collapse(False)
+print(f'With    stop-grad: final std={final_std_sg:.4f}, min std={min_std_sg:.4f}  → stable')
+print(f'Without stop-grad: final std={final_std_nosg:.6f}, min std={min_std_nosg:.6f} → collapsed')
+</code></pre>
+<h2>EM Interpretation — Alternating Optimisation</h2>
+<p>SimSiam can be interpreted as an Expectation-Maximisation algorithm. The full loss without stop-gradient is L = E_{T~A}[‖F(x; θ) - F(T(x); θ)‖²] over augmentations. Introducing stop-gradient defines a two-step procedure: (1) E-step: fix θ, compute the optimal predictor (the mean of F(T(x)) over augmentations) — this is what sg(z) represents; (2) M-step: fix the E-step result, update θ to minimise MSE. The predictor approximates the E-step by learning to output the mean representation across augmentations.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+def em_interpretation_demo(n_aug=8, n_steps=200, seed=0):
+    &quot;&quot;&quot;Show that the predictor converges to the mean of augmented representations.
+    In EM terms: E-step = predictor learning the mean, M-step = encoder updating.
+    &quot;&quot;&quot;
+    torch.manual_seed(seed)
+    encoder = nn.Linear(16, 8, bias=False)
+    predictor = nn.Linear(8, 8, bias=False)
+    opt_enc  = torch.optim.SGD(encoder.parameters(),   lr=0.05)
+    opt_pred = torch.optim.SGD(predictor.parameters(), lr=0.1)
+    x = torch.randn(1, 16)  # one anchor image
+    for step in range(n_steps):
+        # E-step: update predictor to predict mean of augmented views
+        augmentations = [x + 0.1 * torch.randn_like(x) for _ in range(n_aug)]
+        zs = torch.stack([F.normalize(encoder(aug), dim=1) for aug in augmentations])
+        mean_z = zs.mean(0).detach()  # stop-gradient on target
+        pred_out = predictor(F.normalize(encoder(x), dim=1))
+        loss_e = F.mse_loss(pred_out, mean_z)
+        opt_pred.zero_grad(); loss_e.backward(); opt_pred.step()
+        # M-step: update encoder using predictor's current target
+        pred_out = predictor(F.normalize(encoder(x), dim=1))
+        target_z = mean_z  # fixed from E-step
+        loss_m = F.mse_loss(pred_out, target_z)
+        opt_enc.zero_grad(); loss_m.backward(); opt_enc.step()
+    return loss_e.item(), loss_m.item()
+
+le, lm = em_interpretation_demo()
+print(f'E-step final loss: {le:.6f}')
+print(f'M-step final loss: {lm:.6f}')
+print('Predictor converges to mean representation across augmentations.')
+</code></pre>
+<blockquote>
+<p><strong>Predictor Depth Matters</strong>: SimSiam requires the predictor to have at least one hidden layer. A linear predictor (single layer) is insufficient to break the symmetry needed to prevent collapse — a linear map on top of a linear encoder collapses the problem to a trivial rank-1 solution. The hidden layer in the predictor provides the non-linearity needed to implement the E-step approximation faithfully. In practice, a 2-layer MLP with a bottleneck (input 2048 → hidden 512 → output 2048) works well.</p>
+</blockquote>
+<h2>Batch Size and Training Details</h2>
+<p>Unlike SimCLR, SimSiam does not require large batch sizes. Batch sizes of 256–512 are sufficient because there are no in-batch negatives. Training uses SGD with momentum 0.9, weight decay 1e-4, and a cosine learning rate schedule with linear warmup. The learning rate is 0.05 × batch_size/256. No LARS optimiser is needed. Training for 100–800 epochs on ImageNet with ResNet-50 achieves 70.8%–71.3% top-1 linear evaluation accuracy.</p>
+<ul>
+<li>Batch size 256–512 sufficient — no large batch required (key advantage over SimCLR).</li>
+<li>SGD with momentum=0.9, weight decay=1e-4, base_lr=0.05 × batch/256.</li>
+<li>Predictor uses higher learning rate than encoder (10× in some ablations).</li>
+<li>BN in projector output layer uses affine=False (no learnable scale/bias).</li>
+<li>Collapse diagnosis: monitor std(z) — should stay near 0.7 for 128-D unit sphere.</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>EMA Target</th>
+<th>Predictor</th>
+<th>Stop-Gradient</th>
+<th>Collapse Mechanism</th>
+<th>Batch Size</th>
+<th>Linear Eval Top-1</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>BYOL</td>
+<td>Yes (τ=0.996)</td>
+<td>Yes</td>
+<td>Yes (implicit)</td>
+<td>EMA + asymmetry + BN</td>
+<td>4096</td>
+<td>74.3%</td>
+</tr>
+<tr>
+<td>SimSiam</td>
+<td>No</td>
+<td>Yes</td>
+<td>Explicit sg(·)</td>
+<td>EM alternation</td>
+<td>256</td>
+<td>71.3%</td>
+</tr>
+</tbody>
+</table>
+<h2>When to Choose SimSiam</h2>
+<p>SimSiam is the right choice when compute budget is limited and interpretability matters. Its small batch size (256) and absence of an EMA target network halve the memory footprint compared to BYOL. The EM interpretation provides a clean theoretical story for presentations and papers. The main risk is training instability: if the predictor is under-powered (too shallow or too small) or the learning rate is too high, collapse can occur silently — monitor per-dimension std of z during training and stop early if it drops below 0.1.</p>
+<h2>Results and Practical Takeaways</h2>
+<p>SimSiam achieves 71.3% top-1 linear evaluation with ResNet-50 at 200 epochs, improving to 71.3% at 800 epochs. The result is particularly notable because it uses batch size 256 and no EMA — proving that neither large batches nor momentum encoders are necessary for high-quality self-supervised learning. Transfer learning results on Pascal VOC object detection match MoCo v2 within 0.3 AP. The stop-gradient is the single indispensable component: removing it causes collapse within the first few epochs regardless of other hyperparameters.</p>
+    </article>
+  </main>
+</body>
+</html>

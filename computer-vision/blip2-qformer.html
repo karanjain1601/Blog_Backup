@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BLIP-2: Q-Former Bridging Vision and Language Models | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>BLIP-2: Q-Former Bridging Vision and Language Models</h1>
+      
+      <h1>BLIP-2: Q-Former Bridging Vision and Language Models</h1>
+<h2>Overview</h2>
+<p>BLIP-2 (Bootstrapping Language-Image Pretraining) from Salesforce Research introduces the Q-Former, a lightweight transformer module that bridges a frozen image encoder and a frozen large language model. By keeping both pre-trained components frozen, BLIP-2 achieves state-of-the-art multimodal performance with minimal trainable parameters.</p>
+<p>The central challenge BLIP-2 addresses is the modality gap: image encoder and LLM embedding spaces are learned independently and incompatible out of the box. The Q-Former solves this by learning to translate between them using only 188M trainable parameters, while the backbone encoders (billions of parameters) remain frozen.</p>
+<blockquote>
+<p><strong>info</strong>: Q-Former is the core innovation: 32 learned queries distill the entire image into a compact visual representation that any frozen LLM can condition on. This decouples vision encoder upgrades from LLM upgrades — swap either independently.</p>
+</blockquote>
+<p>BLIP-2 uses EVA-CLIP ViT-G/14 (1B params) as the visual encoder and either OPT or FlanT5 as the language model. Despite using frozen backbones, BLIP-2 FlanT5-XXL achieves 65.0% on VQAv2 and 45.9% on OK-VQA, outperforming Flamingo 80B with 54x fewer trainable parameters.</p>
+<h2>Q-Former Architecture</h2>
+<p>The Q-Former is a BERT-based transformer with two attention pathways: self-attention between learned query tokens, and cross-attention from query tokens to frozen image patch features. The 32 query tokens (each 768-dimensional) are the only learned visual representations passed downstream to the LLM.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class QFormerLayer(nn.Module):
+    def __init__(self, d_model, n_heads, n_queries=32):
+        super().__init__()
+        self.query_tokens = nn.Parameter(torch.randn(1, n_queries, d_model))
+        self.self_attn = nn.MultiheadAttention(d_model, n_heads, batch_first=True)
+        self.cross_attn = nn.MultiheadAttention(d_model, n_heads, batch_first=True)
+        self.ffn = nn.Sequential(nn.Linear(d_model, 4*d_model),
+                                 nn.GELU(), nn.Linear(4*d_model, d_model))
+
+    def forward(self, image_features):
+        B = image_features.shape[0]
+        q = self.query_tokens.expand(B, -1, -1)
+        q, _ = self.self_attn(q, q, q)
+        q, _ = self.cross_attn(q, image_features, image_features)
+        return self.ffn(q) + q  # residual
+</code></pre>
+<p>The 32 query tokens compress the entire image — which may have 256 or more patch tokens from ViT-G/14 — into a fixed-size representation. This compression is learned rather than hand-designed: the Q-Former training objectives teach it what visual information is relevant for language understanding.</p>
+<h2>Stage-1 Vision-Language Pretraining</h2>
+<p>Stage-1 trains the Q-Former with three objectives simultaneously, using 129M image-text pairs. The image encoder is frozen; only Q-Former weights are updated. The three losses together teach the Q-Former to extract image features useful for matching, discriminating, and generating text descriptions.</p>
+<pre><code class="language-python">def qformer_stage1_losses(query_output, text_output, image_embeds, text_ids, model):
+    # 1. Image-Text Contrastive (ITC) — align [CLS] of query and text
+    q_feat = F.normalize(model.itc_query_proj(query_output[:, 0]), dim=-1)
+    t_feat = F.normalize(model.itc_text_proj(text_output[:, 0]), dim=-1)
+    sim_matrix = q_feat @ t_feat.T / model.temp
+    labels = torch.arange(sim_matrix.size(0), device=sim_matrix.device)
+    itc_loss = (F.cross_entropy(sim_matrix, labels) +
+                F.cross_entropy(sim_matrix.T, labels)) / 2
+    # 2. Image-Text Matching (ITM) — binary classification on fused features
+    itm_logits = model.itm_head(query_output)  # (B, 2)
+    itm_loss = F.cross_entropy(itm_logits, model.itm_labels)
+    # 3. Image-Grounded Text Generation (ITG) — causal LM on query+text
+    itg_loss = model.lm_head_loss(query_output, text_ids)
+    return itc_loss + itm_loss + itg_loss
+</code></pre>
+<p>ITC aligns global image and text representations. ITM is a binary cross-entropy loss that teaches the Q-Former to distinguish genuine from mismatched image-text pairs. ITG is autoregressive text generation conditioned on query token outputs — it forces the query tokens to capture text-relevant visual information.</p>
+<h2>Stage-2 Language Model Connection</h2>
+<p>Stage-2 connects the Q-Former output to a frozen LLM via a linear projection. The 32 query token outputs (768-dim) are projected to the LLM input dimension (e.g., 2048 for OPT-2.7B) and prepended to the text embedding sequence. The LLM generates text conditioned on this visual prefix.</p>
+<pre><code class="language-python">def blip2_generate(image, prompt_ids, model, max_new_tokens=50):
+    # Frozen CLIP encodes image
+    with torch.no_grad():
+        image_features = model.visual_encoder(image)  # (B, 257, 1408)
+    # Q-Former extracts 32 query tokens
+    query_output = model.qformer(image_features)    # (B, 32, 768)
+    # Project to LLM embedding space
+    visual_prefix = model.language_projection(query_output)  # (B, 32, D_llm)
+    # Get text embeddings and concatenate
+    text_embeds = model.language_model.get_input_embeddings()(prompt_ids)
+    inputs_embeds = torch.cat([visual_prefix, text_embeds], dim=1)
+    # Frozen LLM generates
+    with torch.no_grad():
+        outputs = model.language_model.generate(
+            inputs_embeds=inputs_embeds, max_new_tokens=max_new_tokens)
+    return outputs
+</code></pre>
+<p>For generative LLMs (OPT), the visual prefix acts as a soft visual prompt and the LLM generates the full response autoregressively. For encoder-decoder LLMs (FlanT5), query tokens are passed to the encoder, and the decoder generates the answer. FlanT5-based variants generally score higher on knowledge-intensive VQA tasks.</p>
+<h2>Zero-Shot VQA</h2>
+<p>BLIP-2 supports zero-shot VQA out of the box through its generative interface. The question is formatted as a prompt and concatenated after the visual prefix tokens. The frozen LLM generates a free-form answer conditioned on both the visual representation and the question text — no fine-tuning required.</p>
+<pre><code class="language-python">from transformers import Blip2Processor, Blip2ForConditionalGeneration
+from PIL import Image
+import requests
+import torch
+
+processor = Blip2Processor.from_pretrained(&quot;Salesforce/blip2-opt-2.7b&quot;)
+model = Blip2ForConditionalGeneration.from_pretrained(
+    &quot;Salesforce/blip2-opt-2.7b&quot;, torch_dtype=torch.float16, device_map=&quot;auto&quot;)
+
+image = Image.open(requests.get(&quot;https://example.com/img.jpg&quot;, stream=True).raw)
+question = &quot;Question: How many people are in the image? Answer:&quot;
+inputs = processor(image, question, return_tensors=&quot;pt&quot;).to(model.device, torch.float16)
+generated = model.generate(**inputs, max_new_tokens=30)
+print(processor.decode(generated[0], skip_special_tokens=True))
+</code></pre>
+<p>Zero-shot VQAv2 accuracy for BLIP-2 OPT-6.7B is 61.2%, compared to Flamingo-80B at 56.3% — achieved with a 54x smaller model. The gap comes from BLIP-2's staged pretraining: Q-Former stage-1 provides a strong visual representation before the LLM connection is even introduced.</p>
+<table>
+<thead>
+<tr>
+<th>BLIP-2 Variant</th>
+<th>LLM</th>
+<th>Visual Encoder</th>
+<th>VQAv2 %</th>
+<th>OK-VQA %</th>
+<th>Params Total</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>BLIP-2 OPT-2.7B</td>
+<td>OPT-2.7B</td>
+<td>EVA-CLIP ViT-G</td>
+<td>53.7</td>
+<td>31.7</td>
+<td>~3.4B</td>
+</tr>
+<tr>
+<td>BLIP-2 OPT-6.7B</td>
+<td>OPT-6.7B</td>
+<td>EVA-CLIP ViT-G</td>
+<td>61.2</td>
+<td>36.4</td>
+<td>~8.2B</td>
+</tr>
+<tr>
+<td>BLIP-2 FlanT5-XL</td>
+<td>FlanT5-XL (3B)</td>
+<td>EVA-CLIP ViT-G</td>
+<td>62.0</td>
+<td>40.7</td>
+<td>~4.1B</td>
+</tr>
+<tr>
+<td>BLIP-2 FlanT5-XXL</td>
+<td>FlanT5-XXL (11B)</td>
+<td>EVA-CLIP ViT-G</td>
+<td>65.0</td>
+<td>45.9</td>
+<td>~12.1B</td>
+</tr>
+<tr>
+<td>InstructBLIP FlanT5-XXL</td>
+<td>FlanT5-XXL (11B)</td>
+<td>EVA-CLIP ViT-G</td>
+<td>—</td>
+<td>50.7</td>
+<td>~12.1B</td>
+</tr>
+</tbody>
+</table>
+<h2>Key Takeaways</h2>
+<p>BLIP-2's Q-Former design solves a fundamental problem in multimodal learning: how to efficiently bridge pretrained unimodal models without catastrophic forgetting. By keeping both encoders frozen and training only the 188M-parameter bridge, BLIP-2 is compute-efficient and modular.</p>
+<p>The two-stage pretraining curriculum is principled: stage-1 develops rich visual representations aligned to language, and stage-2 teaches the LLM to use them for generation. This separation prevents the LLM's strong language priors from overwhelming the visual signal during early training.</p>
+<p>BLIP-2's limitations include fixed 32-query compression (may miss fine-grained details), no instruction-following capability in the base model (addressed by InstructBLIP), and reduced performance on tasks requiring spatial reasoning or counting. Subsequent work like InstructBLIP adds instruction tuning on top of the Q-Former framework.</p>
+    </article>
+  </main>
+</body>
+</html>

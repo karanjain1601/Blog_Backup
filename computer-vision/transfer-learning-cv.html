@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Transfer Learning in Computer Vision | Notes Backup</title>
+  <meta name="description" content="Using ImageNet-pretrained features for new tasks — linear probing, full fine-tuning, layer-wise learning rate decay, and when to use frozen vs trainable backbone weights." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Transfer Learning in Computer Vision</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Using ImageNet-pretrained features for new tasks — linear probing, full fine-tuning, layer-wise learning rate decay, and when to use frozen vs trainable backbone weights.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Transfer Learning in Computer Vision</h1>
+<p>Transfer learning reuses weights from a model trained on a large dataset (typically ImageNet-1K or ImageNet-21K) as a starting point for a new task. The intuition is that low-level features — edges, textures, gradients — are universal across vision tasks, while higher-level features become increasingly task-specific. This approach dramatically reduces the data and compute needed for new tasks.</p>
+<p>Models pretrained on ImageNet learn a rich hierarchy of visual concepts: early layers detect edges and colors, middle layers capture shapes and parts, and final layers encode high-level semantics like objects and scenes. Even when the target domain differs from natural images, these learned representations outperform random initialization unless you have millions of in-domain samples.</p>
+<p>Linear probing freezes all pretrained weights and trains only a new classification head on top of the fixed backbone. This is the simplest transfer strategy: the backbone acts as a fixed feature extractor. Because no backbone weights change, training is fast and cheap, and the approach works well when the target domain is similar to the pretraining domain.</p>
+<pre><code class="language-python">import torch\nimport torchvision.models as models\n\nmodel = models.resnet50(weights=&quot;IMAGENET1K_V2&quot;)\nfor param in model.parameters():\n    param.requires_grad = False\n\nnum_classes = 100\nmodel.fc = torch.nn.Linear(model.fc.in_features, num_classes)\n\noptimizer = torch.optim.Adam(model.fc.parameters(), lr=1e-3)
+</code></pre>
+<p>Linear probing accuracy depends heavily on feature quality. ViT-L/14 features from CLIP achieve over 76% top-1 on ImageNet with a single linear layer. ResNet-50 ImageNet features typically reach 55–60% on CIFAR-100. The gap between linear probe and fine-tuned performance reveals how well the pretrained representation aligns with the target task distribution.</p>
+<p>Full fine-tuning unfreezes the entire backbone and trains all weights end-to-end. A critical trick is using a much smaller learning rate for backbone layers than for the newly initialized head — typically 10× lower. Without this asymmetry, large gradient updates destroy the pretrained representations before the new head learns meaningful signals from them.</p>
+<pre><code class="language-python">import torch\nimport torchvision.models as models\n\nmodel = models.resnet50(weights=&quot;IMAGENET1K_V2&quot;)\nnum_classes = 100\nmodel.fc = torch.nn.Linear(model.fc.in_features, num_classes)\n\nbackbone_params = [p for n, p in model.named_parameters() if &quot;fc&quot; not in n]\nhead_params = list(model.fc.parameters())\n\noptimizer = torch.optim.SGD([\n    {&quot;params&quot;: backbone_params, &quot;lr&quot;: 1e-4},\n    {&quot;params&quot;: head_params,     &quot;lr&quot;: 1e-3},\n], momentum=0.9, weight_decay=1e-4)
+</code></pre>
+<p>Full fine-tuning is most effective when you have ≥10K labeled samples and when the target domain differs meaningfully from ImageNet (e.g., satellite imagery, medical scans, industrial defects). With too little data, fine-tuning overfits quickly. Regularization strategies like weight decay, dropout, label smoothing, and data augmentation are essential to prevent overfitting on small datasets.</p>
+<p>Layer-wise learning rate decay (LLRD) assigns progressively smaller learning rates to earlier network layers. The intuition is that early layers learn generic features that should barely change, while later layers learn task-specific patterns that need more adaptation. LLRD is a refinement of the two-group approach and is the standard recipe for fine-tuning large vision transformers like ViT.</p>
+<pre><code class="language-python">def get_llrd_params(model, base_lr=1e-3, decay=0.75):\n    layers = list(model.named_parameters())\n    total = len(layers)\n    param_groups = []\n    for idx, (name, param) in enumerate(layers):\n        lr = base_lr * (decay ** (total - idx))\n        param_groups.append({&quot;params&quot;: [param], &quot;lr&quot;: lr, &quot;name&quot;: name})\n    return param_groups\n\nparam_groups = get_llrd_params(model, base_lr=1e-3, decay=0.75)\noptimizer = torch.optim.AdamW(param_groups, weight_decay=0.05)
+</code></pre>
+<p>In practice, decay values between 0.65 and 0.85 work well for most ViT models. For ResNet-style backbones, grouping by layer block (layer1 through layer4) rather than individual parameters is more common. Research on BERT-style NLP models originally established this technique; it transferred to vision transformers with similar gains, typically improving fine-tuned accuracy by 1–3% over uniform LR.</p>
+<p>Domain gap measures how different the target distribution is from the pretraining distribution. A small gap (e.g., fine-grained bird classification vs. ImageNet) allows aggressive transfer with minimal modification. A large gap (e.g., histopathology slides, remote-sensing imagery, X-rays) may require intermediate pretraining on an unlabeled in-domain corpus before supervised fine-tuning.</p>
+<p>Three strategies address large domain gaps: (1) Domain-adaptive pretraining — continue masked image modeling on unlabeled target-domain data before fine-tuning. (2) Multi-source transfer — pretrain on a mix of ImageNet and a domain-adjacent dataset. (3) Feature alignment — use adversarial training or MMD loss to align source and target feature distributions at intermediate layers.</p>
+<pre><code class="language-python">import torchvision.datasets as datasets\nfrom torchvision import transforms\n\ntransform = transforms.Compose([\n    transforms.Resize(224),\n    transforms.ToTensor(),\n    transforms.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])\n])\ntrain_ds = datasets.CIFAR100(root=&quot;./data&quot;, train=True,  download=True, transform=transform)\nval_ds   = datasets.CIFAR100(root=&quot;./data&quot;, train=False, download=True, transform=transform)\n\n# train linear_probe_model and finetune_model for 10 and 100 epochs\n# compare val accuracy at each checkpoint
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Strategy</th>
+<th>Trainable Params</th>
+<th>Min Data Needed</th>
+<th>Training Cost</th>
+<th>Best For</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Zero-shot</td>
+<td>0</td>
+<td>0</td>
+<td>None</td>
+<td>Quick baselines; CLIP-style models</td>
+</tr>
+<tr>
+<td>Linear probe</td>
+<td>Head only</td>
+<td>~1K</td>
+<td>Very low</td>
+<td>Similar domain; fast iteration</td>
+</tr>
+<tr>
+<td>Partial unfreeze</td>
+<td>Last N layers</td>
+<td>~5K</td>
+<td>Low</td>
+<td>Moderate domain shift</td>
+</tr>
+<tr>
+<td>Full fine-tune</td>
+<td>All</td>
+<td>~10K</td>
+<td>Medium</td>
+<td>Different domain; enough labeled data</td>
+</tr>
+<tr>
+<td>From scratch</td>
+<td>All</td>
+<td>~1M+</td>
+<td>High</td>
+<td>Highly novel domains; massive data</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>****: For under 10K images: use linear probing or fine-tune only the last 2 layers. For 100K+: full fine-tuning with layer-wise LR decay usually wins. Never train from scratch unless you have millions of domain-specific images.</p>
+</blockquote>
+<p>Transfer learning is the default starting point for nearly all practical computer vision projects. ImageNet pretraining provides strong inductive biases even for non-natural-image domains. The choice of transfer strategy should be driven by dataset size, domain similarity, and compute budget — not by intuition alone. Always establish a linear probe baseline before committing to full fine-tuning.</p>
+<p>Modern best practices: use the largest pretrained model your inference budget allows, apply layer-wise LR decay for transformers, warm up the learning rate for 5–10% of training, and use strong augmentations (RandAugment, MixUp, CutMix) to regularize fine-tuning. Monitor both training and validation loss curves; early divergence between them signals overfitting on insufficient data.</p>
+    </article>
+  </main>
+</body>
+</html>

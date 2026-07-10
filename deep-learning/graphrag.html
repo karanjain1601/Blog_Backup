@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GraphRAG: Knowledge Graph-Enhanced Retrieval | Notes Backup</title>
+  <meta name="description" content="Building a knowledge graph from documents and using graph traversal to retrieve connected entities and relationships, enabling complex multi-hop reasoning that vector search cannot provide." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>GraphRAG: Knowledge Graph-Enhanced Retrieval</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Building a knowledge graph from documents and using graph traversal to retrieve connected entities and relationships, enabling complex multi-hop reasoning that vector search cannot provide.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>GraphRAG: Knowledge Graph-Enhanced Retrieval</h1>
+<p>GraphRAG combines knowledge graph construction with large language model reasoning to overcome the fundamental limitations of vector similarity search for complex, multi-document queries. First proposed as a research framework and later released as an open-source system by Microsoft Research in 2024, GraphRAG builds a rich graph of entities and relationships extracted from a document corpus, detects communities of related entities, summarizes each community with an LLM, and uses these summaries as the retrieval units for question answering. The result is a retrieval system capable of answering synthesis questions — questions requiring reasoning across many documents simultaneously — that conventional dense retrieval completely fails on.</p>
+<h2>Overview</h2>
+<p>Conventional vector RAG represents each document chunk as an embedding vector and retrieves the top-k nearest neighbors to a query embedding. This works well for factual lookup questions where the answer appears in a single passage close to the query in embedding space. It fails for two important classes of questions: multi-hop questions requiring inference across multiple documents (e.g., 'What do the acquisition targets of Company A and Company B have in common?') and synthesis questions requiring aggregation across many documents (e.g., 'What are the major themes across all earnings call transcripts in this corpus?'). These questions have no single document that is close to them in embedding space; they require structured reasoning over a connected web of information.</p>
+<p>GraphRAG addresses this by building an explicit relational structure — a knowledge graph — that makes cross-document connections traversable. After extracting entities and relationships from all documents, it runs community detection to group tightly connected entities into clusters (communities), then generates a natural-language summary of each community. These summaries become searchable units that capture corpus-level themes no individual passage could express. At query time, GraphRAG offers two complementary search modes: local search, which finds the entity neighborhood most relevant to the query; and global search, which retrieves community summaries and synthesizes across them. The global search mode enables questions like 'What are the main topics in this corpus?' that have no answer in any single document.</p>
+<h2>Motivation: Vector Search Limits</h2>
+<p>The core limitation of dense retrieval is that it retrieves individual chunks in isolation. Each retrieved chunk provides a snippet of evidence, but the LLM must somehow reason across those independent snippets without any information about how the entities and facts in one snippet relate to those in another. For single-hop factual questions this is adequate: the answer is in one chunk. For multi-hop questions the model must infer a chain A→B→C, where A appears in chunk 1, the A-B link appears in chunk 2, and the B-C link appears in chunk 3. Dense retrieval has no mechanism to identify these structural dependencies; it returns the chunks closest to the original question embedding, which may not include the intermediate-hop passages at all.</p>
+<p>Synthesis questions expose an even sharper failure mode. Asking 'What are the primary strategic concerns mentioned across all board meeting transcripts?' requires aggregating information from potentially hundreds of documents. Dense retrieval cannot retrieve 'all documents in the corpus' — it retrieves the top-k most similar chunks to the query, which will be a small subset. Even setting k very high introduces so much irrelevant context that the LLM is overwhelmed. GraphRAG's global search mode solves this by pre-summarizing groups of related documents into community summaries that are far more compact than the full corpus, enabling the LLM to reason over the entire corpus in a single pass through the summaries rather than through thousands of raw chunks.</p>
+<h2>Graph Construction Pipeline</h2>
+<p>Building a GraphRAG knowledge graph involves five sequential stages. First, the source documents are chunked into passages of 300–600 tokens with 20% overlap. Second, an LLM runs over each chunk to extract named entities and the relationships between them, producing a list of (head entity, relationship type, tail entity) triples for each chunk. Third, all triples from all chunks are merged into a single directed graph, with duplicate edges aggregated by weight. Fourth, community detection algorithms such as the Leiden algorithm partition the graph into tightly connected subgraphs (communities) at multiple resolution levels. Fifth, an LLM summarizes each community into a natural-language description that can itself be embedded and searched.</p>
+<p>The quality of the knowledge graph depends critically on the entity and relation extraction step. Prompt engineering for extraction is important: the LLM must be instructed to extract all relevant entities at the right granularity — not too fine (individual words) and not too coarse (entire sentences as single nodes). Relation types should be meaningful and consistent: 'founded', 'acquired', 'employs', 'produces' are more useful than generic 'related to'. The extraction prompt must also specify how to handle coreference — when 'the company' in one sentence refers to 'OpenAI' in a previous sentence, the node should be 'OpenAI', not 'the company'. In practice, iterative prompt refinement on a sample of documents is required before running extraction on the full corpus.</p>
+<h2>Entity and Relation Extraction</h2>
+<p>LLM-based entity and relation extraction outperforms traditional NER+RE pipelines on open-domain text because the LLM understands the context of a sentence rather than just its surface patterns. The extraction prompt typically asks the model to identify all entities in a chunk and all relationships between them, outputting structured JSON. Common entity types include Person, Organization, Location, Product, Event, and Concept; common relation types include founded_by, acquired_by, is_ceo_of, located_in, produces, and competes_with. For domain-specific corpora (biomedical, legal, financial), domain-specific entity and relation types should be added to the extraction prompt.</p>
+<p>After extraction, the raw triples must be deduplicated and normalized. The same entity often appears under multiple surface forms: 'OpenAI', 'Open AI', 'OpenAI Inc.', and 'the company' (in context) should all resolve to the same graph node. A lightweight normalization pass using string similarity (e.g., Levenshtein distance) or a second LLM call handles most cases. Relation deduplication must also handle semantic equivalence: 'Sam Altman is the CEO of OpenAI' and 'Sam Altman leads OpenAI' should produce the same (Sam Altman, is_ceo_of, OpenAI) triple. The weight of an edge can represent how many chunks mention that relationship, which is useful for downstream community detection and relevance scoring.</p>
+<pre><code class="language-python">import json
+import networkx as nx
+import openai
+from typing import List, Tuple
+
+def extract_triples(text: str, model: str = 'gpt-4o-mini') -&gt; List[Tuple]:
+    # LLM-based NER: extract (head, relation, tail) triples from a text chunk.
+    prompt = f'Extract entity relationships as JSON triples (head, relation, tail): {text}'
+    resp = openai.chat.completions.create(
+        model=model, max_tokens=512,
+        messages=[{'role': 'user', 'content': prompt}],
+    )
+    raw = json.loads(resp.choices[0].message.content)
+    return [(t['head'], t['relation'], t['tail']) for t in raw.get('triples', [])]
+
+def build_kg(chunks: List[str]) -&gt; nx.DiGraph:
+    G = nx.DiGraph()
+    for chunk in chunks:
+        for head, rel, tail in extract_triples(chunk):
+            if G.has_edge(head.lower(), tail.lower()):
+                G[head.lower()][tail.lower()]['weight'] += 1
+            else:
+                G.add_edge(head.lower(), tail.lower(), relation=rel, weight=1)
+    return G
+
+texts = ['OpenAI released GPT-4 in 2023.', 'Sam Altman is CEO of OpenAI.',
+         'Google DeepMind created AlphaFold.', 'AlphaFold models protein folding.']
+G = build_kg(texts)
+print(f'KG: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges')
+</code></pre>
+<h2>Community Detection and Summarization</h2>
+<p>After the knowledge graph is built, community detection partitions it into groups of tightly connected entities. GraphRAG uses the Leiden algorithm, a refinement of the Louvain algorithm that guarantees well-connected communities rather than just high modularity. The Leiden algorithm is run at multiple resolution levels: high resolution produces many small communities (fine-grained topic clusters), while low resolution produces fewer large communities (broad thematic groups). Microsoft GraphRAG uses this hierarchical community structure to support both detailed entity-level queries and broad corpus-level synthesis queries at the appropriate resolution level.</p>
+<p>Each detected community is summarized by an LLM into a natural-language description. The summarization prompt receives the list of entities in the community, the relationships between them, and representative text passages that mention these entities. The LLM is asked to describe what this community is about: what the main entities are, what connects them, and what key facts or themes the community represents. These community summaries are stored alongside the community metadata and can be embedded for vector search. A corpus of 100,000 documents with 50,000 entities might produce 200–500 communities at mid-resolution, which is a manageable number of summaries to reason over in a single LLM call.</p>
+<pre><code class="language-python">import igraph as ig
+import leidenalg
+import networkx as nx
+import openai
+from typing import Dict, List
+
+def nx_to_igraph(G: nx.DiGraph):
+    nodes = list(G.nodes())
+    idx = {n: i for i, n in enumerate(nodes)}
+    edges = [(idx[u], idx[v]) for u, v in G.edges()]
+    g = ig.Graph(n=len(nodes), edges=edges, directed=False)
+    g.vs['name'] = nodes
+    return g, nodes
+
+def detect_communities(G: nx.DiGraph) -&gt; Dict[int, List[str]]:
+    g_ig, nodes = nx_to_igraph(G)
+    partition = leidenalg.find_partition(g_ig, leidenalg.ModularityVertexPartition)
+    return {i: [nodes[j] for j in comm] for i, comm in enumerate(partition)}
+
+def summarize_community(nodes: List[str], G: nx.DiGraph, model: str = 'gpt-4o-mini') -&gt; str:
+    rels = [(u, d['relation'], v) for u, v, d in G.edges(data=True)
+            if u in nodes and v in nodes]
+    rel_text = '; '.join(f'{u} {r} {v}' for u, r, v in rels[:15])
+    prompt = f'Summarize this knowledge cluster.\nEntities: {nodes}\nRelations: {rel_text}'
+    resp = openai.chat.completions.create(
+        model=model, max_tokens=200,
+        messages=[{'role': 'user', 'content': prompt}],
+    )
+    return resp.choices[0].message.content.strip()
+
+G = nx.DiGraph()  # pre-built knowledge graph
+communities = detect_communities(G)
+for cid, nodes in list(communities.items())[:3]:
+    print(f'Community {cid} ({len(nodes)} nodes): {summarize_community(nodes, G)[:80]}...')
+</code></pre>
+<h2>Graph Retrieval Strategies</h2>
+<p>GraphRAG implements two complementary retrieval modes that target different question types. Local search focuses on a specific entity or small neighborhood in the graph. Given a query, it extracts the mentioned entities, retrieves their immediate graph neighbors (1–2 hops), and assembles the local subgraph with its relationship labels and text evidence as context for the LLM. This works well for entity-specific factual questions such as 'What products did Company X acquire in 2022?' where the answer lives in the local neighborhood of the 'Company X' node. Local search is fast (graph lookup plus dense retrieval for entity matching) and precise for narrowly scoped questions.</p>
+<p>Global search queries community summaries rather than individual entities or passages. It retrieves all community summaries (or the top-k by relevance to the query) and passes them to the LLM for synthesis. Because community summaries encode the thematic structure of the corpus, global search can answer questions like 'What are the major strategic risks discussed across all board meeting transcripts?' that have no answer in any individual document. The trade-off is cost: global search requires the LLM to process all community summaries, which may collectively span tens of thousands of tokens. Map-reduce patterns — generating partial answers per community, then reducing to a final answer — are necessary at scale to stay within context window limits.</p>
+<pre><code class="language-python">import numpy as np
+import openai
+from sentence_transformers import SentenceTransformer
+from typing import Dict, List
+
+embedder = SentenceTransformer('all-MiniLM-L6-v2')
+
+def local_search(query: str, node_embeddings: Dict[str, np.ndarray], top_k: int = 5) -&gt; List[str]:
+    q_emb = embedder.encode(query, normalize_embeddings=True)
+    scores = {node: float(np.dot(q_emb, emb)) for node, emb in node_embeddings.items()}
+    return sorted(scores, key=scores.get, reverse=True)[:top_k]
+
+def global_search(query: str, community_summaries: Dict[int, str],
+                  model: str = 'gpt-4o-mini') -&gt; str:
+    summaries_text = '\n\n'.join(
+        f'[Community {cid}] {s}' for cid, s in community_summaries.items()
+    )
+    prompt = f'Using these knowledge summaries, answer the question.\n\n{summaries_text}\n\nQ: {query}\nA:'
+    resp = openai.chat.completions.create(
+        model=model, max_tokens=512,
+        messages=[{'role': 'user', 'content': prompt}],
+    )
+    return resp.choices[0].message.content.strip()
+
+node_embeddings: Dict[str, np.ndarray] = {}   # pre-computed embeddings per entity node
+community_summaries: Dict[int, str] = {}       # pre-generated community summaries
+factual_q = 'Who is the CEO of OpenAI?'
+synthesis_q = 'What are the main themes across all AI company documents?'
+print('Local:', local_search(factual_q, node_embeddings))
+print('Global:', global_search(synthesis_q, community_summaries))
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>RAG Type</th>
+<th>Multi-hop Accuracy</th>
+<th>Synthesis Quality</th>
+<th>Build Cost</th>
+<th>Query Latency</th>
+<th>Best For</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Naive RAG</td>
+<td>0.38</td>
+<td>Low</td>
+<td>Low</td>
+<td>1s</td>
+<td>Single-hop factual QA</td>
+</tr>
+<tr>
+<td>HyDE RAG</td>
+<td>0.44</td>
+<td>Low</td>
+<td>Low</td>
+<td>1.5s</td>
+<td>Factual with sparse queries</td>
+</tr>
+<tr>
+<td>GraphRAG local</td>
+<td>0.61</td>
+<td>Medium</td>
+<td>High</td>
+<td>2s</td>
+<td>Entity-focused multi-hop QA</td>
+</tr>
+<tr>
+<td>GraphRAG global</td>
+<td>0.55</td>
+<td>High</td>
+<td>High</td>
+<td>8s</td>
+<td>Corpus-wide synthesis questions</td>
+</tr>
+<tr>
+<td>KG-RAG</td>
+<td>0.58</td>
+<td>Medium</td>
+<td>Very high</td>
+<td>3s</td>
+<td>Structured knowledge graph queries</td>
+</tr>
+<tr>
+<td>LightRAG</td>
+<td>0.57</td>
+<td>Medium-high</td>
+<td>Medium</td>
+<td>2.5s</td>
+<td>Balanced local and global search</td>
+</tr>
+</tbody>
+</table>
+<h2>Microsoft GraphRAG</h2>
+<p>Microsoft Research released GraphRAG as an open-source Python package in 2024, providing a complete pipeline from document ingestion to indexed graph to query API. The implementation uses Azure OpenAI (or any OpenAI-compatible API) for entity extraction and community summarization, NetworkX for graph construction, and the Leiden algorithm for community detection. The pipeline is designed for offline indexing: building the graph and summaries for a corpus is a one-time batch process, after which queries run against the pre-built index. On Microsoft's internal benchmark evaluating comprehensiveness and diversity of responses, GraphRAG's global search outperformed naive RAG by 72–83% on synthesis questions as judged by a separate LLM evaluator.</p>
+<p>The cost of GraphRAG's indexing phase is its primary practical limitation. Extracting entities from every document chunk requires one LLM call per chunk; summarizing every community requires one more call per community. For a 100,000-document corpus chunked at 400 tokens with GPT-4o-mini, entity extraction alone costs approximately $20–50 and takes several hours. This is a one-time fixed cost, but it means GraphRAG is not suitable for corpora that change frequently. The Microsoft implementation provides incremental indexing to handle new documents without rebuilding the full graph, but this remains a work in progress. For rapidly evolving corpora, lighter-weight alternatives such as LightRAG or hybrid approaches combining dense retrieval with a smaller entity graph may be more practical.</p>
+<pre><code class="language-python">import networkx as nx
+import openai
+import spacy
+from typing import Dict, List, Set
+
+nlp = spacy.load('en_core_web_sm')
+
+def extract_query_entities(question: str) -&gt; List[str]:
+    return [ent.text.lower() for ent in nlp(question).ents]
+
+def graph_neighborhood(G: nx.DiGraph, entities: List[str], hops: int = 2) -&gt; Set[str]:
+    neighbors: Set[str] = set()
+    for entity in entities:
+        if entity in G:
+            neighbors.update(nx.ego_graph(G, entity, radius=hops).nodes())
+    return neighbors
+
+def graph_rag_query(question: str, G: nx.DiGraph,
+                    community_nodes: Dict[int, List[str]],
+                    community_summaries: Dict[int, str]) -&gt; str:
+    entities = extract_query_entities(question)
+    local_nodes = graph_neighborhood(G, entities, hops=2)
+    relevant = [community_summaries[cid] for cid, nodes in community_nodes.items()
+                if any(n in local_nodes for n in nodes)]
+    context = '\n\n'.join(relevant) or 'No relevant graph context found.'
+    prompt = f'Context:\n{context}\n\nQuestion: {question}\nAnswer:'
+    resp = openai.chat.completions.create(
+        model='gpt-4o-mini', max_tokens=512,
+        messages=[{'role': 'user', 'content': prompt}],
+    )
+    return resp.choices[0].message.content.strip()
+
+G, comm_nodes, comm_summaries = nx.DiGraph(), {}, {}
+print(graph_rag_query('Which organizations developed transformer-based LLMs?', G, comm_nodes, comm_summaries))
+</code></pre>
+<blockquote>
+<p><strong>Global Search Cost</strong>: GraphRAG's global search (querying community summaries) dramatically outperforms vector RAG on questions requiring synthesis across many documents — at 10–50× higher cost; use it only for complex analytical queries. For routine factual lookups, route traffic to local search or conventional dense retrieval to keep costs manageable.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<p>GraphRAG is the right tool when your questions require reasoning over relationships between entities across many documents, or synthesis across a large corpus that no individual document can answer. The graph structure makes cross-document connections explicit and traversable, enabling multi-hop reasoning that is structurally impossible for pure vector search. The community summarization step pre-computes corpus-level themes, enabling global synthesis queries at reasonable cost at query time by shifting the work to the offline indexing phase. The practical challenge is the high one-time indexing cost and the need to choose the right retrieval mode — local for entity-focused questions, global for synthesis questions — which may require a query classifier in production.</p>
+<ul>
+<li>Use GraphRAG when questions require multi-hop reasoning or synthesis across many documents — for single-hop factual QA, simpler dense retrieval is faster and cheaper</li>
+<li>Entity and relation extraction quality is the key bottleneck: invest in prompt engineering and manual validation of extractions on a sample before full-corpus indexing</li>
+<li>Run community detection at multiple resolutions and expose both fine-grained and coarse community summaries to support a range of query specificity</li>
+<li>Local search is fast and targeted; global search is expensive but powerful — implement a query classifier to route between them based on question type</li>
+<li>GraphRAG indexing cost scales linearly with corpus size; for corpora updating frequently (daily), maintain a hybrid: GraphRAG for stable historical content, dense retrieval for recent additions</li>
+<li>Microsoft's open-source GraphRAG implementation is a good starting point; for production deployments, monitor LLM extraction costs per-chunk and set strict token budgets for community summarization prompts</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

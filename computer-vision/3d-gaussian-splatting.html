@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>3D Gaussian Splatting: Real-Time Novel View Synthesis | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>3D Gaussian Splatting: Real-Time Novel View Synthesis</h1>
+      
+      <h1>3D Gaussian Splatting: Real-Time Novel View Synthesis</h1>
+<h2>Overview</h2>
+<p>3D Gaussian Splatting (3DGS) represents a scene as a collection of 3D Gaussians — ellipsoidal probability distributions in space — each with position, covariance, opacity, and view-dependent colour encoded as spherical harmonics. Novel views are rendered by projecting all Gaussians onto the image plane and alpha-blending them front-to-back in a single fast GPU rasterization pass.</p>
+<p>3DGS was introduced by Kerbl et al. (SIGGRAPH 2023) and demonstrated real-time novel view synthesis at 100+ FPS on commodity GPUs, matching NeRF quality while being orders of magnitude faster at rendering. The method initialises Gaussians from a sparse SfM point cloud, then jointly optimises all Gaussian attributes via differentiable tile-based rasterization and adaptive density control.</p>
+<h2>3D Gaussian Representation</h2>
+<p>Each Gaussian is defined by a mean μ ∈ R³ and covariance Σ = RSS^T R^T, where R is a rotation matrix (parameterised as a unit quaternion for gradient stability) and S is a diagonal scale matrix. Storing rotation as a quaternion (4 floats) ensures the covariance stays positive semi-definite during gradient updates — direct optimisation of the 3×3 matrix does not guarantee this.</p>
+<pre><code class="language-python">import torch
+
+class Gaussian3D:
+    def __init__(self, n):
+        self.xyz     = torch.zeros(n, 3)      # position
+        self.rot     = torch.zeros(n, 4)      # quaternion
+        self.scale   = torch.zeros(n, 3)      # log-scale
+        self.opacity = torch.zeros(n, 1)      # pre-sigmoid
+        self.sh      = torch.zeros(n, 16, 3) # SH coefficients
+    # Total: 3+4+3+1+48 = 59 floats per Gaussian
+</code></pre>
+<p>Colour is encoded as degree-3 spherical harmonic coefficients — 16 per RGB channel (48 floats total) — capturing view-dependent appearance like specular highlights. During rendering, SH coefficients are evaluated at the current viewing direction to obtain the Gaussian's colour from that viewpoint, enabling the same lighting effects that NeRF's view-conditioned MLP output also models.</p>
+<h2>Differentiable Rasterization</h2>
+<p>Rasterization replaces NeRF's ray marching. Each Gaussian is projected from 3D to 2D using view and projection matrices. The projected 2D Gaussian is splatted onto a 16×16 pixel tile grid. Gaussians are sorted by depth per tile using a fast parallel radix sort on the GPU, enabling correct front-to-back alpha compositing without per-ray sequential sampling loops.</p>
+<pre><code class="language-python">def project_gaussian(mean3d, cov3d, view_mat, proj_mat):
+    # Jacobian of perspective projection at point t
+    t = view_mat @ mean3d
+    J = focal_jacobian(t, fx, fy)
+    W = view_mat[:3, :3]
+    cov2d = J @ W @ cov3d @ W.T @ J.T
+    mean2d = proj_mat @ mean3d
+    depth  = t[2]               # for depth-sort
+    return mean2d[:2], cov2d[:2, :2], depth
+</code></pre>
+<pre><code class="language-python">def render_pixel(gaussians_2d, pixel):
+    accum_alpha, color = 0.0, torch.zeros(3)
+    for g in gaussians_2d:      # front-to-back order
+        d = pixel - g.mu_2d
+        e = -0.5 * d @ g.cov2d_inv @ d
+        a = g.opacity * torch.exp(e)
+        color += (1 - accum_alpha) * a * g.color
+        accum_alpha += (1 - accum_alpha) * a
+        if accum_alpha &gt; 0.9999:
+            break
+    return color
+</code></pre>
+<p>The custom CUDA tile-based rasterizer is the key performance enabler. It processes all pixels in a tile simultaneously, avoiding per-ray sampling. The forward pass is fully differentiable so gradients flow back from the photometric loss (L1 + D-SSIM) to all Gaussian attributes simultaneously. This tile-based design scales to millions of Gaussians at consistently interactive frame rates.</p>
+<h2>Training with SfM Initialization</h2>
+<p>Training starts from a sparse point cloud produced by COLMAP (Structure-from-Motion). Each point becomes an initial Gaussian with small isotropic covariance. The scene is optimised over thousands of iterations on multi-view images using L1 photometric loss combined with D-SSIM structural similarity, with Adam as the optimiser and separate learning rates per attribute type.</p>
+<pre><code class="language-python">def adaptive_density_control(gaussians, step):
+    grads = gaussians.xyz.grad.norm(dim=-1)
+    big = gaussians.scale.max(-1).values
+    # Clone under-reconstructed small Gaussians
+    mask_clone = (grads &gt; tau_densify) &amp; (big &lt; size_thresh)
+    clone_gaussians(gaussians, mask_clone)
+    # Split over-reconstructed large Gaussians into 2
+    mask_split = (grads &gt; tau_densify) &amp; (big &gt;= size_thresh)
+    split_gaussians(gaussians, mask_split)
+    if step % 100 == 0:
+        prune_gaussians(gaussians, opacity_thresh=0.005)
+</code></pre>
+<p>After densification stabilises around 15k iterations, 3DGS converges in 30–60 minutes on a single A100. Opacity regularisation — periodic resetting of opacities followed by pruning below a threshold — prevents Gaussian count from exploding. A typical outdoor scene ends with 1–6 million Gaussians occupying 200–800 MB of GPU memory depending on scene complexity and capture density.</p>
+<blockquote>
+<p>****: 3DGS achieves real-time rendering (&gt;100 FPS) by replacing ray marching with rasterization. The key trick: sort Gaussians by depth once per frame and alpha-blend front-to-back — this is GPU-friendly and avoids the per-ray sampling bottleneck of NeRF.</p>
+</blockquote>
+<h2>Comparison to NeRF</h2>
+<p>The core trade-off: NeRF is implicit and compact (MLP weights ~5 MB) but slow to render; 3DGS is explicit and large (hundreds of MB) but real-time. NeRF renders via sequential MLP queries along rays, which is GPU-unfriendly. 3DGS renders via tile-based rasterization, which maps naturally to GPU parallelism and fully saturates tensor core throughput on modern hardware.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Representation</th>
+<th>Train time</th>
+<th>Render FPS</th>
+<th>PSNR (NeRF-Syn)</th>
+<th>Memory</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>NeRF</td>
+<td>MLP</td>
+<td>1–2 days</td>
+<td>&lt;1</td>
+<td>31.0</td>
+<td>~5 MB</td>
+</tr>
+<tr>
+<td>Instant-NGP</td>
+<td>Hash grid + MLP</td>
+<td>3–5 min</td>
+<td>10–30</td>
+<td>33.2</td>
+<td>~50 MB</td>
+</tr>
+<tr>
+<td>TensoRF</td>
+<td>Vector-matrix factors</td>
+<td>10–30 min</td>
+<td>5–20</td>
+<td>33.1</td>
+<td>~70 MB</td>
+</tr>
+<tr>
+<td>3DGS</td>
+<td>3D Gaussians</td>
+<td>30–60 min</td>
+<td>100–150</td>
+<td>33.3</td>
+<td>200–800 MB</td>
+</tr>
+<tr>
+<td>4DGS</td>
+<td>Deformable Gaussians</td>
+<td>1–2 hrs</td>
+<td>30–60</td>
+<td>32.0</td>
+<td>400+ MB</td>
+</tr>
+</tbody>
+</table>
+<p>3DGS struggles where NeRF excels: unbounded outdoor scenes, very thin structures, and smooth transparent surfaces. The Gaussian primitive poorly approximates fine filaments like tree branches and wire fences. 4DGS and Deformable-3DGS extend the method to dynamic scenes by adding a deformation field that moves and reshapes Gaussians over time given a per-frame latent code.</p>
+<p>Both methods require posed input images from COLMAP or known camera parameters. 3DGS additionally depends on a reasonable SfM initialisation — scenes with insufficient COLMAP coverage produce floaters and artefacts in under-sampled regions. Gaussian Opacity Fields and 2D Gaussian Splatting improve surface reconstruction quality by adding geometric regularisation terms to the training objective.</p>
+<h2>Key Takeaways</h2>
+<p>3DGS is now the dominant method for novel view synthesis in production settings, used in telepresence, game asset creation, and VR content pipelines. Its rendering speed advantage over NeRF is decisive for real-time applications. The main limitation is scene representation size, which restricts in-memory scene complexity for large-scale outdoor or city-level environments.</p>
+<p>The success of 3DGS sparked a wave of extensions: language-embedded Gaussians for open-vocabulary segmentation (LangSplat), generative Gaussian models for text-to-3D (DreamGaussian), hierarchical Gaussians for city-scale scenes, and physics-based Gaussian simulators. The explicit, differentiable nature of Gaussians makes them composable and editable in ways that implicit NeRFs fundamentally are not.</p>
+    </article>
+  </main>
+</body>
+</html>

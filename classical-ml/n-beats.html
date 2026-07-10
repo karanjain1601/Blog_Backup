@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>N-BEATS — Basis Expansion for Interpretable Forecasting | Notes Backup</title>
+  <meta name="description" content="Understand N-BEATS architecture: doubly residual stacking of blocks with backcast and forecast outputs, polynomial trend basis, Fourier seasonality basis, generic learned basis, and N-HiTS extension for longer horizons." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>N-BEATS — Basis Expansion for Interpretable Forecasting</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Understand N-BEATS architecture: doubly residual stacking of blocks with backcast and forecast outputs, polynomial trend basis, Fourier seasonality basis, generic learned basis, and N-HiTS extension for longer horizons.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>N-BEATS — Basis Expansion for Interpretable Forecasting</h1>
+<p>N-BEATS (Neural Basis Expansion Analysis for Interpretable Time Series) is a purely deep-learning forecasting architecture that requires no time-series-specific inductive bias. It learns to decompose a time series into interpretable components through a doubly residual stack of feed-forward blocks. Each block produces a backcast (reconstruction of its input window) and a forecast (prediction of future values). Released in 2020, N-BEATS achieved state-of-the-art on M4 and M3 competitions retrospectively and remains a strong baseline for univariate forecasting.</p>
+<h2>Architecture Overview</h2>
+<p>An N-BEATS model is organised into stacks, each containing multiple blocks. Each block receives the residual signal (original input minus the sum of all previous backcasts) — the doubly residual principle. The block produces two outputs: a backcast explaining part of its input, and a forecast contributing to the final prediction. Final forecast = sum of all blocks’ forecast outputs across all stacks. This design enables very deep networks without vanishing gradients.</p>
+<h2>The N-BEATS Block — Backcast and Forecast</h2>
+<p>Each block contains four fully-connected layers with ReLU activations, followed by two linear heads producing basis expansion coefficients θ_b (backcast) and θ_f (forecast). The coefficients are multiplied by fixed (trend/seasonality) or learned (generic) basis vectors g_b and g_f. For generic N-BEATS, g_b and g_f are learned linear projections. For interpretable N-BEATS, g_b uses a polynomial basis and g_f uses a Fourier basis.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class NBEATSBlock(nn.Module):
+    &quot;&quot;&quot;Single N-BEATS block: FC stack -&gt; basis coefficients -&gt; backcast + forecast.&quot;&quot;&quot;
+    def __init__(self, input_size, theta_size, forecast_size, hidden=256, num_layers=4):
+        super().__init__()
+        layers, in_dim = [], input_size
+        for _ in range(num_layers):
+            layers += [nn.Linear(in_dim, hidden), nn.ReLU()]
+            in_dim = hidden
+        self.fc_stack = nn.Sequential(*layers)
+        self.theta_b = nn.Linear(hidden, theta_size)   # backcast basis coefficients
+        self.theta_f = nn.Linear(hidden, theta_size)   # forecast basis coefficients
+        self.g_b = nn.Linear(theta_size, input_size, bias=False)    # generic backcast basis
+        self.g_f = nn.Linear(theta_size, forecast_size, bias=False) # generic forecast basis
+
+    def forward(self, x):
+        h = self.fc_stack(x)
+        backcast = self.g_b(self.theta_b(h))
+        forecast = self.g_f(self.theta_f(h))
+        return backcast, forecast
+
+# Verify shapes
+block = NBEATSBlock(input_size=30, theta_size=32, forecast_size=10)
+x = torch.randn(8, 30)
+bc, fc = block(x)
+print(f'Backcast: {bc.shape}, Forecast: {fc.shape}')
+print(f'Params: {sum(p.numel() for p in block.parameters()):,}')
+</code></pre>
+<h2>Doubly Residual Stacking</h2>
+<p>In doubly residual stacking each block receives only the unexplained residual (input minus all previous backcasts) rather than the raw input. Simultaneously, forecasts from all blocks accumulate additively. This is doubly residual: residual on the input side (subtracting backcasts) and additive on the output side (summing forecasts). It allows each block to specialise on explaining a different portion of the signal.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class NBEATSBlock(nn.Module):
+    def __init__(self, in_sz, fc_sz, hidden=128):
+        super().__init__()
+        self.fc = nn.Sequential(nn.Linear(in_sz, hidden), nn.ReLU(),
+                                nn.Linear(hidden, hidden), nn.ReLU())
+        self.g_b = nn.Linear(hidden, in_sz, bias=False)
+        self.g_f = nn.Linear(hidden, fc_sz, bias=False)
+    def forward(self, x):
+        h = self.fc(x)
+        return self.g_b(h), self.g_f(h)
+
+def doubly_residual_stack(blocks, x, fc_sz):
+    &quot;&quot;&quot;Subtract backcasts (residual input), accumulate forecasts.&quot;&quot;&quot;
+    residual = x.clone()
+    forecast = torch.zeros(x.size(0), fc_sz)
+    for blk in blocks:
+        bc, fc = blk(residual)
+        residual = residual - bc   # only unexplained signal passes forward
+        forecast = forecast + fc   # each block contributes to total forecast
+    return residual, forecast
+
+torch.manual_seed(0)
+IN, HZ = 30, 10
+trend_blks = [NBEATSBlock(IN, HZ) for _ in range(3)]
+seas_blks  = [NBEATSBlock(IN, HZ) for _ in range(3)]
+x = torch.randn(4, IN)
+r1, fc1 = doubly_residual_stack(trend_blks, x, HZ)
+r2, fc2 = doubly_residual_stack(seas_blks, r1, HZ)
+print(f'Input norm:           {x.norm():.4f}')
+print(f'After trend residual: {r1.norm():.4f}')
+print(f'After seas  residual: {r2.norm():.4f}')
+print(f'Total forecast shape: {(fc1 + fc2).shape}')
+</code></pre>
+<h2>Interpretable N-BEATS — Trend and Seasonality Stacks</h2>
+<p>Interpretable N-BEATS uses fixed basis functions: polynomial for the trend stack and Fourier for the seasonality stack. The FC stack learns coefficient vectors θ which are multiplied by these fixed matrices. This forces trend blocks to model only polynomial trends and seasonality blocks to model only periodic patterns, enabling direct decomposition of the final forecast into interpretable components.</p>
+<pre><code class="language-python">import pandas as pd
+import numpy as np
+from neuralforecast import NeuralForecast
+from neuralforecast.models import NBEATS
+from neuralforecast.losses.pytorch import MAE
+
+np.random.seed(42)
+horizon = 12
+dates = pd.date_range('2015-01', periods=96, freq='ME')
+df = pd.concat([
+    pd.DataFrame({
+        'unique_id': f'series_{i}',
+        'ds': dates,
+        'y': (50 * np.sin(np.linspace(0, 6*np.pi, 96))
+              + np.linspace(100, 200, 96)
+              + 5 * np.random.randn(96))
+    }) for i in range(3)
+], ignore_index=True)
+
+model = NBEATS(
+    h=horizon, input_size=2*horizon,
+    stack_types=['trend', 'seasonality'],  # interpretable N-BEATS variant
+    n_blocks=[3, 3],
+    mlp_units=[[256, 256], [256, 256]],
+    max_steps=200, loss=MAE(),
+)
+nf = NeuralForecast(models=[model], freq='ME')
+nf.fit(df=df)
+preds = nf.predict()
+print(preds.head())
+print(f'Columns: {list(preds.columns)}')
+</code></pre>
+<h2>Interpreting Trend and Seasonality Block Outputs</h2>
+<p>The trend basis is a polynomial up to degree p: B_trend = [1, t, t², ..., tᵖ] with t normalised to [-1, 1]. The seasonality basis is a Fourier expansion: B_seas = [sin(t), cos(t), sin(2t), cos(2t), ...] at multiple harmonics. Learned coefficients θ from the FC stack act as amplitudes. Extracting θ × B gives the interpretable trend and seasonal forecast components separately.</p>
+<pre><code class="language-python">import numpy as np
+
+def polynomial_basis(backcast_len, forecast_len, degree=3):
+    &quot;&quot;&quot;N-BEATS polynomial trend basis: [1, t, t^2, ..., t^degree].&quot;&quot;&quot;
+    t = np.linspace(-1, 1, backcast_len + forecast_len)
+    basis = np.stack([t**d for d in range(degree + 1)])
+    return basis[:, :backcast_len], basis[:, backcast_len:]
+
+def fourier_basis(backcast_len, forecast_len, harmonics=4):
+    &quot;&quot;&quot;N-BEATS Fourier seasonality basis: sin + cos at multiple frequencies.&quot;&quot;&quot;
+    t = np.linspace(0, 2*np.pi, backcast_len + forecast_len)
+    k = np.arange(1, harmonics + 1)
+    sin_b = np.sin(np.outer(k, t[:backcast_len]))
+    cos_b = np.cos(np.outer(k, t[:backcast_len]))
+    sin_f = np.sin(np.outer(k, t[backcast_len:]))
+    cos_f = np.cos(np.outer(k, t[backcast_len:]))
+    return np.vstack([sin_b, cos_b]), np.vstack([sin_f, cos_f])
+
+np.random.seed(1)
+BACK, FWD = 24, 12
+trend_bc, trend_fc = polynomial_basis(BACK, FWD, degree=3)
+seas_bc,  seas_fc  = fourier_basis(BACK, FWD, harmonics=4)
+
+theta_t = np.array([100., 20., -3., 0.5])  # learned trend coefficients
+theta_s = np.random.randn(8)               # learned seasonality coefficients
+trend_component = theta_t @ trend_fc
+seas_component  = theta_s @ seas_fc
+print(f'Trend basis (forecast): {trend_fc.shape}  -- degree-3 polynomial')
+print(f'Seas  basis (forecast): {seas_fc.shape}  -- 4 harmonics x sin+cos')
+print(f'Trend forecast: {trend_component.round(2)}')
+print(f'Combined first 4: {(trend_component + seas_component)[:4].round(3)}')
+</code></pre>
+<blockquote>
+<p><strong>Interpretable vs Generic N-BEATS</strong>: Use interpretable N-BEATS (trend + seasonality stacks with fixed bases) when explainability matters or when domain knowledge confirms polynomial trend and Fourier seasonality. Use generic N-BEATS (all-learned basis) for raw benchmark performance — it is typically 1–2% more accurate on M4 but produces no decomposition.</p>
+</blockquote>
+<h2>N-BEATS vs N-HiTS vs Transformer Forecasters</h2>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Architecture</th>
+<th>Interpretable</th>
+<th>Covariates</th>
+<th>Long Horizon</th>
+<th>M4 Rank</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>N-BEATS Generic</td>
+<td>Deep FC + learned basis</td>
+<td>No</td>
+<td>No (N-BEATSx needed)</td>
+<td>Moderate</td>
+<td>1st (2020)</td>
+</tr>
+<tr>
+<td>N-BEATS Interpretable</td>
+<td>FC + poly + Fourier basis</td>
+<td>Yes</td>
+<td>No</td>
+<td>Moderate</td>
+<td>1st (tied)</td>
+</tr>
+<tr>
+<td>N-HiTS</td>
+<td>Hierarchical interpolation, multi-rate pooling</td>
+<td>Partial</td>
+<td>Yes</td>
+<td>Strong</td>
+<td>SOTA long-horizon</td>
+</tr>
+<tr>
+<td>TFT</td>
+<td>Multi-head attention + LSTM</td>
+<td>Via attention</td>
+<td>Yes (rich)</td>
+<td>Good</td>
+<td>2nd–3rd</td>
+</tr>
+<tr>
+<td>PatchTST</td>
+<td>Patch-based channel-independent Transformer</td>
+<td>No</td>
+<td>Limited</td>
+<td>Strong</td>
+<td>Competitive</td>
+</tr>
+</tbody>
+</table>
+<h2>N-BEATSx and N-HiTS Extensions</h2>
+<p>N-BEATSx extends N-BEATS to accept external covariates by concatenating them to the block input. N-HiTS improves long-horizon forecasting by hierarchical interpolation: each stack operates at a different temporal resolution (downsampling ratios [1, 2, 4]) and outputs are upsampled and summed. This dramatically reduces the effective sequence length for long horizons and improves accuracy on ETT and Electricity datasets versus vanilla Transformers.</p>
+<ul>
+<li>N-BEATS: purely univariate, no covariates, interpretable or generic stacks.</li>
+<li>N-BEATSx: adds exogenous input to block FC layers; supports future-known covariates.</li>
+<li>N-HiTS: hierarchical multi-rate sampling, superior on horizons H &gt; 48, available in NeuralForecast.</li>
+<li>Generic basis: fully learned g_b and g_f allow arbitrary decompositions but lose interpretability.</li>
+<li>Polynomial degree and Fourier harmonics are hyperparameters (typically degree=3, harmonics=floor(H/2)).</li>
+<li>Training: ADAM with lr~1e-3, gradient clipping, and MAE or MSE loss.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

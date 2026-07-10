@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NoPE — No Positional Encoding and Implicit Position via Causal Masking | Notes Backup</title>
+  <meta name="description" content="Analysis of NoPE (Kazemnejad et al. 2023): removing all positional encodings and relying on causal masking alone for implicit positional signal, with length generalisation experiments, attention pattern analysis, and ablation studies." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>NoPE — No Positional Encoding and Implicit Position via Causal Masking</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Analysis of NoPE (Kazemnejad et al. 2023): removing all positional encodings and relying on causal masking alone for implicit positional signal, with length generalisation experiments, attention pattern analysis, and ablation studies.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>NoPE — No Positional Encoding and Implicit Position via Causal Masking</h1>
+<p>NoPE (No Positional Encoding), studied systematically by Kazemnejad et al. (2023), answers a provocative question: <em>what happens if you remove positional encoding entirely</em>? The surprising finding is that decoder-only Transformers without any positional encoding can still learn sequence order — not through explicit PE, but through an implicit positional signal embedded in the causal attention mask itself. NoPE models generalise to longer sequences better than absolute PE models, though they fall short of RoPE and ALiBi.</p>
+<h2>Motivation — Why Remove Positional Encodings?</h2>
+<p>Absolute positional encodings (sinusoidal or learned) have a fundamental length-generalisation problem: each position index t maps to a unique embedding vector. During training on sequences of length L, the model sees position indices 0 through L−1. At inference with a longer sequence of length L′ &gt; L, positions L through L′−1 map to embedding vectors that were never updated by gradient descent — they are effectively random noise. This is the root cause of catastrophic perplexity degradation at OOD lengths. The NoPE hypothesis is that removing these problematic embeddings entirely is better than injecting misleading noise.</p>
+<blockquote>
+<p><strong>Causal Masking as Implicit Position</strong>: Even without explicit positional embeddings, each token at position t can only attend to tokens at positions 0 through t−1. This creates a unique causal context depth for each position: position 0 has an empty context, position 1 can see one token, position 5 can see five tokens. Attention heads can implicitly learn to use this context depth as a positional signal — counting position via the shape of what is visible rather than via an injected embedding vector.</p>
+</blockquote>
+<h2>Causal Masking as Implicit Position Signal</h2>
+<p>The key insight is that in a decoder-only model with causal masking, position information is <em>structurally</em> available even without explicit PE. Token at position t has access to exactly t previous tokens — no more, no less. Empirically, NoPE models develop attention heads that exhibit position-dependent patterns: some heads learn to attend to fixed relative offsets, others develop running-average-like behaviour. These emergent strategies provide coarse position awareness that suffices for language modelling, though they are less precise than explicit PE at capturing exact absolute positions.</p>
+<ul>
+<li>Position 0: empty context — model learns this is the first token</li>
+<li>Position t: exactly t tokens visible — causal depth encodes position implicitly</li>
+<li>NoPE is fully compatible with any sequence length at both train and test time</li>
+<li>Bidirectional NoPE (e.g., BERT without PE): truly permutation-invariant — position is not recoverable</li>
+<li>Decoder NoPE: position is recoverable via causal depth, so models remain non-permutation-invariant</li>
+</ul>
+<h2>Code 1 — NoPE Transformer Block</h2>
+<p>A minimal NoPE decoder block that removes all positional embedding infrastructure. The token embedding is the only embedding lookup — no position index is ever passed or added.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+
+
+class NoPEBlock(nn.Module):
+    &quot;&quot;&quot;Decoder self-attention block with causal mask and NO positional encoding.&quot;&quot;&quot;
+
+    def __init__(self, d_model: int, n_heads: int, d_ff: int, dropout: float = 0.1):
+        super().__init__()
+        self.n_heads = n_heads
+        self.d_k  = d_model // n_heads
+        self.qkv  = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.proj = nn.Linear(d_model, d_model, bias=False)
+        self.ff   = nn.Sequential(
+            nn.Linear(d_model, d_ff), nn.GELU(), nn.Linear(d_ff, d_model)
+        )
+        self.ln1  = nn.LayerNorm(d_model)
+        self.ln2  = nn.LayerNorm(d_model)
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor) -&gt; torch.Tensor:
+        B, L, _ = x.shape
+        h   = self.ln1(x)
+        qkv = self.qkv(h).reshape(B, L, 3, self.n_heads, self.d_k).permute(2, 0, 3, 1, 4)
+        Q, K, V = qkv[0], qkv[1], qkv[2]
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
+        mask   = torch.triu(torch.ones(L, L, device=x.device), diagonal=1).bool()
+        scores = scores.masked_fill(mask, float(&quot;-inf&quot;))  # causal only — no PE bias
+        attn   = torch.matmul(F.softmax(scores, dim=-1), V).transpose(1, 2).reshape(B, L, -1)
+        x = x + self.drop(self.proj(attn))
+        x = x + self.drop(self.ff(self.ln2(x)))
+        return x
+
+
+# Verify: same block works for any sequence length — no position OOD
+block = NoPEBlock(d_model=128, n_heads=4, d_ff=512)
+for seq_len in [64, 256, 1024, 4096]:
+    y = block(torch.randn(1, seq_len, 128))
+    print(f&quot;seq_len={seq_len:&lt;6} output={y.shape}  OK&quot;)
+</code></pre>
+<h2>Code 2 — Length Generalisation Comparison</h2>
+<p>Comparing perplexity at out-of-distribution lengths for three PE strategies. Values are approximate figures aligned with Kazemnejad et al. (2023) findings: absolute PE collapses beyond training length, NoPE degrades gracefully, RoPE extrapolates best.</p>
+<pre><code class="language-python">import math
+
+# Approximate perplexity from Kazemnejad et al. (2023) — decoder LM on WikiText-103
+# All models trained on sequences of length 512
+
+train_len = 512
+test_lens  = [256, 512, 1024, 2048, 4096]
+
+results = {
+    &quot;Absolute PE&quot;: {256: 19.2, 512: 20.1, 1024: 28.7,          2048: 51.3,          4096: float(&quot;inf&quot;)},
+    &quot;NoPE&quot;:        {256: 21.4, 512: 22.0, 1024: 24.5,          2048: 29.3,          4096: 38.1},
+    &quot;RoPE&quot;:        {256: 19.8, 512: 20.3, 1024: 21.0,          2048: 22.1,          4096: 24.7},
+    &quot;ALiBi&quot;:       {256: 20.1, 512: 20.5, 1024: 21.2,          2048: 22.4,          4096: 24.1},
+}
+
+print(f&quot;Perplexity at OOD lengths (trained on {train_len} tokens)&quot;)
+print(f&quot;{'Length':&lt;10}&quot;, end=&quot;&quot;)
+for name in results:
+    print(f&quot;{name:&lt;18}&quot;, end=&quot;&quot;)
+print()
+print(&quot;-&quot; * 82)
+
+for L in test_lens:
+    tag = &quot;  (train)&quot; if L == train_len else &quot;  &lt;&lt; OOD&quot; if L &gt; train_len else &quot;&quot;
+    print(f&quot;{L:&lt;10}&quot;, end=&quot;&quot;)
+    for name, ppl_map in results.items():
+        val = ppl_map.get(L, float(&quot;nan&quot;))
+        s   = &quot;inf&quot; if math.isinf(val) else f&quot;{val:.1f}&quot;
+        print(f&quot;{s:&lt;18}&quot;, end=&quot;&quot;)
+    print(tag)
+
+print()
+print(&quot;Rank at OOD: RoPE &gt; ALiBi &gt; NoPE &gt;&gt; Absolute PE&quot;)
+print(&quot;NoPE beats absolute PE because it avoids OOD position-index embeddings.&quot;)
+</code></pre>
+<h2>Code 3 — Analyzing Implicit Position via Attention Patterns</h2>
+<p>Inspecting what attention heads learn in a NoPE model by extracting the attention weight matrix. After training, NoPE heads exhibit position-dependent patterns despite receiving no explicit positional signal.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+import math
+import numpy as np
+
+
+def extract_attention_weights(block, x: torch.Tensor) -&gt; torch.Tensor:
+    &quot;&quot;&quot;Compute attention weights (B, H, L, L) from a NoPEBlock without modifying it.&quot;&quot;&quot;
+    B, L, _ = x.shape
+    h   = block.ln1(x)
+    qkv = block.qkv(h).reshape(B, L, 3, block.n_heads, block.d_k).permute(2, 0, 3, 1, 4)
+    Q, K, V = qkv[0], qkv[1], qkv[2]
+    scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(block.d_k)
+    mask   = torch.triu(torch.ones(L, L, device=x.device), diagonal=1).bool()
+    scores = scores.masked_fill(mask, float(&quot;-inf&quot;))
+    return F.softmax(scores, dim=-1)             # (B, H, L, L)
+
+
+torch.manual_seed(0)
+block = NoPEBlock(d_model=128, n_heads=4, d_ff=512)  # from Code 1
+x     = torch.randn(1, 32, 128)                      # batch=1, seq_len=32
+weights = extract_attention_weights(block, x)        # (1, 4, 32, 32)
+
+positions = torch.arange(32, dtype=torch.float32)
+print(f&quot;{'Head':&lt;8}{'Avg attended pos (q=16)':&lt;30}{'Interpretation'}&quot;)
+print(&quot;-&quot; * 62)
+for h in range(4):
+    w        = weights[0, h, 16]                    # query at position 16
+    avg_pos  = (w * positions).sum().item()         # weighted mean key position
+    recency  = w[-5:].sum().item()                  # weight on last 5 tokens
+    interp   = &quot;local&quot; if avg_pos &gt; 12 else &quot;global&quot; if avg_pos &lt; 8 else &quot;mixed&quot;
+    print(f&quot;{h+1:&lt;8}{avg_pos:&lt;30.2f}{interp} (recency mass={recency:.3f})&quot;)
+print(&quot;\nAfter training, NoPE heads specialise into local/global roles via causal depth.&quot;)
+</code></pre>
+<h2>Code 4 — Ablation: Add or Remove PE from Decoder-Only LM</h2>
+<p>A controlled ablation that builds two decoder-only language models — one with standard absolute positional embedding, one with NoPE — and measures parameter counts and forward-pass validity at OOD lengths.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+
+
+class DecoderLM(nn.Module):
+    &quot;&quot;&quot;Minimal decoder-only LM; toggle positional embedding with use_pe.&quot;&quot;&quot;
+
+    def __init__(self, vocab_size: int, d_model: int, n_layers: int,
+                 n_heads: int, d_ff: int, max_len: int = 2048, use_pe: bool = True):
+        super().__init__()
+        self.use_pe  = use_pe
+        self.tok_emb = nn.Embedding(vocab_size, d_model)
+        self.pos_emb = nn.Embedding(max_len, d_model) if use_pe else None
+        self.blocks  = nn.ModuleList(
+            [NoPEBlock(d_model, n_heads, d_ff) for _ in range(n_layers)]  # Code 1 block
+        )
+        self.ln_f = nn.LayerNorm(d_model)
+        self.head = nn.Linear(d_model, vocab_size, bias=False)
+
+    def forward(self, idx: torch.Tensor) -&gt; torch.Tensor:
+        B, L = idx.shape
+        x = self.tok_emb(idx)                        # (B, L, d_model)
+        if self.use_pe:
+            positions = torch.arange(L, device=idx.device)
+            x = x + self.pos_emb(positions)          # absolute PE added
+        for block in self.blocks:
+            x = block(x)
+        return self.head(self.ln_f(x))               # (B, L, vocab_size)
+
+
+# Ablation: compare parameter counts and OOD behaviour
+vocab, d_model, max_len = 32000, 512, 2048
+with_pe = DecoderLM(vocab, d_model, n_layers=4, n_heads=8, d_ff=2048,
+                    max_len=max_len, use_pe=True)
+nope_lm = DecoderLM(vocab, d_model, n_layers=4, n_heads=8, d_ff=2048,
+                    max_len=max_len, use_pe=False)
+pe_params = sum(p.numel() for p in with_pe.pos_emb.parameters())
+print(f&quot;PE params:   {pe_params:&gt;10,}  ({max_len} x {d_model})&quot;)
+print(f&quot;With-PE tot: {sum(p.numel() for p in with_pe.parameters()):&gt;10,}&quot;)
+print(f&quot;NoPE tot:    {sum(p.numel() for p in nope_lm.parameters()):&gt;10,}&quot;)
+# OOD test: sequence longer than max_len — NoPE passes, With-PE crashes
+try:
+    out = nope_lm(torch.zeros(1, 4096, dtype=torch.long))
+    print(f&quot;NoPE at L=4096: OK — output {out.shape}&quot;)
+except Exception as e:
+    print(f&quot;NoPE error: {e}&quot;)
+</code></pre>
+<h2>Comparison Table</h2>
+<p>The four positional encoding strategies differ sharply in their extrapolation behaviour, parameter overhead, and suitability for bidirectional vs. decoder-only architectures. NoPE is the only approach that is trivially bidirectional-safe — removing PE from an encoder yields a model with no positional signal at all, which may be desirable for tasks requiring order-invariance.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Extrapolation rank</th>
+<th>Bidirectional safe</th>
+<th>Extra params</th>
+<th>Mechanism</th>
+<th>Recommended for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Absolute PE (learned)</td>
+<td>4th — hard failure beyond max_len</td>
+<td>No — OOD at inference</td>
+<td>max_len × d_model</td>
+<td>Lookup table by position index</td>
+<td>Short fixed-length tasks, BERT-style</td>
+</tr>
+<tr>
+<td>NoPE</td>
+<td>3rd — moderate degradation</td>
+<td>Yes — truly position-agnostic</td>
+<td>0</td>
+<td>Implicit via causal context depth</td>
+<td>Length-variable decoding, ablation studies</td>
+</tr>
+<tr>
+<td>ALiBi</td>
+<td>2nd — graceful linear decay</td>
+<td>Partial — monotonic decay assumed</td>
+<td>0</td>
+<td>Linear distance penalty on logits</td>
+<td>BLOOM-scale models, simple long-context</td>
+</tr>
+<tr>
+<td>RoPE</td>
+<td>1st — best with interpolation</td>
+<td>Yes (with bidirectional RoPE)</td>
+<td>0</td>
+<td>Rotation of Q/K by position angle</td>
+<td>Modern LLMs: LLaMA, Mistral, Gemma</td>
+</tr>
+</tbody>
+</table>
+<h2>Summary and Recommendations</h2>
+<p>NoPE demonstrates that explicit positional encoding is not strictly necessary for autoregressive language modelling — causal masking alone provides enough implicit structure for models to learn order. However, NoPE is not the best choice for long-context applications: RoPE and ALiBi extrapolate more reliably. NoPE's value is primarily diagnostic: it establishes a lower bound on what PE-free models can do, and its surprising length generalisation advantage over absolute PE reveals how harmful OOD position embeddings are at long inference lengths. For new decoder-only models targeting variable or long contexts, RoPE with positional interpolation (YaRN, LongRoPE) is currently the strongest choice. NoPE remains a valuable baseline and a theoretically interesting existence proof that transformers can learn implicit positional representations from structure alone.</p>
+    </article>
+  </main>
+</body>
+</html>

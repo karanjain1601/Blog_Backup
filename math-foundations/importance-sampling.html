@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Importance Sampling | Notes Backup</title>
+  <meta name="description" content="The importance sampling estimator, self-normalised IS, effective sample size, variance explosion with mismatched proposals, weight clipping, annealed IS, and applications in off-policy RL and RLHF." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Importance Sampling</h1>
+      <ul class='note-meta'><li><strong>description:</strong> The importance sampling estimator, self-normalised IS, effective sample size, variance explosion with mismatched proposals, weight clipping, annealed IS, and applications in off-policy RL and RLHF.</li><li><strong>topic:</strong> math-foundations</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Importance Sampling</h1>
+<p>Importance sampling (IS) solves a fundamental problem: estimating expectations under a target distribution p when samples can only be drawn from a different proposal distribution q. This arises constantly in ML — computing expectations under a complex posterior when only a simple distribution is sampleable, correcting for distributional shift between training and deployment, evaluating policies trained on different data, and fine-tuning language models with RLHF where reference and fine-tuned distributions diverge. IS is also the foundation of Sequential Monte Carlo, annealed importance sampling for partition function estimation, and policy gradient variance reduction through baseline subtraction.</p>
+<h2>Core Definition — The IS Estimator</h2>
+<p>Goal: estimate E_p[f(X)] = ∫ f(x) p(x) dx but we can only sample from q(x).</p>
+<p>Key algebraic identity:
+E_p[f(X)] = ∫ f(x) p(x) dx = ∫ f(x) [p(x)/q(x)] q(x) dx = E_q[f(X) w(X)]</p>
+<p>where w(x) = p(x)/q(x) are the importance weights. Requirements: q must have support everywhere p is positive (q(x) &gt; 0 whenever p(x) &gt; 0).</p>
+<p>IS estimator (unnormalised):
+Ê_IS[f] = (1/N) Σᵢ f(xᵢ) w(xᵢ),  xᵢ ~ q</p>
+<p>Self-normalised IS (SNIS) — does not require knowing the normalisation constant of p:
+Ê_SNIS[f] = Σᵢ f(xᵢ) w̃ᵢ  where w̃ᵢ = wᵢ / Σⱼ wⱼ</p>
+<p>SNIS is biased but consistent (bias O(1/N)). It is preferred when p is known only up to a normalising constant, which is the common case in Bayesian inference.</p>
+<pre><code class="language-python">import numpy as np
+from scipy import stats
+
+rng = np.random.default_rng(42)
+
+# Target p: N(3, 0.5^2); Proposal q: N(0, 2^2)
+# Goal: E_p[X^2] = mu^2 + sigma^2 = 9.25
+mu_p, sigma_p = 3.0, 0.5
+mu_q, sigma_q = 0.0, 2.0
+true_val = mu_p**2 + sigma_p**2  # 9.25
+
+N = 5000
+x = rng.normal(mu_q, sigma_q, N)  # sample from q
+
+# Compute log importance weights (always work in log-space!)
+log_w = stats.norm.logpdf(x, mu_p, sigma_p) - stats.norm.logpdf(x, mu_q, sigma_q)
+w = np.exp(log_w)
+
+# Unnormalised IS (requires p to be normalised)
+is_est   = np.mean(x**2 * w)
+
+# Self-normalised IS (works with unnormalised p)
+w_norm   = w / w.sum()
+snis_est = np.sum(x**2 * w_norm)
+
+# Effective sample size: ESS = (sum w)^2 / sum(w^2)
+ess = w.sum()**2 / np.sum(w**2)
+
+print(f&quot;True E_p[X^2]:     {true_val:.4f}&quot;)
+print(f&quot;IS estimate:       {is_est:.4f}  (requires normalised p)&quot;)
+print(f&quot;SNIS estimate:     {snis_est:.4f}  (works with unnormalised p)&quot;)
+print(f&quot;ESS: {ess:.1f} / {N}  ({100*ess/N:.1f}%)&quot;)
+
+# Weight diagnostics
+w_norm_sorted = np.sort(w_norm)[::-1]
+cumsum = np.cumsum(w_norm_sorted)
+n_50pct = np.searchsorted(cumsum, 0.5) + 1
+print(f&quot;Top {n_50pct} samples carry 50% of total weight (out of {N})&quot;)
+print(f&quot;Max weight: {w_norm.max():.4e}, mean weight: {w_norm.mean():.4e}&quot;)
+</code></pre>
+<h2>Effective Sample Size and Variance</h2>
+<p>The effective sample size (ESS) measures how many i.i.d. samples from p the IS estimate is equivalent to:</p>
+<p>ESS = (Σᵢ wᵢ)² / Σᵢ wᵢ²</p>
+<p>For normalised weights: ESS = 1 / Σᵢ w̃ᵢ² ∈ [1, N].</p>
+<p>Properties:
+- ESS = N when all weights are equal — this happens when q = p (perfect proposal)
+- ESS = 1 when one weight dominates all others — worst case, the estimate is based on a single sample
+- ESS/N measures the efficiency of IS: values above 0.5 indicate reasonable proposals; below 0.1 is problematic</p>
+<p>Variance of the IS estimator:
+Var_q[f(x) w(x)] = ∫ (f(x) w(x))² q(x) dx − (E_p[f(x)])²</p>
+<p>This variance is finite if and only if E_q[(f(x) w(x))²] &lt; ∞ — roughly requiring that p(x)/q(x) is bounded. If q has lighter tails than p anywhere, the ratio p/q can become unbounded and variance is infinite. The optimal IS proposal is q*(x) ∝ |f(x)| p(x), concentrating samples where the integrand is largest.</p>
+<h2>Variance Explosion and Weight Clipping</h2>
+<p>When q has lighter tails than p, the importance weights w(x) = p(x)/q(x) → ∞ for large |x|. This causes:</p>
+<ol>
+<li>A few samples with enormous weights dominate the estimate (ESS → 1)</li>
+<li>The IS estimator has infinite variance (despite being unbiased)</li>
+<li>In practice: highly variable estimates, numerical overflow in weights</li>
+</ol>
+<p>Weight clipping (truncation) caps weights at a maximum value c: w̃(x) = min(w(x), c). This introduces bias — it no longer correctly estimates E_p[f] — but reduces variance substantially. The bias is O(P(w(X) &gt; c)) which is small when c is chosen appropriately.</p>
+<p>For RLHF: the policy ratio π_θ(a|s)/π_ref(a|s) plays the role of an importance weight. PPO clips this ratio to [1−ε, 1+ε] for the same reason — preventing variance explosion when the policy drifts far from the reference, at the cost of introducing a small bias in the gradient estimate.</p>
+<pre><code class="language-python">import numpy as np
+from scipy import stats
+
+rng = np.random.default_rng(42)
+
+# Variance explosion: proposal has lighter tails than target
+# Target p: t(3) (heavy tails), Proposal q: N(0,1) (light tails)
+# E_p[X^2] = df/(df-2) = 3.0 for t(3)
+true_val = 3.0
+N = 2000
+
+print(&quot;=== Variance Explosion: q (Normal) lighter than p (t(3)) ===&quot;)
+for run in range(4):
+    x = rng.standard_normal(N)
+    log_w = stats.t.logpdf(x, df=3) - stats.norm.logpdf(x, 0, 1)
+    w = np.exp(log_w)
+    ess = w.sum()**2 / np.sum(w**2)
+    est = np.sum(x**2 * w / w.sum())
+    print(f&quot;  Run {run+1}: SNIS={est:7.2f}  ESS={ess:6.0f}  max_logw={np.log(w.max()):6.2f}&quot;)
+
+print(&quot;\n=== Weight Clipping Bias-Variance Tradeoff ===&quot;)
+x = rng.standard_normal(N)
+log_w = stats.t.logpdf(x, df=3) - stats.norm.logpdf(x, 0, 1)
+w = np.exp(log_w)
+for c in [np.inf, 50.0, 10.0, 5.0, 2.0]:
+    w_clipped = np.minimum(w, c)
+    w_norm    = w_clipped / w_clipped.sum()
+    est       = np.sum(x**2 * w_norm)
+    ess       = 1 / np.sum(w_norm**2)
+    c_str = f&quot;{c:.0f}&quot; if c != np.inf else &quot;none&quot;
+    print(f&quot;  clip={c_str:&gt;5}: SNIS={est:.4f}  ESS={ess:.0f}  bias={abs(est-true_val):.4f}&quot;)
+
+print(&quot;\n=== Correct: q = t(3) = target ===&quot;)
+x_good = rng.standard_t(3, N)
+w_good = np.ones(N)   # all weights = 1
+ess_good = N
+print(f&quot;  SNIS={np.mean(x_good**2):.4f}  ESS={ess_good}  (all weights equal)&quot;)
+</code></pre>
+<h2>Off-Policy RL and RLHF Applications</h2>
+<p>Importance sampling is central to off-policy reinforcement learning: we want to evaluate a target policy π_θ using trajectories collected by a behaviour policy π_b. The IS correction for a T-step trajectory τ = (s₀,a₀,…,sₜ) is:</p>
+<p>ρ(τ) = Πₜ π_θ(aₜ|sₜ) / π_b(aₜ|sₜ)</p>
+<p>For long trajectories, ρ(τ) is a product of T ratios — it can have exponentially growing variance. Per-decision IS uses partial products ρₜ = Π_{t'≤t} π_θ(aₜ'|sₜ') / π_b(aₜ'|sₜ') that reduce variance significantly.</p>
+<p>In RLHF with PPO: the fine-tuned policy π_θ generates responses; the reward model scores them; the PPO loss clips the ratio r_t = π_θ(aₜ|sₜ)/π_old(aₜ|sₜ) to [1−ε, 1+ε] at each token. This is weight clipping applied per-token in the trajectory, preventing any single update from moving the policy too far from the reference.</p>
+<pre><code class="language-python">import numpy as np
+
+rng = np.random.default_rng(42)
+
+# Off-policy IS: evaluate target policy using behaviour-policy trajectories
+n_states, n_actions = 5, 2
+pi_target   = np.array([[0.7, 0.3]] * n_states)  # target: biased toward action 0
+pi_behavior = np.array([[0.5, 0.5]] * n_states)  # behavior: uniform
+
+def run_episode(pi, max_steps=8):
+    s = rng.integers(n_states)
+    traj, G = [], 0.0
+    for _ in range(max_steps):
+        a = rng.choice(n_actions, p=pi[s])
+        r = rng.standard_normal()
+        traj.append((s, a, r)); G += r
+        s = rng.integers(n_states)
+    return traj, G
+
+n_ep = 2000
+is_returns, direct_returns = [], []
+for _ in range(n_ep):
+    traj, _ = run_episode(pi_behavior)
+    # Trajectory IS weight (product of per-step ratios)
+    log_rho = sum(np.log(pi_target[s,a]) - np.log(pi_behavior[s,a]) for s,a,r in traj)
+    rho = np.exp(np.clip(log_rho, -10, 10))   # clip for numerical safety
+    G = sum(r for _,_,r in traj)
+    is_returns.append(G * rho)
+    direct_returns.append(G)
+
+true_returns = [run_episode(pi_target)[1] for _ in range(n_ep)]
+
+print(&quot;=== Off-Policy Value Estimation ===&quot;)
+print(f&quot;Naive (behavior policy):   {np.mean(direct_returns):.4f} SE={np.std(direct_returns)/np.sqrt(n_ep):.4f}&quot;)
+print(f&quot;IS-corrected:              {np.mean(is_returns):.4f} SE={np.std(is_returns)/np.sqrt(n_ep):.4f}&quot;)
+print(f&quot;True (target policy):      {np.mean(true_returns):.4f} SE={np.std(true_returns)/np.sqrt(n_ep):.4f}&quot;)
+
+# PPO-style ratio clipping simulation
+print(&quot;\n=== PPO Ratio Clipping (eps=0.2) ===&quot;)
+log_ratios = [sum(np.log(pi_target[s,a])-np.log(pi_behavior[s,a]) for s,a,r in run_episode(pi_behavior)[0])
+              for _ in range(500)]
+ratios = np.exp(np.array(log_ratios))
+eps = 0.2
+clipped = np.clip(ratios, 1-eps, 1+eps)
+pct_clipped = np.mean((ratios &lt; 1-eps) | (ratios &gt; 1+eps)) * 100
+print(f&quot;Unclipped ratios: min={ratios.min():.3f} mean={ratios.mean():.3f} max={ratios.max():.3f}&quot;)
+print(f&quot;Clipped ratios:   min={clipped.min():.3f} mean={clipped.mean():.3f} max={clipped.max():.3f}&quot;)
+print(f&quot;{pct_clipped:.1f}% of trajectories had ratios outside [1-eps, 1+eps]&quot;)
+</code></pre>
+<h2>Annealed Importance Sampling</h2>
+<p>Annealed importance sampling (AIS) estimates the ratio of partition functions Z₁/Z₀ — a quantity needed for Bayesian model comparison, normalising flow likelihood evaluation, and energy-based model training. It bridges between an easy proposal p₀ and a hard target p₁ through a sequence of intermediate distributions:</p>
+<p>p_t(x) ∝ p₀(x)^{1-βₜ} p₁(x)^{βₜ},  β₀=0, β₁=1, β₀ &lt; β₁ &lt; … &lt; βₙ = 1</p>
+<p>The IS weight for a chain x₀ → x₁ → … → xₙ (where each xₜ is produced by a transition kernel targeting pₜ) is:</p>
+<p>w = Πₜ pₜ(xₜ₋₁) / p_{t-1}(xₜ₋₁)</p>
+<p>AIS with many intermediate steps (large T) gives small variance and reliable partition function estimates.</p>
+<pre><code class="language-python">import numpy as np
+from scipy import stats
+
+rng = np.random.default_rng(42)
+
+# Annealed IS: estimate Z_1/Z_0 where p_0=N(0,1), p_1=N(3,0.5^2)
+# True ratio: Z_1/Z_0 = 1 (both are proper Gaussians)
+# But AIS estimates E_{p_1}[f] = integral f(x) p_1(x) dx / Z_1
+# More useful: AIS to estimate normalising constant of unnormalised target
+
+mu_target, sigma_target = 3.0, 0.5
+
+def log_p0(x):  # proposal: N(0,1)
+    return stats.norm.logpdf(x, 0, 1)
+
+def log_p1(x):  # target: N(3,0.5) (unnormalised in general case)
+    return stats.norm.logpdf(x, mu_target, sigma_target)
+
+def log_pt(x, beta):  # intermediate: geometric average
+    return (1-beta)*log_p0(x) + beta*log_p1(x)
+
+def ais_estimate(n_samples=500, n_steps=20):
+    &quot;&quot;&quot;Annealed IS with Gaussian MCMC transitions.&quot;&quot;&quot;
+    betas = np.linspace(0, 1, n_steps + 1)
+    log_weights = np.zeros(n_samples)
+
+    # Start from proposal
+    x = rng.standard_normal(n_samples)
+
+    for t in range(1, len(betas)):
+        beta_prev, beta_curr = betas[t-1], betas[t]
+        # AIS weight contribution: p_t(x) / p_{t-1}(x)
+        log_weights += log_pt(x, beta_curr) - log_pt(x, beta_prev)
+        # MCMC transition: Metropolis step targeting p_curr
+        x_prop = x + rng.normal(0, 0.5, n_samples)
+        log_alpha = log_pt(x_prop, beta_curr) - log_pt(x, beta_curr)
+        accept = np.log(rng.uniform(size=n_samples)) &lt; log_alpha
+        x[accept] = x_prop[accept]
+
+    # AIS estimate: E_p1[X^2] = sum(X^2 * w) / sum(w)
+    log_w_normalised = log_weights - np.logaddexp.reduce(log_weights)
+    w_norm = np.exp(log_w_normalised)
+    E_x2   = np.sum(x**2 * w_norm)
+    ess    = np.exp(-np.logaddexp.reduce(2 * log_w_normalised))
+    return E_x2, ess
+
+print(&quot;=== Annealed IS: Estimate E_p1[X^2] ===&quot;)
+print(f&quot;True value: {mu_target**2 + sigma_target**2:.4f}&quot;)
+for T in [5, 20, 100]:
+    estimates = [ais_estimate(n_samples=200, n_steps=T) for _ in range(5)]
+    ests = [e[0] for e in estimates]; esss = [e[1] for e in estimates]
+    print(f&quot;  T={T:&gt;4} steps: mean={np.mean(ests):.4f} std={np.std(ests):.4f} avg_ESS={np.mean(esss):.0f}&quot;)
+</code></pre>
+<h2>Pitfalls</h2>
+<p>Critical IS failure modes:</p>
+<ol>
+<li>
+<p><strong>Tail mismatch causing infinite variance</strong>: if q(x) = 0 anywhere p(x) &gt; 0, the estimator is undefined. If q has lighter tails than p, variance is infinite — no amount of samples fixes this.</p>
+</li>
+<li>
+<p><strong>Long trajectory IS product collapse</strong>: Πₜ p(aₜ)/q(aₜ) over T steps has variance that grows exponentially with T. Per-decision IS, V-trace, or clipping are essential for long-horizon problems.</p>
+</li>
+<li>
+<p><strong>Computing weights in linear space</strong>: for even moderately different distributions, weights can be astronomical or zero. Always compute log_w = log p(x) − log q(x) and only exponentiate at the final step.</p>
+</li>
+<li>
+<p><strong>Ignoring ESS as a quality metric</strong>: IS estimates can look numerically stable while having extremely high variance. Always compute ESS/N; below 0.1 is a red flag requiring a better proposal or fewer IS correction steps.</p>
+</li>
+</ol>
+<h2>Practical Guidance</h2>
+<p>Guidelines for reliable IS in ML:</p>
+<ul>
+<li><strong>Always work in log-space</strong>: log_w = log p(x) − log q(x), then w = exp(log_w − log_w.max()) for stability.</li>
+<li><strong>Monitor ESS/N</strong>: flag estimates where ESS/N &lt; 0.1 as unreliable.</li>
+<li><strong>Weight clipping</strong>: cap weights at a percentile (e.g., 95th percentile of weight distribution) or at a fixed constant. This is always a good default for production IS.</li>
+<li><strong>For off-policy RL</strong>: use V-trace (per-step ratio clipping) instead of full trajectory IS. V-trace clips each ratio to ρ̄ and c̄ separately for variance and bias control.</li>
+<li><strong>For RLHF</strong>: PPO's ratio clipping to [1−ε, 1+ε] is weight clipping applied per token. The KL penalty in DPO is an alternative that avoids explicit IS correction.</li>
+</ul>
+<blockquote>
+<p><strong>WARNING: ESS &lt; 10% Indicates Severe IS Failure</strong></p>
+<p>When ESS/N &lt; 0.1, fewer than 10% of samples effectively contribute to the estimate. The top few samples dominate, making the estimate unreliable and high-variance. Remedies: (1) use a heavier-tailed proposal; (2) reduce the IS correction distance (stay closer to on-policy); (3) use annealed IS to bridge gradually; (4) use normalising flows to learn a better proposal distribution.</p>
+<p><strong>TIP: Optimal Proposal Minimises IS Variance</strong></p>
+<p>The variance-minimising IS proposal is q<em>(x) ∝ |f(x)| p(x) — it concentrates samples where the integrand is large. For f(x) ≥ 0 (e.g., positive reward functions), q</em>(x) ∝ f(x) p(x) is proportional to the unnormalised target multiplied by the function value. In RL, this is the motivation for experience replay prioritisation: sample transitions proportionally to |δ| (TD error), then correct with IS weights.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>IS Correction</th>
+<th>Application</th>
+<th>Variance Control</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Vanilla IS</td>
+<td>Full ratio p/q</td>
+<td>Simple expectations</td>
+<td>Can be infinite</td>
+</tr>
+<tr>
+<td>SNIS</td>
+<td>Normalised weights</td>
+<td>Unknown normalising constants</td>
+<td>Biased, finite</td>
+</tr>
+<tr>
+<td>Per-decision IS</td>
+<td>Partial products</td>
+<td>Off-policy RL value estimation</td>
+<td>Lower than full IS</td>
+</tr>
+<tr>
+<td>V-trace</td>
+<td>Clipped per-step ratios</td>
+<td>Off-policy actor-critic (IMPALA)</td>
+<td>Controlled, bounded</td>
+</tr>
+<tr>
+<td>PPO</td>
+<td>Clipped policy ratio per token</td>
+<td>RLHF fine-tuning</td>
+<td>Low (near-on-policy)</td>
+</tr>
+<tr>
+<td>AIS</td>
+<td>Annealed sequence</td>
+<td>Partition function estimation</td>
+<td>Very low (many steps)</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>Key Takeaways</h2>
+<ul>
+<li>IS estimator Ê_p[f] = (1/N) Σ f(xᵢ)w(xᵢ) with xᵢ~q and w=p/q corrects for sampling from the wrong distribution.</li>
+<li>SNIS normalises weights to sum to 1, enabling use with unnormalised p (standard in Bayesian inference) — biased but consistent.</li>
+<li>ESS = (Σwᵢ)²/Σwᵢ² measures efficiency; ESS/N &lt; 0.1 indicates severe weight imbalance and unreliable estimates.</li>
+<li>IS has finite variance only if q has heavier tails than p everywhere; tail mismatch causes infinite variance that extra samples cannot fix.</li>
+<li>Weight clipping (truncation) at constant c trades bias for variance reduction — the principle behind PPO's ratio clipping in RLHF.</li>
+<li>Always compute importance weights in log-space (log p − log q) and only exponentiate at the final step to avoid numerical overflow.</li>
+<li>Annealed IS bridges between a simple proposal and a hard target through intermediate distributions, enabling reliable partition function estimation.</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

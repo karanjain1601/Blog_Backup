@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Prompt Caching in LLM Inference | Notes Backup</title>
+  <meta name="description" content="Reusing KV cache computations for shared prompt prefixes across requests to eliminate redundant prefill computation for system prompts, RAG context, or repeated preambles." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Prompt Caching in LLM Inference</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Reusing KV cache computations for shared prompt prefixes across requests to eliminate redundant prefill computation for system prompts, RAG context, or repeated preambles.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Prompt Caching in LLM Inference</h1>
+<p>Prompt caching (also called prefix caching or KV cache reuse) is a server-side inference optimization that stores the key-value (KV) tensors computed during the prefill phase for a prompt prefix and reuses them across subsequent requests that share the same prefix. Without caching, every request — even if it shares a 2000-token system prompt with the previous one — recomputes all 2000 tokens from scratch. With caching, the server detects the shared prefix, loads its precomputed KV tensors from memory, and runs prefill only on the unique suffix. This eliminates O(L_shared * N_layers) transformer operations per request, where L_shared is the shared prefix length and N_layers is the number of transformer layers.</p>
+<h2>Overview</h2>
+<p>KV cache memory layout: during a forward pass for a sequence of T tokens, each transformer layer l produces key matrix K_l ∈ ℝ^(T×d_k) and value matrix V_l ∈ ℝ^(T×d_v). These tensors are required by subsequent layers for attention computation. Standard autoregressive decoding caches KV tensors for previously generated tokens (the decode-phase KV cache) to avoid recomputing them each step. Prefix caching extends this idea to the prefill phase: KV tensors for the prompt prefix are stored after the first request and reloaded for subsequent requests. The memory cost of storing a prefix cache is 2 × T_prefix × N_layers × d_k × bytes_per_element. For a 7B model with 32 layers, d_k=128, and T_prefix=2000 tokens in float16: 2 × 2000 × 32 × 128 × 2 bytes = 32 MB — modest relative to the 14 GB model weights.</p>
+<h2>Prefix Caching Mechanics</h2>
+<p>The mechanics of prefix caching require three components: (1) a cache store mapping token sequence hashes to KV tensors, (2) a prefix matching algorithm that finds the longest cached prefix of any incoming request, and (3) eviction logic to manage GPU memory when the cache fills. The cache key is typically the hash of the token ID sequence for the prefix. On a new request, the inference server hashes prefixes of increasing length and looks up the longest match. Computation then proceeds only for the uncached suffix. The boundary between cached and uncached tokens must align with a block boundary (typically 16 or 32 tokens) for memory management efficiency. Partial-block caching (handling prefixes that end mid-block) requires additional bookkeeping.</p>
+<pre><code class="language-python">import torch
+import hashlib
+from typing import Optional, Dict, List, Tuple
+from dataclasses import dataclass, field
+
+@dataclass
+class TrieNode:
+    children: Dict[int, &quot;TrieNode&quot;] = field(default_factory=dict)
+    kv_cache: Optional[torch.Tensor] = None
+
+class RadixPrefixCache:
+    &quot;&quot;&quot;Trie-based KV prefix cache. Finds the longest cached prefix for any request.&quot;&quot;&quot;
+    def __init__(self):
+        self.root = TrieNode()
+        self.hits = 0
+        self.misses = 0
+
+    def find_prefix(self, tokens: List[int]) -&gt; Tuple[int, Optional[torch.Tensor]]:
+        &quot;&quot;&quot;Return (matched_length, kv_tensors) for the longest cached prefix.&quot;&quot;&quot;
+        node = self.root
+        matched, last_kv = 0, None
+        for tok in tokens:
+            if tok not in node.children:
+                self.misses += 1
+                break
+            node = node.children[tok]
+            matched += 1
+            last_kv = node.kv_cache
+        if matched &gt; 0:
+            self.hits += 1
+        return matched, last_kv
+
+    def store(self, tokens: List[int], kv: torch.Tensor) -&gt; None:
+        &quot;&quot;&quot;Insert a token sequence and its KV tensors into the trie.&quot;&quot;&quot;
+        node = self.root
+        for tok in tokens:
+            if tok not in node.children:
+                node.children[tok] = TrieNode()
+            node = node.children[tok]
+        node.kv_cache = kv
+
+    def hit_rate(self) -&gt; float:
+        total = self.hits + self.misses
+        return self.hits / total if total &gt; 0 else 0.0
+
+# Demo: two requests sharing a system prompt prefix
+cache = RadixPrefixCache()
+system_tokens = list(range(500))  # 500-token system prompt
+cache.store(system_tokens, torch.zeros(1, 500, 32, 128))  # fake KV
+request_tokens = system_tokens + [601, 702, 803]          # system + user query
+matched, kv = cache.find_prefix(request_tokens)
+print(f&quot;Prefix matched: {matched} tokens  KV reused: {kv is not None}&quot;)
+print(f&quot;Cache hit rate: {cache.hit_rate():.2%}&quot;)
+</code></pre>
+<h2>Radix Attention Tree</h2>
+<p>SGLang's RadixAttention (Zheng et al., 2023) generalizes prefix caching to a radix tree (compressed trie) that stores KV caches for arbitrary subtrees of request sequences, not just linear prefixes. This handles multi-turn conversations where each turn shares a growing prefix with previous turns, as well as tree-structured generation (e.g., beam search or parallel chain-of-thought sampling) where multiple continuations branch from the same root. The radix tree maintains a least-recently-used (LRU) eviction policy at the node level: when GPU memory runs low, the server evicts the deepest, least-recently-accessed nodes first, preserving the most frequently shared roots. RadixAttention achieves cache hit rates of 85–95% for chatbot workloads with shared system prompts, compared to 30–50% for hash-based linear prefix caches.</p>
+<h2>Cache Hit Rate Optimization</h2>
+<p>Cache hit rate depends critically on request ordering and prompt structure. If requests with identical system prompts arrive interleaved with requests using different system prompts, cached KV tensors may be evicted before they can be reused. Batching requests by shared prefix maximizes hit rate: sort incoming requests so that requests sharing a prefix are processed consecutively. At the prompt level, content ordering matters: the shared prefix must be identical at the byte level — even whitespace differences invalidate the hash match. Placing all stable content (system instructions, RAG documents, few-shot examples) before dynamic content (user query, session ID) ensures the longest possible cached prefix. Anthropic's prompt caching API formalizes this: the developer explicitly marks stable blocks with cache_control, and the API guarantees caching for those blocks.</p>
+<pre><code class="language-python">import time
+from vllm import LLM, SamplingParams
+
+def benchmark_vllm_prefix_cache(
+    model_name: str = &quot;mistralai/Mistral-7B-v0.1&quot;,
+    n_requests: int = 50
+) -&gt; float:
+    &quot;&quot;&quot;Compare prefill time with and without prefix caching in vLLM.&quot;&quot;&quot;
+    system_prompt = (
+        &quot;You are a world-class AI assistant with deep expertise in mathematics, &quot;
+        &quot;physics, and computer science. Always reason step by step and show your work. &quot;
+        &quot;Provide rigorous proofs and numerical examples where relevant. &quot;
+    ) * 25  # approx 600-token shared system prompt
+    user_queries = [f&quot;Explain Fourier transform application #{i}.&quot; for i in range(n_requests)]
+    prompts = [system_prompt + &quot; User: &quot; + q + &quot; Assistant:&quot; for q in user_queries]
+    params = SamplingParams(temperature=0.0, max_tokens=64)
+    # Without prefix caching
+    llm_no = LLM(model=model_name, enable_prefix_caching=False, gpu_memory_utilization=0.8)
+    t0 = time.perf_counter()
+    out_no = llm_no.generate(prompts, params)
+    t_no = time.perf_counter() - t0
+    del llm_no
+    # With prefix caching enabled
+    llm_yes = LLM(model=model_name, enable_prefix_caching=True, gpu_memory_utilization=0.8)
+    t0 = time.perf_counter()
+    out_yes = llm_yes.generate(prompts, params)
+    t_yes = time.perf_counter() - t0
+    del llm_yes
+    print(f&quot;No cache:   {t_no:.2f}s for {n_requests} requests&quot;)
+    print(f&quot;With cache: {t_yes:.2f}s for {n_requests} requests&quot;)
+    print(f&quot;Prefill speedup: {t_no / t_yes:.2f}x&quot;)
+    # Verify identical outputs
+    for a, b in zip(out_no, out_yes):
+        assert a.outputs[0].text == b.outputs[0].text
+    return t_no / t_yes
+</code></pre>
+<h2>Anthropic and OpenAI Prompt Caching APIs</h2>
+<p>Both Anthropic and OpenAI expose prompt caching through their APIs, allowing developers to mark specific content blocks as cacheable. Anthropic's implementation uses cache_control: {type: ephemeral} on message content blocks; cached blocks are stored for 5 minutes by default. Usage statistics in the response indicate cache_creation_input_tokens (tokens written to cache on a miss) and cache_read_input_tokens (tokens served from cache on a hit). Cache reads are priced at roughly 10% of normal input token cost, making heavy system prompts (4K–32K tokens) extremely economical when reused across many turns. OpenAI's implementation is automatic for prompts sharing a common prefix of at least 1024 tokens, with no explicit cache_control markers required. Both APIs guarantee that cached computation does not affect output quality — the same guarantees as server-side prefix caching.</p>
+<pre><code class="language-python">import anthropic
+import time
+
+def demo_anthropic_prompt_cache(doc_text: str) -&gt; dict:
+    &quot;&quot;&quot;Show Anthropic prompt caching: mark stable content with cache_control.&quot;&quot;&quot;
+    client = anthropic.Anthropic()
+    messages_cached = [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: [
+        {&quot;type&quot;: &quot;text&quot;, &quot;text&quot;: doc_text,
+         &quot;cache_control&quot;: {&quot;type&quot;: &quot;ephemeral&quot;}},
+        {&quot;type&quot;: &quot;text&quot;, &quot;text&quot;: &quot;Summarize the key findings in 3 bullet points.&quot;}
+    ]}]
+    messages_no_cache = [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: doc_text +
+                          &quot; Summarize the key findings in 3 bullet points.&quot;}]
+    # First call: cold cache miss — full prefill billed at standard rate
+    t0 = time.perf_counter()
+    r1 = client.messages.create(model=&quot;claude-opus-4-5&quot;, max_tokens=256,
+                                 messages=messages_cached)
+    t1 = time.perf_counter() - t0
+    # Second call: cache hit — only new tokens billed
+    t0 = time.perf_counter()
+    r2 = client.messages.create(model=&quot;claude-opus-4-5&quot;, max_tokens=256,
+                                 messages=messages_cached)
+    t2 = time.perf_counter() - t0
+    print(f&quot;Call 1 — created: {r1.usage.cache_creation_input_tokens} cache tokens, read: {r1.usage.cache_read_input_tokens}, time: {t1:.2f}s&quot;)
+    print(f&quot;Call 2 — created: {r2.usage.cache_creation_input_tokens} cache tokens, read: {r2.usage.cache_read_input_tokens}, time: {t2:.2f}s&quot;)
+    print(f&quot;Latency reduction: {(t1 - t2) / t1 * 100:.1f}%&quot;)
+    return {&quot;cold_time&quot;: t1, &quot;warm_time&quot;: t2, &quot;speedup&quot;: t1 / t2}
+</code></pre>
+<h2>On-device Prefix Caching</h2>
+<p>On-device inference (e.g., mobile or edge deployments using llama.cpp or MLC-LLM) can also benefit from prefix caching when the same system prompt or context is reused across multiple user sessions. llama.cpp's session file feature saves and loads the KV cache state for a given prompt prefix to/from disk, allowing the next inference session to skip prefill entirely for the cached portion. The challenge on device is memory: a 4-bit quantized 7B model's KV cache for 2000 tokens is approximately 16 MB, which is feasible on devices with 8+ GB RAM. The cache must be invalidated when the model weights change (e.g., after an app update). For conversational assistants where the system prompt is fixed and the user query is always appended at the end, disk-based KV cache persistence can eliminate system prompt prefill latency entirely on the second and subsequent turns.</p>
+<pre><code class="language-python">import hashlib
+from typing import List, Tuple
+from collections import defaultdict
+
+def optimize_request_ordering(
+    prompts: List[str],
+    prefix_lengths: List[int] = [64, 128, 256, 512]
+) -&gt; Tuple[List[str], float]:
+    &quot;&quot;&quot;Sort prompts to maximize prefix cache hits (group by shared prefixes first).&quot;&quot;&quot;
+    def prefix_key(text: str, length: int) -&gt; str:
+        return hashlib.sha256(text[:length].encode()).hexdigest() if len(text) &gt;= length else &quot;&quot;
+    # Score each prompt by how many others share its prefixes
+    freq: defaultdict = defaultdict(int)
+    for p in prompts:
+        for L in prefix_lengths:
+            k = prefix_key(p, L)
+            if k:
+                freq[k] += 1
+    def score(p: str) -&gt; int:
+        return sum(freq[prefix_key(p, L)] for L in prefix_lengths if len(p) &gt;= L)
+    sorted_prompts = sorted(prompts, key=score, reverse=True)
+    # Estimate cache hit rate after sorting
+    seen_prefixes: set = set()
+    hits = 0
+    for p in sorted_prompts:
+        k = prefix_key(p, prefix_lengths[-1])
+        if k in seen_prefixes:
+            hits += 1
+        seen_prefixes.add(k)
+    hit_rate = hits / len(prompts) if prompts else 0.0
+    print(f&quot;Estimated cache hit rate after ordering: {hit_rate:.2%}&quot;)
+    return sorted_prompts, hit_rate
+</code></pre>
+<h2>Cost Savings Analysis</h2>
+<p>The economic impact of prompt caching is largest for workloads with long, shared prefixes and many requests. A RAG application with a fixed 8000-token knowledge base prefix sent with every query, serving 100,000 daily requests, would without caching pay for 8000 × 100,000 = 800M input tokens per day. With 90% cache hit rate, only 80M tokens need full prefill computation, with the remaining 720M served from cache at 10% of normal cost. The effective input token cost drops to 10% × 720M + 100% × 80M = 152M equivalent tokens — an 81% reduction in input-side compute costs. The savings are proportional to prefix length, request volume, and cache hit rate. Short prefixes or low request rates may not justify the engineering overhead of implementing prefix caching.</p>
+<table>
+<thead>
+<tr>
+<th>Scenario</th>
+<th>Prefix Length (tokens)</th>
+<th>Cache Hit Rate</th>
+<th>Prefill Savings</th>
+<th>Effective Cost Reduction</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Shared system prompt (short)</td>
+<td>200</td>
+<td>90%</td>
+<td>90% of prefix prefill skipped</td>
+<td>45–60%</td>
+</tr>
+<tr>
+<td>RAG with fixed document set</td>
+<td>4000–8000</td>
+<td>85%</td>
+<td>85% of prefix prefill skipped</td>
+<td>70–80%</td>
+</tr>
+<tr>
+<td>Code context window</td>
+<td>2000–4000</td>
+<td>70%</td>
+<td>70% of prefix prefill skipped</td>
+<td>55–65%</td>
+</tr>
+<tr>
+<td>Multi-turn conversational history</td>
+<td>500–2000 (growing)</td>
+<td>60%</td>
+<td>60% of history prefill skipped</td>
+<td>40–55%</td>
+</tr>
+<tr>
+<td>Mixed workload (varied prefixes)</td>
+<td>1000 avg</td>
+<td>40%</td>
+<td>40% of prefix prefill skipped</td>
+<td>25–35%</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Structure Prompts for Maximum Cache Reuse</strong>: Put your longest, most reused content at the beginning of the prompt (system instructions, RAG context, examples) and dynamic content at the end — prefix caches only match from the start of the sequence. Even a single character difference at position 1 invalidates the entire cache match for that request.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<ul>
+<li>Prefix caching stores KV tensors for shared prompt prefixes and reuses them across requests — eliminating redundant prefill computation entirely for cached tokens.</li>
+<li>A trie (radix tree) structure enables efficient longest-prefix matching: each node stores KV tensors for a token sequence prefix, with LRU eviction for memory management.</li>
+<li>vLLM enables prefix caching with a single flag: LLM(enable_prefix_caching=True); no other code changes are required.</li>
+<li>Anthropic and OpenAI APIs expose prompt caching explicitly — mark stable content blocks with cache_control; cached tokens cost ~10% of normal input token price.</li>
+<li>For maximum hit rate, always place stable content (system prompt, RAG context) before dynamic content (user query) in your prompt structure.</li>
+<li>On-device inference can persist KV caches to disk between sessions using session files (llama.cpp) to skip system prompt prefill on warm starts.</li>
+<li>Cache hit rate of 80–90% is achievable for chatbot workloads with a fixed system prompt; RAG with a fixed document set can achieve 85–95%.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

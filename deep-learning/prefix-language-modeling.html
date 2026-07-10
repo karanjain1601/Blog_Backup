@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Prefix Language Modeling — T5 Span Corruption and Mixed Training Objectives | Notes Backup</title>
+  <meta name="description" content="Prefix LM combines bidirectional attention over a prefix with causal autoregressive generation for the continuation; T5 implements this via span corruption with sentinel tokens and a unified text-to-text format that casts every NLP task as sequence-to-sequence generation." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Prefix Language Modeling — T5 Span Corruption and Mixed Training Objectives</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Prefix LM combines bidirectional attention over a prefix with causal autoregressive generation for the continuation; T5 implements this via span corruption with sentinel tokens and a unified text-to-text format that casts every NLP task as sequence-to-sequence generation.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Prefix Language Modeling — T5 Span Corruption and Mixed Training Objectives</h1>
+<p>Prefix Language Modeling sits between CLM and MLM: a prefix (input prompt) is processed with full bidirectional attention so every prefix token can attend to every other prefix token, then the continuation is generated autoregressively with causal attention. This architecture naturally suits conditional generation — the encoder-like prefix understanding enables rich conditioning, while the decoder-like continuation enables generative flexibility. T5 (Raffel et al., 2020) operationalises this with span corruption: replace random 15% text spans with sentinel tokens (<extra_id_0>, <extra_id_1>, …) and train the model to predict the dropped spans. All tasks — classification, summarisation, translation, QA — are cast as text-to-text pairs.</p>
+<h2>T5 Span Corruption Objective</h2>
+<p>T5's pretraining objective corrupts the input by removing contiguous spans of tokens and replacing each span with a unique sentinel token. The target sequence consists of those sentinels each followed by the original tokens of the corresponding span, terminated by a final sentinel and EOS. Span lengths are sampled from a geometric distribution with a mean of 3 tokens, giving a mix of short (1–2 token) and occasionally long (5–10 token) spans. Because spans typically contain 3 tokens but are replaced by a single sentinel, the input sequence is ~10% shorter than the original and the target is ~3–4× shorter than the original dropped tokens — making both encoder and decoder passes computationally cheap.</p>
+<pre><code class="language-python">import torch
+import random
+import math
+from transformers import T5Tokenizer
+
+def t5_span_corruption(tokens, tokenizer, noise_density=0.15, mean_span=3.0):
+    &quot;&quot;&quot;T5 span corruption: replace random spans with &lt;extra_id_N&gt; sentinel tokens.&quot;&quot;&quot;
+    n         = len(tokens)
+    num_noise = max(1, int(n * noise_density))
+    spans, total = [], 0
+    while total &lt; num_noise:
+        length = max(1, min(int(-mean_span * math.log(max(random.random(), 1e-9))), n // 4))
+        spans.append(length)
+        total += length
+    max_start = max(1, n - max(spans))
+    starts    = sorted(random.sample(range(max_start), min(len(spans), max_start)))
+    sentinel_base = tokenizer.convert_tokens_to_ids(&quot;&lt;extra_id_0&gt;&quot;)
+    inp, tgt, pos = [], [], 0
+    for idx, (start, length) in enumerate(zip(starts, spans)):
+        end = min(start + length, n)
+        inp.extend(tokens[pos:start])          # keep non-corrupted tokens
+        inp.append(sentinel_base - idx)        # &lt;extra_id_idx&gt; replaces span
+        tgt.append(sentinel_base - idx)        # target: sentinel then original tokens
+        tgt.extend(tokens[start:end])
+        pos = end
+    inp.extend(tokens[pos:])
+    tgt.append(tokenizer.eos_token_id)
+    return torch.tensor(inp, dtype=torch.long), torch.tensor(tgt, dtype=torch.long)
+
+tokenizer = T5Tokenizer.from_pretrained(&quot;t5-small&quot;)
+text   = &quot;Pretraining objectives determine how well a language model generalizes to new tasks&quot;
+tokens = tokenizer.encode(text)[:-1]
+inp, tgt = t5_span_corruption(tokens, tokenizer)
+print(f&quot;Original: {len(tokens)} | Input: {len(inp)} | Target: {len(tgt)}&quot;)
+print(&quot;Input :&quot;, tokenizer.decode(inp))
+print(&quot;Target:&quot;, tokenizer.decode(tgt))
+</code></pre>
+<h2>Prefix LM Attention Mask</h2>
+<p>The prefix LM attention pattern is a hybrid: prefix tokens form a fully connected (bidirectional) block — every prefix token can attend to every other prefix token in both directions. Continuation tokens form a causal block — each continuation token can attend to all prefix tokens and all prior continuation tokens but not future ones. In an encoder-decoder model like T5 this is implemented naturally by the cross-attention mechanism: the encoder computes fully bidirectional representations of the corrupted input (the prefix), and the decoder attends to those representations via cross-attention while applying a causal self-attention mask over the generated tokens so far.</p>
+<pre><code class="language-python">import torch
+import math
+
+def build_prefix_lm_mask(seq_len, prefix_len, device=&quot;cpu&quot;):
+    &quot;&quot;&quot;Prefix LM mask: prefix bidirectional, continuation causal.
+    Returns (seq_len, seq_len) bool tensor; True = allowed to attend.&quot;&quot;&quot;
+    mask = torch.zeros(seq_len, seq_len, dtype=torch.bool, device=device)
+    mask[:prefix_len, :prefix_len] = True   # prefix attends to all prefix
+    for i in range(prefix_len, seq_len):
+        mask[i, :i + 1] = True             # continuation: causal window
+    return mask
+
+def scaled_dot_product_prefix_lm(Q, K, V, prefix_len):
+    &quot;&quot;&quot;Attention with prefix LM mask applied in a single call.&quot;&quot;&quot;
+    seq_len = Q.size(-2)
+    d_k     = Q.size(-1)
+    scores  = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(d_k)
+    mask    = build_prefix_lm_mask(seq_len, prefix_len, Q.device)
+    scores  = scores.masked_fill(~mask, float(&quot;-inf&quot;))
+    weights = torch.softmax(scores, dim=-1)
+    return torch.matmul(weights, V), weights
+
+seq_len, prefix_len, d_k = 12, 5, 64
+Q = torch.randn(1, seq_len, d_k)
+K = torch.randn(1, seq_len, d_k)
+V = torch.randn(1, seq_len, d_k)
+out, attn = scaled_dot_product_prefix_lm(Q, K, V, prefix_len)
+mask = build_prefix_lm_mask(seq_len, prefix_len)
+print(f&quot;Prefix ({prefix_len} tokens): attend to {mask[:prefix_len,:prefix_len].sum(1).float().mean():.0f} tokens avg (full prefix)&quot;)
+print(f&quot;Continuation ({seq_len-prefix_len} tokens): causal — prefix + prior tokens only&quot;)
+print(f&quot;Output shape: {out.shape}&quot;)
+</code></pre>
+<h2>Text-to-Text Task Formatting</h2>
+<p>T5's most influential design decision is the text-to-text format: every NLP task is expressed as a mapping from an input text string to an output text string. Classification becomes string output ('positive', 'negative', 'neutral'); regression becomes a numeric string; translation is self-evident; QA maps 'question: ... context: ...' to an answer string. A task-specific prefix (e.g. 'sst2 sentence:', 'summarize:', 'translate English to German:') routes the model to the appropriate behaviour. This unification means a single model can handle dozens of tasks with no architecture changes, only prompt changes — the precursor to modern instruction-tuned models.</p>
+<pre><code class="language-python">from transformers import T5Tokenizer
+
+TASK_TEMPLATES = {
+    &quot;classification&quot;: (&quot;sst2 sentence: {text}&quot;, &quot;{label}&quot;),
+    &quot;summarization&quot;:  (&quot;summarize: {text}&quot;, &quot;{summary}&quot;),
+    &quot;translation&quot;:    (&quot;translate English to German: {text}&quot;, &quot;{translation}&quot;),
+    &quot;nli&quot;:            (&quot;mnli hypothesis: {hypothesis} premise: {premise}&quot;, &quot;{label}&quot;),
+    &quot;qa&quot;:             (&quot;question: {question} context: {context}&quot;, &quot;{answer}&quot;),
+}
+
+def format_text_to_text(task, **kwargs):
+    tmpl_in, tmpl_out = TASK_TEMPLATES[task]
+    return tmpl_in.format(**kwargs), tmpl_out.format(**kwargs)
+
+tokenizer = T5Tokenizer.from_pretrained(&quot;t5-small&quot;)
+examples  = [
+    format_text_to_text(&quot;classification&quot;, text=&quot;The film was breathtaking.&quot;, label=&quot;positive&quot;),
+    format_text_to_text(&quot;translation&quot;, text=&quot;Deep learning is powerful.&quot;, translation=&quot;Deep Learning ist machtvoll.&quot;),
+    format_text_to_text(&quot;qa&quot;, question=&quot;What is T5?&quot;,
+                        context=&quot;T5 is a text-to-text transfer transformer.&quot;,
+                        answer=&quot;text-to-text transfer transformer&quot;),
+    format_text_to_text(&quot;summarization&quot;,
+                        text=&quot;T5 converts every NLP task into text-to-text format using an encoder-decoder.&quot;,
+                        summary=&quot;T5 unifies NLP tasks as text-to-text.&quot;),
+]
+for inp, tgt in examples:
+    enc_in  = tokenizer.encode(inp)
+    enc_tgt = tokenizer.encode(tgt)
+    print(f&quot;[{len(enc_in):3d} in | {len(enc_tgt):2d} tgt] {inp[:55]}...&quot;)
+    print(f&quot;  Target: {tgt}\n&quot;)
+</code></pre>
+<blockquote>
+<p><strong>T5 Span Corruption vs Word-Level Masking</strong>: T5's span corruption creates 3.4x shorter target sequences than SpanBERT's word-level masking for the same 15% masking rate — this significantly reduces decoder compute during pretraining while maintaining span-level context recovery. A mean span of 3 tokens means one sentinel replaces 3 tokens in the input, compressing the target to roughly 1/3 of the dropped-token count.</p>
+</blockquote>
+<h2>FLAN-T5 Zero-Shot Inference</h2>
+<p>FLAN-T5 (Wei et al. 2022, Chung et al. 2022) fine-tunes T5 on a massive mixture of instruction-formatted tasks — over 1800 tasks phrased as natural language instructions across multiple benchmarks. This instruction tuning dramatically improves zero-shot and few-shot performance: the model learns to follow free-form instructions rather than only task-specific prefixes. FLAN-T5-XXL (11B parameters) matches or exceeds GPT-3 (175B) on many benchmarks, demonstrating that instruction diversity matters more than raw scale for zero-shot generalisation.</p>
+<pre><code class="language-python">import torch
+from transformers import T5ForConditionalGeneration, T5Tokenizer
+
+device    = &quot;cuda&quot; if torch.cuda.is_available() else &quot;cpu&quot;
+model     = T5ForConditionalGeneration.from_pretrained(&quot;google/flan-t5-base&quot;).to(device)
+tokenizer = T5Tokenizer.from_pretrained(&quot;google/flan-t5-base&quot;)
+model.eval()
+
+def flan_t5_predict(prompt, max_new_tokens=64, num_beams=4):
+    &quot;&quot;&quot;Zero-shot FLAN-T5 inference for arbitrary instruction-formatted tasks.&quot;&quot;&quot;
+    inputs = tokenizer(prompt, return_tensors=&quot;pt&quot;, truncation=True,
+                       max_length=512).to(device)
+    with torch.no_grad():
+        out = model.generate(**inputs, max_new_tokens=max_new_tokens,
+                             num_beams=num_beams, early_stopping=True)
+    return tokenizer.decode(out[0], skip_special_tokens=True)
+
+prompts = [
+    &quot;Classify sentiment (positive/negative): 'This lecture on transformers was outstanding!'&quot;,
+    &quot;Translate to French: 'The quick brown fox jumps over the lazy dog.'&quot;,
+    &quot;Answer: What pretraining objective does T5 use? Context: T5 uses span corruption.&quot;,
+]
+for prompt in prompts:
+    answer = flan_t5_predict(prompt)
+    print(f&quot;Q: {prompt[:60]}...&quot;)
+    print(f&quot;A: {answer}\n&quot;)
+</code></pre>
+<h2>Comparison of Pretraining Objectives</h2>
+<p>The three paradigms — CLM, MLM, and Prefix LM / Encoder-Decoder — represent fundamental trade-offs between generation capability, representation richness, and compute efficiency. CLM is the simplest and most sample-efficient, making it dominant for large-scale pretraining. MLM produces the richest token-level representations for understanding but cannot generate. Prefix LM / Encoder-Decoder is the most powerful for conditional generation tasks but requires paired input-output data for task formatting and is more expensive to train (two components).</p>
+<table>
+<thead>
+<tr>
+<th>Aspect</th>
+<th>CLM</th>
+<th>MLM</th>
+<th>Prefix LM</th>
+<th>Encoder-Decoder</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Attention type</td>
+<td>Causal (left-to-right)</td>
+<td>Bidirectional (full)</td>
+<td>Bidir prefix + causal continuation</td>
+<td>Encoder: full; Decoder: causal</td>
+</tr>
+<tr>
+<td>Training target</td>
+<td>All N tokens (shifted)</td>
+<td>~15% masked tokens</td>
+<td>Dropped span tokens + sentinels</td>
+<td>Target sequence tokens</td>
+</tr>
+<tr>
+<td>Generation</td>
+<td>Native autoregressive</td>
+<td>Not native — needs separate decoder</td>
+<td>Native continuation of prefix</td>
+<td>Native via cross-attention decoding</td>
+</tr>
+<tr>
+<td>Sample efficiency</td>
+<td>High — N targets/seq</td>
+<td>Low — ~0.15N targets/seq</td>
+<td>Medium — depends on span density</td>
+<td>Depends on paired data quality</td>
+</tr>
+<tr>
+<td>Key models</td>
+<td>GPT, LLaMA, Mistral</td>
+<td>BERT, RoBERTa, DeBERTa</td>
+<td>PaLM (suffix prediction)</td>
+<td>T5, FLAN-T5, BART, mT5</td>
+</tr>
+</tbody>
+</table>
+<h2>UL2 — Mixture of Objectives</h2>
+<p>UL2 (Tay et al. 2022) proposes training a single model with a mixture of denoising objectives, calling it Mixture-of-Denoisers (MoD). Three objective families are mixed: R-denoisers (CLM-like: predict a suffix), S-denoisers (span corruption like T5 with short spans), and X-denoisers (extreme span corruption with very long spans or high masking rates). A mode token ([R], [S], [X]) prepended to the input tells the model which denoising regime applies. UL2-20B outperforms GPT-3 175B on many benchmarks, showing that objective diversity during pretraining is a more efficient use of compute than scaling a single objective.</p>
+<ul>
+<li>R-denoiser: predict suffix from prefix — identical to CLM, encourages left-to-right generation.</li>
+<li>S-denoiser: T5-style span corruption with short spans (mean 3 tokens, 15% rate) — standard seq2seq.</li>
+<li>X-denoiser: extreme corruption — very long spans (mean 32 tokens) or high rate (50%) — forces full document reconstruction.</li>
+<li>Mode token ([R], [S], [X]) prepended to input routes the model to the correct denoising behaviour.</li>
+<li>UL2 unifies GPT-style generation and T5-style seq2seq in one model without architectural changes.</li>
+</ul>
+<h2>Compute Efficiency of Prefix LM</h2>
+<p>A practical advantage of the encoder-decoder architecture is that the encoder computes prefix representations only once per generation request. In CLM, re-processing the entire prompt is required for each new token (mitigated by KV cache), and the prefix tokens compete for context length with generated tokens. In encoder-decoder models, the prefix is processed by the encoder at full attention complexity once, then its key-value representations are passed to the decoder via cross-attention for all generation steps. This separation means the encoder can process very long contexts without burdening the decoder. T5 11B achieves strong performance across diverse tasks while remaining more interpretable than same-size CLM models due to this explicit input-output separation.</p>
+<h2>PaLM and Prefix Prediction</h2>
+<p>PaLM (Chowdhery et al., 2022), a 540B parameter decoder-only model, also incorporates a prefix-style training variant called suffix prediction: a fraction of training examples are formatted so that a random suffix of the document is moved to the beginning, and the model learns to complete the document from a position in the middle. This exposes the CLM-only model to bidirectional context during pretraining without requiring an encoder. Combined with chain-of-thought prompting, PaLM achieves human-level performance on a wide range of multi-step reasoning tasks, suggesting that pretraining objective diversity — even within a decoder-only framework — significantly improves generalisation.</p>
+    </article>
+  </main>
+</body>
+</html>

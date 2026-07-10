@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Vision Backbone Comparison: ResNet vs EfficientNet vs ViT vs ConvNeXt | Notes Backup</title>
+  <meta name="description" content="Practical tradeoffs among leading vision backbones — accuracy, throughput, parameter efficiency, transfer learning quality, and when to choose each." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Vision Backbone Comparison: ResNet vs EfficientNet vs ViT vs ConvNeXt</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Practical tradeoffs among leading vision backbones — accuracy, throughput, parameter efficiency, transfer learning quality, and when to choose each.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Vision Backbone Comparison: ResNet vs EfficientNet vs ViT vs ConvNeXt</h1>
+<h2>Overview</h2>
+<p>Vision backbones are deep networks that extract hierarchical feature representations from images. They form the encoder stage of nearly every computer vision pipeline — from classification to detection to segmentation. Choosing the right backbone determines your accuracy ceiling, inference speed, memory footprint, and how much labeled data you need to reach production quality.</p>
+<p>Modern backbone families differ fundamentally in inductive biases. CNNs encode translation equivariance through convolutions, enabling strong performance on small datasets. Vision Transformers apply global self-attention across image patches, capturing long-range dependencies but requiring large datasets or heavy augmentation. Hybrid designs attempt to inherit benefits from both worlds.</p>
+<pre><code class="language-python">import torch, timm, time
+
+model = timm.create_model(&quot;resnet50&quot;, pretrained=False).cuda().eval()
+x = torch.randn(32, 3, 224, 224, device=&quot;cuda&quot;)
+
+# Warm-up
+with torch.no_grad():
+    for _ in range(10): model(x)
+
+start = time.perf_counter()
+with torch.no_grad():
+    for _ in range(100): model(x)
+torch.cuda.synchronize()
+elapsed = time.perf_counter() - start
+print(f&quot;Throughput: {32 * 100 / elapsed:.0f} img/s&quot;)
+</code></pre>
+<h2>CNN Backbones</h2>
+<p>ResNet introduced skip connections that allow gradients to bypass layers, enabling networks up to 152 layers deep without vanishing gradients. ResNet-50's four-stage design — with 3, 4, 6, and 3 bottleneck blocks respectively — remains the most widely benchmarked backbone, providing a reliable 76-77% ImageNet top-1 baseline with strong transfer learning properties.</p>
+<p>EfficientNet applies compound scaling: simultaneously increasing depth, width, and input resolution using a fixed ratio derived from a neural architecture search baseline. EfficientNet-B4 achieves ~83% top-1 with 19M parameters — comparable to ResNet-152 with 60M — making it the dominant choice when parameter efficiency matters more than raw throughput on GPU hardware.</p>
+<pre><code class="language-python">import timm, torch.nn as nn
+
+model = timm.create_model(&quot;resnet50&quot;, pretrained=True, num_classes=0)
+
+# Freeze stem and early layers; fine-tune only layer3/layer4
+for name, param in model.named_parameters():
+    if not any(k in name for k in [&quot;layer3&quot;, &quot;layer4&quot;, &quot;head&quot;]):
+        param.requires_grad = False
+
+# Replace classifier head for target task
+in_features = model.num_features
+model.fc = nn.Linear(in_features, NUM_CLASSES)
+</code></pre>
+<h2>Transformer Backbones</h2>
+<p>Vision Transformer (ViT) divides an image into fixed 16×16 patches, linearly embeds each, and processes them as a sequence with multi-head self-attention. Without inductive bias toward locality, ViT-B/16 underperforms ResNet-50 at small dataset sizes but surpasses all CNN baselines beyond roughly 14M training images, achieving 81.8% top-1 on ImageNet-21K pre-training.</p>
+<p>Swin Transformer imposes a hierarchical feature map structure and restricts attention to local shifted windows, making self-attention complexity linear in image size rather than quadratic. Swin-T matches ViT-B/16 accuracy while running 2× faster at 224×224 resolution, and its pyramid feature map structure makes it a drop-in replacement for ResNet in detection frameworks.</p>
+<pre><code class="language-python">from sklearn.preprocessing import normalize
+import numpy as np
+
+def linear_cka(X, Y):
+    X, Y = normalize(X), normalize(Y)
+    hsic_xy = np.linalg.norm(X.T @ Y, &quot;fro&quot;) ** 2
+    hsic_xx = np.linalg.norm(X.T @ X, &quot;fro&quot;) ** 2
+    hsic_yy = np.linalg.norm(Y.T @ Y, &quot;fro&quot;) ** 2
+    return hsic_xy / np.sqrt(hsic_xx * hsic_yy)
+
+# Compare feature map semantics between ResNet-50 and ViT-B/16
+cka_score = linear_cka(resnet_feats, vit_feats)
+print(f&quot;CKA similarity: {cka_score:.3f}&quot;)
+</code></pre>
+<h2>Hybrid and Modern Designs</h2>
+<p>ConvNeXt modernizes ResNet by adopting design choices from ViT training recipes: larger 7×7 depthwise convolutions, inverted bottleneck blocks, LayerNorm instead of BatchNorm, GELU activations, and fewer activation functions per block. ConvNeXt-T achieves 82.1% top-1 with 28M parameters using standard CNN operators, making it faster on edge hardware than transformer models.</p>
+<p>Hybrid architectures like MaxViT and CoAtNet interleave local convolution blocks with global attention layers, achieving SOTA accuracy without the data hunger of pure transformers. MobileViT targets mobile deployment by replacing expensive attention with lightweight transformers applied only to coarse feature maps, keeping inference latency under 5ms on ARM processors.</p>
+<pre><code class="language-python">from torchinfo import summary
+import timm
+
+models_to_compare = {
+    &quot;resnet50&quot;: timm.create_model(&quot;resnet50&quot;),
+    &quot;efficientnet_b4&quot;: timm.create_model(&quot;efficientnet_b4&quot;),
+    &quot;vit_base_patch16_224&quot;: timm.create_model(&quot;vit_base_patch16_224&quot;),
+    &quot;convnext_tiny&quot;: timm.create_model(&quot;convnext_tiny&quot;),
+}
+for name, model in models_to_compare.items():
+    stats = summary(model, input_size=(1, 3, 224, 224), verbose=0)
+    print(f&quot;{name}: {stats.total_params/1e6:.1f}M params, &quot;
+          f&quot;{stats.total_mult_adds/1e9:.2f} GMACs&quot;)
+</code></pre>
+<table>
+<thead>
+<tr>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td></td>
+</tr>
+</tbody>
+</table>
+<h2>Selecting a Backbone</h2>
+<p>Backbone selection depends on four axes: dataset size, compute budget, deployment target, and task type. With fewer than 50K images, prefer inductive-bias-rich CNNs — ConvNeXt, EfficientNet — that generalize better from small samples. With millions of images, ViT-scale transformers unlock superior representations. For real-time inference on GPU, throughput-optimized models like Swin-T dominate.</p>
+<blockquote>
+<p>****: For most fine-tuning tasks under 100K images, ConvNeXt-T or EfficientNet-B4 outperform ViT-B/16 — transformers need more data to fully leverage their attention mechanism.</p>
+</blockquote>
+<p>Augmentation strategy interacts heavily with backbone choice. ViT models benefit from RandAugment, MixUp, and CutMix because they reduce reliance on locality and help transformers learn global cues from limited samples. CNN backbones are more sensitive to geometric augmentations but less sensitive to color jitter, reflecting their built-in translation equivariance assumptions.</p>
+<p>Deployment constraints often override accuracy considerations. Mobile targets favor MobileNetV3 or EfficientNet-Lite; server GPU clusters with FP16 tensor cores prefer ViT and Swin; edge AI chips with fixed convolution accelerators work best with depthwise-separable CNN architectures. Always profile on the target hardware — benchmark numbers measured on A100 rarely transfer directly.</p>
+<h2>Key Takeaways</h2>
+<p>CNNs remain competitive through 2025: ConvNeXt and EfficientNet match or exceed ViT accuracy at small to medium dataset scales while being faster, more memory-efficient, and easier to deploy on hardware without attention-optimized kernels. ResNet-50 continues to serve as the universal baseline for ablations due to its predictable training dynamics and extensive benchmark coverage.</p>
+<p>Vision Transformers dominate at scale: when pre-training on datasets exceeding 10M images — ImageNet-21K, LAION, or JFT — ViT-L and above produce transferable representations that outperform any CNN backbone on downstream tasks by 2-5% top-1 accuracy. The DINOv2 self-supervised ViT-G achieves 86.5% top-1 without any labeled pre-training, setting the current SOTA ceiling.</p>
+<p>Practical recommendation: start with ConvNeXt-T for rapid prototyping — strong out-of-box fine-tuning, 82% accuracy floor, familiar CNN training recipes. Graduate to Swin-T for detection and segmentation pipelines. Use ViT-B/16 or larger only when you have access to large-scale pre-trained checkpoints such as DINOv2, CLIP, or MAE and sufficient compute for full fine-tuning.</p>
+    </article>
+  </main>
+</body>
+</html>

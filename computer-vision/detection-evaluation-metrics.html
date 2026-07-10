@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Detection Evaluation: COCO mAP and Metrics | Notes Backup</title>
+  <meta name="description" content="COCO evaluation protocol — mAP@50, mAP@50:95, AP for small/medium/large objects, AR@100, and how to use pycocotools to evaluate a custom detector." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Detection Evaluation: COCO mAP and Metrics</h1>
+      <ul class='note-meta'><li><strong>description:</strong> COCO evaluation protocol — mAP@50, mAP@50:95, AP for small/medium/large objects, AR@100, and how to use pycocotools to evaluate a custom detector.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Detection Evaluation: COCO mAP and Metrics</h1>
+<p>COCO (Common Objects in Context) defines the standard evaluation protocol for modern object detection. The primary metric is AP50:95 — the mean average precision averaged across 10 IoU thresholds from 0.5 to 0.95. This stricter protocol rewards detectors that localise tightly, not just detectors that find objects approximately.</p>
+<p>Beyond the headline number, COCO reports AP broken down by object scale (small &lt;32², medium 32–96², large &gt;96²), maximum recall at 1/10/100 detections per image, and per-category AP. These diagnostics reveal whether a model fails on tiny objects, crowds, or specific semantic categories.</p>
+<p>For a single class at a fixed IoU threshold, evaluation sorts all predictions across all images by confidence (descending). Each prediction is matched to an unmatched ground-truth box — if IoU ≥ threshold it is a true positive, otherwise a false positive. Running P and R are computed cumulatively, tracing the P-R curve.</p>
+<pre><code>import numpy as np
+
+def precision_recall_curve(scores, tp_flags, n_gt):
+    &quot;&quot;&quot;
+    scores:   (N,) confidence scores
+    tp_flags: (N,) 1 if TP, 0 if FP (sorted by score desc)
+    n_gt:     total ground-truth count for this class
+    &quot;&quot;&quot;
+    order = np.argsort(-scores)
+    tp = tp_flags[order]
+    fp = 1 - tp
+    cum_tp = np.cumsum(tp)
+    cum_fp = np.cumsum(fp)
+    precision = cum_tp / (cum_tp + cum_fp).clip(min=1e-8)
+    recall = cum_tp / max(n_gt, 1)
+    return precision, recall
+</code></pre>
+<p>A good detector traces a P-R curve that hugs the top-right corner — high precision even at high recall. Area under this curve (Average Precision) summarises the entire precision-recall trade-off in a single number, independent of any operating point threshold chosen at inference time.</p>
+<p>mAP@50 (Pascal VOC metric) declares a detection correct if IoU with any ground-truth box exceeds 0.5. A box covering roughly the right area qualifies. mAP@50:95 repeats this at 10 thresholds (0.50, 0.55, …, 0.95) and averages — a box must localise tightly to score well at 0.75 or 0.95.</p>
+<pre><code>import numpy as np
+
+def compute_ap_101(precision, recall):
+    &quot;&quot;&quot;101-point interpolated AP (COCO style).&quot;&quot;&quot;
+    recall_thresholds = np.linspace(0, 1, 101)
+    ap = 0.0
+    for thr in recall_thresholds:
+        p_at_r = precision[recall &gt;= thr]
+        ap += (p_at_r.max() if p_at_r.size &gt; 0 else 0.0)
+    return ap / 101
+
+def map_50_95(per_iou_aps):
+    &quot;&quot;&quot;per_iou_aps: list of 10 AP values at IoU 0.5..0.95&quot;&quot;&quot;
+    return float(np.mean(per_iou_aps))
+</code></pre>
+<blockquote>
+<p>****: AP50 (Pascal VOC style) is much easier to game than AP50:95 — a model can score 60% AP50 but only 40% AP50:95. Use COCO's primary metric (AP50:95) for fair comparison.</p>
+</blockquote>
+<p>COCO segments AP by object area: APs (area &lt; 32²=1024 px²), APm (1024–9216 px²), APl (&gt;9216 px²). Small object AP is consistently the hardest metric — detectors struggle because features are low-resolution and context is limited. Improvements on APs usually come from higher input resolution or better FPN design.</p>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>IoU threshold</th>
+<th>Object size</th>
+<th>What it measures</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>AP (primary)</td>
+<td>0.50:0.05:0.95</td>
+<td>All</td>
+<td>Overall localisation quality</td>
+</tr>
+<tr>
+<td>AP50</td>
+<td>0.50</td>
+<td>All</td>
+<td>Coarse detection (VOC style)</td>
+</tr>
+<tr>
+<td>AP75</td>
+<td>0.75</td>
+<td>All</td>
+<td>Strict localisation</td>
+</tr>
+<tr>
+<td>APs</td>
+<td>0.50:0.95</td>
+<td>&lt; 32×32 px</td>
+<td>Small object performance</td>
+</tr>
+<tr>
+<td>APm</td>
+<td>0.50:0.95</td>
+<td>32–96 px</td>
+<td>Medium object performance</td>
+</tr>
+<tr>
+<td>APl</td>
+<td>0.50:0.95</td>
+<td>&gt; 96×96 px</td>
+<td>Large object performance</td>
+</tr>
+<tr>
+<td>AR100</td>
+<td>0.50:0.95</td>
+<td>All</td>
+<td>Max recall at 100 dets/img</td>
+</tr>
+</tbody>
+</table>
+<p>AR (Average Recall) at 100 detections per image measures the upper bound on recall given a fixed detection budget. A high AR100 with low AP indicates the model finds objects but ranks them poorly — the confidence calibration or NMS threshold needs tuning.</p>
+<p>pycocotools is the official COCO evaluation library. It expects predictions in COCO result format: a JSON array of objects with image_id, category_id, bbox ([x,y,w,h] format), and score. The library handles matching, IoU computation, and all 12 standard metrics in a single evaluate() + summarize() call.</p>
+<pre><code>from pycocotools.coco import COCO
+from pycocotools.cocoeval import COCOeval
+import json
+
+# Load ground truth
+coco_gt = COCO('annotations/instances_val2017.json')
+
+# Load predictions (list of dicts with image_id, category_id, bbox, score)
+with open('predictions.json') as f:
+    pred_list = json.load(f)
+
+coco_dt = coco_gt.loadRes(pred_list)
+eval = COCOeval(coco_gt, coco_dt, iouType='bbox')
+eval.evaluate()
+eval.accumulate()
+eval.summarize()  # prints all 12 metrics
+</code></pre>
+<p>To evaluate on a subset of categories or images, set eval.params.catIds and eval.params.imgIds before calling evaluate(). Per-category AP requires iterating over categories and setting params.catIds = [cat_id] for each, then reading eval.stats[0] (AP50:95 for that category).</p>
+<pre><code>from pycocotools.coco import COCO
+from pycocotools.cocoeval import COCOeval
+
+def per_category_ap(coco_gt, coco_dt):
+    results = {}
+    for cat in coco_gt.loadCats(coco_gt.getCatIds()):
+        ev = COCOeval(coco_gt, coco_dt, iouType='bbox')
+        ev.params.catIds = [cat['id']]
+        ev.evaluate()
+        ev.accumulate()
+        ev.summarize()
+        results[cat['name']] = round(float(ev.stats[0]), 4)
+    return results
+</code></pre>
+<p>Always report AP50:95 as the primary metric for COCO comparisons. AP50 alone overstates model quality. When debugging, APs is the first place to look for headroom — most SOTA models still lag significantly on small objects compared to medium and large ones.</p>
+<p>Confidence calibration matters: a miscalibrated model that ranks FPs above TPs degrades AP without affecting classification accuracy. Temperature scaling or Platt scaling on detector confidence scores can improve AP by 1–3 points without retraining the backbone.</p>
+<p>When comparing custom domain results to COCO benchmarks, note that COCO has 80 categories with heavy long-tail distribution. A model trained on 5 balanced categories may report inflated AP because rare hard negatives are absent. Always contextualise metrics against the evaluation set difficulty.</p>
+<p>AR100 is underutilised in practice but valuable for two-stage pipelines. If your region proposal network is the bottleneck, maximise AR100 of proposals before worrying about the detection head. A proposal AR100 below 90% caps final detector AP regardless of head quality.</p>
+<p>pycocotools supports segmentation (iouType='segm') and keypoint (iouType='keypoints') evaluation with the same API. Instance segmentation models are evaluated on mask IoU, not box IoU — a common source of confusion when adapting box detectors to segmentation tasks.</p>
+    </article>
+  </main>
+</body>
+</html>

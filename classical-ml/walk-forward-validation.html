@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Walk-Forward Validation — Preventing Data Leakage Through Time | Notes Backup</title>
+  <meta name="description" content="Understand why standard k-fold cross-validation is invalid for time series and implement expanding-window and rolling-window walk-forward validation to obtain unbiased out-of-sample performance estimates." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Walk-Forward Validation — Preventing Data Leakage Through Time</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Understand why standard k-fold cross-validation is invalid for time series and implement expanding-window and rolling-window walk-forward validation to obtain unbiased out-of-sample performance estimates.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Walk-Forward Validation — Preventing Data Leakage Through Time</h1>
+<p>Standard k-fold cross-validation randomly assigns observations to folds, allowing future observations to appear in the training set. For time series this constitutes data leakage: the model sees future information during training, and in-sample error metrics severely underestimate true test error. Walk-forward validation (also called rolling-origin evaluation) respects the temporal ordering — the model is always trained on past data and evaluated on future data — producing unbiased estimates of forecast accuracy at the desired horizon.</p>
+<ul>
+<li>Walk-forward evaluation always trains on past data and tests on future data — no shuffling.</li>
+<li>Expanding window: training set grows each fold; best for stationary series with limited data.</li>
+<li>Rolling window: fixed training size slides forward; best for non-stationary or regime-changing series.</li>
+<li>Gap: buffer periods between train end and test start prevent feature window contamination.</li>
+<li>Nested CV: use an inner walk-forward loop for hyperparameter tuning within each outer training fold.</li>
+</ul>
+<h2>Why k-Fold Fails for Time Series</h2>
+<p>Time series observations are autocorrelated: yₜ depends on yₜ₋₁, yₜ₋₂, etc. When k-fold assigns fold k to the test set and the remaining folds to training, observations from t+1, t+2, ... are included in the training set even though they occur after test point t. This is future leakage. Additionally, autocorrelation means that training points just before or after a test point are nearly identical to it, inflating apparent accuracy. The expected value of the k-fold MSE estimator is biased downward relative to the true out-of-sample MSE for any horizon h ≥ 1.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.linear_model import Ridge
+from sklearn.metrics import mean_squared_error
+
+def walk_forward_expanding(X, y, min_train=60, horizon=1):
+    &quot;&quot;&quot;
+    Expanding-window walk-forward validation.
+    Train on [0..t], predict y[t+1..t+horizon], advance by horizon.
+    Returns list of (y_true, y_pred) arrays.
+    &quot;&quot;&quot;
+    n = len(X)
+    results = []
+    t = min_train
+    while t + horizon &lt;= n:
+        X_train, y_train = X[:t], y[:t]
+        X_test,  y_true  = X[t:t + horizon], y[t:t + horizon]
+        model = Ridge(alpha=1.0).fit(X_train, y_train)
+        y_pred = model.predict(X_test)
+        results.append((y_true, y_pred))
+        t += horizon
+    return results
+
+np.random.seed(42)
+T = 200
+t_idx = np.arange(T)
+y = 0.6 * np.roll(t_idx * 0, 1) + np.cumsum(np.random.randn(T)) + 50
+X = np.column_stack([np.roll(y, k) for k in range(1, 6)])[5:]
+y_aligned = y[5:]
+
+results = walk_forward_expanding(X, y_aligned, min_train=60, horizon=1)
+all_true = np.concatenate([r[0] for r in results])
+all_pred = np.concatenate([r[1] for r in results])
+rmse = np.sqrt(mean_squared_error(all_true, all_pred))
+print(f'Walk-forward RMSE (expanding, h=1): {rmse:.4f}')
+print(f'Folds evaluated: {len(results)}')
+</code></pre>
+<h2>sklearn TimeSeriesSplit</h2>
+<p>scikit-learn's TimeSeriesSplit implements expanding-window validation with n_splits folds. Each fold adds roughly len(series)/n_splits new training observations. The test window is fixed at the same length across folds. TimeSeriesSplit integrates with GridSearchCV and cross_val_score, enabling standard hyperparameter tuning pipelines. Use n_splits ≥ 5 for stable accuracy estimates. For models with rolling features, pass the full dataset including lag columns — the split takes care of temporal ordering.</p>
+<pre><code class="language-python">import numpy as np
+import pandas as pd
+from sklearn.linear_model import Ridge
+from sklearn.model_selection import TimeSeriesSplit, cross_val_score
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+
+np.random.seed(0)
+T = 300
+t_idx = np.arange(T)
+y = np.sin(2 * np.pi * t_idx / 30) + 0.5 * np.cumsum(np.random.randn(T) * 0.1)
+
+# Lag features
+lags = 10
+X = np.column_stack([np.roll(y, k) for k in range(1, lags + 1)])[lags:]
+y_aligned = y[lags:]
+
+tscv = TimeSeriesSplit(n_splits=5)
+pipe = Pipeline([('scaler', StandardScaler()), ('model', Ridge(alpha=1.0))])
+
+scores = cross_val_score(pipe, X, y_aligned, cv=tscv,
+                          scoring='neg_root_mean_squared_error')
+
+print('TimeSeriesSplit RMSE per fold:')
+for i, s in enumerate(scores, 1):
+    print(f'  Fold {i}: RMSE = {-s:.4f}')
+print(f'Mean RMSE = {-scores.mean():.4f} ± {scores.std():.4f}')
+</code></pre>
+<h2>Rolling vs Expanding Window</h2>
+<p>Expanding window: training set grows with each fold (all past data used). Advantage: maximum training data in later folds; disadvantage: early data may be non-stationary or follow a different regime. Rolling window: training set size is fixed at W observations and slides forward with each fold. Advantage: training distribution is more homogeneous; disadvantage: discards useful older data. Rolling is preferred when the series has structural breaks or regime changes; expanding is preferred when the series is stationary and data is scarce.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.linear_model import Ridge
+from sklearn.metrics import mean_squared_error
+
+def walk_forward(X, y, min_train=60, horizon=1, window=None):
+    &quot;&quot;&quot;Walk-forward validation. window=None → expanding; window=int → rolling.&quot;&quot;&quot;
+    n = len(X)
+    rmses = []
+    t = min_train
+    while t + horizon &lt;= n:
+        start = 0 if window is None else max(0, t - window)
+        X_train, y_train = X[start:t], y[start:t]
+        X_test,  y_true  = X[t:t + horizon], y[t:t + horizon]
+        y_pred = Ridge(alpha=1.0).fit(X_train, y_train).predict(X_test)
+        rmses.append(np.sqrt(mean_squared_error(y_true, y_pred)))
+        t += horizon
+    return rmses
+
+np.random.seed(1)
+T = 250
+y = np.sin(np.arange(T) * 0.3) + np.cumsum(np.random.randn(T) * 0.15)
+X = np.column_stack([np.roll(y, k) for k in range(1, 8)])[7:]
+y_a = y[7:]
+
+exp_rmses  = walk_forward(X, y_a, window=None)
+roll_rmses = walk_forward(X, y_a, window=60)
+print(f'Expanding window: mean RMSE = {np.mean(exp_rmses):.4f}')
+print(f'Rolling window 60: mean RMSE = {np.mean(roll_rmses):.4f}')
+</code></pre>
+<h2>Gap Parameter to Prevent Feature Leakage</h2>
+<p>When using rolling features (rolling mean, rolling std) with window w, the feature for observation t includes observations up to t-1. If training ends at t and the test point is t+1, there is no problem. But if rolling features for the test point include observations from very close to the train/test boundary, any lag shorter than the feature window can introduce leakage. A gap of g periods between the last training point and the first test point ensures all overlapping windows are safely in the past, eliminating this subtle leakage channel.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.linear_model import Ridge
+from sklearn.metrics import mean_squared_error
+
+def walk_forward_with_gap(X, y, min_train=60, horizon=1, gap=0):
+    &quot;&quot;&quot;Walk-forward validation with a gap between train end and test start.&quot;&quot;&quot;
+    n = len(X)
+    results = []
+    t = min_train
+    while t + gap + horizon &lt;= n:
+        X_train, y_train = X[:t],              y[:t]
+        X_test,  y_true  = X[t+gap:t+gap+horizon], y[t+gap:t+gap+horizon]
+        y_pred = Ridge(alpha=1.0).fit(X_train, y_train).predict(X_test)
+        results.append(np.sqrt(mean_squared_error(y_true, y_pred)))
+        t += horizon
+    return results
+
+np.random.seed(2)
+T = 300
+y = np.cumsum(np.random.randn(T)) + 50
+X = np.column_stack([np.roll(y, k) for k in range(1, 8)])[7:]
+y_a = y[7:]
+
+for gap in [0, 3, 7, 14]:
+    rmses = walk_forward_with_gap(X, y_a, gap=gap)
+    print(f'Gap={gap:2d}  mean RMSE={np.mean(rmses):.4f}  folds={len(rmses)}')
+</code></pre>
+<blockquote>
+<p><strong>Nested CV for Hyperparameter Tuning</strong>: Do not tune hyperparameters using the same walk-forward loop used for final evaluation — this introduces optimistic bias. Use nested CV: an outer walk-forward loop for unbiased accuracy estimation, and an inner TimeSeriesSplit for hyperparameter search within each outer training fold. Only the outer loop RMSE should be reported as the model's expected accuracy.</p>
+</blockquote>
+<p>When evaluating multi-step models, the walk-forward loop should stride by H (the full forecast horizon) rather than 1, so each test block covers exactly one non-overlapping H-step window. Striding by 1 creates overlapping windows that inflate the number of folds and introduce correlation between fold errors, making the mean RMSE artificially precise. Stride = H gives independent evaluation windows whose RMSE estimates are asymptotically uncorrelated as the series grows.</p>
+<h2>Validation Strategy Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Strategy</th>
+<th>Leakage</th>
+<th>Variance</th>
+<th>Compute</th>
+<th>Hyper-Tuning</th>
+<th>Best For</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>k-Fold (random)</td>
+<td>High — future in train</td>
+<td>Low</td>
+<td>Low</td>
+<td>Standard CV</td>
+<td>Non-temporal data only</td>
+</tr>
+<tr>
+<td>Single holdout</td>
+<td>None</td>
+<td>High</td>
+<td>Very low</td>
+<td>None</td>
+<td>Very large datasets</td>
+</tr>
+<tr>
+<td>Expanding walk-forward</td>
+<td>None</td>
+<td>Medium</td>
+<td>Medium</td>
+<td>Nested inner CV</td>
+<td>Stationary series</td>
+</tr>
+<tr>
+<td>Rolling walk-forward</td>
+<td>None</td>
+<td>Medium</td>
+<td>Medium</td>
+<td>Nested inner CV</td>
+<td>Non-stationary / regime change</td>
+</tr>
+<tr>
+<td>Walk-forward + gap</td>
+<td>None</td>
+<td>Slightly higher</td>
+<td>Medium</td>
+<td>Nested inner CV</td>
+<td>Series with long rolling features</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>Never use sklearn's KFold or StratifiedKFold for time-series CV — use TimeSeriesSplit or a custom walk-forward loop.</li>
+<li>Set the gap equal to the maximum rolling window size to eliminate feature leakage across folds.</li>
+<li>Use at least 5 folds for stable RMSE estimates — fewer folds produce high-variance accuracy numbers.</li>
+<li>Report accuracy as mean ± std across folds; a high std indicates the model is sensitive to the training period.</li>
+<li>For multi-step forecasting, align the test window with the forecast horizon h to evaluate accuracy at the horizon of interest.</li>
+</ul>
+<p>Walk-forward validation generalises naturally to panel (multi-series) datasets. For N series with a shared temporal index, apply the same temporal cutoff across all series simultaneously — never allow some series to contribute post-cutoff observations to the training folds for other series. The fold-level RMSE becomes an average over all N series in the test window, providing a global accuracy estimate that accounts for cross-series variability in difficulty and scale.</p>
+<p>In production forecasting pipelines, implement the walk-forward loop to match the real deployment cadence. If the model is retrained weekly and forecasts 4 weeks ahead, the validation loop should stride by 1 week, use a horizon of 4 weeks, and apply the same feature computation pipeline that will be used in production — including any data cleaning, outlier handling, and calendar feature generation steps.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

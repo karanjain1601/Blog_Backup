@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Visual SLAM and Odometry: Localization and Mapping with Cameras | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Visual SLAM and Odometry: Localization and Mapping with Cameras</h1>
+      
+      <h1>Visual SLAM and Odometry: Localization and Mapping with Cameras</h1>
+<h2>Overview</h2>
+<p>Visual SLAM (Simultaneous Localization and Mapping) enables a camera-equipped agent to build a map of an unknown environment while simultaneously tracking its own pose within that map. Unlike offline SfM, SLAM operates in real time and handles incremental data arrival, making it essential for robotics, AR, and autonomous vehicles.</p>
+<p>The fundamental challenge of SLAM is the chicken-and-egg problem: accurate mapping requires knowing the camera pose, but accurate localization requires knowing the map. The solution is to maintain a probabilistic joint distribution over both quantities and iteratively refine them as new observations arrive. Practical systems use graph-based optimization.</p>
+<p>Visual Odometry (VO) is a subset of SLAM that estimates incremental camera motion without maintaining a persistent global map. VO accumulates drift over time, while SLAM corrects drift via loop closure — recognizing a previously visited location and applying a global pose graph correction. VO + loop closure = SLAM.</p>
+<h2>Visual Odometry Pipeline</h2>
+<p>Feature-based VO detects and tracks keypoints across consecutive frames. ORB features (binary, rotation-invariant) are the standard for real-time systems due to their fast extraction and matching. The tracking thread runs at camera frame rate (30–60 Hz) while mapping and loop closure run in parallel threads asynchronously.</p>
+<pre><code class="language-python">import cv2\nimport numpy as np\n\n# Detect features in previous frame\nprev_kp = cv2.goodFeaturesToTrack(frame_t, maxCorners=500,\n    qualityLevel=0.01, minDistance=10)\n\n# Track to current frame with KLT optical flow\ncurr_kp, status, _ = cv2.calcOpticalFlowPyrLK(\n    frame_t, frame_t1, prev_kp, None)\n\n# Keep only successfully tracked points\ngood_prev = prev_kp[status == 1]\ngood_curr = curr_kp[status == 1]\n\n# Estimate pose via PnP against known 3D map points\n_, R_vec, t, inliers = cv2.solvePnPRansac(\n    map_pts, good_curr, K, dist_coeffs)
+</code></pre>
+<p>RGB-D SLAM (e.g., ORB-SLAM3 with depth) directly uses the depth channel to lift 2D keypoints to 3D, enabling scale-aware pose estimation from a single frame pair. This eliminates the scale ambiguity of monocular VO and produces metric-scale maps. ICP (Iterative Closest Point) can supplement feature matching for dense depth alignment.</p>
+<h2>Keyframe Selection and Map Management</h2>
+<p>Not every frame needs to be a keyframe. ORB-SLAM3 inserts a new keyframe when: (1) more than 20 frames have passed since the last keyframe, (2) fewer than 50% of map points from the last keyframe are tracked, or (3) the median optical flow exceeds a threshold. Keyframe culling removes redundant keyframes with high covisibility to keep the graph compact.</p>
+<pre><code class="language-python"># Keyframe insertion heuristic\nimport numpy as np\n\ndef should_insert_keyframe(curr_frame, last_kf, tracked_pts, map_pts):\n    flows = np.linalg.norm(\n        curr_frame.kp - last_kf.kp[:len(curr_frame.kp)], axis=1\n    )\n    median_flow = np.median(flows)\n    covisibility = len(tracked_pts) / max(len(map_pts), 1)\n\n    if median_flow &gt; 20.0:\n        return True\n    if covisibility &lt; 0.6:\n        return True\n    return False
+</code></pre>
+<p>The local map is the set of keyframes sharing map points with the current frame (covisibility graph neighbors). Local bundle adjustment optimizes poses and points within the local map without touching the global map. This maintains O(1) complexity per frame for the tracking thread, ensuring real-time performance regardless of trajectory length.</p>
+<h2>Loop Closure Detection</h2>
+<blockquote>
+<p><strong>warning</strong>: Visual odometry drift is unavoidable without loop closure — a 1% rotational error compounds over 100m into meters of position error. Loop closure detection via bag-of-words (ORB-SLAM) or learned descriptors (NetVLAD) is essential for large-scale mapping.</p>
+</blockquote>
+<p>Bag-of-Words (BoW) place recognition converts a frame's feature descriptors into a sparse histogram over a visual vocabulary (typically 1M visual words). Querying this histogram against a database of keyframes returns candidates ranked by TF-IDF score. Geometric verification with PnP + RANSAC confirms true loop closures.</p>
+<pre><code class="language-python"># Loop closure with DBoW2 (conceptual Python bindings)\nimport DBoW2\n\n# Build vocabulary offline from training images\nvoc = DBoW2.Vocabulary('orb_vocab.txt')\ndb = DBoW2.Database(voc, use_direct_index=True)\n\n# Add keyframe descriptors to database\nfor kf in keyframes:\n    desc = orb.compute(kf.image)[1]\n    db.add(desc)\n\n# Query current frame\ndesc_curr = orb.compute(frame.image)[1]\nresults = db.query(desc_curr, max_results=5)\n\nif results[0].score &gt; 0.03:\n    loop_candidate = keyframes[results[0].id]
+</code></pre>
+<p>When a loop closure is confirmed, the pose graph is corrected: a relative constraint is added between the current keyframe and the loop closure keyframe, then all keyframes are re-optimized with g2o's pose graph optimizer. Map points are then fused across the matched keyframes to eliminate duplicates introduced by the accumulated drift.</p>
+<h2>Modern Deep SLAM</h2>
+<p>DROID-SLAM (Teed &amp; Deng, 2021) replaces hand-crafted features with a recurrent optical flow network (RAFT-based) that estimates dense flow between all keyframe pairs. A differentiable dense bundle adjustment (DBA) layer solves for camera poses and inverse depths jointly using a learned damping schedule, enabling end-to-end training.</p>
+<pre><code class="language-python"># DROID-SLAM inference (simplified)\nimport torch\n\n# Initialize DROID with first two frames\ndroid = DROID.from_pretrained('droid.pth').cuda()\ndroid.track(t=0, image=frames[0], depth=None, intrinsics=K)\ndroid.track(t=1, image=frames[1], depth=None, intrinsics=K)\n\n# Incremental tracking\nfor t, frame in enumerate(frames[2:], start=2):\n    droid.track(t=t, image=frame, intrinsics=K)\n\n# Final global BA\ntrajectory = droid.terminate(stream=frames)
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>System</th>
+<th>Type</th>
+<th>ATE (TUM RGB-D)</th>
+<th>Loop Closure</th>
+<th>GPU Required</th>
+<th>Open Source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ORB-SLAM3</td>
+<td>Feature-based SLAM</td>
+<td>0.017m</td>
+<td>Yes (DBoW2)</td>
+<td>No</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>DSO</td>
+<td>Direct sparse odometry</td>
+<td>0.041m</td>
+<td>No</td>
+<td>No</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>LSD-SLAM</td>
+<td>Direct semi-dense SLAM</td>
+<td>0.098m</td>
+<td>Yes</td>
+<td>No</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>DROID-SLAM</td>
+<td>Deep learned SLAM</td>
+<td>0.009m</td>
+<td>Implicit</td>
+<td>Yes</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>NICE-SLAM</td>
+<td>Neural implicit SLAM</td>
+<td>0.027m</td>
+<td>No</td>
+<td>Yes</td>
+<td>Yes</td>
+</tr>
+</tbody>
+</table>
+<p>NICE-SLAM and iMAP represent a new class of neural SLAM systems that encode the scene as a neural implicit (NeRF-style MLP or hash grid). The map is updated by minimizing a photometric rendering loss, and the camera pose is estimated jointly. These systems produce dense geometry but are currently too slow (~1 Hz) for real-time robotics.</p>
+<h2>Key Takeaways</h2>
+<p>For real-time robotics on CPU, ORB-SLAM3 remains the gold standard with 0.017m ATE on TUM RGB-D and support for monocular, stereo, RGB-D, and fisheye cameras. It handles map reuse across sessions (map merging) and is the most battle-tested open-source SLAM system available. Use ORB-SLAM3 as the baseline before exploring deep methods.</p>
+<p>Initialization is the most fragile part of monocular SLAM. The system needs enough parallax (baseline) to triangulate initial points. Keep the camera moving during initialization; a static camera will fail. For indoor AR applications with mostly planar surfaces, a homography-based initialization is more robust than the essential matrix approach.</p>
+<p>DROID-SLAM achieves the best accuracy on TUM benchmarks (0.009m ATE) but requires a GPU and ~8GB VRAM for a standard run. For deployment on embedded hardware (Jetson Orin), use ORB-SLAM3 with CUDA-accelerated ORB extraction or consider the stereo mode to eliminate scale ambiguity without a depth sensor.</p>
+<p>Sensor fusion dramatically improves SLAM robustness. IMU preintegration (ORB-SLAM3 IMU mode) bridges tracking failures during fast motion or textureless regions. Wheel odometry adds metric scale and reduces lateral drift for ground vehicles. Multi-sensor SLAM (visual-inertial-lidar) is the production standard in autonomous driving.</p>
+    </article>
+  </main>
+</body>
+</html>

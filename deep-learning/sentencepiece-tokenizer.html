@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SentencePiece — Unigram Language Model Tokenizer and Byte Fallback | Notes Backup</title>
+  <meta name="description" content="How SentencePiece processes raw Unicode without pre-tokenization, the Unigram LM algorithm with EM training and pruning, byte fallback for rare characters, and subword regularization." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>SentencePiece — Unigram Language Model Tokenizer and Byte Fallback</h1>
+      <ul class='note-meta'><li><strong>description:</strong> How SentencePiece processes raw Unicode without pre-tokenization, the Unigram LM algorithm with EM training and pruning, byte fallback for rare characters, and subword regularization.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>SentencePiece — Unigram Language Model Tokenizer and Byte Fallback</h1>
+<p>SentencePiece is a language-independent tokenizer used by LLaMA, Gemma, Mistral, T5, and ALBERT. Unlike BPE implementations that first split text on whitespace, SentencePiece treats the input as a raw Unicode byte stream—whitespace is just another character. Words are not assumed to be separated by spaces, making the tokenizer suitable for Chinese, Japanese, Thai, and other languages without space-delimited words. SentencePiece supports two algorithms: BPE mode (identical in principle to GPT-2 BPE) and Unigram Language Model mode. The Unigram LM mode is the default for most modern models; it produces a probabilistic vocabulary and supports subword regularization during training—sampling multiple valid tokenizations of the same text to improve model robustness.</p>
+<h2>Introduction</h2>
+<p>SentencePiece's self-contained .model file encodes the full vocabulary, algorithm, and special token configuration, making tokenization deterministic and portable across frameworks and languages. The _ prefix (U+2581 LOWER ONE EIGHTH BLOCK) marks the beginning of a word in place of GPT-2's Ġ byte-level space encoding. A sequence like '▁hello▁world' tokenized as ['▁hello', '▁world'] preserves the leading-space information needed to reconstruct the original text. LLaMA-1 uses a 32K SentencePiece Unigram vocabulary; LLaMA-3 switched to tiktoken BPE at 128K tokens; Gemma retains SentencePiece with 256K vocabulary.</p>
+<h2>Raw Unicode Processing</h2>
+<p>Because SentencePiece processes raw Unicode without pre-tokenization, a space at position i is treated identically to any other character. This means 'hello world' and 'helloworld' produce different token sequences, and the tokenizer can learn that '▁' (space) is a meaningful boundary signal without being explicitly programmed to split on whitespace. SentencePiece normalises input using Unicode NFKC by default, which maps compatibility characters to their canonical forms (e.g., full-width digits to ASCII digits). This normalisation can be disabled with normalization_rule_name='identity' when the model must handle raw text exactly.</p>
+<pre><code class="language-python">import sentencepiece as spm
+import os, tempfile
+
+# Build a small training corpus
+lines = [
+    'The quick brown fox jumps over the lazy dog.',
+    'Natural language processing enables machines to understand text.',
+    'Subword tokenization balances vocabulary size and sequence length.',
+    'Byte-pair encoding and unigram models are the two main algorithms.',
+    'SentencePiece processes raw Unicode without whitespace pre-splitting.',
+] * 60  # repeat to produce enough training data
+
+with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
+    f.write('\n'.join(lines))
+    corpus_file = f.name
+
+model_prefix = tempfile.mktemp()
+spm.SentencePieceTrainer.train(
+    input=corpus_file,
+    model_prefix=model_prefix,
+    vocab_size=300,
+    model_type='unigram',
+    character_coverage=0.9995,
+    pad_id=0, unk_id=1, bos_id=2, eos_id=3,
+)
+sp = spm.SentencePieceProcessor(model_file=model_prefix + '.model')
+
+test = 'The quick brown fox'
+print(f'Text   : {test}')
+print(f'Tokens : {sp.encode(test, out_type=str)}')
+print(f'IDs    : {sp.encode(test, out_type=int)}')
+print(f'Vocab size: {sp.get_piece_size()}')
+print('\nTop 15 vocabulary pieces:')
+for i in range(15):
+    print(f'  [{i:3d}] {sp.id_to_piece(i)!r:&lt;20} score={sp.get_score(i):.4f}')
+os.unlink(corpus_file)
+</code></pre>
+<h2>Unigram Language Model Algorithm</h2>
+<p>The Unigram LM tokenizer assigns a log-probability score p(t) to each token t in the vocabulary. The probability of a segmentation (t₁, t₂, …, t_k) of a word is p(t₁) × p(t₂) × … × p(t_k). The corpus log-likelihood is the sum of log p(best segmentation) over all words. Training starts with a large initial vocabulary (∼3× the target size, built from frequent substrings), then iteratively prunes it. At each EM iteration: (1) E-step: use the Viterbi algorithm to find the best segmentation of each word given the current probabilities; (2) M-step: update token probabilities using the segmentation counts; (3) prune tokens whose removal decreases corpus log-likelihood least, typically removing 10–20% of tokens per round. Repeat until the vocabulary reaches the target size V.</p>
+<pre><code class="language-python">import math
+
+def viterbi_segment(word, unigram_log_probs, max_piece_len=8):
+    &quot;&quot;&quot;Viterbi best-path segmentation given unigram log-probabilities.&quot;&quot;&quot;
+    n = len(word)
+    best = [-math.inf] * (n + 1)
+    back = [None] * (n + 1)
+    best[0] = 0.0
+    for i in range(1, n + 1):
+        for j in range(max(0, i - max_piece_len), i):
+            piece = word[j:i]
+            lp = unigram_log_probs.get(piece, -math.inf)
+            score = best[j] + lp
+            if score &gt; best[i]:
+                best[i] = score
+                back[i] = j
+    if best[n] == -math.inf:
+        return [word]  # fallback: unknown word
+    tokens, i = [], n
+    while i &gt; 0:
+        j = back[i]
+        tokens.append(word[j:i])
+        i = j
+    return list(reversed(tokens))
+
+# Small example unigram vocabulary with log-probabilities
+unigram_lp = {
+    'low': math.log(0.10), 'er': math.log(0.08), 'est': math.log(0.07),
+    'new': math.log(0.09), 'wide': math.log(0.06), 'run': math.log(0.08),
+    'lo': math.log(0.03), 'w': math.log(0.02), 'r': math.log(0.04),
+    'n': math.log(0.02), 'e': math.log(0.05), 's': math.log(0.03),
+    't': math.log(0.03), 'i': math.log(0.02), 'd': math.log(0.02),
+}
+words = ['lower', 'newest', 'wider', 'runner', 'lowest']
+print(f'{&quot;Word&quot;:&lt;12} {&quot;Viterbi Segmentation&quot;}')
+for w in words:
+    segs = viterbi_segment(w, unigram_lp)
+    print(f'{w:&lt;12} {segs}')
+</code></pre>
+<h2>EM Training and Pruning</h2>
+<p>EM training alternates between computing the best (or expected) segmentation of the corpus (E-step) and re-estimating token log-probabilities from segmentation counts (M-step). To prune, each token t is removed from the vocabulary and the loss in corpus log-likelihood is computed: tokens with the smallest loss impact are pruned. A pruning rate of 10–20% per round means that from an initial vocabulary of 100K, reaching a target of 32K takes roughly 5–8 rounds of EM + pruning. Unlike BPE (which adds tokens one by one), the Unigram LM approach works top-down by removing tokens, giving it more global control over the final vocabulary distribution.</p>
+<h2>Byte Fallback</h2>
+<p>SentencePiece's byte fallback feature handles characters not covered by the vocabulary: any character that cannot be tokenized is split into its UTF-8 bytes, each encoded as a special token in the form &lt;0xHH&gt; where HH is the hex byte value. This guarantees that even rare CJK characters, emoji, or unusual Unicode can be encoded without [UNK]. LLaMA-1's tokenizer has 256 reserved byte fallback tokens (&lt;0x00&gt; through &lt;0xFF&gt;). The byte fallback vocabulary slots cost only 256 entries but enable complete Unicode coverage. Byte tokens have very low probability scores and are pruned last during Unigram LM training.</p>
+<pre><code class="language-python"># Demonstrate byte fallback encoding for rare Unicode characters
+# (without requiring a trained model)
+
+def utf8_byte_tokens(char):
+    &quot;&quot;&quot;Return SentencePiece-style byte fallback tokens for a character.&quot;&quot;&quot;
+    return [f'&lt;0x{b:02X}&gt;' for b in char.encode('utf-8')]
+
+rare_chars = [
+    ('\U0001F600', 'emoji (U+1F600)'),
+    ('\u4e2d',     'CJK \u4e2d (U+4E2D)'),
+    ('\u03b1',     'Greek \u03b1 (U+03B1)'),
+    ('\u2192',     'Arrow \u2192 (U+2192)'),
+    ('\u00f1',     'Latin \u00f1 (U+00F1)'),
+    ('\u0436',     'Cyrillic \u0436 (U+0436)'),
+]
+print('Byte fallback encoding for rare Unicode characters:')
+print(f'{&quot;Char&quot;:&lt;8} {&quot;Unicode&quot;:&lt;22} {&quot;UTF-8 bytes&quot;:&lt;20} {&quot;Fallback tokens&quot;}')
+print('-' * 75)
+for char, label in rare_chars:
+    utf8 = list(char.encode('utf-8'))
+    tokens = utf8_byte_tokens(char)
+    print(f'{repr(char):&lt;8} {label:&lt;22} {str(utf8):&lt;20} {tokens}')
+
+print('\nByte fallback uses 256 reserved token slots &lt;0x00&gt;...&lt;0xFF&gt;.')
+print('Any Unicode character decomposes into at most 4 byte tokens.')
+</code></pre>
+<h2>Subword Regularization</h2>
+<p>During training, subword regularization samples from the distribution of valid tokenizations rather than always using the Viterbi-best segmentation. For a word with probability distribution over valid token sequences, the E-step can sample instead of taking the argmax, exposing the model to multiple valid tokenizations of the same text. At inference time, the best (Viterbi) tokenization is used. Subword regularization is controlled by two parameters: nbest_size (number of candidate tokenizations to sample from; -1 = full lattice) and alpha (flatness of the sampling distribution; 0 = uniform, 1 = proportional to probability). It acts as a data augmentation technique that improves robustness to tokenization artifacts.</p>
+<pre><code class="language-python">import sentencepiece as spm
+
+# Reuse model trained in the first code block
+sp = spm.SentencePieceProcessor(model_file=model_prefix + '.model')
+
+text = 'natural language processing'
+print(f'Text: {repr(text)}')
+print()
+
+# Deterministic best segmentation
+best = sp.encode(text, out_type=str)
+print(f'Best (Viterbi): {best}')
+print()
+
+# Sample multiple tokenizations (subword regularization)
+print('Sampled tokenizations (nbest_size=-1, alpha=0.1):')
+seen = set()
+for _ in range(50):
+    sampled = sp.sample_encode(text, -1, 0.1, out_type=str)
+    key = '|'.join(sampled)
+    if key not in seen:
+        seen.add(key)
+        print(f'  {sampled}')
+    if len(seen) &gt;= 6:
+        break
+
+print()
+print(f'Unique segmentations found: {len(seen)}')
+print('Use sample_encode during training to expose model to tokenization variants.')
+print('At inference always use encode (Viterbi-best) for deterministic output.')
+</code></pre>
+<blockquote>
+<p><strong>Subword Regularization for Training Robustness</strong>: Unigram LM tokenizer supports subword regularization (sample_encode with nbest_size=-1) during training — this exposes the model to multiple valid tokenizations of the same text, improving robustness to tokenization artifacts at inference. In practice, use alpha=0.1–0.2 (low alpha = near-best segmentation; high alpha = uniform random). Always switch to deterministic Viterbi encoding (sp.encode) at inference time to ensure consistent token sequences.</p>
+</blockquote>
+<h2>Practical Usage</h2>
+<p>Load a SentencePiece model in Python with sentencepiece.SentencePieceProcessor(model_file='path.model'). The .model binary file is fully self-contained: no additional vocabulary files are needed. HuggingFace wraps SentencePiece behind the LlamaTokenizer and T5Tokenizer classes, which add special token handling and the HuggingFace tokenizer API. When working with LLaMA-2, the BOS token (ID 1) must be prepended manually if using the raw SentencePiece API, as the model expects it; HuggingFace's LlamaTokenizer adds it automatically via add_special_tokens=True.</p>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>BPE Mode</th>
+<th>Unigram LM Mode</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Training direction</td>
+<td>Bottom-up: merge characters</td>
+<td>Top-down: prune from large vocab</td>
+</tr>
+<tr>
+<td>Merge criterion</td>
+<td>Highest frequency count</td>
+<td>Lowest log-likelihood loss on removal</td>
+</tr>
+<tr>
+<td>Segmentation</td>
+<td>Deterministic (merge order)</td>
+<td>Probabilistic (Viterbi-best or sampled)</td>
+</tr>
+<tr>
+<td>Handles rare chars</td>
+<td>Byte-level BPE only</td>
+<td>Yes, via byte fallback tokens</td>
+</tr>
+<tr>
+<td>Vocabulary control</td>
+<td>Exact (one slot per merge)</td>
+<td>Approximate (pruning rate)</td>
+</tr>
+<tr>
+<td>Subword regularization</td>
+<td>No native support</td>
+<td>Yes: sample_encode API</td>
+</tr>
+<tr>
+<td>Used by</td>
+<td>GPT-2/3/4, RoBERTa</td>
+<td>T5, mT5, LLaMA-1/2, Gemma, Mistral</td>
+</tr>
+</tbody>
+</table>
+<h2>Key Takeaways</h2>
+<ul>
+<li>SentencePiece treats whitespace as a regular character (marked with ▁), enabling language-agnostic tokenization without pre-splitting.</li>
+<li>Unigram LM training starts with a large vocabulary and prunes iteratively using EM; unlike BPE it operates top-down.</li>
+<li>Viterbi decoding finds the segmentation that maximises the product of unigram token probabilities.</li>
+<li>Byte fallback encodes any Unicode character via its UTF-8 bytes as &lt;0xHH&gt; tokens, guaranteeing zero OOV with only 256 extra slots.</li>
+<li>Subword regularization (sample_encode) samples from the tokenization distribution during training, improving model robustness.</li>
+<li>The .model file is self-contained; the .vocab file is optional metadata. Ship only the .model file for inference.</li>
+<li>LLaMA-1/2 use a 32K SentencePiece vocabulary; Gemma uses 256K. Larger vocabulary reduces fertility but requires more embedding parameters.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

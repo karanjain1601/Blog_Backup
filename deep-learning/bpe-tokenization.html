@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BPE — Byte-Pair Encoding and LLM Vocabulary Construction | Notes Backup</title>
+  <meta name="description" content="How BPE builds LLM vocabularies by iteratively merging frequent character pairs, covering the merge algorithm, pre-tokenization, fertility analysis, and HuggingFace integration." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>BPE — Byte-Pair Encoding and LLM Vocabulary Construction</h1>
+      <ul class='note-meta'><li><strong>description:</strong> How BPE builds LLM vocabularies by iteratively merging frequent character pairs, covering the merge algorithm, pre-tokenization, fertility analysis, and HuggingFace integration.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>BPE — Byte-Pair Encoding and LLM Vocabulary Construction</h1>
+<p>Byte-Pair Encoding (BPE) is the tokenization algorithm used by GPT-2, GPT-3, and GPT-4. Originally a lossless data-compression technique, BPE was adapted for NLP by Sennrich et al. (2016) to handle open vocabularies in neural machine translation without out-of-vocabulary tokens. The algorithm starts with a vocabulary of individual characters (or bytes), then iteratively merges the most frequent adjacent symbol pair until the vocabulary reaches a target size V. The result is a set of subword units ranging from single characters to complete common words, with rare words split into their most frequent constituent pieces. Because every possible byte is in the initial vocabulary, byte-level BPE guarantees that any input text can be encoded without an [UNK] token.</p>
+<h2>Introduction</h2>
+<p>Word-level vocabularies suffer from out-of-vocabulary tokens and require 500K+ entries to cover morphologically rich languages. Character-level models avoid OOV but produce very long sequences. BPE finds a middle ground: a 32K–100K subword vocabulary covers any input without UNK while keeping average sequence length manageable. GPT-2 uses 50,257-token byte-level BPE where all 256 bytes form the base vocabulary, ensuring zero OOV. GPT-4's cl100k_base uses 100,277 tokens with a refined 5-pattern regex pre-tokenizer. The fertility metric—average tokens per word—measures how efficiently a tokenizer uses context-window space; GPT-4's larger vocabulary achieves roughly 1.2–1.3 tokens/word on English text, versus 1.3–1.5 for GPT-2.</p>
+<h2>Merge Algorithm</h2>
+<p>BPE training maintains a frequency table mapping each current token sequence (a word represented as its current tokens) to its corpus count. At each iteration: (1) count all adjacent token pairs across all words, weighting by word frequency; (2) select the most frequent pair (a, b); (3) add the merged token ab to the vocabulary; (4) update the token sequences by replacing every occurrence of (a b) with ab. The result is an ordered merge table—the order matters because encoding applies merges in the same order. A priority queue over pair frequencies reduces the per-merge scan from O(N) to O(log N), which is how tiktoken achieves fast encoding.</p>
+<pre><code class="language-python">from collections import Counter
+import re
+
+def build_vocab(corpus):
+    vocab = Counter()
+    for word in corpus.split():
+        vocab[' '.join(list(word)) + ' &lt;/w&gt;'] += 1
+    return dict(vocab)
+
+def get_pair_stats(vocab):
+    pairs = Counter()
+    for word, freq in vocab.items():
+        symbols = word.split()
+        for i in range(len(symbols) - 1):
+            pairs[(symbols[i], symbols[i+1])] += freq
+    return pairs
+
+def merge_pair(pair, vocab):
+    pat = re.compile(r'(?&lt;!\S)' + re.escape(' '.join(pair)) + r'(?!\S)')
+    return {pat.sub(''.join(pair), w): f for w, f in vocab.items()}
+
+def train_bpe(corpus, num_merges):
+    vocab, merges = build_vocab(corpus), []
+    for i in range(num_merges):
+        stats = get_pair_stats(vocab)
+        if not stats:
+            break
+        best = max(stats, key=stats.get)
+        vocab = merge_pair(best, vocab)
+        merges.append(best)
+        print(f'  Merge {i+1:2d}: {best[0]+&quot; &quot;+best[1]:&lt;20} -&gt; {&quot;|&quot;.join(best):&lt;18} freq={stats[best]}')
+    return merges
+
+corpus = 'low lower lowest newer newest wider widest running runner runs ' * 25
+print('BPE Training:')
+merge_table = train_bpe(corpus, num_merges=15)
+print(f'Total merges learned: {len(merge_table)}')
+</code></pre>
+<h2>Vocabulary Construction</h2>
+<p>After training, the vocabulary = initial character set + one new token per merge. For GPT-2's byte-level BPE: 256 byte tokens + 50,000 merges + 1 special token = 50,257. Larger vocabularies reduce fertility but increase embedding-matrix memory. At 768 dimensions, a 100K-token vocabulary uses 100K × 768 × 4 bytes ≈ 295 MB for embeddings alone. Tail tokens—tokens that appear very rarely in the training corpus—consume vocabulary slots without contributing meaningfully to model quality; some tokenizer implementations prune tokens below a minimum frequency threshold before finalising the vocabulary.</p>
+<pre><code class="language-python">def bpe_encode(word, merges):
+    tokens = list(word) + ['&lt;/w&gt;']
+    for pair in merges:
+        i, new = 0, []
+        while i &lt; len(tokens):
+            if i &lt; len(tokens) - 1 and (tokens[i], tokens[i+1]) == pair:
+                new.append(''.join(pair))
+                i += 2
+            else:
+                new.append(tokens[i])
+                i += 1
+        tokens = new
+    return tokens
+
+def bpe_decode(tokens):
+    return ''.join(tokens).replace('&lt;/w&gt;', '')
+
+test_words = ['low', 'lower', 'lowest', 'newer', 'widest', 'unknown', 'runner']
+print(f'{&quot;Word&quot;:&lt;12} {&quot;BPE Tokens&quot;:&lt;42} {&quot;Count&quot;:&gt;5}')
+print('-' * 62)
+for w in test_words:
+    toks = bpe_encode(w, merge_table)
+    dec  = bpe_decode(toks)
+    ok   = 'OK' if dec == w else 'ERR'
+    print(f'{w:&lt;12} {str(toks):&lt;42} {len(toks):&gt;5}  [{ok}]')
+
+print('\nDecoding: join tokens, strip &lt;/w&gt;. Lossless for known chars.')
+print('Unknown words split to chars first, then merges applied where possible.')
+</code></pre>
+<h2>Encoding and Decoding</h2>
+<p>BPE encoding applies learned merges in order: scan the current token list for the highest-priority merge pair, apply it, rescan. This greedy process is O(M × T) per word where M is the number of merges and T is the word length. The tiktoken library uses a priority-queue approach that achieves near-linear time and is 5–20× faster than Python BPE implementations. Decoding is trivial: concatenate the subword tokens and remove the end-of-word marker (</w> for standard BPE; byte-level GPT-2 uses a separate byte-to-unicode mapping where space ð  and newline Ā are represented as single Unicode characters). Because every byte is in the initial vocabulary, decoding is always lossless.</p>
+<h2>Pre-Tokenization and Regex Splits</h2>
+<p>Before BPE is applied, GPT-4's cl100k_base uses a 5-pattern regex to split text into pre-tokens: (1) contractions like 's, 't, 're; (2) sequences of letters; (3) sequences of digits; (4) sequences of non-whitespace, non-letter, non-digit characters; (5) whitespace. This prevents BPE from producing cross-word merges such as 'e ' (end of 'the' fused with the space before the next word). Without pre-tokenization, BPE would freely merge across word boundaries, creating tokens that depend on context rather than just subword content. GPT-2 uses a simpler regex. Language-specific pre-tokenizers for Chinese, Japanese, and code use different split strategies.</p>
+<pre><code class="language-python">import re
+from collections import Counter
+
+def simple_bpe_fertility(corpus, n_merges):
+    &quot;&quot;&quot;Compute avg tokens/word after n_merges BPE operations.&quot;&quot;&quot;
+    word_freq = Counter(corpus.split())
+    vocab = {' '.join(list(w)) + ' &lt;/w&gt;': f for w, f in word_freq.items()}
+
+    def get_stats(v):
+        pairs = Counter()
+        for word, freq in v.items():
+            syms = word.split()
+            for i in range(len(syms) - 1):
+                pairs[(syms[i], syms[i+1])] += freq
+        return pairs
+
+    def merge(pair, v):
+        pat = re.compile(r'(?&lt;!\S)' + re.escape(' '.join(pair)) + r'(?!\S)')
+        return {pat.sub(''.join(pair), w): f for w, f in v.items()}
+
+    for _ in range(n_merges):
+        stats = get_stats(vocab)
+        if not stats:
+            break
+        vocab = merge(max(stats, key=stats.get), vocab)
+
+    total_tok = sum(len(w.split()) * f for w, f in vocab.items())
+    return total_tok / sum(word_freq.values())
+
+corpus = ('the quick brown fox jumps over the lazy dog '
+          'running runner runs lower lowest newer newest wider widest ') * 30
+print('Corpus fertility vs BPE merge count:')
+print(f'{&quot;Merges&quot;:&gt;8} {&quot;Approx Scale&quot;:&gt;14} {&quot;Fertility&quot;:&gt;12}')
+print('-' * 38)
+for n, label in [(0, 'char-level'), (8, '~1K vocab'), (20, '~8K vocab'), (40, '~32K vocab')]:
+    f = simple_bpe_fertility(corpus, n)
+    print(f'{n:&gt;8} {label:&gt;14} {f:&gt;12.3f}')
+</code></pre>
+<h2>Fertility and Vocabulary Size</h2>
+<p>Fertility = average tokens per word. For English, GPT-2 (50K vocab) achieves fertility ≈1.3–1.5; GPT-4 (100K) achieves ≈1.2–1.3. Non-English languages suffer higher fertility when under-represented in training data: Chinese text may reach 2–4 tokens/word on GPT-2 because CJK characters are rare in its English-heavy corpus. Fertility directly determines effective context window length: at fertility 2.0, a 4096-token context holds only ≈2048 words. Choosing vocabulary size V requires balancing fertility, embedding-matrix memory, and frequency of tail tokens in the training corpus.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>OOV Rate</th>
+<th>Avg Fertility</th>
+<th>Vocab Size</th>
+<th>Training Complexity</th>
+<th>Used By</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Character-level</td>
+<td>0%</td>
+<td>4–6 tok/word</td>
+<td>~100–300</td>
+<td>O(C) trivial</td>
+<td>Early char-RNNs</td>
+</tr>
+<tr>
+<td>Word-level</td>
+<td>1–5%</td>
+<td>1.0 tok/word</td>
+<td>50K–500K</td>
+<td>O(V) fast</td>
+<td>Classic NLP, word2vec</td>
+</tr>
+<tr>
+<td>BPE</td>
+<td>0% (byte-level)</td>
+<td>1.2–1.8 tok/word</td>
+<td>32K–100K</td>
+<td>O(V × merges)</td>
+<td>GPT-2/3/4, RoBERTa</td>
+</tr>
+<tr>
+<td>Unigram LM</td>
+<td>0% (byte fallback)</td>
+<td>1.2–1.8 tok/word</td>
+<td>16K–64K</td>
+<td>O(V × EM iters)</td>
+<td>T5, mT5, Gemma, LLaMA</td>
+</tr>
+<tr>
+<td>WordPiece</td>
+<td>~0.1% ([UNK])</td>
+<td>1.3–2.0 tok/word</td>
+<td>28K–32K</td>
+<td>O(V × likelihood)</td>
+<td>BERT, DistilBERT, ELECTRA</td>
+</tr>
+</tbody>
+</table>
+<h2>HuggingFace Integration</h2>
+<p>HuggingFace AutoTokenizer loads the correct tokenizer class for any model checkpoint. GPT-2 uses PreTrainedTokenizerFast, backed by the Rust tokenizers library—typically 10–100× faster than the Python implementation and supporting offset_mapping to align token positions back to character spans in the original text. This is essential for span-extraction tasks such as NER and QA. For GPT-4's cl100k_base, use the tiktoken library directly (not available through HuggingFace), which is the production tokenizer used by OpenAI's API.</p>
+<pre><code class="language-python">from transformers import AutoTokenizer
+
+# Load GPT-2 tokenizer (50,257-token byte-level BPE)
+tokenizer = AutoTokenizer.from_pretrained('gpt2')
+
+text = 'Byte-pair encoding merges frequent character pairs iteratively.'
+encoding = tokenizer(text, return_tensors='pt', return_offsets_mapping=True)
+ids     = encoding['input_ids'][0].tolist()
+offsets = encoding['offset_mapping'][0].tolist()
+tokens  = tokenizer.convert_ids_to_tokens(ids)
+
+print(f'Text   : {text}')
+print(f'Tokens : {tokens}')
+print(f'Vocab size : {tokenizer.vocab_size}')
+print(f'Special    : {tokenizer.all_special_tokens}')
+print()
+print(f'{&quot;Token&quot;:&lt;22} {&quot;ID&quot;:&gt;6}  Char span')
+for tok, tid, (s, e) in zip(tokens, ids, offsets):
+    print(f'{repr(tok):&lt;22} {tid:&gt;6}  [{s}:{e}] -&gt; {repr(text[s:e])}')
+
+words = ['Hello', 'Supercalifragilistic', 'tokenization', 'GPT-4']
+print('\nFertility samples (GPT-2 tokenizer):')
+for w in words:
+    toks = tokenizer.tokenize(w)
+    print(f'  {w!r:&lt;25} -&gt; {len(toks)} tokens: {toks}')
+</code></pre>
+<blockquote>
+<p><strong>Merge Order Dependency</strong>: BPE merges are greedy and order-dependent — different corpus samples or random seeds produce different merge orders even for the same final vocabulary size, leading to different tokenizations of the same text. Two BPE tokenizers trained on different corpora with identical target vocabulary sizes will generally disagree on how to tokenize identical inputs. Always use the exact tokenizer checkpoint that was used during model training; substituting a different BPE tokenizer of the same nominal vocab size will produce incorrect token IDs and degrade model quality.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<ul>
+<li>BPE starts from a character (or byte) vocabulary and greedily merges the most frequent adjacent pair — one merge per vocabulary slot.</li>
+<li>GPT-2 uses byte-level BPE with 50,257 tokens; GPT-4 uses cl100k_base with 100,277 tokens and a 5-pattern regex pre-tokenizer.</li>
+<li>Fertility (avg tokens per word) measures tokenizer efficiency; lower fertility means fewer tokens per word and more text fits in a fixed context window.</li>
+<li>Pre-tokenization with regex prevents cross-word merges; GPT-4's regex splits on contractions, letters, digits, and punctuation separately.</li>
+<li>Byte-level BPE guarantees zero OOV — any byte sequence can be encoded using the 256 initial byte tokens.</li>
+<li>Larger vocabulary sizes reduce fertility but increase embedding-matrix memory; 100K × 768d = 295 MB for embeddings alone.</li>
+<li>Use tiktoken for GPT-4 tokenization; use HuggingFace AutoTokenizer with return_offsets_mapping=True for span-extraction tasks.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NAS — Differentiable Architecture Search and Efficiency Proxies | Notes Backup</title>
+  <meta name="description" content="Neural architecture search from RL-based controllers to DARTS bi-level optimization. Covers the search space definition, differentiable relaxation, efficiency-aware objectives (FLOPs, latency), and one-shot supernet methods with weight sharing." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>NAS — Differentiable Architecture Search and Efficiency Proxies</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Neural architecture search from RL-based controllers to DARTS bi-level optimization. Covers the search space definition, differentiable relaxation, efficiency-aware objectives (FLOPs, latency), and one-shot supernet methods with weight sharing.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>NAS — Differentiable Architecture Search and Efficiency Proxies</h1>
+<p>Neural architecture search (NAS) automates the design of neural network architectures by formulating architecture selection as an optimization problem. Early NAS methods used reinforcement learning to train a controller that proposes architectures, evaluated each on a proxy task, and updated the controller based on the validation accuracy. This required thousands of GPU-hours and hundreds of GPU machines. Modern NAS methods — DARTS, one-shot supernets, and efficiency-aware search — have reduced the cost to a single GPU-day or less.</p>
+<h2>Search Space Definition</h2>
+<p>The search space determines which architectures can be found. A typical cell-based search space defines a computational cell (a small graph of operations) and stacks N cells to form the full network. At each edge in the cell, the operation is chosen from a candidate set: 3×3 conv, 5×5 conv, 3×3 dilated conv, 3×3 max pool, skip connection, zero. With 7 candidate ops and 14 edges in a cell, the search space has 7^14 ≈ 10^12 possible cells. RL-NAS samples directly from this space; DARTS relaxes it to a continuous mixture.</p>
+<h2>DARTS — Differentiable Mixed Operation</h2>
+<p>DARTS (Liu et al. 2019) relaxes the discrete operation selection to a continuous mixture: for each edge, the output is a weighted sum of all candidate operations: ō(x) = Σ_i exp(α_i) / Σ_j exp(α_j) · o_i(x). The architecture parameters α (one per operation per edge) are learned jointly with the weight parameters w by gradient descent. After search, the architecture is discretized by selecting the highest-α operation on each edge.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class MixedOp(nn.Module):
+    &quot;&quot;&quot;DARTS mixed operation: weighted softmax mixture of candidate ops.&quot;&quot;&quot;
+
+    CANDIDATES = {
+        'skip': lambda C: nn.Identity(),
+        'conv3x3': lambda C: nn.Sequential(nn.Conv2d(C, C, 3, padding=1, bias=False), nn.BatchNorm2d(C)),
+        'conv5x5': lambda C: nn.Sequential(nn.Conv2d(C, C, 5, padding=2, bias=False), nn.BatchNorm2d(C)),
+        'maxpool': lambda C: nn.MaxPool2d(3, stride=1, padding=1),
+        'avgpool': lambda C: nn.AvgPool2d(3, stride=1, padding=1),
+    }
+
+    def __init__(self, C: int):
+        super().__init__()
+        self.ops = nn.ModuleList([fn(C) for fn in self.CANDIDATES.values()])
+        self.op_names = list(self.CANDIDATES.keys())
+        # Architecture weights (α) — not in model.parameters(), trained separately
+        self.arch_weights = nn.Parameter(torch.zeros(len(self.ops)))
+
+    def forward(self, x: torch.Tensor) -&gt; torch.Tensor:
+        weights = F.softmax(self.arch_weights, dim=0)
+        return sum(w * op(x) for w, op in zip(weights, self.ops))
+
+    def discretize(self) -&gt; str:
+        &quot;&quot;&quot;Return the name of the operation with highest arch weight.&quot;&quot;&quot;
+        best = self.arch_weights.argmax().item()
+        return self.op_names[best]
+
+# Demo
+C = 16
+mixed = MixedOp(C)
+x = torch.randn(2, C, 8, 8)
+out = mixed(x)
+print(f'Output shape: {out.shape}')
+print(f'Arch weights (softmax): {F.softmax(mixed.arch_weights, dim=0).detach().round(decimals=3).tolist()}')
+print(f'Discretized operation: {mixed.discretize()}')
+</code></pre>
+<h2>DARTS Bi-Level Optimization</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.optim as optim
+
+def darts_train_step(model, arch_params, train_batch, val_batch, criterion,
+                     w_optimizer, arch_optimizer, inner_steps=1):
+    &quot;&quot;&quot;
+    DARTS alternating optimization:
+    1. Update architecture params alpha on validation loss.
+    2. Update weight params w on training loss.
+    &quot;&quot;&quot;
+    X_train, y_train = train_batch
+    X_val, y_val = val_batch
+
+    # Step 1: Update architecture parameters on validation set
+    arch_optimizer.zero_grad()
+    val_loss = criterion(model(X_val), y_val)
+    val_loss.backward()
+    arch_optimizer.step()
+
+    # Step 2: Update weight parameters on training set
+    for _ in range(inner_steps):
+        w_optimizer.zero_grad()
+        train_loss = criterion(model(X_train), y_train)
+        train_loss.backward()
+        w_optimizer.step()
+
+    return train_loss.item(), val_loss.item()
+
+# Separate weight and arch parameters for dual optimizers
+# (arch_params have requires_grad=True and are passed to arch_optimizer)
+print('DARTS bi-level: arch optimizer -&gt; val loss; weight optimizer -&gt; train loss')
+print('After search: discretize by argmax(arch_weights) per edge.')
+print('Re-train discretized architecture from scratch for fair comparison.')
+</code></pre>
+<h2>Efficiency-Aware NAS</h2>
+<p>Accuracy alone is insufficient for mobile and edge deployment. Efficiency-aware NAS adds a hardware cost term to the objective: L_total = L_CE(y, ŷ) + λ · log(latency(α)). The latency is estimated from a lookup table (op × resolution × hardware) rather than measured at every step. FBNet and ProxylessNAS use this approach. The λ hyperparameter controls the accuracy-latency trade-off; sweeping λ produces a Pareto frontier of architectures.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+# Latency lookup table: op -&gt; (ms on mobile CPU, ms on server GPU)
+LATENCY_TABLE = {
+    'skip':    (0.05, 0.01),
+    'conv3x3': (1.20, 0.15),
+    'conv5x5': (2.80, 0.30),
+    'maxpool': (0.30, 0.04),
+    'avgpool': (0.25, 0.04),
+}
+
+def differentiable_latency(arch_weights: torch.Tensor,
+                           op_names: list,
+                           target: str = 'mobile') -&gt; torch.Tensor:
+    &quot;&quot;&quot;
+    Expected latency as a differentiable function of arch weights.
+    target: 'mobile' (index 0) or 'server' (index 1)
+    &quot;&quot;&quot;
+    idx = 0 if target == 'mobile' else 1
+    lat_tensor = torch.tensor(
+        [LATENCY_TABLE[name][idx] for name in op_names],
+        dtype=torch.float32
+    )
+    probs = torch.softmax(arch_weights, dim=0)
+    return (probs * lat_tensor).sum()  # expected latency
+
+def efficiency_aware_loss(task_loss, arch_weights, op_names, lam=0.1, target='mobile'):
+    lat = differentiable_latency(arch_weights, op_names, target)
+    return task_loss + lam * torch.log(lat + 1e-6)
+
+# Demo
+arch_w = torch.randn(5, requires_grad=True)
+op_names = list(LATENCY_TABLE.keys())
+task_loss = torch.tensor(1.5)
+total_loss = efficiency_aware_loss(task_loss, arch_w, op_names, lam=0.1)
+total_loss.backward()
+print(f'Total loss: {total_loss.item():.4f}')
+print(f'arch_w grad: {arch_w.grad.round(decimals=4).tolist()}')
+</code></pre>
+<h2>One-Shot Supernet with Weight Sharing</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import random
+
+class Supernet(nn.Module):
+    &quot;&quot;&quot;One-shot supernet: all subnets share the same weights.&quot;&quot;&quot;
+
+    OPS = ['skip', 'conv3', 'conv5', 'pool']
+
+    def __init__(self, n_layers: int = 4, C: int = 32):
+        super().__init__()
+        self.n_layers = n_layers
+        self.layers = nn.ModuleList([
+            nn.ModuleDict({
+                'skip':  nn.Identity(),
+                'conv3': nn.Sequential(nn.Conv2d(C, C, 3, padding=1), nn.ReLU()),
+                'conv5': nn.Sequential(nn.Conv2d(C, C, 5, padding=2), nn.ReLU()),
+                'pool':  nn.AvgPool2d(3, stride=1, padding=1),
+            })
+            for _ in range(n_layers)
+        ])
+        self.classifier = nn.AdaptiveAvgPool2d(1)
+
+    def forward(self, x: torch.Tensor, subnet: list = None) -&gt; torch.Tensor:
+        &quot;&quot;&quot;subnet: list of op names per layer. If None, sample randomly.&quot;&quot;&quot;
+        if subnet is None:
+            subnet = [random.choice(self.OPS) for _ in range(self.n_layers)]
+        for op_choice, layer_ops in zip(subnet, self.layers):
+            x = layer_ops[op_choice](x)
+        return self.classifier(x).squeeze(-1).squeeze(-1)
+
+# Train supernet with random subnet sampling
+supernet = Supernet(n_layers=4, C=32)
+x = torch.randn(4, 32, 8, 8)
+# Each forward uses a different random subnet -&gt; all op weights get trained
+for step in range(3):
+    subnet = [random.choice(Supernet.OPS) for _ in range(4)]
+    out = supernet(x, subnet)
+    print(f'Step {step+1} subnet={subnet}  out.shape={out.shape}')
+</code></pre>
+<blockquote>
+<p><strong>Weight Coupling in One-Shot NAS</strong>: In a one-shot supernet, all subnets share weights. This causes weight coupling: the optimal weights for the conv3 subnet are not the same as the optimal weights when conv3 coexists with conv5. This coupling means the supernet ranking of subnets does not perfectly correlate with their standalone accuracy after retraining. Once-for-All (OFA) addresses this with progressive shrinking and in-place distillation.</p>
+</blockquote>
+<h2>NAS Method Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>GPU-Days (Search)</th>
+<th>Search Type</th>
+<th>Top-1 ImageNet</th>
+<th>FLOP Efficiency</th>
+<th>Target Hardware</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>RL-NAS (Zoph 2017)</td>
+<td>~1800 GPU-days</td>
+<td>Discrete sampling via RL controller</td>
+<td>74.0%</td>
+<td>Not optimized</td>
+<td>Generic</td>
+</tr>
+<tr>
+<td>DARTS (2019)</td>
+<td>~4 GPU-days</td>
+<td>Continuous relaxation, gradient</td>
+<td>73.3%</td>
+<td>Not optimized</td>
+<td>Generic</td>
+</tr>
+<tr>
+<td>FBNet (2019)</td>
+<td>~9 GPU-days</td>
+<td>Gumbel-softmax + latency table</td>
+<td>74.9%</td>
+<td>Mobile (50M FLOPs)</td>
+<td>Mobile CPU</td>
+</tr>
+<tr>
+<td>One-shot (SNAS)</td>
+<td>~1.5 GPU-days</td>
+<td>Weight sharing + stochastic sampling</td>
+<td>72.7%</td>
+<td>Moderate</td>
+<td>Generic</td>
+</tr>
+<tr>
+<td>EfficientNet (manual+NAS)</td>
+<td>~N/A (compound)</td>
+<td>Grid search over depth/width/res</td>
+<td>84.4%</td>
+<td>Excellent Pareto</td>
+<td>All hardware</td>
+</tr>
+</tbody>
+</table>
+<h2>DARTS Pitfalls and Fixes</h2>
+<p>DARTS has known failure modes. The bi-level optimization is only an approximation: the inner optimization (weight update) is not taken to convergence, so the architecture gradient is biased. This can cause the search to over-select skip connections (zero-parameter, low-loss operations), collapsing the architecture to a near-identity mapping. Fixes include DARTS+ (regularize skip count), GDAS (Gumbel-softmax with temperature annealing), and SNAS (stochastic NAS with KL divergence constraints).</p>
+<p>A practical DARTS training schedule: search for 50 epochs with architecture LR 3e-4 and weight LR 3e-4; keep a strict 50/50 train/val split so architecture gradients are not computed on training data; after search, discretize and re-train the discovered architecture from scratch for 600 epochs. The re-training step is important — accuracy measured on the mixed operation supernet is not representative of the discretized architecture.</p>
+<ul>
+<li>Skip connection collapse: DARTS tends to select skip connections — force at most 2 skips per cell.</li>
+<li>Bi-level approximation bias: use first-order DARTS (ignore second-order Hessian) for stability at slight accuracy cost.</li>
+<li>Discretize then retrain: the supernet accuracy is not the final model accuracy — always retrain from scratch.</li>
+<li>Proxy task: search on a small proxy (CIFAR-10) then transfer architecture to the target dataset.</li>
+<li>Early stopping of arch search: over-searching degrades the architecture — 50 epochs is usually enough.</li>
+<li>One-shot vs DARTS: one-shot avoids bi-level entirely by training a supernet and sampling subnets.</li>
+</ul>
+<p>Efficiency proxies beyond latency tables include FLOPs, number of parameters, and energy consumption. FLOPs is hardware-agnostic but does not account for memory bandwidth — a depthwise conv has far fewer FLOPs than a standard conv but is memory-bandwidth-bound on GPU. Latency lookup tables measured on the actual target device are more accurate proxies, especially for mobile CPU vs GPU vs DSP.</p>
+<ul>
+<li>FLOPs: easy to compute analytically but poor predictor of GPU latency (memory-bound operations are penalised unfairly).</li>
+<li>Latency LUT: measure each (op, resolution, channel) combination on target device; fast to query during search.</li>
+<li>Energy: critical for battery-powered devices; correlates with memory access count more than FLOPs.</li>
+<li>Model size (MB): important for over-the-air update and on-device storage, not for inference speed.</li>
+<li>Hardware-aware NAS: ProxylessNAS, FBNet, MNASNet — all use hardware-specific latency models.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

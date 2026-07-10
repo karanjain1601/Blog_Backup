@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Overflow, Underflow, and the Log-Sum-Exp Trick | Notes Backup</title>
+  <meta name="description" content="Floating-point overflow and underflow in exp-based computations, the log-sum-exp trick derivation, numerically stable softmax and log-softmax, and applications in attention, CTC, HMMs, and beam search." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Overflow, Underflow, and the Log-Sum-Exp Trick</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Floating-point overflow and underflow in exp-based computations, the log-sum-exp trick derivation, numerically stable softmax and log-softmax, and applications in attention, CTC, HMMs, and beam search.</li><li><strong>topic:</strong> math-foundations</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Overflow, Underflow, and the Log-Sum-Exp Trick</h1>
+<p>Overflow and underflow are the two modes of catastrophic failure in floating-point computation. Overflow occurs when a computed value exceeds the maximum representable number, producing infinity; underflow collapses a value to zero. Both are silent — computation continues but produces wrong answers. These failures appear constantly in ML: softmax with large logits, log-probabilities over long sequences, normalizing-flow log-determinants, CTC alignment marginalization, and attention over high-dimensional queries. The log-sum-exp trick is arguably the single most important numerical technique in ML, solving both problems simultaneously in the critical context of softmax and log-probability computations.</p>
+<h2>Overflow and Underflow Thresholds</h2>
+<p>Overflow occurs when a computed value exceeds the maximum representable floating-point number. For the exp() function:</p>
+<ul>
+<li>fp32: exp(x) overflows to ∞ for x &gt; 88.72 (max fp32 ≈ 3.4×10³⁸)</li>
+<li>fp16: exp(x) overflows for x &gt; 11.09 (max fp16 = 65504)</li>
+<li>bf16: same exponent range as fp32, so threshold ≈ 88.72</li>
+</ul>
+<p>Underflow occurs when a value is smaller than the minimum normal number and rounds to zero (via subnormals or directly):</p>
+<ul>
+<li>fp32: exp(x) → 0 for x &lt; −87.34</li>
+<li>fp16: exp(x) → 0 for x &lt; −9.70</li>
+</ul>
+<p>In softmax: if any x_i &gt; 88.72 in fp32, then exp(x_i) = ∞, the denominator is ∞, and 0/∞ or ∞/∞ = NaN. In log-softmax: if all x_i are very negative, Σ exp(x_j) underflows to 0, then log(0) = −∞, making the loss infinite. Both failures are especially common in early training when logits are large or when using fp16.</p>
+<h2>The Log-Sum-Exp Trick</h2>
+<p>The logsumexp trick provides numerically stable computation of log(Σᵢ exp(xᵢ)) by exploiting the following algebraic identity:</p>
+<p>log Σᵢ exp(xᵢ) = m + log Σᵢ exp(xᵢ − m),  where m = max(x)</p>
+<p>Proof: log Σᵢ exp(xᵢ) = log[exp(m) × Σᵢ exp(xᵢ − m)] = m + log Σᵢ exp(xᵢ − m).</p>
+<p>By subtracting m = max(x) before exponentiating:
+- The maximum term becomes exp(0) = 1 — no overflow possible.
+- All other terms are ≤ 1 — no overflow.
+- The minimum term is exp(xᵢ − m) ≥ exp(−range) where range is the dynamic range of x — typically no severe underflow unless logits span hundreds of units.</p>
+<p>The result is mathematically identical to the original but numerically safe. This is the foundation of numerically stable softmax, log-softmax, and cross-entropy.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+import torch.nn.functional as F
+
+# Problem: naive logsumexp overflows
+def naive_logsumexp(x):
+    return np.log(np.sum(np.exp(x)))
+
+x = np.array([1000.0, 1001.0, 1002.0], dtype=np.float32)
+print(&quot;Naive logsumexp:&quot;, naive_logsumexp(x))  # inf (overflow)
+
+# Solution: stable logsumexp
+def stable_logsumexp(x):
+    m = np.max(x)
+    return m + np.log(np.sum(np.exp(x - m)))
+
+print(&quot;Stable logsumexp:&quot;, stable_logsumexp(x))   # 1002.4076 (correct)
+
+# Verify: mathematically identical for normal inputs
+x2 = np.array([1.0, 2.0, 3.0])
+print(f&quot;naive={naive_logsumexp(x2):.6f}  stable={stable_logsumexp(x2):.6f}&quot;)
+
+# PyTorch built-in (use this in production)
+print(&quot;torch.logsumexp:&quot;, torch.logsumexp(torch.tensor(x), dim=0))  # 1002.4076
+
+# Underflow: naive log-softmax fails for very negative logits
+x_neg = np.array([-1000.0, -1001.0, -1002.0], dtype=np.float32)
+print(&quot;\n--- Underflow demo ---&quot;)
+print(&quot;np.exp(x_neg):&quot;, np.exp(x_neg))     # [0. 0. 0.] — all underflow to 0
+print(&quot;naive log(sum(exp)):&quot;, np.log(np.sum(np.exp(x_neg))))  # -inf
+print(&quot;stable_logsumexp:&quot;, stable_logsumexp(x_neg))  # -1000.4076 (correct)
+
+# Numerically stable softmax
+def stable_softmax(x):
+    e = np.exp(x - np.max(x))
+    return e / e.sum()
+
+print(&quot;\n--- Stable softmax ---&quot;)
+print(&quot;stable_softmax([1000,1001,1002]):&quot;, np.round(stable_softmax(x), 4))
+</code></pre>
+<h2>Numerically Stable Softmax and Log-Softmax</h2>
+<p>Stable softmax = subtract max before exponentiating:</p>
+<p>softmax(x)ᵢ = exp(xᵢ − m) / Σⱼ exp(xⱼ − m),  m = max(x)</p>
+<p>This is mathematically equivalent to the original because both numerator and denominator are multiplied by exp(−m), which cancels. The operation costs one additional pass over x (to find the maximum) but is entirely safe.</p>
+<p>Stable log-softmax builds on stable logsumexp:</p>
+<p>log softmax(x)ᵢ = xᵢ − logsumexp(x) = xᵢ − m − log Σⱼ exp(xⱼ − m)</p>
+<p>Note that this is just subtraction — no exp on the output side, so no overflow or underflow on the final values. The only exp calls are in computing Σⱼ exp(xⱼ − m), which is safe because all arguments are ≤ 0.</p>
+<p>Cross-entropy loss = NLL(log_softmax(logits), targets). PyTorch's F.cross_entropy combines both steps in a single numerically stable fused operation.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+import numpy as np
+
+# Stable log-softmax from scratch
+def stable_log_softmax(x):
+    &quot;&quot;&quot;log(exp(xi) / sum(exp(xj))) = xi - logsumexp(x).&quot;&quot;&quot;
+    m = x.max()
+    log_sum = m + np.log(np.sum(np.exp(x - m)))
+    return x - log_sum
+
+# Demonstration with extreme logits
+logits_np = np.array([1000.0, 1001.0, 1002.0], dtype=np.float32)
+logits_t  = torch.tensor(logits_np)
+
+print(&quot;=== Log-Softmax Comparison ===&quot;)
+# Naive: log(softmax(x)) — two-step, unstable
+naive_sm  = np.exp(logits_np) / np.sum(np.exp(logits_np))  # inf/inf = nan
+print(&quot;naive softmax:&quot;, naive_sm)
+
+# Stable from scratch
+print(&quot;stable log_softmax:&quot;, stable_log_softmax(logits_np))
+
+# PyTorch F.log_softmax (stable by design)
+print(&quot;F.log_softmax:&quot;, F.log_softmax(logits_t, dim=0).numpy())
+
+# Cross-entropy: always use F.cross_entropy, not manual softmax -&gt; log -&gt; NLL
+print(&quot;\n=== Cross-Entropy Stability ===&quot;)
+batch_logits = torch.tensor([[1000.0, 1001.0, 1002.0]])
+target       = torch.tensor([2])  # class 2 is correct
+
+# WRONG: manual softmax -&gt; log -&gt; NLL
+probs = torch.softmax(batch_logits, dim=1)  # [0, 0, nan] or similar
+loss_wrong = -torch.log(probs[0, target[0]])
+print(f&quot;Wrong (softmax-&gt;log-&gt;NLL): {loss_wrong.item()}&quot;)  # nan or inf
+
+# CORRECT: F.cross_entropy (fused stable operation)
+loss_correct = F.cross_entropy(batch_logits, target)
+print(f&quot;Correct (F.cross_entropy): {loss_correct.item():.6f}&quot;)  # ~0.4076
+
+# Verify: same result with normal logits
+normal_logits = torch.tensor([[1.0, 2.0, 3.0]])
+print(&quot;\nNormal logits comparison:&quot;)
+print(f&quot;  Manual:         {-torch.log(torch.softmax(normal_logits, dim=1)[0, 2]).item():.6f}&quot;)
+print(f&quot;  F.cross_entropy:{F.cross_entropy(normal_logits, target).item():.6f}&quot;)
+</code></pre>
+<h2>Variants and Special Cases</h2>
+<p>Log-domain arithmetic is needed whenever multiplying many probabilities, since products underflow rapidly. For a sequence of T tokens each with probability ~0.1, the joint probability is 0.1^T which underflows to 0 for T &gt; 45 in fp32. Log-domain: sum log-probabilities instead.</p>
+<p>Temperature scaling softmax(x/T):
+- T &lt; 1 (sharpening): divides by T &lt; 1, which multiplies logit magnitudes by 1/T — making overflow more likely. Always apply the max-shift trick.
+- T &gt; 1 (softening): reduces logit magnitudes, less overflow risk.</p>
+<p>log-sum-exp with two terms: log(exp(a) + exp(b)) = max(a,b) + log(1 + exp(−|a−b|)). This is the logaddexp function in numpy and log1p(exp(x)) for softplus. Both appear frequently in probabilistic models.</p>
+<h2>Log-Domain HMM Forward Algorithm</h2>
+<p>The HMM forward algorithm computes the probability of an observed sequence by marginalizing over all hidden state sequences. The product of T emission and transition probabilities underflows to zero for long sequences. The log-domain forward algorithm maintains log α_t(s) = log P(x₁,...,xₜ, state_t = s) and performs all summations using logsumexp:</p>
+<p>log α_t(s') = log P(xₜ | s') + logsumexp_s[log α_{t-1}(s) + log A(s→s')]</p>
+<p>This is O(T × S²) in time (same as standard forward algorithm) but stable for sequences of any length.</p>
+<pre><code class="language-python">import numpy as np
+
+def log_forward_hmm(log_emission, log_transition, log_init):
+    &quot;&quot;&quot;
+    Log-domain HMM forward algorithm (numerically stable).
+    log_emission:   (T, S) log P(x_t | state_s)
+    log_transition: (S, S) log P(state_s' | state_s)
+    log_init:       (S,)   log P(state_s at t=0)
+    Returns: log P(observation sequence)
+    &quot;&quot;&quot;
+    T, S = log_emission.shape
+    log_alpha = log_init + log_emission[0]  # (S,) — init at t=0
+
+    for t in range(1, T):
+        # log_alpha[s'] = log sum_s exp(log_alpha[s] + log_A[s,s'])
+        # Shape broadcast: log_alpha (S,1) + log_transition (S,S) -&gt; (S,S)
+        log_trans_contrib = log_alpha[:, None] + log_transition  # (S, S)
+        log_alpha = np.logaddexp.reduce(log_trans_contrib, axis=0) + log_emission[t]
+
+    # Total log probability: sum over final states
+    return np.logaddexp.reduce(log_alpha)
+
+# Demo: 3-state HMM, 50-step sequence
+np.random.seed(42)
+S, T = 3, 50
+log_A = np.log(np.array([[0.7, 0.2, 0.1],
+                           [0.1, 0.6, 0.3],
+                           [0.2, 0.3, 0.5]]))
+log_B = np.random.randn(T, S) - np.log(S)  # random emission log-probs
+log_pi = np.log(np.ones(S) / S)
+
+log_prob = log_forward_hmm(log_B, log_A, log_pi)
+print(f&quot;Log P(sequence): {log_prob:.4f}&quot;)
+print(f&quot;P(sequence) = exp({log_prob:.4f}) = {np.exp(log_prob):.4e}&quot;)
+# Without log-domain, P would underflow to 0 for T=50 steps
+</code></pre>
+<h2>Pitfalls</h2>
+<p>Common mistakes with overflow/underflow:</p>
+<ol>
+<li>
+<p><strong>Manual softmax before log</strong>: computing log(softmax(x)) in two steps instead of using log_softmax. The intermediate softmax may produce NaN that log then propagates.</p>
+</li>
+<li>
+<p><strong>Forgetting max-shift when scaling</strong>: dividing logits by temperature &lt; 1 before softmax inflates magnitudes. Always apply temperature first, then use stable softmax.</p>
+</li>
+<li>
+<p><strong>Using fp16 for attention without max-shift</strong>: attention scores Q@K^T/√d can easily exceed 11 in fp16, causing overflow. Use bf16 or ensure FlashAttention's tiled softmax is active.</p>
+</li>
+<li>
+<p><strong>Accumulating probabilities across tokens</strong>: multiplying per-token probabilities instead of adding log-probabilities causes rapid underflow for sequences longer than ~50 tokens in fp32.</p>
+</li>
+</ol>
+<h2>Practical Guidance</h2>
+<p>Rules for numerically safe computation:</p>
+<ul>
+<li><strong>Always use F.cross_entropy</strong> in PyTorch, never manual softmax → log → NLL.</li>
+<li><strong>Use torch.logsumexp</strong> rather than implementing logsumexp manually.</li>
+<li><strong>In custom normalizing-flow implementations</strong>, compute log-determinants as sums of log|diag(J)|, not products of |diag(J)|.</li>
+<li><strong>For beam search</strong>, maintain log-probabilities and add per-step log-probs; only convert to probability for final output.</li>
+<li><strong>Validate with small test cases</strong>: verify that naive and stable implementations agree on normal logits before testing on extreme inputs.</li>
+</ul>
+<blockquote>
+<p><strong>WARNING: Temperature &lt; 1 Amplifies Overflow Risk</strong></p>
+<p>Temperature scaling computes softmax(x/T). For T &lt; 1 (sharpening), logits are multiplied by 1/T, increasing their magnitude. With logits already near the fp32 overflow threshold (~88), dividing by T = 0.1 gives logits near 880 — certain overflow. Always apply the max-shift trick explicitly when using temperatures other than 1.0, or use F.softmax(logits / T) which does so internally.</p>
+<p><strong>TIP: Log-Domain Arithmetic for Long Sequences</strong></p>
+<p>When computing probability of a sequence (product of conditionals), always work in log-domain: add log-probabilities instead of multiplying probabilities. For N tokens each with probability ~0.1, joint probability 0.1^N underflows for N &gt; 45 in fp32. In log-domain, N × log(0.1) ≈ −N × 2.303 remains perfectly representable for any N.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Computation</th>
+<th>Naive Failure</th>
+<th>Stable Solution</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>logsumexp(x)</td>
+<td>exp overflow</td>
+<td>m + log Σ exp(x-m), m=max(x)</td>
+</tr>
+<tr>
+<td>softmax(x)</td>
+<td>exp overflow → NaN</td>
+<td>softmax(x - max(x))</td>
+</tr>
+<tr>
+<td>log_softmax(x)</td>
+<td>log(0) when denominator underflows</td>
+<td>x - logsumexp(x)</td>
+</tr>
+<tr>
+<td>cross_entropy</td>
+<td>chain of instabilities</td>
+<td>F.cross_entropy (fused)</td>
+</tr>
+<tr>
+<td>sequence probability</td>
+<td>product underflows</td>
+<td>sum of log-probs</td>
+</tr>
+<tr>
+<td>HMM forward</td>
+<td>α_t → 0 for long T</td>
+<td>log-domain with logaddexp</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>Key Takeaways</h2>
+<ul>
+<li>exp(x) overflows in fp32 for x &gt; 88.72 and underflows to 0 for x &lt; −87.34; fp16 thresholds are much tighter (±11).</li>
+<li>The log-sum-exp trick log Σ exp(xᵢ) = m + log Σ exp(xᵢ−m) with m = max(x) is mathematically identical but numerically safe.</li>
+<li>Stable softmax subtracts max before exponentiating; stable log-softmax computes xᵢ − logsumexp(x).</li>
+<li>Always use F.cross_entropy (PyTorch) — it fuses log_softmax + NLL in one stable operation.</li>
+<li>Temperature T &lt; 1 amplifies logit magnitudes by 1/T, increasing overflow risk — always use the max-shift trick.</li>
+<li>For long sequences, maintain and accumulate log-probabilities instead of multiplying probabilities (which underflow past ~45 tokens in fp32).</li>
+<li>The log-domain forward algorithm (using logaddexp reductions) enables stable HMM inference over arbitrarily long sequences.</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

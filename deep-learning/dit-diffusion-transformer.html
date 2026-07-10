@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DiT — Diffusion Transformer Replacing U-Net | Notes Backup</title>
+  <meta name="description" content="DiT replaces the U-Net backbone in latent diffusion with a scalable Vision Transformer, using patchified latent tokens, adaLN-Zero conditioning, and ViT-style scaling laws to achieve state-of-the-art FID on ImageNet while enabling the MM-DiT architectures used in SD3 and FLUX." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>DiT — Diffusion Transformer Replacing U-Net</h1>
+      <ul class='note-meta'><li><strong>description:</strong> DiT replaces the U-Net backbone in latent diffusion with a scalable Vision Transformer, using patchified latent tokens, adaLN-Zero conditioning, and ViT-style scaling laws to achieve state-of-the-art FID on ImageNet while enabling the MM-DiT architectures used in SD3 and FLUX.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>DiT — Diffusion Transformer Replacing U-Net</h1>
+<p>Diffusion Transformers (DiT, Peebles &amp; Xie 2023) replace the U-Net backbone used in standard latent diffusion models with a Vision Transformer, processing the image latent as a sequence of flattened patches. This architectural swap is motivated by the observation that ViT performance scales reliably with compute (unlike U-Nets which show diminishing returns), and that transformers handle variable-length conditioning inputs more naturally via self-attention. DiT-XL/2 achieves FID 2.27 on ImageNet 256×256, surpassing the U-Net-based ADM model, and forms the backbone of SD3 and FLUX.</p>
+<h2>From U-Net to Vision Transformer</h2>
+<p>The U-Net was the natural choice for diffusion: its encoder-decoder with skip connections mirrors the denoising process of refining features at multiple resolutions. However, U-Nets do not scale as cleanly as transformers — adding layers often requires hand-designed changes to the architecture. DiT treats the latent grid as a token sequence (like ViT), applies standard transformer blocks, and relies on the attention mechanism's global receptive field rather than hierarchical feature extraction. The conditioning on timestep t and class label (or text) is injected per-block via Adaptive LayerNorm.</p>
+<h2>Patchify Latent Input</h2>
+<p>The VAE latent of shape (C, H/8, W/8) — typically (4, 32, 32) for a 256×256 image — is split into non-overlapping patches of size p×p (p=2 or p=4). Each patch is flattened and linearly projected to a d-dimensional token embedding. For a 32×32 latent with patch size 2, we get (32/2)² = 256 tokens. Smaller patches give more tokens and finer spatial resolution but increase sequence length quadratically. A learned positional embedding is added before the transformer blocks.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class PatchEmbed(nn.Module):
+    &quot;&quot;&quot;Patchify image latent into token sequence for DiT.&quot;&quot;&quot;
+    def __init__(self, in_channels=4, patch_size=2, embed_dim=1152):
+        super().__init__()
+        self.patch_size = patch_size
+        self.proj = nn.Conv2d(in_channels, embed_dim, kernel_size=patch_size, stride=patch_size)
+
+    def forward(self, x):
+        # x: (B, C, H, W) latent
+        B, C, H, W = x.shape
+        assert H % self.patch_size == 0 and W % self.patch_size == 0
+        tokens = self.proj(x)          # (B, embed_dim, H/p, W/p)
+        tokens = tokens.flatten(2)     # (B, embed_dim, N) where N=(H/p)*(W/p)
+        tokens = tokens.transpose(1, 2)  # (B, N, embed_dim)
+        return tokens
+
+def add_positional_embedding(tokens, pos_embed):
+    return tokens + pos_embed[:, :tokens.shape[1], :]
+
+# Demo: 256x256 image -&gt; 32x32 VAE latent (4 channels) -&gt; 256 tokens
+patch_embed = PatchEmbed(in_channels=4, patch_size=2, embed_dim=1152)
+latent = torch.randn(2, 4, 32, 32)  # batch of 2 latents
+tokens = patch_embed(latent)
+print(f'Latent: {latent.shape} -&gt; Tokens: {tokens.shape}')  # (2, 256, 1152)
+
+# For 512x512 image: 64x64 latent, patch=2 -&gt; 1024 tokens
+latent_lg = torch.randn(1, 4, 64, 64)
+tokens_lg = patch_embed(latent_lg)
+print(f'64x64 latent -&gt; {tokens_lg.shape[1]} tokens')  # 1024 tokens
+</code></pre>
+<h2>Adaptive LayerNorm Zero</h2>
+<p>DiT conditions each transformer block on both the timestep t and the class label (or text embedding) via Adaptive Layer Normalization (adaLN). The condition is computed as: (α, β, γ, α', β', γ') = Linear(SiLU(cond)), where cond is the sum of timestep and class embeddings. The LayerNorm output is then modulated: adaLN(x) = γ·LayerNorm(x) + β, and the attention/FFN output is scaled by α before the residual addition. The Zero variant initialises the final linear layer of each adaLN to zero, so at training start each block acts as the identity — critical for training stability at scale.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class AdaLNZero(nn.Module):
+    &quot;&quot;&quot;Adaptive LayerNorm-Zero: conditioning via scale+shift, zero-init output.&quot;&quot;&quot;
+    def __init__(self, hidden_size, cond_dim):
+        super().__init__()
+        self.norm = nn.LayerNorm(hidden_size, elementwise_affine=False)
+        # 6 outputs: shift, scale for pre-attn; gate for attn; shift, scale, gate for FFN
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(cond_dim, 6 * hidden_size)
+        )
+        nn.init.zeros_(self.adaLN_modulation[-1].weight)
+        nn.init.zeros_(self.adaLN_modulation[-1].bias)
+
+    def modulate(self, x, shift, scale):
+        return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
+
+    def get_modulations(self, cond):
+        mods = self.adaLN_modulation(cond).chunk(6, dim=1)
+        return mods  # shift_attn, scale_attn, gate_attn, shift_ff, scale_ff, gate_ff
+
+torch.manual_seed(0)
+ad = AdaLNZero(hidden_size=1152, cond_dim=1152)
+cond = torch.randn(4, 1152)  # timestep + class condition
+mods = ad.get_modulations(cond)
+print(f'adaLN-Zero modulations at init (should be ~0): {[m.abs().max().item():.4f} for m in mods]}'.replace(&quot;[&quot;, &quot;[&quot;).replace(&quot;]&quot;, &quot;]&quot;))
+print(f'Blocks start as identity at init — stable training from scratch')
+</code></pre>
+<h2>DiT Block Architecture</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class DiTBlock(nn.Module):
+    &quot;&quot;&quot;DiT transformer block: ViT attention + FFN with adaLN-Zero conditioning.&quot;&quot;&quot;
+    def __init__(self, hidden_size=1152, n_heads=16, cond_dim=1152, mlp_ratio=4.0):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(hidden_size, elementwise_affine=False)
+        self.norm2 = nn.LayerNorm(hidden_size, elementwise_affine=False)
+        self.attn = nn.MultiheadAttention(hidden_size, n_heads, batch_first=True)
+        mlp_dim = int(hidden_size * mlp_ratio)
+        self.mlp = nn.Sequential(
+            nn.Linear(hidden_size, mlp_dim), nn.GELU(),
+            nn.Linear(mlp_dim, hidden_size)
+        )
+        self.adaLN = nn.Sequential(nn.SiLU(), nn.Linear(cond_dim, 6 * hidden_size))
+        nn.init.zeros_(self.adaLN[-1].weight)
+        nn.init.zeros_(self.adaLN[-1].bias)
+
+    def forward(self, x, c):
+        mods = self.adaLN(c).chunk(6, dim=-1)  # 6 modulation vectors
+        shift_a, scale_a, gate_a, shift_m, scale_m, gate_m = mods
+        # Attention with adaLN conditioning
+        h = self.norm1(x) * (1 + scale_a[:, None]) + shift_a[:, None]
+        attn_out, _ = self.attn(h, h, h)
+        x = x + gate_a[:, None] * attn_out
+        # FFN with adaLN conditioning
+        h = self.norm2(x) * (1 + scale_m[:, None]) + shift_m[:, None]
+        x = x + gate_m[:, None] * self.mlp(h)
+        return x
+
+block = DiTBlock(hidden_size=1152, n_heads=16, cond_dim=1152)
+tokens = torch.randn(2, 256, 1152)  # (batch, N_tokens, hidden)
+cond   = torch.randn(2, 1152)        # timestep + class condition
+out = block(tokens, cond)
+print(f'DiT block: {tokens.shape} -&gt; {out.shape}')
+</code></pre>
+<h2>Scaling Laws and FLOPs vs FID</h2>
+<p>DiT follows the same scaling laws as ViT: FID decreases as a power law in compute (GFLOPs per sample). DiT-XL/2 uses 2000M GFLOPs per sample and achieves FID 2.27, while DiT-S/2 (33M params) achieves FID 68.4 — a 30× compute increase yields 30× better FID. Crucially, this relationship is smooth and predictable, making DiT amenable to compute-optimal training. The U-Net ADM model achieves FID 10.94 with comparable compute, confirming that DiT's transformer backbone is more compute-efficient for diffusion.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+
+# DiT scaling: approximate FID vs GFLOPs (from Peebles &amp; Xie 2023 Table 1)
+dit_results = [
+    ('DiT-S/2',  33,   6,    68.4),
+    ('DiT-B/2',  130,  23,   43.5),
+    ('DiT-L/2',  458,  80,   23.5),
+    ('DiT-XL/2', 675,  119,  9.62),
+    ('ADM (U-Net)', 554, 98, 10.94),
+]
+print(f'{&quot;Model&quot;:&lt;15} {&quot;Params (M)&quot;:&gt;12} {&quot;GFLOPs&quot;:&gt;8} {&quot;FID&quot;:&gt;8} {&quot;vs ADM&quot;:&gt;10}')
+print('-' * 58)
+adm_fid = 10.94
+for name, params, gflops, fid in dit_results:
+    delta = f'{fid - adm_fid:+.2f}' if name != 'ADM (U-Net)' else '(baseline)'
+    print(f'{name:&lt;15} {params:&gt;12} {gflops:&gt;8} {fid:&gt;8.2f} {delta:&gt;10}')
+
+print()
+# Scaling law: log-log relationship
+gflops = np.array([6, 23, 80, 119])
+fids = np.array([68.4, 43.5, 23.5, 9.62])
+coef = np.polyfit(np.log(gflops), np.log(fids), 1)
+print(f'Power law fit: FID ~ GFLOPs^{coef[0]:.2f} (exponent &lt; 0 = improvement with scale)')
+</code></pre>
+<h2>MM-DiT in SD3 and FLUX</h2>
+<p>SD3 introduces Multi-Modal DiT (MM-DiT), where image tokens and text tokens are processed jointly in the same transformer blocks with separate weights for each modality. Each MM-DiT block has two independent sets of attention projections — one for image tokens and one for text tokens — but the attention itself is computed over the concatenated sequence, allowing full bidirectional cross-modal attention. This is more powerful than the cross-attention mechanism in SD 1.x U-Net because text tokens can also attend to image tokens. SD3 uses 16-channel latents (vs 4 in SD 1.x), tripling the information capacity of the compressed representation.</p>
+<blockquote>
+<p><strong>FLUX: SoTA DiT Text-to-Image</strong>: FLUX.1 (Black Forest Labs, 2024) is a DiT-based model that achieves state-of-the-art text-to-image quality on human preference benchmarks. FLUX uses a hybrid architecture combining MM-DiT blocks (for joint image-text attention) and single-stream DiT blocks (for image-only refinement), with flow matching as the training objective. FLUX.1-dev (12B parameters) is publicly available and outperforms Midjourney v6 on prompt adherence while FLUX.1-schnell requires only 4 NFE.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Architecture</th>
+<th>Params</th>
+<th>GFLOPs/sample</th>
+<th>ImageNet 256 FID</th>
+<th>Training Compute</th>
+<th>Architecture Type</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ADM (U-Net, class-cond)</td>
+<td>554M</td>
+<td>~98</td>
+<td>10.94</td>
+<td>~1000 A100 GPU-days</td>
+<td>U-Net with self+cross-attn</td>
+</tr>
+<tr>
+<td>DiT-S/2</td>
+<td>33M</td>
+<td>6</td>
+<td>68.4</td>
+<td>~7 A100 GPU-days</td>
+<td>Shallow ViT, patch=2</td>
+</tr>
+<tr>
+<td>DiT-B/2</td>
+<td>130M</td>
+<td>23</td>
+<td>43.5</td>
+<td>~28 A100 GPU-days</td>
+<td>BERT-scale ViT, patch=2</td>
+</tr>
+<tr>
+<td>DiT-XL/2</td>
+<td>675M</td>
+<td>119</td>
+<td>2.27 (w/ CFG)</td>
+<td>~1000 A100 GPU-days</td>
+<td>Large ViT, patch=2, SoTA</td>
+</tr>
+<tr>
+<td>FLUX.1 (approx)</td>
+<td>12B</td>
+<td>&gt;1000</td>
+<td>N/A (T2I)</td>
+<td>&gt;&gt;10k GPU-days</td>
+<td>MM-DiT + single-stream DiT</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>Patch size p=2 gives 4× more tokens than p=4 for the same latent — better spatial detail but 4× more compute.</li>
+<li>adaLN-Zero's zero-init ensures blocks start as identity — without this, deep DiTs diverge at the start of training.</li>
+<li>DiT-XL/2 uses 28 transformer blocks with hidden size 1152 and 16 attention heads — the same scale as ViT-L.</li>
+<li>MM-DiT enables text tokens to attend to image tokens, giving text stronger control than cross-attention alone.</li>
+<li>FLUX.1-schnell achieves 4-step generation via guidance distillation — the DiT architecture is compatible with all distillation methods.</li>
+</ul>
+<h2>Key Design Principles</h2>
+<p>Three design decisions define DiT's success: (1) Patchify-then-transformer: treating the latent as a token sequence gives global receptive field from layer 1, unlike U-Net's limited kernel sizes. (2) adaLN-Zero: conditioning via scale+shift+gate with zero initialisation is more expressive than in-context conditioning (prepending condition tokens) and more stable than cross-attention conditioning. (3) Predict ε or v: DiT uses the same noise prediction objective as DDPM but gains from the transformer's better capacity. The key lesson is that architectural improvements compound with scale — DiT benefits more from 10× more compute than U-Net does.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

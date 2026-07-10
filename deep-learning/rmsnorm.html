@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RMSNorm — Simplified Layer Norm in LLaMA and Gemma | Notes Backup</title>
+  <meta name="description" content="Derive RMSNorm by removing mean subtraction from LN, benchmark its speed advantage, implement LLaMA-style pre-norm transformer blocks, and verify when RMSNorm equals LN." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>RMSNorm — Simplified Layer Norm in LLaMA and Gemma</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Derive RMSNorm by removing mean subtraction from LN, benchmark its speed advantage, implement LLaMA-style pre-norm transformer blocks, and verify when RMSNorm equals LN.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>RMSNorm — Simplified Layer Norm in LLaMA and Gemma</h1>
+<p>RMSNorm (Zhang &amp; Sennrich 2019) simplifies Layer Normalization by removing the mean subtraction step, keeping only the root-mean-square scaling. The intuition — called the re-centering hypothesis — is that mean subtraction adds compute without meaningful benefit in practice, since the scale and shift parameters γ and β can absorb any centering. RMSNorm achieves 10–15% faster forward and backward passes than LayerNorm and has become the default normalization in virtually all modern large language models.</p>
+<h2>RMSNorm Formula</h2>
+<p>RMSNorm computes: RMS(x) = √((1/n) Σᵢ xᵢ²) — the root mean square of the input (no mean subtraction). x̂ᵢ = xᵢ / RMS(x) — divide each element by the RMS. yᵢ = γᵢ · x̂ᵢ — apply a learned scale γ (no bias β). The key difference from LayerNorm: no mean computation, no subtraction, no β parameter. This removes the re-centering operation entirely, keeping only re-scaling. The gradient is also simpler: ∂L/∂xᵢ = (1/RMS) · [∂L/∂ŷᵢ · γᵢ − x̂ᵢ · (1/n) Σⱼ ∂L/∂ŷⱼ · γⱼ · x̂ⱼ].</p>
+<pre><code class="language-python">import numpy as np
+import torch
+import torch.nn as nn
+
+def rmsnorm_numpy(x, gamma, eps=1e-6):
+    # RMS over the last dimension (feature dim)
+    rms = np.sqrt(np.mean(x ** 2, axis=-1, keepdims=True) + eps)
+    return gamma * (x / rms)
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim, eps=1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+    def forward(self, x):
+        rms = x.pow(2).mean(dim=-1, keepdim=True).add(self.eps).sqrt()
+        return self.weight * (x / rms)
+
+np.random.seed(42)
+B, T, C = 2, 10, 64
+x_np = np.random.randn(B, T, C).astype(np.float32)
+gamma_np = np.ones(C, dtype=np.float32)
+out_np = rmsnorm_numpy(x_np, gamma_np)
+
+x_torch = torch.tensor(x_np)
+rms_torch = RMSNorm(C)
+out_torch = rms_torch(x_torch).detach().numpy()
+
+print(f'Max diff numpy vs PyTorch: {np.abs(out_np - out_torch).max():.2e}')
+print(f'RMS of output (should ~1): {np.sqrt(np.mean(out_np**2, axis=-1)).mean():.4f}')
+print(f'Mean of output (not forced to 0): {out_np.mean(axis=-1).mean():.4f}')
+</code></pre>
+<h2>Motivation — Why Remove Mean Subtraction?</h2>
+<p>The re-centering hypothesis states that the learned bias β in LayerNorm can absorb any constant shift, making explicit mean subtraction redundant. Empirically, removing mean computation saves memory bandwidth and arithmetic: for a feature vector of dimension d, LayerNorm requires two passes (one for mean, one for variance); RMSNorm requires one pass (variance around zero). This translates to approximately 10–15% wall-clock speedup on large tensors, which compounds significantly across thousands of transformer blocks in LLM training.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import time
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim, eps=1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+    def forward(self, x):
+        rms = x.pow(2).mean(-1, keepdim=True).add(self.eps).sqrt()
+        return self.weight * (x / rms)
+
+B, T, C = 32, 2048, 4096
+x = torch.randn(B, T, C, device=device)
+ln = nn.LayerNorm(C).to(device)
+rms = RMSNorm(C).to(device)
+
+def benchmark(fn, x, n=50):
+    for _ in range(5):  # warmup
+        fn(x)
+    if device == 'cuda':
+        torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    for _ in range(n):
+        fn(x)
+    if device == 'cuda':
+        torch.cuda.synchronize()
+    return (time.perf_counter() - t0) / n * 1000
+
+ln_ms = benchmark(ln, x)
+rms_ms = benchmark(rms, x)
+print(f'LayerNorm : {ln_ms:.3f} ms')
+print(f'RMSNorm   : {rms_ms:.3f} ms')
+print(f'Speedup   : {ln_ms/rms_ms:.2f}x')
+</code></pre>
+<h2>RMSNorm in Modern LLMs</h2>
+<p>RMSNorm has become the default normalization for nearly all open-weight LLMs: LLaMA 1/2/3, Gemma 1/2, Mistral, Mixtral, Falcon, Qwen, and Phi all use RMSNorm with Pre-Norm placement. The standard placement is before the attention sublayer and before the feed-forward sublayer — two RMSNorm operations per transformer block. The final hidden state before the language model head receives one additional RMSNorm. LLaMA uses ε=1e-5; Gemma uses ε=1e-6. The weight γ is initialized to 1.0.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim, eps=1e-5):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+    def forward(self, x):
+        rms = x.pow(2).mean(-1, keepdim=True).add(self.eps).sqrt()
+        return self.weight * (x / rms)
+
+class LLaMABlock(nn.Module):
+    def __init__(self, d_model, nhead, dim_ff):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(d_model, nhead, batch_first=True)
+        self.ff = nn.Sequential(
+            nn.Linear(d_model, dim_ff, bias=False),
+            nn.SiLU(),
+            nn.Linear(dim_ff, d_model, bias=False)
+        )
+        self.rms1 = RMSNorm(d_model)  # before attention
+        self.rms2 = RMSNorm(d_model)  # before feed-forward
+    def forward(self, x):
+        n1 = self.rms1(x)
+        x = x + self.attn(n1, n1, n1)[0]
+        x = x + self.ff(self.rms2(x))
+        return x
+
+d_model, nhead, dim_ff = 128, 4, 512
+block = LLaMABlock(d_model, nhead, dim_ff)
+x = torch.randn(2, 32, d_model)
+out = block(x)
+print(f'Input  norm: {x.norm(dim=-1).mean():.4f}')
+print(f'Output norm: {out.norm(dim=-1).mean():.4f}')
+print(f'Params: {sum(p.numel() for p in block.parameters()):,}')
+</code></pre>
+<blockquote>
+<p><strong>Pre-Norm Placement in LLaMA</strong>: In LLaMA-style models, RMSNorm is applied before attention (input_layernorm) and before the feed-forward network (post_attention_layernorm). A final RMSNorm is applied to the last hidden state before the unembedding layer. No normalization is applied to the embedding table output itself in LLaMA (unlike BERT).</p>
+</blockquote>
+<h2>When Does Mean Subtraction Matter?</h2>
+<p>If the input to a normalization layer has a significant non-zero mean shift (e.g., from a biased residual accumulation), LN's mean subtraction corrects it while RMSNorm leaves the shift for γ and β to handle. In practice, pre-norm placement means the residual stream is re-normalized frequently, and the mean shift accumulates very slowly. Empirical results across LLaMA, Gemma, and Mistral training show that RMSNorm matches LN perplexity to within 0.1–0.5% on standard benchmarks.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class RMSNorm(nn.Module):
+    def __init__(self, dim, eps=1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.eps = eps
+    def forward(self, x):
+        return self.weight * x / x.pow(2).mean(-1, keepdim=True).add(self.eps).sqrt()
+
+torch.manual_seed(0)
+dim = 256
+
+# Case 1: zero-mean input — RMSNorm and LN should agree
+x_zeromean = torch.randn(16, dim)  # standard normal is zero-mean
+ln = nn.LayerNorm(dim)
+rms = RMSNorm(dim)
+out_ln  = ln(x_zeromean)
+out_rms = rms(x_zeromean)
+diff_zeromean = (out_ln - out_rms).abs().mean().item()
+
+# Case 2: shifted input — LN corrects shift, RMSNorm does not
+x_shifted = x_zeromean + 5.0  # add constant shift
+out_ln2  = ln(x_shifted)
+out_rms2 = rms(x_shifted)
+diff_shifted = (out_ln2 - out_rms2).abs().mean().item()
+
+print(f'Zero-mean input  — LN vs RMSNorm mean abs diff: {diff_zeromean:.4f}')
+print(f'Shifted input (+5) — LN vs RMSNorm mean abs diff: {diff_shifted:.4f}')
+print('RMSNorm matches LN closely for zero-mean inputs (typical after normalization).')
+</code></pre>
+<h2>Gradient and Numerical Properties</h2>
+<p>The RMSNorm backward pass is simpler than LayerNorm: there is no centering term in the gradient. The gradient ∂L/∂x has the form (γᵢ/RMS) · [∂L/∂ŷᵢ − x̂ᵢ · mean(∂L/∂ŷⱼ · x̂ⱼ)] — a single dot-product correction instead of LayerNorm's two correction terms. The ε value matters: LLaMA uses 1e-5, Gemma uses 1e-6. Too small an ε causes NaN when inputs have near-zero magnitude; too large biases the normalization. In bfloat16 training, ε is sometimes increased to 1e-5 or higher for numerical safety.</p>
+<h2>Implementation Details</h2>
+<p>Fused RMSNorm kernels (available in FlashAttention and Apex) compute the normalization in a single GPU kernel pass, eliminating the memory bandwidth bottleneck of reading x twice. The weight γ is typically stored in fp32 even when the activations are in bf16, to maintain precision in the scale parameters. Hugging Face Transformers implements LlamaRMSNorm with an upcast to fp32 for the normalization computation, downcast back to the activation dtype for output.</p>
+<ul>
+<li>No β parameter: RMSNorm has only γ (scale), not β (shift) — this saves parameters and slightly simplifies the computation graph.</li>
+<li>Fused kernels: use apex.normalization.FusedRMSNorm or flash_attn.ops.rms_norm for maximum throughput.</li>
+<li>Upcast to fp32: the pow/mean/sqrt sequence is numerically safer in fp32 even when activations are bf16.</li>
+<li>ε tuning: increase ε to 1e-5 if you see NaN losses in the first few steps of training with bf16 precision.</li>
+<li>Initialization: γ initialized to 1.0 (ones), which means the layer is an identity map at initialization.</li>
+</ul>
+<h2>LN vs RMSNorm vs BN Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>LayerNorm</th>
+<th>RMSNorm</th>
+<th>BatchNorm</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Formula</td>
+<td>x̂=(x−μ)/σ, y=γx̂+β</td>
+<td>x̂=x/RMS(x), y=γx̂</td>
+<td>x̂=(x−μ_B)/σ_B, y=γx̂+β</td>
+</tr>
+<tr>
+<td>Mean subtraction</td>
+<td>Yes</td>
+<td>No</td>
+<td>Yes (over batch)</td>
+</tr>
+<tr>
+<td>Learnable params</td>
+<td>γ and β per feature</td>
+<td>γ per feature only</td>
+<td>γ and β per feature</td>
+</tr>
+<tr>
+<td>Compute cost (relative)</td>
+<td>1.0×</td>
+<td>~0.85–0.90×</td>
+<td>1.0× (+ running stats)</td>
+</tr>
+<tr>
+<td>Batch dependence</td>
+<td>None</td>
+<td>None</td>
+<td>Yes — train/eval gap</td>
+</tr>
+<tr>
+<td>Used in</td>
+<td>BERT, T5, GPT-2 (early)</td>
+<td>LLaMA, Gemma, Mistral, Falcon</td>
+<td>ResNet, EfficientNet, VGG</td>
+</tr>
+</tbody>
+</table>
+<p>For new Transformer-based models, RMSNorm is the recommended default. It delivers the same empirical performance as LayerNorm with lower compute cost. LayerNorm remains appropriate when loading pretrained checkpoints that used it (BERT, T5, early GPT-2). BatchNorm is inappropriate for autoregressive language models and sequence models with variable lengths.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

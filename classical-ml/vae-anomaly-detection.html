@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VAE Anomaly Detection — ELBO-Based Scoring | Notes Backup</title>
+  <meta name="description" content="Understand how Variational Autoencoders detect anomalies using the ELBO as a scoring function: reconstruction probability, KL divergence, Monte Carlo importance-sampling estimates of log p(x), and why ELBO outperforms pure reconstruction error for out-of-distribution detection." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>VAE Anomaly Detection — ELBO-Based Scoring</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Understand how Variational Autoencoders detect anomalies using the ELBO as a scoring function: reconstruction probability, KL divergence, Monte Carlo importance-sampling estimates of log p(x), and why ELBO outperforms pure reconstruction error for out-of-distribution detection.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>VAE Anomaly Detection — ELBO-Based Scoring</h1>
+<p>Variational Autoencoders learn a probabilistic generative model p(x) by maximising a lower bound on the log-likelihood. At inference time this same bound — the ELBO — becomes a natural anomaly score: normal points achieve high ELBO while out-of-distribution inputs do not. Understanding the ELBO decomposition is key to choosing the right scoring variant and setting reliable thresholds.</p>
+<h2>The VAE Generative Model and ELBO</h2>
+<p>The VAE models data as x ~ p(x|z), z ~ p(z) with p(z)=N(0,I). Because the true posterior p(z|x) is intractable, we introduce a variational approximation q(z|x) = N(μ(x), σ²(x)) and maximise the Evidence Lower BOund: ELBO = E_q[log p(x|z)] − KL(q(z|x) ‖ p(z)). The first term is the reconstruction quality; the second term penalises the approximate posterior for deviating from the prior. The negative ELBO is the training loss and also the anomaly score: high −ELBO means the point is poorly explained by the model.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.optim as optim
+
+class VAE(nn.Module):
+    def __init__(self, d_in, d_lat=8):
+        super().__init__()
+        self.enc = nn.Sequential(nn.Linear(d_in, 64), nn.ReLU(),
+                                  nn.Linear(64, 32), nn.ReLU())
+        self.mu_h = nn.Linear(32, d_lat)
+        self.lv_h = nn.Linear(32, d_lat)
+        self.dec = nn.Sequential(nn.Linear(d_lat, 32), nn.ReLU(),
+                                  nn.Linear(32, 64), nn.ReLU(),
+                                  nn.Linear(64, d_in))
+
+    def encode(self, x):
+        h = self.enc(x)
+        return self.mu_h(h), self.lv_h(h)
+
+    def reparameterize(self, mu, lv):
+        return mu + torch.exp(0.5 * lv) * torch.randn_like(mu)
+
+    def forward(self, x):
+        mu, lv = self.encode(x)
+        return self.dec(self.reparameterize(mu, lv)), mu, lv
+
+def elbo_loss(x, x_hat, mu, lv):
+    recon = nn.functional.mse_loss(x_hat, x, reduction='sum')
+    kl = -0.5 * torch.sum(1 + lv - mu.pow(2) - lv.exp())
+    return recon + kl  # negative ELBO
+
+torch.manual_seed(0)
+X_normal = torch.randn(800, 20)
+vae = VAE(d_in=20)
+opt = optim.Adam(vae.parameters(), lr=1e-3)
+for epoch in range(20):
+    opt.zero_grad()
+    x_hat, mu, lv = vae(X_normal)
+    loss = elbo_loss(X_normal, x_hat, mu, lv)
+    loss.backward(); opt.step()
+    if (epoch + 1) % 5 == 0:
+        print(f'Epoch {epoch+1:2d} | -ELBO/n: {loss.item()/len(X_normal):.4f}')
+</code></pre>
+<h2>ELBO-Based Anomaly Scoring</h2>
+<p>At inference the anomaly score for point x is −ELBO(x) = E[‖x−x̂‖²] + KL(q(z|x)‖p(z)). The KL term measures whether the encoder maps x to a region of the prior; anomalies often produce unusual latent codes even when the decoder reconstructs them plausibly. Averaging the reconstruction loss over multiple posterior samples reduces variance. The per-sample ELBO score can then be thresholded using the 95th or 99th percentile of scores on held-out normal data.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+
+def elbo_score(vae, x, n_samples=30):
+    '''Anomaly score = reconstruction error + KL divergence (negative ELBO).'''
+    vae.eval()
+    x_t = torch.tensor(x, dtype=torch.float32)
+    with torch.no_grad():
+        mu, lv = vae.encode(x_t)
+        recon_sum = torch.zeros(len(x_t))
+        for _ in range(n_samples):
+            z = vae.reparameterize(mu, lv)
+            x_hat = vae.dec(z)
+            recon_sum += ((x_t - x_hat) ** 2).sum(dim=1)
+        recon = (recon_sum / n_samples).numpy()
+        kl = (-0.5 * (1 + lv - mu.pow(2) - lv.exp()).sum(dim=1)).numpy()
+    return recon + kl
+
+np.random.seed(42)
+X_norm = np.random.randn(100, 20).astype('float32')
+X_anom = (np.random.randn(20, 20) * 3 + 4).astype('float32')
+s_norm = elbo_score(vae, X_norm)
+s_anom = elbo_score(vae, X_anom)
+thr = np.percentile(s_norm, 95)
+print(f'Normal  mean={s_norm.mean():.2f}  p95={thr:.2f}')
+print(f'Anomaly mean={s_anom.mean():.2f}  detected={(s_anom &gt; thr).sum()}/{len(s_anom)}')
+</code></pre>
+<h2>Monte Carlo Log-Likelihood via Importance Sampling</h2>
+<p>The ELBO is a lower bound on log p(x). A tighter estimate uses importance sampling (IWAE): log p(x) ≈ log(1/K Σₖ w_k) where log wₖ = log p(x|zₖ) + log p(zₖ) − log q(zₖ|x) and zₖ ~ q(z|x). As K→∞ this converges to the true log p(x). The anomaly score becomes −log p(x) — a principled likelihood-based score that avoids the ELBO's approximation error, at the cost of K forward passes per point.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+
+def mc_log_px(vae, x, n_samples=200):
+    '''Estimate log p(x) via importance-weighted sampling.
+    log p(x) ≈ logsumexp(log w_1,...,log w_K) - log K
+    log w_k = log p(x|z_k) + log p(z_k) - log q(z_k|x)
+    '''
+    vae.eval()
+    x_t = torch.tensor(x, dtype=torch.float32)
+    with torch.no_grad():
+        mu, lv = vae.encode(x_t)
+        std = torch.exp(0.5 * lv)
+        log_ws = []
+        for _ in range(n_samples):
+            z = mu + std * torch.randn_like(mu)
+            x_hat = vae.dec(z)
+            log_px_z = -0.5 * ((x_t - x_hat) ** 2).sum(dim=1)
+            log_pz   = -0.5 * (z ** 2).sum(dim=1)
+            log_qz_x = -0.5 * (((z - mu) / (std + 1e-8)) ** 2
+                                + 2 * torch.log(std + 1e-8)).sum(dim=1)
+            log_ws.append((log_px_z + log_pz - log_qz_x).unsqueeze(0))
+        log_w_stack = torch.cat(log_ws, dim=0)
+        log_px = torch.logsumexp(log_w_stack, dim=0) - np.log(n_samples)
+    return log_px.numpy()
+
+sample_n = np.random.randn(3, 20).astype('float32')
+sample_a = (np.random.randn(3, 20) * 3 + 4).astype('float32')
+lp_n = mc_log_px(vae, sample_n, n_samples=100)
+lp_a = mc_log_px(vae, sample_a, n_samples=100)
+print('Normal  log p(x):', lp_n.round(2))
+print('Anomaly log p(x):', lp_a.round(2))
+print('Anomaly score (-log p(x)):', (-lp_a).round(2))
+</code></pre>
+<h2>ELBO Score vs Pure Reconstruction Error</h2>
+<p>Pure reconstruction error ‖x−x̂‖² ignores the KL term and therefore cannot detect anomalies that happen to reconstruct well — a common failure mode when the decoder is expressive. The ELBO also penalises unusual latent codes. An anomaly that lies outside the prior support produces large KL even with small reconstruction error. Empirically the ELBO score yields higher AUROC than reconstruction-only scoring across most benchmarks.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+from sklearn.metrics import roc_auc_score
+
+def recon_score(vae, x):
+    vae.eval()
+    x_t = torch.tensor(x, dtype=torch.float32)
+    with torch.no_grad():
+        mu, lv = vae.encode(x_t)
+        x_hat = vae.dec(mu)  # use posterior mean
+    return ((x_t - x_hat) ** 2).sum(dim=1).numpy()
+
+np.random.seed(0)
+n_n, n_a = 200, 50
+X_n = np.random.randn(n_n, 20).astype('float32')
+X_a = (np.random.randn(n_a, 20) * 2.5 + 3).astype('float32')
+X_all = np.vstack([X_n, X_a])
+y = np.array([0] * n_n + [1] * n_a)
+
+s_elbo  = elbo_score(vae, X_all, n_samples=20)
+s_recon = recon_score(vae, X_all)
+auc_e = roc_auc_score(y, s_elbo)
+auc_r = roc_auc_score(y, s_recon)
+print(f'AUROC ELBO score:  {auc_e:.4f}')
+print(f'AUROC Recon only:  {auc_r:.4f}')
+print(f'Improvement:       {auc_e - auc_r:+.4f}')
+print('KL term catches anomalies whose latent codes deviate from the prior.')
+</code></pre>
+<h2>Threshold Selection and Calibration</h2>
+<p>Set the anomaly threshold using the empirical distribution of ELBO scores on a held-out normal validation set. Common strategies: (1) Fixed percentile — flag points above the 95th or 99th percentile of validation scores; controls false-positive rate directly. (2) 3σ rule — fit a Gaussian to validation scores and flag points more than 3 standard deviations above the mean. (3) Extreme-value theory — fit a GPD to the tail of the score distribution for principled extrapolation into low-density regions.</p>
+<blockquote>
+<p><strong>Choosing the Right Score</strong>: Use −ELBO when speed matters and data dimensionality is moderate. Use the MC importance-sampling estimate (IWAE, K=200) when you need the tightest possible bound and can afford K forward passes per point. If the decoder is very powerful, weight the KL term more heavily by setting β &gt; 1 in the β-VAE objective to prevent the reconstruction term from dominating.</p>
+</blockquote>
+<h2>Variants: DONUT and OC-VAE</h2>
+<p>DONUT (Xu et al., 2018) is a VAE-based KPI anomaly detector for time-series: it uses a conditional VAE over sliding windows and scores anomalies via a modified reconstruction probability that accounts for missing values. OC-VAE adds a one-class objective to the ELBO: a hypersphere constraint on the latent space forces normal data to cluster around a center c, making the latent KL distance a more discriminative anomaly score.</p>
+<ul>
+<li>DONUT: conditional VAE over time windows; reconstruction probability as score; handles missing values explicitly during training.</li>
+<li>OC-VAE: adds ‖μ(x)−c‖² penalty to ELBO; latent distance from c becomes a complementary anomaly score.</li>
+<li>β-VAE (β&gt;1): disentangles latent factors and forces a tighter prior match; can improve anomaly separation at the cost of reconstruction quality.</li>
+<li>IWAE: tighter ELBO via importance-weighted samples; anomaly score is −log p̂(x) rather than −ELBO; computationally heavier.</li>
+</ul>
+<h2>VAE Anomaly Score Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Score</th>
+<th>Formula</th>
+<th>What It Captures</th>
+<th>Threshold Ease</th>
+<th>Robustness</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Reconstruction error</td>
+<td>‖x−x̂‖²</td>
+<td>Decoder mismatch only</td>
+<td>Easy — MSE scale</td>
+<td>Fails if decoder overfits</td>
+</tr>
+<tr>
+<td>KL divergence only</td>
+<td>KL(q‖p)</td>
+<td>Latent irregularity only</td>
+<td>Moderate</td>
+<td>Misses surface anomalies</td>
+</tr>
+<tr>
+<td>Negative ELBO</td>
+<td>Recon + KL</td>
+<td>Both surface and latent</td>
+<td>Easy — single scalar</td>
+<td>Good general default</td>
+</tr>
+<tr>
+<td>Reconstruction probability</td>
+<td>E_q[log p(x</td>
+<td>z)]</td>
+<td>Probabilistic recon quality</td>
+<td>Requires noise model</td>
+</tr>
+<tr>
+<td>MC log p(x) (IWAE)</td>
+<td>−log p̂(x) via IS</td>
+<td>Tightest likelihood bound</td>
+<td>Principled but slow</td>
+<td>Best accuracy, K×cost</td>
+</tr>
+</tbody>
+</table>
+<p>In practice start with the negative ELBO. If reconstruction-quality anomalies dominate, upweight the reconstruction term. If latent-space irregularities matter more (e.g., semantic OOD), upweight the KL term or use OC-VAE. Reserve the IWAE estimate for high-stakes applications where accuracy justifies the computational cost.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>StreamingLLM: Efficient Streaming Language Model Inference | Notes Backup</title>
+  <meta name="description" content="The StreamingLLM system combining attention sinks with a fixed-size sliding KV cache window to enable LLMs to generate arbitrarily long sequences without context-length restrictions." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>StreamingLLM: Efficient Streaming Language Model Inference</h1>
+      <ul class='note-meta'><li><strong>description:</strong> The StreamingLLM system combining attention sinks with a fixed-size sliding KV cache window to enable LLMs to generate arbitrarily long sequences without context-length restrictions.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>StreamingLLM: Efficient Streaming Language Model Inference</h1>
+<p>StreamingLLM (Xiao et al., 2023) is an inference system that enables pretrained large language models to generate text of unbounded length without retraining, architectural changes, or context-length restrictions. It achieves this by combining two insights: (1) the attention sink phenomenon — that models reliably attend to initial tokens regardless of content — means those tokens must be kept in the KV cache permanently; and (2) a fixed sliding window of recent tokens provides sufficient local context for coherent generation. The result is a constant-memory, constant-speed inference engine that transforms any pretrained LLM into a streaming model capable of producing millions of tokens in a single session, enabling applications such as real-time transcription summarization, always-on AI assistants, and streaming code generation over entire repositories.</p>
+<h2>Overview</h2>
+<p>Standard autoregressive generation stores all past KV pairs in memory (the KV cache), which grows linearly with sequence length and eventually exhausts GPU memory. Truncating the input to a fixed context window forces the model to discard earlier content and breaks generation quality. StreamingLLM avoids both problems by implementing a SinkCache: a fixed-size KV store that always contains the first n_sink=4 tokens (the sink region) plus the most recent window_size tokens (the sliding window). Total cache size is constant at n_sink + window_size entries. When a new token is generated, its KV pair enters the window; if the window is full, the oldest window entry is evicted. Sink entries are never evicted. The model attends over this bounded cache at each step, producing stable perplexity for sequences of arbitrary length. The paper demonstrates stable generation at 4 million tokens.</p>
+<h2>System Architecture</h2>
+<p>StreamingLLM is a pure inference modification — the model weights are untouched. The system inserts a SinkCache manager between the transformer's attention modules and the KV cache storage. At each generation step, the attention module calls SinkCache.add(key, value) to store the new KV pair, then calls SinkCache.get_kv() to retrieve the full bounded KV state for attention computation. The get_kv() return is a concatenation of [sink_keys; window_keys] and [sink_values; window_values] in their original causal order. Position IDs are re-indexed at each step to match the actual attended positions: sink tokens retain positions [0, 1, 2, 3]; window tokens are assigned contiguous positions [n_sink, n_sink+1, ..., n_sink+window_size-1]. This re-indexing is critical for RoPE consistency — the model must see positions that reflect the relative order of attended tokens.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from typing import Optional, Tuple
+
+class SinkCache:
+    # StreamingLLM KV cache: permanent sink region + sliding window
+    # Enables infinite-length generation at constant memory and compute
+
+    def __init__(self, n_sink: int = 4, window_size: int = 512):
+        self.n_sink = n_sink
+        self.window_size = window_size
+        self._sink_k:  list = []
+        self._sink_v:  list = []
+        self._win_k:   list = []
+        self._win_v:   list = []
+        self.seq_len = 0
+
+    def add(self, key: torch.Tensor, value: torch.Tensor) -&gt; None:
+        # key/value: (batch, n_heads, 1, head_dim) — single new token
+        if self.seq_len &lt; self.n_sink:
+            self._sink_k.append(key)
+            self._sink_v.append(value)
+        else:
+            self._win_k.append(key)
+            self._win_v.append(value)
+            if len(self._win_k) &gt; self.window_size:
+                self._win_k.pop(0)
+                self._win_v.pop(0)
+        self.seq_len += 1
+
+    def get_kv(self) -&gt; Tuple[torch.Tensor, torch.Tensor]:
+        # Returns concatenated [sink | window] keys and values
+        all_k = torch.cat(self._sink_k + self._win_k, dim=2)
+        all_v = torch.cat(self._sink_v + self._win_v, dim=2)
+        return all_k, all_v
+
+    def get_position_ids(self) -&gt; torch.Tensor:
+        # Contiguous positions [0..n_sink-1, n_sink..cache_len-1]
+        cache_len = len(self._sink_k) + len(self._win_k)
+        return torch.arange(cache_len, dtype=torch.long)
+
+    @property
+    def cache_size(self) -&gt; int:
+        return len(self._sink_k) + len(self._win_k)
+</code></pre>
+<h2>Sink Cache Implementation</h2>
+<p>The SinkCache.add() method routes incoming KV pairs based on whether the sequence length has reached the sink budget. For the first n_sink tokens, entries are appended to the permanent sink lists. From token n_sink onward, entries go into the window lists, which are pruned by evicting from the front whenever length exceeds window_size. This means the first n_sink tokens of any document are always retained, matching the attention sink structure observed in pretrained models. The SinkCache.get_kv() method concatenates sink and window lists along the sequence dimension, returning a view suitable for use as past_key_values in any HuggingFace model. The total number of KV entries returned is always at most n_sink + window_size, providing the constant-memory guarantee regardless of how many tokens have been generated.</p>
+<pre><code class="language-python">import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM
+
+def build_streaming_position_ids(sink_len: int, window_len: int,
+                                  new_token_pos: int) -&gt; torch.Tensor:
+    # Re-index positions so attended tokens have contiguous RoPE-compatible IDs
+    # Sink tokens: [0, 1, ..., sink_len-1] — always fixed
+    # Window tokens: [new_token_pos - window_len, ..., new_token_pos - 1]
+    sink_ids   = torch.arange(sink_len, dtype=torch.long)
+    window_start = max(sink_len, new_token_pos - window_len)
+    window_ids = torch.arange(window_start, new_token_pos, dtype=torch.long)
+    return torch.cat([sink_ids, window_ids])
+
+def streaming_generate(model, tokenizer, prompt: str,
+                        n_sink: int = 4, window: int = 512,
+                        max_new_tokens: int = 2000) -&gt; str:
+    # Autoregressive generation using SinkCache for constant-memory streaming
+    cache = SinkCache(n_sink=n_sink, window_size=window)
+    ids = tokenizer(prompt, return_tensors='pt').input_ids.to(model.device)
+    generated = []
+    # Prefill: process all prompt tokens through the cache
+    for i in range(ids.shape[1]):
+        tok = ids[:, i:i+1]
+        pos = torch.tensor([[i]], dtype=torch.long, device=model.device)
+        with torch.no_grad():
+            out = model(tok, position_ids=pos, use_cache=True)
+        new_k, new_v = out.past_key_values[-1]
+        cache.add(new_k[:, :, -1:, :], new_v[:, :, -1:, :])
+    # Decode: generate up to max_new_tokens using the bounded cache
+    next_tok = ids[:, -1:]
+    for step in range(max_new_tokens):
+        pos_ids = build_streaming_position_ids(cache.n_sink, window, cache.seq_len)
+        pos_ids = pos_ids[-1:].unsqueeze(0).to(model.device)
+        with torch.no_grad():
+            out = model(next_tok, position_ids=pos_ids, use_cache=False)
+        next_tok = out.logits[:, -1, :].argmax(dim=-1, keepdim=True)
+        generated.append(next_tok.item())
+        if next_tok.item() == tokenizer.eos_token_id:
+            break
+    return tokenizer.decode(generated, skip_special_tokens=True)
+</code></pre>
+<h2>Sliding Window Attention</h2>
+<p>The sliding window component of SinkCache provides local context coherence: each generated token can attend to the most recent window_size tokens. This window captures sentence-level and paragraph-level dependencies — typically sufficient for fluent text generation. Content from beyond the window is permanently lost to attention, which is the primary limitation of StreamingLLM compared to full long-context models. However, for many streaming applications (live transcription, real-time dialogue), only the recent context is needed and the window approach is perfectly adequate. The window size is a tunable parameter: window_size=512 uses approximately 1GB of KV cache memory for a 7B model, while window_size=2048 uses ~4GB. Larger windows provide better long-term coherence at the cost of slower attention computation (though still O(window_size) per step, not O(n)).</p>
+<pre><code class="language-python">import torch
+import time
+from transformers import AutoTokenizer, AutoModelForCausalLM
+
+def throughput_benchmark(model_name: str, n_tokens: int = 1000,
+                          window: int = 512, n_sink: int = 4) -&gt; dict:
+    # Compare tokens/sec: StreamingLLM vs standard generation with 4K truncation
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name, torch_dtype=torch.float16, device_map='auto'
+    )
+    prompt = 'The following is a long technical discussion about machine learning: '
+    ids = tokenizer(prompt, return_tensors='pt').input_ids.cuda()
+    # Benchmark 1: Standard generation (truncation at max_length=4096)
+    t0 = time.perf_counter()
+    with torch.no_grad():
+        out = model.generate(ids, max_new_tokens=n_tokens,
+                             max_length=4096, do_sample=False)
+    std_speed = n_tokens / (time.perf_counter() - t0)
+    # Benchmark 2: StreamingLLM with SinkCache
+    cache = SinkCache(n_sink=n_sink, window_size=window)
+    t0 = time.perf_counter()
+    for _ in range(n_tokens):
+        k, v = cache.get_kv() if cache.cache_size &gt; 0 else (None, None)
+        pass  # placeholder for actual streaming step
+    stream_speed = n_tokens / (time.perf_counter() - t0)
+    print(f'Standard generation: {std_speed:.1f} tokens/sec')
+    print(f'StreamingLLM ({window}-token window): {stream_speed:.1f} tokens/sec')
+    return {'standard': std_speed, 'streaming': stream_speed}
+</code></pre>
+<h2>Position Re-indexing</h2>
+<p>After each eviction step, the window tokens have a gap between the sink positions (0–3) and their original sequence positions. Without re-indexing, the RoPE embeddings would use the original positions, creating a large positional gap that disrupts relative position attention. StreamingLLM re-indexes positions at each step: sink tokens retain positions [0, 1, 2, 3]; window tokens are assigned positions [n_sink, n_sink+1, ..., n_sink+window_len-1] regardless of their original absolute positions. This makes the attended sequence appear contiguous from the model's perspective. The practical effect is that the model believes it is attending to a sequence of length n_sink + window_size — the sink tokens at the beginning and the recent window right after. Position re-indexing requires only a change to the position_ids tensor passed to the model; no weight modification is needed.</p>
+<pre><code class="language-python">import torch
+
+def demo_multiturn_streaming(n_turns: int = 20, window: int = 256,
+                              n_sink: int = 4) -&gt; None:
+    # Simulate multi-turn dialogue with StreamingLLM SinkCache
+    # Each turn appends user + assistant tokens to the cache
+    cache_status = []
+    total_tokens = 0
+    for turn in range(n_turns):
+        user_tokens   = torch.randn(1, 8, 1, 64)   # simulate 8 new user tokens
+        assist_tokens = torch.randn(1, 8, 1, 64)   # simulate 8 assistant tokens
+        for tok in range(8):  # add user tokens
+            k = user_tokens[:, :, tok:tok+1, :]
+            v = user_tokens[:, :, tok:tok+1, :]
+            if total_tokens &lt; n_sink:
+                pass  # goes to sink
+            total_tokens += 1
+        for tok in range(8):  # add assistant tokens
+            total_tokens += 1
+        cache_len = min(total_tokens, n_sink + window)
+        cache_status.append({'turn': turn + 1, 'total': total_tokens, 'cache': cache_len})
+    print(f'{&quot;Turn&quot;:&gt;5} | {&quot;Total Tokens&quot;:&gt;12} | {&quot;Cache Size&quot;:&gt;10}')
+    for s in cache_status[::5]:
+        print(f'{s[&quot;turn&quot;]:&gt;5} | {s[&quot;total&quot;]:&gt;12} | {s[&quot;cache&quot;]:&gt;10}')
+    print(f'Cache stays bounded at max {n_sink + window} regardless of total tokens')
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Scenario</th>
+<th>Context Needed</th>
+<th>Cache Size</th>
+<th>Approach</th>
+<th>StreamingLLM Works?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Short document Q&amp;A</td>
+<td>&lt; window_size</td>
+<td>&lt; 516 tokens</td>
+<td>Standard or streaming</td>
+<td>Yes — trivially</td>
+</tr>
+<tr>
+<td>Long document summarization</td>
+<td>Full document</td>
+<td>Grows with doc</td>
+<td>Full long-context model or RAG</td>
+<td>Partial — loses earlier content</td>
+</tr>
+<tr>
+<td>Streaming transcription</td>
+<td>Recent audio only</td>
+<td>512-2048 tokens</td>
+<td>Sink + window</td>
+<td>Yes — ideal use case</td>
+</tr>
+<tr>
+<td>Multi-turn dialogue</td>
+<td>Recent turns</td>
+<td>512-2048 tokens</td>
+<td>Sink + window</td>
+<td>Yes — window covers recent turns</td>
+</tr>
+<tr>
+<td>Infinite novel generation</td>
+<td>Local coherence only</td>
+<td>512-2048 tokens</td>
+<td>Sink + window</td>
+<td>Yes — stable indefinitely</td>
+</tr>
+<tr>
+<td>Needle-in-haystack retrieval</td>
+<td>Full document</td>
+<td>Grows to OOM</td>
+<td>Full long-context model</td>
+<td>No — evicted content unattendable</td>
+</tr>
+</tbody>
+</table>
+<h2>Throughput and Latency</h2>
+<p>StreamingLLM achieves constant per-token latency because the KV cache size is bounded. In standard generation, attention computation per token grows as O(n) (linear in sequence length, quadratic total), causing generation to slow down significantly for long sequences. With a fixed cache of size n_sink + window_size = 516 entries (at default settings), each token requires a constant number of attention operations regardless of how many tokens have been generated. The paper reports that StreamingLLM maintains 95% of the single-token throughput of the base model indefinitely. Memory usage is also constant: for LLaMA-7B with 32 layers, 32 heads, head_dim=128, float16, and a 516-entry cache, total KV memory is 32 × 32 × 516 × 128 × 2 bytes ≈ 1.37 GB — a fixed budget regardless of generation duration.</p>
+<blockquote>
+<p><strong>StreamingLLM Solves Memory, Not Retrieval</strong>: StreamingLLM solves the memory problem but not the retrieval problem — the model can only attend to content in its window; for true long-context retrieval, combine StreamingLLM with RAG or use a full long-context model. StreamingLLM is ideal for streaming generation where only local coherence is needed.</p>
+</blockquote>
+<h2>Limitations and Use Cases</h2>
+<p>StreamingLLM has one fundamental limitation: content evicted from the window is permanently inaccessible to attention. This means the model cannot retrieve information from more than window_size tokens ago, regardless of how long the generation session is. For needle-in-haystack retrieval tasks where the answer may be anywhere in a long document, StreamingLLM will fail unless the relevant content happens to remain in the window. The appropriate use cases are those where only recent context is needed: live transcription and summarization, streaming code completion, real-time dialogue systems, and long creative writing where local style coherence suffices. For true long-context understanding tasks — legal document analysis, multi-chapter book summarization, long-form research report Q&amp;A — a full long-context model with RoPE extension or a RAG system is required.</p>
+<ul>
+<li>Memory cost is constant: (n_sink + window_size) × layers × heads × head_dim × 2 bytes, fixed for the session.</li>
+<li>Per-token speed is constant: attention over a fixed cache of size 516 rather than a growing sequence.</li>
+<li>Sink tokens are never evicted: the first 4 tokens of any session are permanently retained throughout generation.</li>
+<li>Position re-indexing is required: sink tokens get positions 0-3, window tokens get positions 4 to 4+window_len-1.</li>
+<li>No retraining needed: works with any pretrained RoPE or ALiBi model without weight modification.</li>
+<li>Critical limitation: content evicted from the window is unattendable — combine with RAG for long-context retrieval.</li>
+<li>Window size tuning: 512 tokens for minimal memory, 2048 for better coherence, 4096 for near-full-context quality.</li>
+</ul>
+<h2>Key Takeaways</h2>
+<p>StreamingLLM is a practical system enabling pretrained LLMs to function as true streaming models. Its design is principled: the SinkCache is not a heuristic but a direct response to the observed attention sink structure of transformer models. By retaining 4 sink tokens plus a sliding window, StreamingLLM achieves constant memory, constant speed, and stable perplexity over arbitrarily long sequences. The approach requires no retraining, no fine-tuning, and no architectural changes — a zero-shot capability that makes it immediately applicable to any pretrained RoPE-based model including the entire LLaMA family.</p>
+<ul>
+<li>SinkCache design: keep first n_sink=4 tokens permanently + rolling window_size=512 for recent context.</li>
+<li>Cache is bounded at n_sink + window_size entries, giving O(1) memory growth over arbitrary generation length.</li>
+<li>Position re-index at each step: sink at [0..3], window at [4..4+win_len-1] for RoPE consistency.</li>
+<li>Works without retraining on any pretrained RoPE model — pure inference-time modification.</li>
+<li>Stable perplexity demonstrated at 4 million generated tokens in the original paper.</li>
+<li>Combine with RAG for long-context retrieval tasks; StreamingLLM alone cannot retrieve evicted content.</li>
+<li>For training-time improvement, add a dedicated <sink> token prefix so content tokens are not repurposed as sinks.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

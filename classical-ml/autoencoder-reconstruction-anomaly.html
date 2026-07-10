@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Autoencoder Reconstruction Error for Anomaly Detection | Notes Backup</title>
+  <meta name="description" content="Train autoencoders on normal data and use reconstruction error as anomaly score — covering dense, CNN, and LSTM architectures with threshold selection strategies and memorization pitfalls." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Autoencoder Reconstruction Error for Anomaly Detection</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Train autoencoders on normal data and use reconstruction error as anomaly score — covering dense, CNN, and LSTM architectures with threshold selection strategies and memorization pitfalls.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Autoencoder Reconstruction Error for Anomaly Detection</h1>
+<p>Autoencoders learn a compressed representation of normal training data by encoding it into a low-dimensional latent space and decoding it back. Trained exclusively on normal data, the autoencoder learns the manifold of normal patterns. At test time, normal points reconstruct well (low error) while anomalies — which do not lie on the learned manifold — produce high reconstruction errors. The anomaly score is simply ‖x − decoder(encoder(x))‖².</p>
+<h2>Reconstruction Error as Anomaly Score</h2>
+<p>The autoencoder minimises reconstruction error over normal training data. The bottleneck (latent dimension &lt; input dimension) forces the model to learn a compact representation capturing only the main variance directions. Anomalies, by definition not well-represented by this compact code, produce high decoder error. The key parameters are latent dimension (smaller = more compression = higher sensitivity but more false positives) and architecture depth.</p>
+<p>$$\text{score}(x) = |x - g(f(x))|^2, \quad \text{flag if score}(x) &gt; \tau$$</p>
+<h2>Dense Autoencoder for Tabular Data</h2>
+<p>For tabular data, a dense (fully connected) autoencoder with 2-3 hidden layers and a bottleneck latent dimension of 2-8 is typically sufficient. Train only on normal data using Adam, mean-squared error loss, and early stopping on a held-out validation set of normal data. After training, compute per-sample reconstruction error on the full dataset to generate anomaly scores.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+
+np.random.seed(42); torch.manual_seed(42)
+X_normal  = np.random.normal(0, 1, (1000, 20)).astype(np.float32)
+X_anomaly = np.random.uniform(-4, 4, (50,  20)).astype(np.float32)
+
+class Autoencoder(nn.Module):
+    def __init__(self, d_in, d_lat):
+        super().__init__()
+        self.enc = nn.Sequential(nn.Linear(d_in, 64), nn.ReLU(),
+                                  nn.Linear(64, d_lat), nn.ReLU())
+        self.dec = nn.Sequential(nn.Linear(d_lat, 64), nn.ReLU(),
+                                  nn.Linear(64, d_in))
+    def forward(self, x): return self.dec(self.enc(x))
+
+ds  = TensorDataset(torch.tensor(X_normal))
+dl  = DataLoader(ds, batch_size=64, shuffle=True)
+mdl = Autoencoder(20, 4)
+opt = torch.optim.Adam(mdl.parameters(), lr=1e-3)
+
+for epoch in range(50):
+    for (xb,) in dl:
+        loss = nn.functional.mse_loss(mdl(xb), xb)
+        opt.zero_grad(); loss.backward(); opt.step()
+
+mdl.eval()
+with torch.no_grad():
+    Xn_t = torch.tensor(X_normal)
+    Xa_t = torch.tensor(X_anomaly)
+    err_n = nn.functional.mse_loss(mdl(Xn_t), Xn_t, reduction='none').mean(1).numpy()
+    err_a = nn.functional.mse_loss(mdl(Xa_t), Xa_t, reduction='none').mean(1).numpy()
+print(f'Normal  recon error: {err_n.mean():.3f} +/- {err_n.std():.3f}')
+print(f'Anomaly recon error: {err_a.mean():.3f} +/- {err_a.std():.3f}')
+</code></pre>
+<h2>Threshold Selection Strategies</h2>
+<p>The threshold τ determines the precision-recall tradeoff. Common strategies: (1) fixed percentile of training errors (e.g., 95th or 99th percentile), (2) optimise F1 on a small labelled validation set, (3) fit extreme value theory (Gumbel) to training errors and use a return level, (4) PR-curve optimum for the target recall. Training percentile is the simplest and most common approach in practice.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.metrics import precision_recall_curve, average_precision_score
+
+np.random.seed(42)
+train_errors  = np.random.exponential(scale=0.5, size=1000)
+normal_test   = np.random.exponential(scale=0.5, size=200)
+anomaly_test  = np.random.exponential(scale=2.5, size=30)
+test_errors   = np.concatenate([normal_test, anomaly_test])
+y_true        = np.array([0]*200 + [1]*30)
+
+print('--- Percentile Thresholds ---')
+for pct in [90, 95, 99]:
+    tau = np.percentile(train_errors, pct)
+    preds = (test_errors &gt; tau).astype(int)
+    prec = (preds &amp; y_true).sum() / max(preds.sum(), 1)
+    rec  = (preds &amp; y_true).sum() / y_true.sum()
+    f1   = 2*prec*rec/(prec+rec+1e-8)
+    print(f'  P{pct}: tau={tau:.3f}  P={prec:.2f}  R={rec:.2f}  F1={f1:.2f}')
+
+print('--- PR-Curve Optimal Threshold ---')
+prec_c, rec_c, thres = precision_recall_curve(y_true, test_errors)
+f1_c = 2*prec_c*rec_c/(prec_c+rec_c+1e-8)
+best = np.argmax(f1_c)
+print(f'  tau={thres[best]:.3f}  P={prec_c[best]:.2f}  R={rec_c[best]:.2f}  F1={f1_c[best]:.2f}')
+ap = average_precision_score(y_true, test_errors)
+print(f'  AUPRC: {ap:.3f}')
+</code></pre>
+<h2>CNN Autoencoder for Image Anomaly Detection</h2>
+<p>For image data, convolutional autoencoders capture spatial structure more effectively than dense autoencoders. The encoder uses Conv2d + MaxPool2d to downsample; the decoder uses ConvTranspose2d to upsample back to original resolution. The reconstruction error is computed per-pixel and averaged. The bottleneck spatial resolution (not just channel count) controls compression: a 7×7 bottleneck for 28×28 images captures global structure only.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+torch.manual_seed(42)
+
+class ConvAE(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.enc = nn.Sequential(
+            nn.Conv2d(1, 16, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2),
+            nn.Conv2d(16, 8, 3, padding=1), nn.ReLU(), nn.MaxPool2d(2)
+        )
+        self.dec = nn.Sequential(
+            nn.ConvTranspose2d(8, 16, 2, stride=2), nn.ReLU(),
+            nn.ConvTranspose2d(16, 1, 2, stride=2), nn.Sigmoid()
+        )
+    def forward(self, x): return self.dec(self.enc(x))
+
+model = ConvAE()
+opt   = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+X_normal  = torch.zeros(200, 1, 28, 28) + 0.3*torch.randn(200, 1, 28, 28)
+X_anomaly = torch.rand(10, 1, 28, 28)
+
+for _ in range(30):
+    rec  = model(X_normal)
+    loss = nn.functional.mse_loss(rec, X_normal)
+    opt.zero_grad(); loss.backward(); opt.step()
+
+model.eval()
+with torch.no_grad():
+    err_n = nn.functional.mse_loss(model(X_normal),  X_normal,  reduction='none').mean([1,2,3])
+    err_a = nn.functional.mse_loss(model(X_anomaly), X_anomaly, reduction='none').mean([1,2,3])
+print(f'Normal  recon error: {err_n.mean():.4f} +/- {err_n.std():.4f}')
+print(f'Anomaly recon error: {err_a.mean():.4f} +/- {err_a.std():.4f}')
+print(f'Separation ratio: {err_a.mean()/err_n.mean():.1f}x')
+</code></pre>
+<h2>LSTM Autoencoder for Sequence Anomaly Detection</h2>
+<p>For time-series and sequence data, LSTM autoencoders encode the full sequence into a fixed-size hidden state and decode it back to the original sequence. The encoder reads the sequence forward; the decoder receives the final hidden state repeated as input and generates the reconstruction. Training on normal sequences teaches the model temporal patterns; anomalous sequences with unusual dynamics produce high per-timestep reconstruction error.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+torch.manual_seed(42)
+SEQ, FEAT = 30, 5
+
+class LSTMAutoencoder(nn.Module):
+    def __init__(self, n_feat, latent=8):
+        super().__init__()
+        self.enc = nn.LSTM(n_feat,  latent, batch_first=True)
+        self.dec = nn.LSTM(latent, n_feat,  batch_first=True)
+    def forward(self, x):
+        _, (h, _) = self.enc(x)
+        h_rep = h.squeeze(0).unsqueeze(1).repeat(1, x.size(1), 1)
+        out, _ = self.dec(h_rep)
+        return out
+
+model = LSTMAutoencoder(FEAT)
+opt   = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+t = torch.linspace(0, 6.28, SEQ)
+X_normal  = torch.stack([torch.stack([
+    torch.sin(t + i*0.5 + j) for j in range(FEAT)], dim=1) for i in range(300)])
+X_anomaly = torch.randn(20, SEQ, FEAT) * 3
+
+for _ in range(40):
+    rec  = model(X_normal)
+    loss = nn.functional.mse_loss(rec, X_normal)
+    opt.zero_grad(); loss.backward(); opt.step()
+
+model.eval()
+with torch.no_grad():
+    err_n = nn.functional.mse_loss(model(X_normal),  X_normal,  reduction='none').mean([1,2]).numpy()
+    err_a = nn.functional.mse_loss(model(X_anomaly), X_anomaly, reduction='none').mean([1,2]).numpy()
+print(f'Normal  seq error: {err_n.mean():.4f} +/- {err_n.std():.4f}')
+print(f'Anomaly seq error: {err_a.mean():.4f} +/- {err_a.std():.4f}')
+</code></pre>
+<h2>Threshold Methods Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Label Requirement</th>
+<th>Calibration</th>
+<th>Robustness</th>
+<th>Recommended For</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Fixed percentile (P95/P99)</td>
+<td>None (train errors only)</td>
+<td>Simple — single parameter</td>
+<td>Sensitive to train distribution</td>
+<td>Quick baseline, no labelled anomalies</td>
+</tr>
+<tr>
+<td>Validation set optimisation</td>
+<td>Small labelled set needed</td>
+<td>Optimises target metric (F1/AUPRC)</td>
+<td>Good if val set is representative</td>
+<td>When a few labelled anomalies are available</td>
+</tr>
+<tr>
+<td>Extreme value theory (Gumbel)</td>
+<td>None (train errors only)</td>
+<td>Principled statistical model</td>
+<td>Robust for rare extremes</td>
+<td>When anomalies are rare and extreme</td>
+</tr>
+<tr>
+<td>PR-curve optimum</td>
+<td>Labelled test set required</td>
+<td>Maximises F1 at target recall</td>
+<td>Depends on test set quality</td>
+<td>Evaluation and offline threshold selection</td>
+</tr>
+</tbody>
+</table>
+<h2>Memorization Problem and Regularisation</h2>
+<p>A powerful autoencoder (many layers, large latent dim) can memorise training data and generalise well even to anomalies, eliminating the score gap. Regularisation strategies to prevent this: (1) undercomplete architecture (small latent dim forces compression), (2) sparse autoencoder (L1 penalty on latent activations), (3) denoising autoencoder (train to remove noise — anomalies cannot be denoised), (4) dropout in encoder/decoder, (5) early stopping before the model overfits.</p>
+<blockquote>
+<p><strong>Memorisation Risk</strong>: If the validation reconstruction error stops decreasing but the gap between normal and anomaly scores collapses, the model is memorising rather than generalising. Use early stopping monitored on a validation set of normal data, and ensure the latent dimension is much smaller than the input dimension (rule of thumb: latent_dim &lt; 0.2 * input_dim for tabular data).</p>
+</blockquote>
+<ul>
+<li>Use the 95th or 99th percentile of train reconstruction errors as the initial threshold</li>
+<li>Always visualise the score histograms for normal and anomalous points to check separation</li>
+<li>For image data, also inspect worst-reconstructed images qualitatively</li>
+<li>Denoising autoencoders are more robust to memorisation than standard autoencoders</li>
+<li>AUPRC (area under precision-recall curve) is the right evaluation metric for imbalanced anomaly detection</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

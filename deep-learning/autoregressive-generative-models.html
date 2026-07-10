@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Autoregressive Models — PixelCNN, WaveNet, and Language Models | Notes Backup</title>
+  <meta name="description" content="A deep dive into autoregressive generative models — how masked convolutions in PixelCNN, dilated causal convolutions in WaveNet, and transformer-based language models all share the same factorization p(x)=∏p(xᵢ|x&lt;i), covering evaluation via bits-per-dim and the two-stage VQ-VAE+PixelCNN approach." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Autoregressive Models — PixelCNN, WaveNet, and Language Models</h1>
+      <ul class='note-meta'><li><strong>description:</strong> A deep dive into autoregressive generative models — how masked convolutions in PixelCNN, dilated causal convolutions in WaveNet, and transformer-based language models all share the same factorization p(x)=∏p(xᵢ|x&lt;i), covering evaluation via bits-per-dim and the two-stage VQ-VAE+PixelCNN approach.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Autoregressive Models — PixelCNN, WaveNet, and Language Models</h1>
+<p>Autoregressive models decompose the joint distribution of a high-dimensional variable x into a product of conditionals: p(x) = ∏ᵢ p(xᵢ | x₁, …, xᵢ₋₁). This factorization is exact — no approximation is introduced — and the chain rule of probability guarantees it always yields a valid probability distribution. The ordering of dimensions is a design choice: raster scan order (row by row, left to right) for images, time order for audio, and token order for text. Every element in the sequence is predicted from all previous elements, making these models Turing-complete generative models capable of capturing arbitrarily complex dependencies given sufficient capacity.</p>
+<h2>Autoregressive Factorization</h2>
+<p>The core equation p(x) = ∏ᵢ p(xᵢ | x₁, …, xᵢ₋₁) has several critical properties. First, because it follows from the chain rule of probability, training by maximum likelihood (minimizing negative log-likelihood) is straightforward and stable — there is no adversarial objective, no reconstruction-approximation tradeoff, and no posterior collapse. Second, during training all conditionals can be computed in parallel using teacher forcing: the ground-truth prefix is fed as input and the model predicts the next element at every position simultaneously. Third, during generation samples must be drawn sequentially — each new element requires a full forward pass — making sampling O(L) in sequence length and often the primary bottleneck for long sequences.</p>
+<h2>PixelCNN — Masked Convolutions</h2>
+<p>PixelCNN (van den Oord et al. 2016) models images autoregressively in raster scan order using masked convolutions to enforce causality. A Type-A mask zeros out the center pixel and all pixels to its right and below, ensuring p(x_i | x_{&lt;i}) does not include x_i itself — used only in the first layer. A Type-B mask includes the center pixel, allowing the model to refine its representation of x_i from previous layers but never leaking future pixels. Stacking many gated residual blocks with Type-B masks allows the model to build deep representations while respecting the causal constraint. PixelCNN++ replaces the 256-way softmax output with a mixture of logistics, dramatically reducing the number of output parameters and improving sample quality.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class MaskedConv2d(nn.Conv2d):
+    &quot;&quot;&quot;Type A: excludes center pixel (first layer). Type B: includes center (subsequent layers).&quot;&quot;&quot;
+    def __init__(self, mask_type, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        assert mask_type in ('A', 'B')
+        self.register_buffer('mask', self.weight.data.clone())
+        _, _, kH, kW = self.weight.size()
+        self.mask.fill_(1)
+        self.mask[:, :, kH // 2, kW // 2 + (1 if mask_type == 'B' else 0):] = 0
+        self.mask[:, :, kH // 2 + 1:, :] = 0
+
+    def forward(self, x):
+        self.weight.data *= self.mask
+        return super().forward(x)
+
+class GatedResBlock(nn.Module):
+    def __init__(self, n_filters=64):
+        super().__init__()
+        self.conv = MaskedConv2d('B', n_filters, 2 * n_filters, kernel_size=3, padding=1)
+        self.res_conv = nn.Conv2d(n_filters, n_filters, 1)
+
+    def forward(self, x):
+        out = self.conv(x)
+        tanh_part, sig_part = out.chunk(2, dim=1)
+        gated = torch.tanh(tanh_part) * torch.sigmoid(sig_part)
+        return x + self.res_conv(gated)
+
+mask_a = MaskedConv2d('A', 1, 64, kernel_size=7, padding=3)
+mask_b = GatedResBlock(n_filters=64)
+x = torch.randn(2, 1, 28, 28)
+print('Type-A output:', mask_a(x).shape)
+print('Gated ResBlock output:', mask_b(mask_a(x)).shape)
+</code></pre>
+<p>The causal masking property can be verified empirically: if any gradient flows from position i back to position j &gt; i, the masking is incorrect. Type-A convolutions guarantee that the receptive field of pixel i is strictly contained in {pixel 0, …, pixel i-1}. In practice, PixelCNN models 8-bit pixel values (256 classes) at each location; PixelCNN++ models the logistic mixture directly to avoid the 256-way softmax bottleneck.</p>
+<h2>WaveNet — Dilated Causal Convolutions</h2>
+<p>WaveNet (van den Oord et al. 2016) applies autoregressive modeling to raw audio waveforms at 16–24 kHz. The key architectural innovation is dilated causal convolutions with exponentially growing dilation rates: 1, 2, 4, 8, 16, …, 512. A single dilated convolution with dilation d has a receptive field of d+1 steps. Stacking dilation rates 1, 2, 4, …, 512 in one block covers 1024 timesteps. Multiple such stacks cover receptive fields of tens of thousands of samples. Causality is enforced by shifting the input right so that position i can only see positions ≤ i. WaveNet conditions on local features (speaker identity, mel spectrogram) by adding a conditioning signal to the gated activation at each layer.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class DilatedCausalConv1d(nn.Module):
+    &quot;&quot;&quot;Causal dilated conv: pads left only so output[t] depends only on input[&lt;=t].&quot;&quot;&quot;
+    def __init__(self, in_ch, out_ch, kernel_size=2, dilation=1):
+        super().__init__()
+        self.dilation = dilation
+        self.pad = (kernel_size - 1) * dilation  # left pad only for causality
+        self.conv = nn.Conv1d(in_ch, out_ch, kernel_size, dilation=dilation)
+
+    def forward(self, x):
+        x = F.pad(x, (self.pad, 0))
+        return self.conv(x)
+
+class WaveNetBlock(nn.Module):
+    def __init__(self, n_channels=64, dilation=1, cond_channels=None):
+        super().__init__()
+        self.dilated_conv = DilatedCausalConv1d(n_channels, 2 * n_channels, kernel_size=2, dilation=dilation)
+        self.res_conv = nn.Conv1d(n_channels, n_channels, 1)
+        self.skip_conv = nn.Conv1d(n_channels, n_channels, 1)
+        self.cond_conv = nn.Conv1d(cond_channels, 2 * n_channels, 1) if cond_channels else None
+
+    def forward(self, x, cond=None):
+        h = self.dilated_conv(x)
+        if cond is not None and self.cond_conv is not None:
+            h = h + self.cond_conv(cond)
+        tanh_h, sig_h = h.chunk(2, dim=1)
+        h = torch.tanh(tanh_h) * torch.sigmoid(sig_h)
+        skip = self.skip_conv(h)
+        res  = self.res_conv(h) + x
+        return res, skip
+
+# Build WaveNet stack with exponential dilation rates
+dilations = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]
+blocks = nn.ModuleList([WaveNetBlock(n_channels=64, dilation=d) for d in dilations])
+x = torch.randn(2, 64, 1024)  # batch=2, channels=64, T=1024
+skips = []
+for block in blocks:
+    x, skip = block(x)
+    skips.append(skip)
+out = sum(skips)
+print(f'Receptive field: {sum(dilations) + 1} timesteps, output shape: {out.shape}')
+</code></pre>
+<h2>Language Models as Autoregressive Models</h2>
+<p>GPT and its successors apply autoregressive modeling over token sequences. The vocabulary defines the discrete space (50k–100k tokens for BPE), and the model learns p(token_t | token_1, …, token_{t-1}). Transformers implement causal masking via an upper-triangular attention mask that prevents each position from attending to future positions. Unlike PixelCNN's fixed raster order, language models benefit from the natural sequential structure of text. Training on next-token prediction at scale leads to emergent capabilities: the same maximum-likelihood objective produces models that translate, summarize, reason, and generate code.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class SimplePixelCNN(nn.Module):
+    &quot;&quot;&quot;Minimal PixelCNN for MNIST: train with NLL, generate sequentially.&quot;&quot;&quot;
+    def __init__(self, n_filters=64, n_layers=6):
+        super().__init__()
+        self.first = MaskedConv2d('A', 1, n_filters, kernel_size=7, padding=3)
+        self.layers = nn.Sequential(*[GatedResBlock(n_filters) for _ in range(n_layers)])
+        self.out = nn.Sequential(
+            nn.Conv2d(n_filters, 256, 1),  # 256-way softmax per pixel
+        )
+
+    def forward(self, x):
+        h = self.first(x.float() / 255.0 - 0.5)
+        h = self.layers(h)
+        return self.out(h)  # (B, 256, H, W) logits
+
+class MaskedConv2d(nn.Conv2d):
+    def __init__(self, mask_type, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.register_buffer('mask', self.weight.data.clone())
+        _, _, kH, kW = self.weight.size()
+        self.mask.fill_(1)
+        self.mask[:, :, kH // 2, kW // 2 + (1 if mask_type == 'B' else 0):] = 0
+        self.mask[:, :, kH // 2 + 1:, :] = 0
+    def forward(self, x):
+        self.weight.data *= self.mask
+        return super().forward(x)
+
+class GatedResBlock(nn.Module):
+    def __init__(self, n_filters):
+        super().__init__()
+        self.conv = MaskedConv2d('B', n_filters, 2 * n_filters, kernel_size=3, padding=1)
+        self.res = nn.Conv2d(n_filters, n_filters, 1)
+    def forward(self, x):
+        t, s = self.conv(x).chunk(2, dim=1)
+        return x + self.res(torch.tanh(t) * torch.sigmoid(s))
+
+model = SimplePixelCNN()
+x_batch = torch.randint(0, 256, (4, 1, 28, 28))
+logits = model(x_batch)
+loss = F.cross_entropy(logits, x_batch[:, 0].long())
+print(f'Logits: {logits.shape}, NLL loss: {loss.item():.4f}')
+</code></pre>
+<h2>Bits-per-Dim Evaluation</h2>
+<p>Autoregressive models produce exact log-likelihoods, enabling rigorous evaluation via bits-per-dim (BPD). BPD converts the negative log-likelihood (in nats, base-e) to bits, normalised by the number of dimensions (pixels or samples). It corresponds to the number of bits needed to losslessly compress each dimension on average — lower is better, and entropy of the data distribution is the theoretical minimum. BPD makes models comparable across datasets of different size and resolution. For MNIST, state-of-the-art autoregressive models achieve ~0.8 BPD; for CIFAR-10, around 2.8 BPD.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+import math
+
+def compute_bits_per_dim(model, dataloader, device='cpu'):
+    &quot;&quot;&quot;
+    Compute bits-per-dim: average NLL in nats / (H * W) / ln(2).
+    For images: lower = better compression = better generative model.
+    BPD = E[-log2 p(x)] / (H * W) = E[-log p(x)] / (H * W * log(2))
+    &quot;&quot;&quot;
+    model.eval()
+    total_nll = 0.0
+    total_pixels = 0
+    with torch.no_grad():
+        for x, _ in dataloader:
+            x = x.to(device)  # (B, 1, H, W) in [0, 255]
+            B, C, H, W = x.shape
+            logits = model(x)  # (B, 256, H, W)
+            # NLL summed over all pixels in batch
+            nll = F.cross_entropy(logits, x[:, 0].long(), reduction='sum')
+            total_nll += nll.item()
+            total_pixels += B * H * W
+    avg_nll_per_pixel = total_nll / total_pixels
+    bits_per_dim = avg_nll_per_pixel / math.log(2)
+    return bits_per_dim
+
+# Demonstrate conversion formula
+def nll_to_bpd(nll_nats, height, width, n_samples):
+    avg = nll_nats / (n_samples * height * width)
+    return avg / math.log(2)
+
+for nll, h, w, n in [(500.0, 28, 28, 1), (3200.0, 32, 32, 1)]:
+    bpd = nll_to_bpd(nll, h, w, n)
+    print(f'NLL={nll:.0f} nats, {h}x{w} image -&gt; {bpd:.3f} bits/dim')
+
+print('MNIST SOTA: ~0.8 BPD | CIFAR-10 SOTA: ~2.8 BPD | ImageNet 64x64 SOTA: ~3.4 BPD')
+</code></pre>
+<h2>Two-Stage: VQ-VAE + PixelCNN Prior</h2>
+<p>Pixel-space autoregressive generation over 256×256 images requires modeling 196,608 dimensions — computationally prohibitive. VQ-VAE (van den Oord et al. 2017) solves this by first compressing images into a discrete latent grid (e.g., 32×32 tokens from a codebook of 512 entries), then training an autoregressive prior (PixelCNN or Transformer) over the much shorter 32×32 = 1024 token sequence. Generation proceeds in two stages: sample the discrete latent grid autoregressively, then decode to pixels with the VQ-VAE decoder. This two-stage approach allows autoregressive models to scale to high-resolution images and is the architectural ancestor of DALL-E and modern image tokenizers.</p>
+<blockquote>
+<p><strong>Sampling Speed Bottleneck</strong>: Autoregressive models are slow to sample because each token requires a full forward pass with no parallelism. For a 256×256 image (65,536 pixels) with a 100ms forward pass, sampling takes ~1.8 hours sequentially. Speculative decoding, caching KV states in transformers, and working in compressed latent space (VQ-VAE) are the main practical mitigations.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Modality</th>
+<th>Architecture</th>
+<th>Training Objective</th>
+<th>Sampling Speed</th>
+<th>Evaluation Metric</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>PixelCNN</td>
+<td>Images</td>
+<td>Masked conv stack</td>
+<td>Cross-entropy (256-way)</td>
+<td>Slow — O(H×W) steps</td>
+<td>Bits-per-dim (BPD)</td>
+</tr>
+<tr>
+<td>PixelCNN++</td>
+<td>Images</td>
+<td>Masked conv + logistic mix</td>
+<td>Logistic mixture NLL</td>
+<td>Slow — O(H×W) steps</td>
+<td>Bits-per-dim (BPD)</td>
+</tr>
+<tr>
+<td>WaveNet</td>
+<td>Audio (raw)</td>
+<td>Dilated causal conv stack</td>
+<td>Cross-entropy (µ-law 256)</td>
+<td>Slow — O(T) steps, T~16000/s</td>
+<td>Bits-per-dim / MOS</td>
+</tr>
+<tr>
+<td>GPT / LM</td>
+<td>Text tokens</td>
+<td>Causal Transformer</td>
+<td>Cross-entropy next-token</td>
+<td>~10–100 tok/s (KV cache)</td>
+<td>Perplexity / BPD</td>
+</tr>
+<tr>
+<td>ImageGPT</td>
+<td>Pixels as tokens</td>
+<td>Causal Transformer</td>
+<td>Cross-entropy pixel tokens</td>
+<td>Slow — O(H×W) steps</td>
+<td>Bits-per-dim (BPD)</td>
+</tr>
+<tr>
+<td>VQ-VAE + PixelCNN</td>
+<td>Images (2-stage)</td>
+<td>VQ-VAE encoder + masked prior</td>
+<td>Stage-1 VQ + Stage-2 NLL</td>
+<td>Faster — O(latent tokens)</td>
+<td>FID / Reconstruction PSNR</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>Autoregressive models provide exact likelihoods — no ELBO approximation, no discriminator instability.</li>
+<li>Type-A masks exclude the current pixel; Type-B masks include it — stacking A then B layers is a standard PixelCNN pattern.</li>
+<li>WaveNet's exponential dilation (1,2,4,…,512) covers 1023 samples per stack; 3 stacks cover ~3000 samples.</li>
+<li>ImageGPT flattens images to pixel sequences and trains a GPT, showing that autoregressive transformers can generate images without architectural changes.</li>
+<li>VQ-VAE + PixelCNN prior is the conceptual predecessor of DALL-E 1, which used a discrete image tokenizer with a transformer prior.</li>
+<li>Bits-per-dim is lower-bounded by the true entropy of the data distribution — no model can beat the true data entropy.</li>
+</ul>
+<hr />
+<p>Autoregressive models remain competitive for likelihood estimation and have seen a resurgence with transformer architectures. Their advantages — exact likelihood, stable training, no mode collapse — make them reliable baselines. Their disadvantages — O(L) sequential sampling and absence of a continuous latent space — motivate hybrid approaches like VQ-VAE, which retains the tractable prior while enabling faster generation in a compressed space.</p>
+    </article>
+  </main>
+</body>
+</html>

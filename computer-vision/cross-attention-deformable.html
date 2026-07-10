@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Deformable Attention: Efficient Sparse Cross-Attention in Vision | Notes Backup</title>
+  <meta name="description" content="How deformable attention replaces O(N^2) full attention with O(N*K) sparse sampling, enabling transformer-based detection and segmentation at high resolution." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Deformable Attention: Efficient Sparse Cross-Attention in Vision</h1>
+      <ul class='note-meta'><li><strong>description:</strong> How deformable attention replaces O(N^2) full attention with O(N*K) sparse sampling, enabling transformer-based detection and segmentation at high resolution.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Deformable Attention: Efficient Sparse Cross-Attention in Vision</h1>
+<h2>Overview</h2>
+<p>Standard self-attention in vision transformers attends to all spatial positions, giving O((HW)^2) complexity. For an 800x1200 detection image processed at stride 8, this produces 120,000 tokens — making full attention computationally infeasible. Deformable attention replaces the full attention map with a sparse set of K learned sampling points per query, reducing complexity to O(HW * K) where K is typically 4–8.</p>
+<p>The key idea: instead of computing similarity scores to all other tokens, each query predicts where to look — a set of reference point offsets sampled from the feature map via bilinear interpolation. The attended value is a weighted sum of features at those K positions. This is architecturally similar to deformable convolution but operates within the transformer attention framework.</p>
+<blockquote>
+<p><strong>Warning</strong>: Deformable attention offsets are learned via a linear layer with sigmoid activation — if reference points collapse to a small region during early training, gradients vanish. Use small init std (0.01) for the offset prediction head.</p>
+</blockquote>
+<h2>Quadratic Attention Problem</h2>
+<p>Full self-attention requires computing an N×N similarity matrix where N is the number of spatial tokens. For ViT-B at 224px this is 196×196 = 38,416 operations per head per layer — tractable. But object detection and segmentation typically operate at much higher resolution or multi-scale feature pyramids where the total token count makes the naive formulation impractical for any real-time or batch workload.</p>
+<p>Window attention (Swin Transformer) reduces complexity to O(HW * W^2) where W is window size, but local windows lack global receptive fields and require additional cross-window communication mechanisms. Deformable attention provides global receptive field with sparse cost, without needing the shifted-window machinery or multiple passes through the feature pyramid.</p>
+<p>Sparse attention methods predate deformable attention — Longformer uses fixed stride patterns, BigBird uses random + sliding window + global tokens. Deformable attention differs in that the sparsity pattern is input-dependent and learned: different images yield different query sampling locations. This content-adaptive sparsity is especially effective for detection where attention needs to focus on object boundaries and keypoints.</p>
+<h2>Deformable Sampling Points</h2>
+<p>Each query q at position p generates K offset vectors via a linear projection. These offsets are added to the reference point (normalized to [0,1]) and used to sample feature values via bilinear interpolation. The attended output is the weighted sum of sampled features, where weights are produced by a second linear head and normalized via softmax across the K points.</p>
+<pre><code class="language-python"># Deformable attention: predict K reference offsets, sample with grid_sample
+import torch, torch.nn as nn, torch.nn.functional as F
+
+class DeformableAttention(nn.Module):
+    def __init__(self, dim, K=4):
+        super().__init__()
+        self.K = K
+        self.offset_proj = nn.Linear(dim, 2 * K)  # (dx, dy) per point
+        self.attn_proj  = nn.Linear(dim, K)
+        self.value_proj = nn.Linear(dim, dim)
+        nn.init.normal_(self.offset_proj.weight, std=0.01)
+        nn.init.zeros_(self.offset_proj.bias)
+
+    def forward(self, query, value_map, ref_points):
+        # query: (B,Nq,D); value_map: (B,D,H,W); ref_points: (B,Nq,2) in [0,1]
+        offsets = self.offset_proj(query).view(-1, query.shape[1], self.K, 2).tanh() * 0.5
+        pts = (ref_points.unsqueeze(2) + offsets).clamp(0, 1) * 2 - 1  # to [-1,1]
+        v = self.value_proj(value_map.flatten(2).transpose(1, 2))
+        v_map = v.view(value_map.shape[0], *value_map.shape[2:], -1).permute(0,3,1,2)
+        sampled = F.grid_sample(v_map, pts.view(v_map.shape[0],-1,1,2), align_corners=True)
+        sampled = sampled.squeeze(-1).view(v_map.shape[0], -1, query.shape[1], self.K).permute(0,2,3,1)
+        weights = self.attn_proj(query).softmax(-1).unsqueeze(-1)
+        return (sampled * weights).sum(dim=2)
+</code></pre>
+<p>The offset head initialization is critical. Small std (0.01) ensures offsets start near zero, so the model initially attends to the reference point neighborhood. If offsets are initialized with default std (0.02+), sampling points scatter across the feature map, producing noisy gradients that stall early training. The tanh activation bounds offsets to ±0.5 of the feature map extent to prevent runaway sampling locations.</p>
+<h2>Multi-Scale Deformable Attention</h2>
+<p>Multi-scale deformable attention extends the single-scale version by attending across feature pyramid levels simultaneously. Given L feature maps [P3, P4, P5, P6] with strides [8, 16, 32, 64], each query generates K sampling points per level — total K×L = 32 samples for K=4, L=4. A level embedding distinguishes which pyramid level each sample point belongs to.</p>
+<pre><code class="language-python"># Multi-scale deformable attention: sample across [P3,P4,P5,P6] feature maps
+import torch, torch.nn as nn, torch.nn.functional as F
+
+class MSDeformAttn(nn.Module):
+    def __init__(self, dim, n_levels=4, K=4, n_heads=8):
+        super().__init__()
+        self.K = K; self.L = n_levels; self.H = n_heads
+        self.offset_proj = nn.Linear(dim, n_heads * n_levels * K * 2)
+        self.attn_proj   = nn.Linear(dim, n_heads * n_levels * K)
+        self.value_proj  = nn.Linear(dim, dim)
+        self.out_proj    = nn.Linear(dim, dim)
+        self.level_embed = nn.Parameter(torch.zeros(n_levels, dim))
+        nn.init.normal_(self.offset_proj.weight, std=0.01)
+
+    def forward(self, query, value_list, ref_points):
+        B, Nq, D = query.shape
+        offsets = self.offset_proj(query).view(B, Nq, self.H, self.L, self.K, 2)
+        attn_w  = self.attn_proj(query).view(B, Nq, self.H, self.L * self.K).softmax(-1)
+        attn_w  = attn_w.view(B, Nq, self.H, self.L, self.K)
+        # sample from each level and accumulate (details in _sample_level)
+        return self.out_proj(self._aggregate(value_list, ref_points, offsets, attn_w))
+</code></pre>
+<p>Multi-scale sampling gives each query access to both fine-grained (P3, stride-8) features for precise localization and coarse (P6, stride-64) features for semantic context — all within a single attention operation. This replaces explicit FPN top-down fusion with implicit scale-aware attention, reducing the number of architectural components needed.</p>
+<p>The level embedding allows the offset prediction head to specialize per scale. In practice, models learn to use high-resolution levels for edge-aligned sampling and low-resolution levels for object-category context. This emergent specialization is visible when visualizing the distribution of sampling points per level across different query types in trained Deformable DETR models.</p>
+<h2>Applications in Detection and Segmentation</h2>
+<p>Deformable DETR replaces standard DETR's attention with multi-scale deformable attention in both encoder and decoder. The encoder applies deformable self-attention to flattened multi-scale features, replacing O(N^2) attention. The decoder applies deformable cross-attention from object queries to encoder output, using each query's predicted reference point as the anchor for sampling.</p>
+<pre><code class="language-python"># Deformable DETR: encoder uses deformable self-attn; decoder uses cross-attn
+import torch.nn as nn
+
+class DeformableDETR(nn.Module):
+    def __init__(self, backbone, d_model=256, enc_layers=6, dec_layers=6):
+        super().__init__()
+        self.backbone   = backbone
+        self.input_proj = nn.ModuleList(
+            [nn.Conv2d(c, d_model, 1) for c in [512, 1024, 2048]])
+        self.encoder    = nn.ModuleList(
+            [DeformableEncoderLayer(d_model, n_levels=4, K=4) for _ in range(enc_layers)])
+        self.decoder    = nn.ModuleList(
+            [DeformableDecoderLayer(d_model, n_levels=4, K=4) for _ in range(dec_layers)])
+        self.query_embed = nn.Embedding(300, d_model * 2)  # content + pos
+        self.class_head  = nn.Linear(d_model, 91)
+        self.bbox_head   = nn.Sequential(
+            nn.Linear(d_model, d_model), nn.ReLU(), nn.Linear(d_model, 4))
+</code></pre>
+<pre><code class="language-python"># Profile standard vs deformable attention: FLOPs and latency on 800x1200 image
+H, W, D, K = 100, 150, 256, 4  # stride-8 feature map of 800x1200
+N = H * W  # 15,000 tokens
+
+std_flops   = 2 * N * N * D    # QK^T + AV: O(N^2 * D)
+deform_flops = 2 * N * K * D  # O(N * K * D)
+
+print(f'Standard attention : {std_flops / 1e9:.1f} GFLOPs')
+print(f'Deformable (K={K})  : {deform_flops / 1e6:.1f} MFLOPs')
+print(f'FLOP reduction      : {std_flops / deform_flops:.0f}x')
+
+# Conceptual latency on A100 (single-batch, encoder only)
+for label, ms in [('Standard 800x1200', 2840), ('Deformable K=4', 47), ('Deformable K=8', 89)]:
+    print(f'{label}: ~{ms} ms')
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Attention Type</th>
+<th>Complexity</th>
+<th>Keys per Query</th>
+<th>Memory (GB)</th>
+<th>COCO AP</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Standard</td>
+<td>O((HW)^2)</td>
+<td>HW = 15000</td>
+<td>12.4</td>
+<td>42.0</td>
+</tr>
+<tr>
+<td>Deformable K=4</td>
+<td>O(HW * K)</td>
+<td>4</td>
+<td>1.1</td>
+<td>44.5</td>
+</tr>
+<tr>
+<td>Deformable K=8</td>
+<td>O(HW * K)</td>
+<td>8</td>
+<td>1.4</td>
+<td>45.1</td>
+</tr>
+<tr>
+<td>Window (Swin)</td>
+<td>O(HW * W^2)</td>
+<td>49 (7x7 window)</td>
+<td>2.3</td>
+<td>48.3</td>
+</tr>
+</tbody>
+</table>
+<h2>Key Takeaways</h2>
+<p>Deformable attention solves the quadratic bottleneck by making attention sparse and content-adaptive. The core tradeoff is that each query only attends to K locations instead of all N, so the model must learn to predict good sampling locations. This requires careful initialization and sometimes slower early training convergence, but the asymptotic speed gains make it the default choice for high-resolution vision tasks.</p>
+<p>The multi-scale variant is particularly powerful for detection because it allows a single attention operation to simultaneously gather evidence from multiple scales of the feature pyramid. This replaces explicit FPN top-down fusion with implicit scale-aware attention, reducing the number of architectural components needed while achieving competitive accuracy with much lower computational cost across benchmark datasets.</p>
+<p>For implementation, the most critical practical consideration is the offset head initialization: use std=0.01 and zero bias so early training starts with near-zero offsets. Additionally, clamp sampling points to [0,1] before bilinear interpolation to prevent out-of-bounds sampling that produces zero gradients. These two implementation details separate stable from unstable training runs in nearly every reported Deformable DETR reproduction.</p>
+    </article>
+  </main>
+</body>
+</html>

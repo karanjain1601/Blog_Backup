@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Video Swin Transformer: Spatiotemporal Shifted Window Attention | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Video Swin Transformer: Spatiotemporal Shifted Window Attention</h1>
+      
+      <h1>Video Swin Transformer: Spatiotemporal Shifted Window Attention</h1>
+<h2>Overview</h2>
+<p>Video Swin Transformer (Liu et al., 2022) adapts the image Swin Transformer for video by extending its local window attention to three dimensions: temporal, height, and width. Each attention layer operates within small non-overlapping spatiotemporal windows, keeping complexity linear in video length. The shifted-window mechanism connects adjacent windows across layers to achieve global receptive fields efficiently.</p>
+<p>Image Swin uses 2D shifted windows of size 7×7. Video Swin adds a temporal window of size 2, creating 2×7×7 spatiotemporal cubes. The patch embedding absorbs frames as tokens: a T×H×W video becomes T×(H/4)×(W/4) tokens after the initial 2×4×4 patch partition. Stage-wise patch merging progressively reduces spatial and temporal resolution, building a hierarchical feature pyramid for downstream tasks.</p>
+<h2>3D Shifted Windows</h2>
+<p>Standard 3D self-attention is O((T·H·W)²), infeasible for even short clips. Video Swin restricts attention to local 3D windows of size Wt×Wh×Ww (default 2×7×7), giving O(T·H·W·Wt·Wh·Ww) complexity — linear in video length. Within each window, multi-head self-attention captures local spatiotemporal dependencies; between-window information flows via window shifts in alternating transformer blocks.</p>
+<pre><code>from einops import rearrange
+
+def window_partition_3d(x, window_size=(2, 7, 7)):
+    &quot;&quot;&quot;Partition (B,T,H,W,C) into (num_windows*B, Wt*Wh*Ww, C).&quot;&quot;&quot;
+    Wt, Wh, Ww = window_size
+    B, T, H, W, C = x.shape
+    x = x.view(B, T//Wt, Wt, H//Wh, Wh, W//Ww, Ww, C)
+    windows = x.permute(0, 1, 3, 5, 2, 4, 6, 7).contiguous()
+    windows = windows.view(-1, Wt * Wh * Ww, C)
+    return windows  # (num_windows * B, tokens_per_window, C)
+</code></pre>
+<pre><code>def shifted_window_attn_3d(x, win_size, shift, mask):
+    B, T, H, W, C = x.shape
+    if any(s &gt; 0 for s in shift):
+        x = torch.roll(
+            x,
+            shifts=(-shift[0], -shift[1], -shift[2]),
+            dims=(1, 2, 3)
+        )
+    wins = window_partition_3d(x, win_size)
+    out  = window_msa(wins, mask=mask)
+    x    = window_reverse_3d(out, win_size, T, H, W)
+    if any(s &gt; 0 for s in shift):
+        x = torch.roll(
+            x, shifts=(shift[0], shift[1], shift[2]), dims=(1, 2, 3)
+        )
+    return x
+</code></pre>
+<p>The cyclic shift for boundary handling is identical to image Swin but extended to 3D: after rolling the tensor by (-1, -3, -3) in (T, H, W), windows near boundaries contain tokens from opposite ends of the volume. An attention mask zeroes out cross-boundary attention scores, ensuring shifted-window attention is equivalent to partitioning the cyclically shifted tensor into proper non-overlapping windows.</p>
+<h2>Spatiotemporal Locality</h2>
+<p>Spatiotemporal locality is well-justified for video: adjacent frames share most content, and local object motion rarely spans more than a few pixels per frame. A temporal window of size 2 covers two consecutive frames — sufficient to capture inter-frame motion at typical video frame rates. Larger temporal windows increase FLOPs quadratically within the window and show diminishing accuracy returns on standard benchmarks.</p>
+<p>Compared to full spatiotemporal attention (used in TimeSformer space-time mode), Video Swin's window attention reduces FLOPs by roughly 10 to 50× on 8-frame clips. TimeSformer uses divided space-time attention — separate spatial and temporal stages — also achieving linear complexity, but Video Swin's joint spatiotemporal windows capture cross-modal correlations more directly within each attention layer.</p>
+<h2>Temporal Downsampling</h2>
+<p>Video Swin uses four stages with spatial patch merging after stages 1, 2, and 3. Spatial resolution drops from H/4 to H/8, H/16, and H/32. Temporal patch merging can be applied similarly, halving temporal resolution at selected stages. This creates a feature pyramid reusable for dense downstream tasks like action segmentation, video object detection, and spatiotemporal dense prediction with minimal adaptation.</p>
+<pre><code>import torch.nn as nn
+
+class TemporalPatchMerging(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.norm = nn.LayerNorm(2 * dim)
+        self.proj = nn.Linear(2 * dim, dim, bias=False)
+
+    def forward(self, x):  # x: (B, T, H, W, C)
+        x0 = x[:, 0::2]   # even-indexed frames
+        x1 = x[:, 1::2]   # odd-indexed frames
+        x  = torch.cat([x0, x1], dim=-1)  # (B, T//2, H, W, 2C)
+        return self.proj(self.norm(x))    # (B, T//2, H, W, C)
+</code></pre>
+<p>The temporal resolution schedule depends on the task: for short-clip classification using 8 or 16 frames, temporal merging is typically disabled to preserve all temporal tokens. For longer videos, temporal merging after stage 1 or 2 reduces memory footprint. The Video Swin-B model uses window sizes (8, 7, 7) at later stages where temporal resolution has been reduced by earlier patch merging layers.</p>
+<h2>Comparison to 3D CNNs</h2>
+<p>Video Swin outperforms 3D CNNs in three key ways. First, attention is data-adaptive: window attention weights depend on content, unlike fixed convolution kernels. Second, ImageNet-21K pretraining transfers well because image and video Swin share architectural design. Third, hierarchical features at multiple scales make Video Swin directly usable for dense prediction without additional adaptor modules.</p>
+<pre><code>def load_video_swin_from_image(image_ckpt, num_frames=16):
+    model = VideoSwinTransformer(
+        embed_dim=128, depths=[2, 2, 18, 2],
+        num_heads=[4, 8, 16, 32], window_size=(8, 7, 7)
+    )
+    state = torch.load(image_ckpt, map_location='cpu')['model']
+    # Inflate 2D patch embed (C, 3, 4, 4) -&gt; 3D (C, 3, 2, 4, 4)
+    pe = state['patch_embed.proj.weight'].unsqueeze(2)
+    state['patch_embed.proj.weight'] = pe.repeat(1, 1, 2, 1, 1) / 2
+    model.load_state_dict(state, strict=False)
+    return model
+</code></pre>
+<p>Fine-tuning from image Swin requires two modifications: replace 2D position embeddings with interpolated 3D embeddings, and adapt the patch embedding to accept T frames. The temporal window size is set to 2 regardless of how many frames are used at fine-tune time. Kinetics fine-tuning uses a 3D random crop of 16×224×224, weight decay 0.05, and cosine learning rate decay over 30 training epochs.</p>
+<blockquote>
+<p><strong>info</strong>: Video Swin extends image Swin by adding a temporal window dimension (size 2) and shifting by (-1, -3, -3) in (T, H, W). The temporal window of 2 is intentionally small — most motion is local in time, and small windows keep FLOPs linear in video length.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Pretrain</th>
+<th>Kinetics-400 %</th>
+<th>Kinetics-600 %</th>
+<th>Params (M)</th>
+<th>FLOPs (G)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>TimeSformer</td>
+<td>ImageNet-21K</td>
+<td>78.0</td>
+<td>79.7</td>
+<td>121</td>
+<td>590</td>
+</tr>
+<tr>
+<td>ViViT</td>
+<td>ImageNet-21K</td>
+<td>80.7</td>
+<td>83.0</td>
+<td>308</td>
+<td>3981</td>
+</tr>
+<tr>
+<td>Video Swin-T</td>
+<td>ImageNet-1K</td>
+<td>78.8</td>
+<td>80.6</td>
+<td>28</td>
+<td>88</td>
+</tr>
+<tr>
+<td>Video Swin-B</td>
+<td>ImageNet-21K</td>
+<td>82.7</td>
+<td>84.0</td>
+<td>88</td>
+<td>282</td>
+</tr>
+<tr>
+<td>Video Swin-L</td>
+<td>ImageNet-21K</td>
+<td>84.6</td>
+<td>86.1</td>
+<td>197</td>
+<td>604</td>
+</tr>
+</tbody>
+</table>
+<h2>Key Takeaways</h2>
+<p>Window attention is the key to scalable video transformers. By restricting self-attention to local spatiotemporal windows (2×7×7), Video Swin achieves linear complexity in video length while maintaining competitive accuracy. The shifted-window mechanism enables cross-window communication without quadratic cost, making Video Swin practical for clips up to 32 frames on a single GPU at inference time.</p>
+<p>Pretraining dataset quality drives most of the accuracy gap between variants. Video Swin-L pretrained on ImageNet-21K reaches 84.6% on Kinetics-400; the same architecture from ImageNet-1K loses 2 to 3%. Larger pretraining datasets improve low-level feature quality and regularize attention heads, reducing overfitting to Kinetics training clips that are often visually similar within action categories.</p>
+<p>Video Swin established that pure transformer architectures can match and exceed 3D CNNs on standard video benchmarks. Subsequent models — VideoMAE, InternVideo, UMT — build directly on this foundation, using masked autoencoding pretraining on Video Swin-style architectures. The spatiotemporal locality inductive bias of windowed attention remains valuable even as model scale and pretraining data continue to grow.</p>
+    </article>
+  </main>
+</body>
+</html>

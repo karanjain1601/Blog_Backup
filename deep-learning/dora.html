@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DoRA — Weight-Decomposed LoRA with Magnitude and Direction Adaptation | Notes Backup</title>
+  <meta name="description" content="In-depth guide to DoRA (Liu et al., 2024): decompose pretrained weights W0 = m·(V/‖V‖), separately adapt magnitude m with a learned scalar and direction V with LoRA, yielding consistent 1-3% improvements over same-rank LoRA across commonsense reasoning benchmarks." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>DoRA — Weight-Decomposed LoRA with Magnitude and Direction Adaptation</h1>
+      <ul class='note-meta'><li><strong>description:</strong> In-depth guide to DoRA (Liu et al., 2024): decompose pretrained weights W0 = m·(V/‖V‖), separately adapt magnitude m with a learned scalar and direction V with LoRA, yielding consistent 1-3% improvements over same-rank LoRA across commonsense reasoning benchmarks.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>DoRA — Weight-Decomposed LoRA with Magnitude and Direction Adaptation</h1>
+<p>DoRA (Weight-Decomposed Low-Rank Adaptation, Liu et al. 2024) identifies a structural limitation of LoRA: LoRA adapts only the column space (direction) of weight updates, with no explicit control over magnitude changes. DoRA decomposes each pretrained weight matrix W₀ = m·(V/‖V‖) into a magnitude vector m ∈ ℝ^(out_features) and a direction matrix V/‖V‖ (unit norm). It then learns Δm (magnitude change) directly as a scalar vector and ΔV (direction change) via a standard LoRA branch — separately optimizing both components for better approximation of full fine-tuning.</p>
+<h2>LoRA's Structural Limitation</h2>
+<p>Analysis of full fine-tuning updates shows that pretrained LLM weights undergo both magnitude and direction changes: some neurons scale up (magnitude increases) while pivoting in weight space (direction changes). LoRA injects ΔW = (α/r)BA which is a rank-r matrix — it changes the effective column space but cannot independently control row magnitudes. In practice, LoRA implicitly changes magnitudes as a side effect of the direction update, but this coupling makes optimization harder. DoRA decouples them: the magnitude vector is trained independently from the direction LoRA branch.</p>
+<p>$$W_0 = m \cdot \frac{V}{|V|},\quad W_{\text{DoRA}} = (m + \Delta m) \cdot \frac{V + \Delta V_{\text{LoRA}}}{|V + \Delta V_{\text{LoRA}}|}$$</p>
+<h2>DoRA — Weight Decomposition and Separate Adaptation</h2>
+<p>DoRA initialization: given pretrained W₀ ∈ ℝ^(d×k), compute the row-wise L2 norms m = ‖W₀‖_row ∈ ℝ^d and the unit-direction matrix V = W₀ / m. The magnitude vector m is stored as a learnable parameter (initialized to the actual row norms of W₀). The direction V is stored as a buffer (non-learnable base) and adapted via a standard LoRA branch ΔV = (α/r)BA. At each forward pass: compute adapted direction V + ΔV, normalize it to unit vectors, then scale by m + Δm where Δm is also learned.</p>
+<ul>
+<li>Magnitude m ∈ R^d: learnable vector, initialized to row-wise L2 norms of W0 — controls 'how much' each output neuron activates</li>
+<li>Direction V/||V||: unit-norm weight matrix, adapted via LoRA branch (alpha/r)*B@A — controls 'which features' the neuron detects</li>
+<li>LoRA branch: same A, B matrices as standard LoRA; updated through gradient descent with the same rank hyperparameter</li>
+<li>Extra parameters: only d magnitude scalars per weight matrix (768 for 7B LLaMA Q-proj) — completely negligible overhead</li>
+<li>HuggingFace PEFT support: enabled by use_dora=True in LoraConfig — no architectural changes needed beyond the flag</li>
+</ul>
+<h2>DoRA Layer — Implementation from Scratch</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import math
+
+class DoRALayer(nn.Module):
+    &quot;&quot;&quot;DoRA: W = magnitude * normalize(direction + LoRA_delta).&quot;&quot;&quot;
+    def __init__(self, in_feat: int, out_feat: int,
+                 rank: int = 4, alpha: float = 16.0):
+        super().__init__()
+        self.scaling = alpha / rank
+        W0 = torch.randn(out_feat, in_feat) * 0.02
+        row_norms = W0.norm(dim=1, keepdim=True).clamp(min=1e-8)
+        # Learnable magnitude: initialized to row-wise L2 norms of W0
+        self.magnitude = nn.Parameter(row_norms.squeeze(1))  # [out_feat]
+        # Frozen unit-direction matrix (non-learnable base)
+        self.register_buffer(&quot;direction&quot;, (W0 / row_norms).half())
+        # LoRA matrices for direction adaptation: A ~ N(0,sigma), B = 0
+        self.lora_A = nn.Parameter(torch.empty(rank, in_feat))
+        self.lora_B = nn.Parameter(torch.zeros(out_feat, rank))
+        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+    def forward(self, x: torch.Tensor) -&gt; torch.Tensor:
+        # Perturb the direction with the LoRA branch
+        dir_delta = self.scaling * (self.lora_B @ self.lora_A)
+        adapted_dir = self.direction.float() + dir_delta
+        # Re-normalize each row to unit vector
+        unit_dir = adapted_dir / adapted_dir.norm(dim=1, keepdim=True).clamp(1e-8)
+        # Reconstruct weight: magnitude * unit_direction
+        W = self.magnitude.unsqueeze(1) * unit_dir
+        return x @ W.T
+
+layer = DoRALayer(in_feat=768, out_feat=768, rank=8, alpha=16)
+x = torch.randn(2, 10, 768)
+print(f&quot;Output shape: {layer(x).shape}&quot;)
+trainable = sum(p.numel() for p in layer.parameters())
+print(f&quot;Trainable params: {trainable:,}&quot;)  # 768 magnitude + 12288 LoRA = 13056
+</code></pre>
+<p>The normalization step (unit_dir = adapted_dir / norm) ensures that gradient updates to lora_A and lora_B affect only the direction of the weight, not its magnitude — because magnitude changes are separately handled by the self.magnitude parameter. This decoupling is the core of DoRA's improvement over LoRA: the optimizer can independently tune how large each neuron's response is versus which features it responds to.</p>
+<h2>Magnitude vs Direction Analysis</h2>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def analyze_weight_update(W_base: torch.Tensor,
+                          W_adapted: torch.Tensor) -&gt; dict:
+    &quot;&quot;&quot;Decompose weight update into magnitude vs direction components.&quot;&quot;&quot;
+    # Row-wise L2 magnitude for each output neuron
+    mag_base = W_base.norm(dim=1)             # [out_features]
+    mag_adapted = W_adapted.norm(dim=1)
+    # Relative magnitude change: |delta_m| / m_base
+    rel_mag = ((mag_adapted - mag_base) / mag_base.clamp(1e-8)).abs().mean().item()
+
+    # Row-wise direction: normalize to unit vectors
+    dir_base = F.normalize(W_base, dim=1)
+    dir_adapted = F.normalize(W_adapted, dim=1)
+    # Direction change: 1 - cosine_sim (0=identical, 1=orthogonal)
+    cos_sim = (dir_base * dir_adapted).sum(dim=1).clamp(-1, 1)
+    dir_change = (1 - cos_sim).mean().item()
+    return {&quot;mag_change&quot;: rel_mag, &quot;dir_change&quot;: dir_change}
+
+W0 = torch.randn(768, 768) * 0.02
+# Simulate LoRA: rank-r additive perturbation (direction change, implicit magnitude shift)
+r = 8
+B_mat = torch.randn(768, r) * 0.001
+A_mat = torch.randn(r, 768) * 0.001
+W_lora = W0 + B_mat @ A_mat
+# Simulate DoRA: explicit magnitude shift + LoRA direction change
+W_dora = W0 * (1 + 0.05 * torch.randn(768, 1))  # explicit magnitude adaptation
+W_dora = W_dora + 0.0005 * torch.randn(768, 768)  # LoRA direction change
+
+lora_stats = analyze_weight_update(W0, W_lora)
+dora_stats = analyze_weight_update(W0, W_dora)
+print(f&quot;LoRA -&gt; mag: {lora_stats['mag_change']:.5f}, dir: {lora_stats['dir_change']:.5f}&quot;)
+print(f&quot;DoRA -&gt; mag: {dora_stats['mag_change']:.5f}, dir: {dora_stats['dir_change']:.5f}&quot;)
+print(&quot;DoRA controls magnitude explicitly; LoRA changes it only as a side effect.&quot;)
+</code></pre>
+<p>The analysis reveals that LoRA updates produce similar magnitude and direction changes (tightly coupled), while DoRA allows independent control — the magnitude vector can change significantly while the direction changes only slightly, or vice versa. This matches the pattern observed in full fine-tuning where different layers undergo different magnitudes of magnitude vs direction change depending on the task.</p>
+<h2>DoRA with HuggingFace PEFT</h2>
+<pre><code class="language-python">import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
+from peft import LoraConfig, get_peft_model, TaskType
+from trl import SFTTrainer
+from datasets import load_dataset
+
+model = AutoModelForCausalLM.from_pretrained(
+    &quot;meta-llama/Llama-2-7b-hf&quot;,
+    torch_dtype=torch.bfloat16,
+    device_map=&quot;auto&quot;,
+)
+tokenizer = AutoTokenizer.from_pretrained(&quot;meta-llama/Llama-2-7b-hf&quot;)
+tokenizer.pad_token = tokenizer.eos_token
+
+# DoRA: identical to LoraConfig but with use_dora=True
+dora_config = LoraConfig(
+    task_type=TaskType.CAUSAL_LM,
+    r=16, lora_alpha=32,
+    target_modules=[&quot;q_proj&quot;, &quot;v_proj&quot;, &quot;k_proj&quot;, &quot;o_proj&quot;],
+    lora_dropout=0.05, bias=&quot;none&quot;,
+    use_dora=True,   # Enable weight decomposition into magnitude + direction
+)
+
+peft_model = get_peft_model(model, dora_config)
+peft_model.print_trainable_parameters()  # ~67M LoRA + ~13K magnitude scalars
+dataset = load_dataset(&quot;tatsu-lab/alpaca&quot;, split=&quot;train[:5000]&quot;)
+args = TrainingArguments(
+    output_dir=&quot;./dora-llama2-7b&quot;, per_device_train_batch_size=4,
+    gradient_accumulation_steps=4, num_train_epochs=3,
+    learning_rate=2e-4, bf16=True, logging_steps=10,
+)
+trainer = SFTTrainer(model=peft_model, args=args,
+                     train_dataset=dataset, tokenizer=tokenizer)
+trainer.train()
+peft_model.save_pretrained(&quot;./dora-adapter&quot;)
+</code></pre>
+<p>The only difference from standard LoRA training in PEFT is the use_dora=True flag. The magnitude vectors are stored as additional parameters in the adapter checkpoint — for a 7B model targeting Q, K, V, O across 32 layers, this adds only 4 × 32 × 4096 = 524,288 extra float32 values (~2MB) — completely negligible compared to the 100MB+ LoRA adapter weights. Training time is nearly identical to LoRA because the magnitude update is just a vector addition.</p>
+<h2>DoRA vs LoRA Benchmark</h2>
+<pre><code class="language-python">import torch
+from transformers import AutoModelForCausalLM
+from peft import LoraConfig, get_peft_model, TaskType
+from lm_eval import evaluator
+from lm_eval.models.huggingface import HFLM
+
+def run_peft_eval(model_name: str, use_dora: bool, rank: int = 16) -&gt; dict:
+    &quot;&quot;&quot;Evaluate LoRA vs DoRA at equal rank on commonsense reasoning tasks.&quot;&quot;&quot;
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name, torch_dtype=torch.bfloat16, device_map=&quot;auto&quot;
+    )
+    config = LoraConfig(
+        task_type=TaskType.CAUSAL_LM, r=rank, lora_alpha=rank * 2,
+        target_modules=[&quot;q_proj&quot;, &quot;v_proj&quot;, &quot;k_proj&quot;, &quot;o_proj&quot;],
+        lora_dropout=0.05, use_dora=use_dora,
+    )
+    peft_model = get_peft_model(model, config)
+    trainable = sum(p.numel() for p in peft_model.parameters() if p.requires_grad)
+    # Evaluate using lm-evaluation-harness
+    lm = HFLM(pretrained=peft_model)
+    results = evaluator.simple_evaluate(lm, tasks=[&quot;hellaswag&quot;, &quot;arc_easy&quot;])
+    hs = results[&quot;results&quot;][&quot;hellaswag&quot;][&quot;acc_norm,none&quot;]
+    arc = results[&quot;results&quot;][&quot;arc_easy&quot;][&quot;acc,none&quot;]
+    method = &quot;DoRA&quot; if use_dora else &quot;LoRA&quot;
+    print(f&quot;{method} r={rank}: params={trainable:,}, HellaSwag={hs:.3f}, ARC-Easy={arc:.3f}&quot;)
+    return {&quot;method&quot;: method, &quot;trainable&quot;: trainable, &quot;hellaswag&quot;: hs, &quot;arc_easy&quot;: arc}
+
+for use_dora in [False, True]:
+    run_peft_eval(&quot;meta-llama/Llama-2-7b-hf&quot;, use_dora=use_dora, rank=16)
+</code></pre>
+<p>Empirical results from Liu et al. (2024): at equal rank (r=16), DoRA consistently outperforms LoRA by 1-3% on commonsense reasoning benchmarks (HellaSwag, ARC, BoolQ, WinoGrande). The gap is larger for tasks requiring nuanced factual recall and smaller for tasks where simple instruction following suffices. DoRA matches full fine-tuning quality at lower ranks than LoRA, making r=16 DoRA roughly equivalent to r=32 LoRA on most benchmarks.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Trainable Params</th>
+<th>Adapts Magnitude</th>
+<th>Adapts Direction</th>
+<th>Extra Parameters</th>
+<th>Performance vs Full FT</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Full Fine-Tuning</td>
+<td>100%</td>
+<td>Yes — explicit</td>
+<td>Yes — explicit</td>
+<td>None</td>
+<td>Baseline</td>
+</tr>
+<tr>
+<td>LoRA</td>
+<td>~0.5-2%</td>
+<td>Implicitly (side effect)</td>
+<td>Yes — primary adaptation</td>
+<td>None</td>
+<td>95-99%</td>
+</tr>
+<tr>
+<td>DoRA</td>
+<td>~0.5-2% + tiny</td>
+<td>Yes — explicit Δm vector</td>
+<td>Yes — via LoRA branch</td>
+<td>d scalars/layer (~2MB total)</td>
+<td>97-99.5%</td>
+</tr>
+<tr>
+<td>QLoRA (LoRA on 4-bit)</td>
+<td>~0.5-2%</td>
+<td>Implicitly</td>
+<td>Yes</td>
+<td>None</td>
+<td>95-98%</td>
+</tr>
+<tr>
+<td>QDoRA (DoRA on 4-bit)</td>
+<td>~0.5-2% + tiny</td>
+<td>Yes — explicit</td>
+<td>Yes — via LoRA branch</td>
+<td>d scalars/layer</td>
+<td>96-98.5%</td>
+</tr>
+</tbody>
+</table>
+<h2>When to Use DoRA over LoRA</h2>
+<p>DoRA is most beneficial when: (1) the target task requires significant shift from pretrained behavior (commonsense reasoning, complex instruction following), where the pretrained weight magnitudes and directions both need to change substantially; (2) you are constrained to a low rank budget (r=4 to r=16) and need maximum quality per trainable parameter; (3) you are fine-tuning from a strong pretrained checkpoint where the pretrained magnitudes carry meaningful information worth preserving and adapting separately.</p>
+<ul>
+<li>Use DoRA when LoRA underperforms: if r=32 LoRA still lags behind full fine-tuning by more than 3%, try DoRA at r=16</li>
+<li>DoRA is nearly free: the extra magnitude parameters add ~2MB per 7B model — checkpoint size and training time are virtually unchanged</li>
+<li>Combine DoRA with QLoRA: set use_dora=True alongside BitsAndBytesConfig for maximum memory efficiency + quality</li>
+<li>Avoid DoRA for simple style transfer or domain adaptation tasks where LoRA already matches full fine-tuning at r=8</li>
+<li>DoRA and LoRA+ (asymmetric learning rates for A vs B) are orthogonal improvements and can be combined</li>
+<li>Benchmark before committing: run a quick r=16 LoRA vs r=16 DoRA comparison on a validation set — if gap is less than 0.5%, stick with LoRA</li>
+</ul>
+<blockquote>
+<p><strong>DoRA's Key Insight</strong>: DoRA's key insight is that pretrained weights undergo different magnitude vs direction changes during fine-tuning — LoRA only adapts direction (via column space of BA), while DoRA explicitly models both, better approximating full fine-tuning's update pattern. The magnitude vector m adds only d=4096 extra float32 values per target weight matrix in a 7B model — a completely negligible cost (~2MB total) for a consistent 1-3% benchmark improvement over same-rank LoRA.</p>
+</blockquote>
+<p>DoRA represents the current state-of-the-art for single-adapter PEFT methods, consistently outperforming LoRA on commonsense reasoning, instruction following, and multi-task benchmarks with negligible additional cost. Its compatibility with QLoRA (use_dora=True + BitsAndBytesConfig) and native HuggingFace PEFT support makes it a drop-in replacement for LoRA in most training scripts. For new fine-tuning projects targeting quality-critical tasks, DoRA is the recommended default over vanilla LoRA.</p>
+    </article>
+  </main>
+</body>
+</html>

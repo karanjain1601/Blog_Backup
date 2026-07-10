@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Data Mixing Ratios for LLM Pretraining | Notes Backup</title>
+  <meta name="description" content="How to choose proportions of web text, books, code, scientific papers, and other sources in the pretraining mixture — covering the recipes from LLaMA, Falcon, Mistral, and Phi." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Data Mixing Ratios for LLM Pretraining</h1>
+      <ul class='note-meta'><li><strong>description:</strong> How to choose proportions of web text, books, code, scientific papers, and other sources in the pretraining mixture — covering the recipes from LLaMA, Falcon, Mistral, and Phi.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Data Mixing Ratios for LLM Pretraining</h1>
+<p>The data mixture used to pretrain a large language model may be the single most consequential design decision after model size. Two models with identical architectures, hyperparameters, and token budgets can produce dramatically different capabilities depending solely on the proportion of web text, books, code, scientific papers, and other curated sources in the training corpus. The field has converged on a handful of broad domain categories — general web crawls, filtered web text, books, code repositories, scientific literature, Wikipedia/encyclopedic text, and conversational data — but the optimal weights among these categories remain an active research question. This note synthesises the publicly disclosed mixing recipes from LLaMA-1, LLaMA-2, LLaMA-3, Falcon-40B, Mistral-7B, and Phi-2, and covers the empirical and algorithmic approaches used to search for better mixtures.</p>
+<h2>Overview</h2>
+<p>A pretraining corpus is not a monolith — it is a weighted mixture of heterogeneous sources, each with different token counts, quality distributions, and domain coverage. Choosing these weights is called data mixing or mixture design. The naive approach is to concatenate all available data in proportion to its raw volume; this invariably over-represents low-quality web content and under-represents high-value domains like books or code. Practitioners instead specify a target mixing ratio — a probability distribution over domains — and sample tokens proportionally, regardless of absolute corpus size. Domains whose natural token count is smaller than their target proportion are upsampled (repeated), while large web crawl corpora are downsampled. The resulting effective distribution seen by the model during training is called the training mixture, and it governs which capabilities emerge and at what parameter efficiency.</p>
+<h2>Domain Categories</h2>
+<p>Modern pretraining corpora are organised into a small number of canonical domain buckets. Web text (CommonCrawl, C4, RefinedWeb, FineWeb) forms the bulk of any large corpus — the raw internet is the only source large enough to fill multi-trillion-token budgets. Filtered web text such as OpenWebText, WebText2, or Dolma-Web applies quality heuristics (perplexity filtering, deduplication, classifier-based filtering) to extract higher-signal documents from raw crawl data. Books (Project Gutenberg, BooksCorpus, Books3, LibGen samples) provide long-form coherent text with diverse vocabulary and narrative structure. Code (GitHub, The Stack) teaches the model formal reasoning, precise syntax, and structured problem solving. Scientific papers (arXiv, PubMed, Semantic Scholar) contribute technical vocabulary, citation reasoning, and mathematical notation. Wikipedia and Wikidata provide encyclopedic factual knowledge in a tightly structured, high-quality format. Conversational and instruction data (StackExchange, Reddit, web forums) is sometimes included to improve instruction following before fine-tuning.</p>
+<p>Each domain contributes different capabilities. Code dramatically improves reasoning and structured-output quality even for non-coding tasks — this was noted across LLaMA, StarCoder, and Phi. Books improve long-range coherence and narrative reasoning. Wikipedia and encyclopedic sources provide dense factual recall. The relative weight assigned to each domain must balance these effects against the risk of overfitting smaller corpora through repeated upsampling.</p>
+<h2>Empirical Mixing Recipes</h2>
+<p>The table below shows disclosed mixing ratios for representative open-weight models. Numbers are approximate percentages of tokens drawn from each domain during training. Blank cells indicate the category was not disclosed separately or was bundled into another category. LLaMA-1 and LLaMA-2 follow a broadly similar web-heavy recipe; LLaMA-3 shifted toward dramatically higher code and Wikipedia fractions. Falcon-40B is the purest web-text recipe, relying almost entirely on RefinedWeb. Phi-2 is the outlier — a deliberate experiment in quality-over-quantity with ~50% synthetic/textbook data and ~50% filtered web.</p>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Web %</th>
+<th>Code %</th>
+<th>Books %</th>
+<th>Wikipedia %</th>
+<th>Other %</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>LLaMA-1 65B</td>
+<td>67.0</td>
+<td>4.5</td>
+<td>4.5</td>
+<td>4.5</td>
+<td>19.5 (C4, arXiv, StackEx)</td>
+</tr>
+<tr>
+<td>LLaMA-2 70B</td>
+<td>67.0</td>
+<td>8.0</td>
+<td>4.5</td>
+<td>4.5</td>
+<td>16.0 (arXiv, StackEx, code)</td>
+</tr>
+<tr>
+<td>LLaMA-3 (8B/70B)</td>
+<td>50.0</td>
+<td>17.0</td>
+<td>7.0</td>
+<td>8.0</td>
+<td>18.0 (math, multilingual)</td>
+</tr>
+<tr>
+<td>Falcon-40B</td>
+<td>80.0</td>
+<td>5.0</td>
+<td>2.0</td>
+<td>3.0</td>
+<td>10.0 (conversations, other)</td>
+</tr>
+<tr>
+<td>Mistral-7B</td>
+<td>~68.0</td>
+<td>~8.5</td>
+<td>~4.5</td>
+<td>~4.5</td>
+<td>~14.5 (undisclosed mix)</td>
+</tr>
+<tr>
+<td>Phi-2 (2.7B)</td>
+<td>~48.0</td>
+<td>~12.0</td>
+<td>~5.0</td>
+<td>~3.0</td>
+<td>~32.0 (synthetic textbooks)</td>
+</tr>
+<tr>
+<td>Gemma (7B)</td>
+<td>~55.0</td>
+<td>~15.0</td>
+<td>~5.0</td>
+<td>~5.0</td>
+<td>~20.0 (math, multilingual)</td>
+</tr>
+</tbody>
+</table>
+<p>A recurring pattern is that code fraction has increased over successive model generations — from ~4.5% in LLaMA-1 to ~8% in LLaMA-2 to ~17% in LLaMA-3 — driven by the empirical finding that code training improves general reasoning. Wikipedia fraction has likewise grown as quality-dense sources have been valued more highly. The largest shift between LLaMA-1 and LLaMA-3 is a reduction in raw web text from 67% to 50%, replaced by higher-quality curated sources.</p>
+<h2>Upsampling High-Quality Sources</h2>
+<p>When a high-quality domain has far fewer tokens than its target mixing weight requires, it must be upsampled — tokens from that domain are repeated across multiple epochs while the larger web corpus is seen only once. Wikipedia typically contributes ~3–4B tokens; at a 4.5% mixing weight in a 1T-token training run, it would need ~45B effective tokens, requiring roughly 11× upsampling. The key risk is memorisation: a model trained on the same Wikipedia articles 11 times will begin to memorise them rather than generalise, exhibiting near-zero perplexity on seen passages and poor generalisation to paraphrases. The safe upsampling limit is generally believed to be 2–4 epochs for high-quality text; beyond this, the marginal benefit decreases and memorisation risk increases sharply.</p>
+<pre><code class="language-python">import numpy as np
+from typing import Dict
+
+def compute_upsampling_factors(
+    domain_tokens: Dict[str, int],
+    target_weights: Dict[str, float],
+    total_training_tokens: int,
+    warn_epochs_threshold: float = 2.0,
+) -&gt; Dict[str, dict]:
+    &quot;&quot;&quot;
+    Compute how many times each domain is upsampled given target mixing weights.
+
+    Args:
+        domain_tokens: natural token count per domain in the raw corpus.
+        target_weights: desired fraction of training tokens from each domain (must sum to 1).
+        total_training_tokens: total tokens consumed during the training run.
+        warn_epochs_threshold: warn if a domain is repeated more than this many times.
+
+    Returns:
+        Per-domain stats: target_tokens, upsampling_factor, epochs, overfitting_risk.
+    &quot;&quot;&quot;
+    assert abs(sum(target_weights.values()) - 1.0) &lt; 1e-6, &quot;Weights must sum to 1&quot;
+    results = {}
+    for domain, weight in target_weights.items():
+        target_tokens   = int(weight * total_training_tokens)
+        raw_tokens      = domain_tokens.get(domain, 1)
+        upsampling      = target_tokens / raw_tokens
+        epochs          = upsampling
+        risk            = &quot;HIGH&quot; if epochs &gt; warn_epochs_threshold else &quot;OK&quot;
+        if epochs &gt; warn_epochs_threshold:
+            print(f&quot;[WARN] {domain}: {epochs:.1f} epochs — overfitting risk! &quot;
+                  f&quot;Consider reducing weight or adding more data.&quot;)
+        results[domain] = {
+            &quot;target_tokens&quot;:    target_tokens,
+            &quot;upsampling_factor&quot;: round(upsampling, 2),
+            &quot;epochs&quot;:           round(epochs, 2),
+            &quot;overfitting_risk&quot;: risk,
+        }
+    return results
+
+# Example: LLaMA-2-style mix on 2T token training run
+domain_sizes = {
+    &quot;web&quot;:   1_400_000_000_000,  # CommonCrawl: 1.4T tokens
+    &quot;code&quot;:      200_000_000_000,  # GitHub: 200B tokens
+    &quot;books&quot;:      30_000_000_000,  # Books: 30B tokens
+    &quot;papers&quot;:     30_000_000_000,  # arXiv: 30B tokens
+    &quot;wiki&quot;:         4_000_000_000,  # Wikipedia: 4B tokens
+    &quot;other&quot;:      100_000_000_000,  # StackEx, etc: 100B tokens
+}
+target = {&quot;web&quot;: 0.67, &quot;code&quot;: 0.08, &quot;books&quot;: 0.045,
+          &quot;papers&quot;: 0.025, &quot;wiki&quot;: 0.045, &quot;other&quot;: 0.135}
+stats = compute_upsampling_factors(domain_sizes, target, total_training_tokens=2_000_000_000_000)
+for d, s in stats.items():
+    print(f&quot;{d:8s}: {s['upsampling_factor']:.2f}x ({s['epochs']:.2f} epochs) [{s['overfitting_risk']}]&quot;)
+</code></pre>
+<blockquote>
+<p><strong>Phi's quality-over-quantity lesson</strong>: The Phi series showed that ~50% high-quality synthetic/textbook data + 50% filtered web text produces models that punch far above their parameter count — mixture quality often matters more than total token count. Phi-1 (1.3B) outperformed models 5× its size on coding benchmarks purely through data curation, and Phi-2 (2.7B) outperformed models up to 25B parameters on reasoning tasks. This challenges the conventional wisdom that scaling data volume is always the primary lever.</p>
+</blockquote>
+<h2>Data Mixing Optimization</h2>
+<p>Manual recipe design is expensive: each pretraining run costs millions of dollars. Two algorithmic approaches have emerged for automating mixture search. DoReMi (Xie et al., 2023) trains a small proxy model on the full corpus with uniform weights, then uses group distributionally robust optimization (Group DRO) to find weights that minimize worst-case per-domain loss — redistributing weight away from domains the model finds easy toward harder domains. RegMix (Liu et al., 2024) frames mixing as a regression problem: train hundreds of tiny proxy models at different mixture points and fit a linear model predicting downstream performance from mixture weights, then optimise the linear model analytically. Both approaches use the proxy model insight: a 50M-parameter model trained on 1B tokens faithfully predicts which mixture helps a 7B-parameter model trained on 1T tokens.</p>
+<pre><code class="language-python">import itertools
+import numpy as np
+from dataclasses import dataclass, field
+from typing import List, Tuple, Dict
+
+@dataclass
+class MixtureSearchConfig:
+    &quot;&quot;&quot;Configuration for grid-search mixture optimisation using proxy models.&quot;&quot;&quot;
+    proxy_params:      int   = 50_000_000    # 50M parameter proxy model
+    proxy_tokens:      int   = 1_000_000_000 # 1B tokens per proxy run
+    benchmarks:        List[str] = field(default_factory=lambda: [&quot;arc_easy&quot;, &quot;hellaswag&quot;])
+    web_candidates:    List[float] = field(default_factory=lambda: [0.50, 0.60, 0.67, 0.75])
+    code_candidates:   List[float] = field(default_factory=lambda: [0.05, 0.08, 0.12, 0.18])
+    books_candidates:  List[float] = field(default_factory=lambda: [0.03, 0.045, 0.07])
+
+def enumerate_mixtures(cfg: MixtureSearchConfig) -&gt; List[Dict[str, float]]:
+    &quot;&quot;&quot;Generate all valid (sum-to-1) combinations across the candidate weights.&quot;&quot;&quot;
+    valid = []
+    for w, c, b in itertools.product(
+        cfg.web_candidates, cfg.code_candidates, cfg.books_candidates
+    ):
+        remainder = 1.0 - w - c - b
+        if 0.05 &lt;= remainder &lt;= 0.40:   # sanity: 5%–40% left for wiki+papers+other
+            valid.append({&quot;web&quot;: w, &quot;code&quot;: c, &quot;books&quot;: b, &quot;other&quot;: round(remainder, 4)})
+    return valid
+
+def evaluate_proxy_mixture(mixture: Dict[str, float], seed: int = 42) -&gt; Dict[str, float]:
+    &quot;&quot;&quot;Stub: train 50M proxy model and return benchmark scores (replace with real training).&quot;&quot;&quot;
+    # In practice: launch a distributed training job with the given mixture weights
+    rng = np.random.default_rng(seed + int(mixture[&quot;code&quot;] * 1000))
+    arc_score      = 0.50 + mixture[&quot;code&quot;] * 0.6  + rng.normal(0, 0.01)
+    hellaswag_score = 0.55 + mixture[&quot;web&quot;]  * 0.15 + rng.normal(0, 0.01)
+    return {&quot;arc_easy&quot;: arc_score, &quot;hellaswag&quot;: hellaswag_score}
+
+def run_mixture_search(cfg: MixtureSearchConfig) -&gt; Tuple[Dict, float]:
+    &quot;&quot;&quot;Grid-search: evaluate all mixtures, return best by average benchmark score.&quot;&quot;&quot;
+    mixtures   = enumerate_mixtures(cfg)
+    print(f&quot;Evaluating {len(mixtures)} mixtures with {cfg.proxy_params/1e6:.0f}M proxy model&quot;)
+    best_mix, best_score = None, -1.0
+    results = []
+    for mix in mixtures:
+        scores  = evaluate_proxy_mixture(mix)
+        avg     = np.mean(list(scores.values()))
+        results.append((mix, avg, scores))
+        if avg &gt; best_score:
+            best_score, best_mix = avg, mix
+    results.sort(key=lambda x: x[1], reverse=True)
+    print(&quot;Top-3 mixtures:&quot;)
+    for mix, score, scores in results[:3]:
+        print(f&quot;  web={mix['web']:.2f} code={mix['code']:.2f} books={mix['books']:.2f} &quot;
+              f&quot;other={mix['other']:.2f} -&gt; avg={score:.4f} &quot;
+              f&quot;arc={scores['arc_easy']:.4f} hs={scores['hellaswag']:.4f}&quot;)
+    return best_mix, best_score
+
+cfg = MixtureSearchConfig()
+best, score = run_mixture_search(cfg)
+print(f&quot;\nBest mixture: {best} | avg score: {score:.4f}&quot;)
+</code></pre>
+<p>The key insight from DoReMi and RegMix is that proxy models generalise well across scales. Mixture rankings found at 50M parameters and 1B tokens are preserved at 7B parameters and 1T tokens with high fidelity, meaning the expensive large-scale search only needs to be run once using cheap proxies. The compute cost of a full grid search across, say, 100 mixture points at 50M params is roughly equivalent to a single 5B-parameter pretraining run — far cheaper than searching directly at scale.</p>
+<h2>Domain-Specific Effects</h2>
+<p>Different domain proportions produce predictable capability signatures. Increasing code fraction from 5% to 15% typically improves performance on reasoning benchmarks (ARC, HellaSwag, GSM8K) by 3–8 percentage points even for non-code tasks — the hypothesis is that code requires precise, chain-of-thought-style reasoning that transfers to other structured reasoning tasks. Increasing books fraction improves perplexity on long documents and coherence of generated narratives, but has diminishing returns on short-question benchmarks. Increasing Wikipedia fraction helps factual recall and knowledge-intensive tasks (TriviaQA, NaturalQuestions) but does little for reasoning or code. Increasing scientific paper fraction improves performance on STEM benchmarks and mathematical reasoning, but such text is stylistically distant from the instruction-tuning distribution and can hurt conversational capabilities.</p>
+<p>The most studied interaction effect is between code and reasoning: adding code to a predominantly web-text corpus produces outsized reasoning gains relative to the fraction added. LLaMA-3 doubled its code fraction from LLaMA-2 (8% → 17%) and observed corresponding improvements in MATH, HumanEval, and MBPP that outpaced what parameter scaling alone would predict. Phi-1 demonstrated the extreme case: a 1.3B model trained on 8B tokens of synthetic Python textbooks achieved HumanEval pass@1 of 50.6%, matching models over 10× its size trained on generic corpora.</p>
+<h2>Curriculum Ordering</h2>
+<p>Curriculum learning applies data mixing changes over time rather than holding the mixture constant throughout training. The intuition is that easy or general data (web text) should dominate early when the model is learning basic language statistics, while harder or more specialised data (code, math, scientific papers) is more effective once the model has a strong general foundation. Phi-2 and Gemma both use a form of implicit curriculum: training starts with high-quality filtered web text and progressively increases the fraction of synthetic instructional data. LLaMA-3 reportedly uses a separate 'annealing' phase in the final few percent of training where the mixture is shifted dramatically toward high-quality curated sources and synthetic data, a technique borrowed from DeepSeek and MiniCPM.</p>
+<pre><code class="language-python">from dataclasses import dataclass, field
+from typing import List, Dict
+import numpy as np
+
+@dataclass
+class CurriculumStage:
+    &quot;&quot;&quot;One stage of a multi-phase curriculum with its domain weight vector.&quot;&quot;&quot;
+    name:          str
+    token_budget:  int
+    weights:       Dict[str, float]
+
+def build_phi_style_curriculum(total_tokens: int) -&gt; List[CurriculumStage]:
+    &quot;&quot;&quot;Three-stage curriculum mirroring Phi-2 / LLaMA-3 annealing strategy.&quot;&quot;&quot;
+    return [
+        CurriculumStage(
+            name=&quot;foundation&quot;,
+            token_budget=int(0.60 * total_tokens),
+            weights={&quot;web&quot;: 0.80, &quot;books&quot;: 0.10, &quot;wiki&quot;: 0.05, &quot;code&quot;: 0.03, &quot;synthetic&quot;: 0.02},
+        ),
+        CurriculumStage(
+            name=&quot;enrichment&quot;,
+            token_budget=int(0.35 * total_tokens),
+            weights={&quot;web&quot;: 0.50, &quot;books&quot;: 0.10, &quot;wiki&quot;: 0.05, &quot;code&quot;: 0.15, &quot;synthetic&quot;: 0.20},
+        ),
+        CurriculumStage(
+            name=&quot;annealing&quot;,
+            token_budget=int(0.05 * total_tokens),
+            weights={&quot;web&quot;: 0.20, &quot;books&quot;: 0.10, &quot;wiki&quot;: 0.10, &quot;code&quot;: 0.10, &quot;synthetic&quot;: 0.50},
+        ),
+    ]
+
+def simulate_curriculum_perplexity(stages: List[CurriculumStage]) -&gt; List[float]:
+    &quot;&quot;&quot;Simulate perplexity improvements per stage (toy model for illustration).&quot;&quot;&quot;
+    ppl = 120.0
+    history = []
+    for stage in stages:
+        tokens  = stage[&quot;token_budget&quot;] if isinstance(stage, dict) else stage.token_budget
+        weights = stage[&quot;weights&quot;]       if isinstance(stage, dict) else stage.weights
+        # High-quality data (code + synthetic) accelerates ppl reduction
+        quality_fraction = weights.get(&quot;code&quot;, 0) + weights.get(&quot;synthetic&quot;, 0)
+        reduction = 0.35 + quality_fraction * 0.55   # heuristic
+        ppl *= (1 - reduction)
+        history.append(round(ppl, 2))
+    return history
+
+curriculum = build_phi_style_curriculum(total_tokens=2_000_000_000_000)
+ppl_trace  = simulate_curriculum_perplexity(curriculum)
+for stage, ppl in zip(curriculum, ppl_trace):
+    budget_b = stage.token_budget // 1_000_000_000
+    print(f&quot;[{stage.name:12s}] {budget_b:4d}B tokens | &quot;
+          f&quot;synthetic={stage.weights['synthetic']*100:.0f}% &quot;
+          f&quot;code={stage.weights['code']*100:.0f}% | PPL -&gt; {ppl}&quot;)
+</code></pre>
+<p>The curriculum approach has a practical complication: validation perplexity on a held-out set is not always a reliable signal during stage transitions. When the mixture shifts from web-heavy to code-heavy, perplexity on a web-text validation set can temporarily increase even as coding benchmarks improve. Practitioners therefore track a multi-benchmark eval suite throughout training rather than relying on a single perplexity metric to decide when to transition stages.</p>
+<pre><code class="language-python">from typing import Dict, List
+import numpy as np
+
+def compute_weighted_sampler_probs(
+    domain_weights: Dict[str, float],
+    domain_sizes:   Dict[str, int],
+) -&gt; Dict[str, float]:
+    &quot;&quot;&quot;
+    Convert per-domain target weights into per-token sampling probabilities.
+    Handles domains of vastly different sizes by computing the effective
+    probability of drawing the next token from each domain.
+
+    For a domain d with N_d natural tokens and target weight w_d:
+        p(next token from d) = w_d  (independent of N_d — upsampling handles the rest)
+    Returns the per-domain per-token draw probability for implementation
+    in an interleaved dataset sampler.
+    &quot;&quot;&quot;
+    assert abs(sum(domain_weights.values()) - 1.0) &lt; 1e-6
+    probs = {}
+    for domain, weight in domain_weights.items():
+        n_tokens  = domain_sizes.get(domain, 0)
+        if n_tokens == 0:
+            raise ValueError(f&quot;Domain '{domain}' has zero tokens&quot;)
+        probs[domain] = weight   # sampling probability == target weight
+    return probs
+
+def sample_batch_indices(
+    domain_weights: Dict[str, float],
+    domain_sizes:   Dict[str, int],
+    batch_size:     int,
+    rng:            np.random.Generator,
+) -&gt; Dict[str, int]:
+    &quot;&quot;&quot;
+    For one training batch, decide how many samples to draw from each domain.
+    Uses multinomial sampling over the target weight vector.
+    &quot;&quot;&quot;
+    domains = list(domain_weights.keys())
+    weights = np.array([domain_weights[d] for d in domains])
+    counts  = rng.multinomial(batch_size, weights)
+    return {d: int(c) for d, c in zip(domains, counts)}
+
+# Example: standard LLaMA-2-style weights
+llama2_weights = {
+    &quot;web&quot;:    0.670,
+    &quot;code&quot;:   0.080,
+    &quot;books&quot;:  0.045,
+    &quot;papers&quot;: 0.025,
+    &quot;wiki&quot;:   0.045,
+    &quot;other&quot;:  0.135,
+}
+llama2_sizes = {
+    &quot;web&quot;:    1_400_000_000_000,
+    &quot;code&quot;:     200_000_000_000,
+    &quot;books&quot;:     30_000_000_000,
+    &quot;papers&quot;:    30_000_000_000,
+    &quot;wiki&quot;:       4_000_000_000,
+    &quot;other&quot;:    100_000_000_000,
+}
+rng = np.random.default_rng(42)
+batch_draw = sample_batch_indices(llama2_weights, llama2_sizes, batch_size=2048, rng=rng)
+for domain, count in batch_draw.items():
+    print(f&quot;  {domain:8s}: {count:4d} sequences ({count/2048*100:.1f}%)&quot;)
+</code></pre>
+<h2>Key Takeaways</h2>
+<p>Data mixing is not a detail — it is a primary design decision that shapes which capabilities a pretrained model possesses and at what parameter efficiency. The key lessons from the literature are: (1) Web text should form the majority of any large pretraining corpus, but the web fraction has been declining over successive generations as higher-quality sources are valued more; (2) Code fraction should be higher than naive corpus statistics suggest — even for general-purpose models, 8–17% code improves reasoning across all domains; (3) High-quality curated data (books, Wikipedia, papers) should be upsampled but with caution — more than 2–4 epochs of the same source risks memorisation; (4) Proxy model search (DoReMi, RegMix) makes mixture optimisation tractable by finding good mixtures at 50M parameters that generalise to 7B+; (5) Curriculum ordering — finishing with a high-quality annealing phase — is increasingly standard and provides the final performance lift; (6) The Phi experiments show that quality can substitute for scale: a 2.7B model on a well-chosen mixture can match or exceed a 13B model on a generic mixture.</p>
+<ul>
+<li>Web text dominates by volume but its fraction is declining: LLaMA-1 (67%) → LLaMA-3 (~50%) as quality-dense sources are added.</li>
+<li>Code is systematically underweighted by raw corpus statistics but overweights its parameter-efficiency contribution to reasoning.</li>
+<li>Books and Wikipedia require upsampling; keep repeat factor ≤ 2–4 epochs to avoid memorisation.</li>
+<li>DoReMi and RegMix use 50M proxy models to find optimal mixtures that transfer faithfully to 7B+ scale.</li>
+<li>Curriculum annealing — shifting to high-quality / synthetic data in the final 5% of training — is used by LLaMA-3, Gemma, DeepSeek, and MiniCPM.</li>
+<li>Phi-2 demonstrated that ~50% high-quality synthetic data enables a 2.7B model to match models 5–9× larger.</li>
+<li>Mixture decisions interact: adding more code amplifies the benefit of adding more math; the effects are not independent.</li>
+<li>No universal optimal ratio exists — the best mixture depends on target use cases, available data, and total compute budget.</li>
+</ul>
+<p>As pretraining shifts from compute-limited to data-quality-limited regimes — a transition already underway as internet-scale text approaches deduplication saturation — data mixing decisions will become even more central. The next frontier is domain-aware dynamic mixing: algorithms that adjust domain weights online during training based on real-time loss signals, rather than committing to a fixed schedule in advance. Early results from Doge, MassiveText, and academic work on online mixture optimisation suggest this can yield another 5–15% improvement in downstream benchmark performance over static schedules.</p>
+    </article>
+  </main>
+</body>
+</html>

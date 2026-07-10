@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Focal Loss — Hard Example Mining for Class Imbalance | Notes Backup</title>
+  <meta name="description" content="Derive focal loss from binary cross-entropy, visualize the γ focusing effect, implement RetinaNet-style detection loss, and compare CE vs OHEM vs focal vs ASL for imbalanced training." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Focal Loss — Hard Example Mining for Class Imbalance</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Derive focal loss from binary cross-entropy, visualize the γ focusing effect, implement RetinaNet-style detection loss, and compare CE vs OHEM vs focal vs ASL for imbalanced training.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Focal Loss — Hard Example Mining for Class Imbalance</h1>
+<p>Class imbalance is a fundamental challenge in object detection: a single image may contain 1–10 foreground objects but 10,000–100,000 background anchor boxes. Standard cross-entropy loss is overwhelmed by easy negative examples — each individual easy negative contributes a tiny loss, but their sheer number dominates training. Online Hard Example Mining (OHEM) addresses this by sampling only the highest-loss examples, but it requires complex sampling logic. Focal Loss (Lin et al. 2017) solves the same problem elegantly by reweighting each example's loss based on its classification confidence.</p>
+<h2>Class Imbalance in Object Detection</h2>
+<p>Two-stage detectors (Faster R-CNN) use a region proposal network to filter most background anchors before the classification stage — the class imbalance ratio in the second stage is manageable (roughly 1:3 foreground to background). One-stage detectors (SSD, YOLO, RetinaNet) classify all anchors simultaneously, facing ratios of 1:1000 or worse. OHEM (Online Hard Example Mining) selects the top-k highest-loss anchors per image during training, discarding easy negatives. But OHEM requires sorting all anchor losses and is sensitive to the mining ratio hyperparameter.</p>
+<h2>Focal Loss Formula</h2>
+<p>Focal Loss modifies binary cross-entropy by adding a modulating factor. Define pₜ = p if y=1 else (1−p) — the predicted probability for the true class. Standard BCE: CE(pₜ) = −log(pₜ). Focal Loss: FL(pₜ) = −(1−pₜ)^γ · log(pₜ). The modulating factor (1−pₜ)^γ: when the example is easy (pₜ → 1), (1−pₜ)^γ → 0, suppressing the loss contribution. When the example is hard (pₜ → 0), (1−pₜ)^γ → 1, keeping full loss weight. γ=2 is the standard choice. Note that CE is focal loss with γ=0. The class-balanced version adds α: FL(pₜ) = −αₜ(1−pₜ)^γ log(pₜ) where αₜ = α if y=1 else (1−α).</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def focal_loss_binary(logits, targets, gamma=2.0, alpha=0.25, reduction='mean'):
+    # Binary focal loss (sigmoid-based) for single-class detection
+    probs = torch.sigmoid(logits)
+    # p_t: predicted probability for the true class
+    p_t = torch.where(targets == 1, probs, 1 - probs)
+    # alpha_t: class weight
+    alpha_t = torch.where(targets == 1,
+                          torch.full_like(probs, alpha),
+                          torch.full_like(probs, 1 - alpha))
+    # Focal modulation: suppress easy examples
+    focal_weight = (1 - p_t).pow(gamma)
+    # BCE with numerically stable log
+    bce = F.binary_cross_entropy_with_logits(
+        logits, targets.float(), reduction='none')
+    loss = alpha_t * focal_weight * bce
+    if reduction == 'mean':
+        return loss.mean()
+    elif reduction == 'sum':
+        return loss.sum()
+    return loss
+
+torch.manual_seed(42)
+# Simulate: 10 positive anchors, 9990 negative anchors
+logits = torch.cat([torch.randn(10) + 1.0,   # positives
+                    torch.randn(9990) - 2.0])  # easy negatives
+targets = torch.cat([torch.ones(10), torch.zeros(9990)])
+
+fl = focal_loss_binary(logits, targets, gamma=2.0, alpha=0.25)
+ce = F.binary_cross_entropy_with_logits(logits, targets.float())
+print(f'Cross-entropy loss: {ce.item():.6f}')
+print(f'Focal loss (g=2):   {fl.item():.6f}')
+print('Focal loss is much lower because easy negatives are suppressed.')
+</code></pre>
+<h2>Effect of the Focusing Parameter γ</h2>
+<p>The parameter γ controls how aggressively easy examples are down-weighted. At γ=0, FL = CE (no suppression). At γ=1, easy examples (pₜ=0.9) receive weight (1−0.9)^1 = 0.1 — 10% of their CE loss. At γ=2 (standard), they receive (1−0.9)^2 = 0.01 — 1% of their CE loss. At γ=5, they receive (1−0.9)^5 ≈ 0.00001 — effectively zero. Hard examples (pₜ=0.2) receive: γ=1 → 0.8×, γ=2 → 0.64×, γ=5 → 0.33×. The ratio of hard-to-easy weighting grows rapidly with γ, concentrating training on the hardest examples.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+
+def focal_weight(p_t, gamma):
+    return (1 - p_t) ** gamma
+
+p_values = np.linspace(0.01, 0.99, 100)
+print(f'{&quot;p_t&quot;:&gt;6} {&quot;CE&quot;:&lt;10} {&quot;FL(g=1)&quot;:&lt;12} {&quot;FL(g=2)&quot;:&lt;12} {&quot;FL(g=5)&quot;:&lt;12}')
+for p in [0.1, 0.3, 0.5, 0.7, 0.9, 0.99]:
+    ce   = -np.log(p)
+    fl1  = focal_weight(p, 1) * ce
+    fl2  = focal_weight(p, 2) * ce
+    fl5  = focal_weight(p, 5) * ce
+    print(f'{p:&gt;6.2f} {ce:&lt;10.4f} {fl1:&lt;12.4f} {fl2:&lt;12.4f} {fl5:&lt;12.4f}')
+
+print('\n--- Hard (p=0.1) vs Easy (p=0.9) loss ratio by gamma ---')
+for g in [0, 1, 2, 5]:
+    ratio = (focal_weight(0.1, g) * (-np.log(0.1))) / \
+            (focal_weight(0.9, g) * (-np.log(0.9)))
+    print(f'  gamma={g}: hard/easy ratio = {ratio:.1f}x')
+print('\nHigher gamma -&gt; harder examples dominate training more strongly.')
+</code></pre>
+<h2>Focal Loss in Object Detection</h2>
+<p>In RetinaNet, the classification subnet outputs B × A × C sigmoid logits (not softmax), treating each class as an independent binary classification. Focal loss is applied to each (anchor, class) pair. Anchors with IoU ≥ 0.5 with any ground-truth box are positive; anchors with IoU &lt; 0.4 are negative; anchors in the ambiguous range [0.4, 0.5) are ignored (target=-1). Only positive and negative anchors contribute to the focal loss; ignored anchors are masked out. The total loss is normalized by the number of foreground anchors.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class RetinaNetFocalLoss(nn.Module):
+    def __init__(self, gamma=2.0, alpha=0.25):
+        super().__init__()
+        self.gamma = gamma
+        self.alpha = alpha
+
+    def forward(self, cls_logits, cls_targets):
+        # cls_logits:  (B, A, C) — logits per anchor per class
+        # cls_targets: (B, A)    — -1=ignore, 0=background, 1..C=class
+        B, A, C = cls_logits.shape
+        probs = torch.sigmoid(cls_logits)
+        # Build one-hot targets (background has all-zero target)
+        fg_mask = cls_targets &gt; 0
+        bg_mask = cls_targets == 0
+        one_hot = torch.zeros(B, A, C, device=cls_logits.device)
+        for c in range(1, C + 1):
+            one_hot[:, :, c-1] = (cls_targets == c).float()
+        # Compute focal loss only for non-ignored anchors
+        valid = cls_targets &gt;= 0  # ignore anchors with target=-1
+        p_t = torch.where(one_hot.bool(), probs, 1 - probs)
+        alpha_t = torch.where(one_hot.bool(),
+                              torch.full_like(probs, self.alpha),
+                              torch.full_like(probs, 1 - self.alpha))
+        bce = F.binary_cross_entropy_with_logits(
+            cls_logits, one_hot, reduction='none')
+        focal = alpha_t * (1 - p_t).pow(self.gamma) * bce
+        n_fg = fg_mask.sum().clamp(min=1)
+        return focal[valid].sum() / n_fg
+
+B, A, C = 2, 1000, 80
+cls_logits  = torch.randn(B, A, C)
+cls_targets = torch.full((B, A), -1, dtype=torch.long)
+cls_targets[:, :10] = torch.randint(1, 81, (B, 10))
+cls_targets[:, 10:500] = 0
+loss_fn = RetinaNetFocalLoss()
+loss = loss_fn(cls_logits, cls_targets)
+print(f'Focal loss (RetinaNet style): {loss.item():.4f}')
+</code></pre>
+<blockquote>
+<p><strong>RetinaNet Achieved One-Stage Parity</strong>: RetinaNet (Lin et al. 2017) was the first one-stage detector to match two-stage Faster R-CNN accuracy on COCO. The key was focal loss — without it, the one-stage model was dominated by easy background anchors and performed 10+ AP points worse. With focal loss and a ResNet-50 FPN backbone, RetinaNet achieved 37.8 AP vs Faster R-CNN's 36.8 AP, with higher inference speed.</p>
+</blockquote>
+<h2>CE vs Focal on Imbalanced Classification</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import average_precision_score
+
+np.random.seed(42)
+torch.manual_seed(42)
+X, y = make_classification(n_samples=5000, n_features=20, n_informative=15,
+                            weights=[0.95, 0.05], random_state=42)
+X = torch.tensor(X, dtype=torch.float32)
+y = torch.tensor(y, dtype=torch.long)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.3, stratify=y, random_state=0)
+
+def train_eval(loss_fn, epochs=80):
+    net = nn.Sequential(nn.Linear(20, 64), nn.ReLU(), nn.Linear(64, 2))
+    opt = torch.optim.Adam(net.parameters(), lr=3e-3, weight_decay=1e-4)
+    for _ in range(epochs):
+        net.train()
+        loss = loss_fn(net(X_tr), y_tr)
+        opt.zero_grad(); loss.backward(); opt.step()
+    net.eval()
+    with torch.no_grad():
+        probs = F.softmax(net(X_te), dim=-1)[:, 1].numpy()
+    return average_precision_score(y_te.numpy(), probs)
+
+# Standard CE
+ap_ce = train_eval(nn.CrossEntropyLoss())
+print(f'Cross-entropy      AP: {ap_ce:.4f}')
+
+# Focal-style via class weights
+weights = torch.tensor([0.05, 0.95])  # inverse frequency
+ap_weighted = train_eval(nn.CrossEntropyLoss(weight=weights))
+print(f'Weighted CE        AP: {ap_weighted:.4f}')
+</code></pre>
+<h2>Asymmetric Loss for Multi-Label Classification</h2>
+<p>Asymmetric Loss (ASL, Ridnik et al. 2021) extends focal loss for multi-label settings where the positive/negative imbalance is extreme. ASL uses different γ for positives and negatives: FL_pos = (1−pₜ)^γ⁺ · log(pₜ) and FL_neg = pₜ^γ⁻ · log(1−pₜ) with γ⁻ &gt; γ⁺. Typically γ⁻=4, γ⁺=0 (no focusing for positives, strong focusing for negatives). Additionally, ASL includes probability shifting: subtract margin m from negative probabilities before computing loss, hard-thresholding very easy negatives. ASL achieves state-of-the-art on MS-COCO multi-label classification (90.4 mAP with TResNet-L).</p>
+<ul>
+<li>γ=2, α=0.25 are the standard RetinaNet defaults — these were found via grid search on COCO.</li>
+<li>For extreme imbalance (1:10000), increase γ to 3–5 to suppress easy negatives more aggressively.</li>
+<li>VariFocalLoss (VFL): uses the IoU score as the target probability instead of a binary label — better for detection quality scoring.</li>
+<li>QFocalLoss (QFL): generalizes focal loss to continuous targets for predicting distribution of bounding box coordinates.</li>
+<li>Focal loss requires sigmoid outputs (not softmax) for multi-class detection — each class is treated as a binary problem independently.</li>
+</ul>
+<h2>Loss Function Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Loss</th>
+<th>Class Imbalance</th>
+<th>Focusing Params</th>
+<th>Detection Use</th>
+<th>Multi-Label</th>
+<th>Complexity</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Cross-Entropy</td>
+<td>Dominated by easy examples</td>
+<td>None</td>
+<td>Two-stage (with OHEM)</td>
+<td>No (use BCE)</td>
+<td>Low — standard baseline</td>
+</tr>
+<tr>
+<td>Weighted CE</td>
+<td>Partial — fixed class weights</td>
+<td>α per class</td>
+<td>Limited</td>
+<td>No</td>
+<td>Low — add weight vector</td>
+</tr>
+<tr>
+<td>OHEM</td>
+<td>Good — selects hard examples</td>
+<td>Mining ratio k</td>
+<td>Two-stage detectors</td>
+<td>No</td>
+<td>Medium — requires sorting losses</td>
+</tr>
+<tr>
+<td>Focal Loss (γ=2)</td>
+<td>Excellent — continuous weighting</td>
+<td>γ, α</td>
+<td>One-stage (RetinaNet, FCOS)</td>
+<td>Yes (binary)</td>
+<td>Low — single modulation term</td>
+</tr>
+<tr>
+<td>Asymmetric Loss</td>
+<td>Best for extreme imbalance</td>
+<td>γ⁺, γ⁻, margin m</td>
+<td>Multi-label detection</td>
+<td>Yes</td>
+<td>Medium — separate pos/neg handling</td>
+</tr>
+</tbody>
+</table>
+<p>Focal loss with γ=2 and α=0.25 is the recommended default for any one-stage object detector. For multi-label classification with extreme positive/negative imbalance (e.g., image tagging with thousands of classes), use Asymmetric Loss with γ⁻=4, γ⁺=0. For two-stage detectors where OHEM is already implemented, the additional benefit of focal loss is marginal — weighted CE with α=0.25 is sufficient.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

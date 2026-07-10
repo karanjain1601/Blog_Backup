@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Glow — Generative Flow with Invertible 1×1 Convolutions | Notes Backup</title>
+  <meta name="description" content="Glow (Kingma &amp; Dhariwal 2018) improves RealNVP with learnable 1x1 convolutions (LU decomposition for O(c) log-det), Actnorm (data-dependent scale/bias), and affine coupling layers. Covers multi-scale architecture, latent space manipulation, and attribute arithmetic in z-space." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Glow — Generative Flow with Invertible 1×1 Convolutions</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Glow (Kingma &amp; Dhariwal 2018) improves RealNVP with learnable 1x1 convolutions (LU decomposition for O(c) log-det), Actnorm (data-dependent scale/bias), and affine coupling layers. Covers multi-scale architecture, latent space manipulation, and attribute arithmetic in z-space.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Glow — Generative Flow with Invertible 1×1 Convolutions</h1>
+<p>Glow (Kingma &amp; Dhariwal, 2018) is a generative flow that extends RealNVP with three improvements: Actnorm replaces batch normalization, learnable invertible 1×1 convolutions replace fixed channel permutations, and the affine coupling layer is retained. Together these allow exact likelihood computation, efficient sampling, and meaningful latent-space arithmetic such as smile → no-smile by vector subtraction in z-space.</p>
+<h2>Normalizing Flows Recap</h2>
+<p>A normalizing flow defines a bijective mapping f: x → z between data space and a simple base distribution (typically N(0,I)). The change-of-variables formula gives log p(x) = log p_z(f(x)) + log|det J_f|. Training maximizes this log-likelihood. The key constraint is that f must be invertible and its Jacobian determinant must be tractable. Glow stacks K steps of flow at L levels in a multi-scale architecture, factoring out half the channels at each level to keep computation manageable.</p>
+<h2>Actnorm — Data-Dependent Initialization</h2>
+<p>Actnorm is a per-channel affine transformation z = scale ∘ (x + bias) where scale and bias are learnable parameters initialized from the first batch so that the output has zero mean and unit variance. This is a valid alternative to batch normalization that does not depend on batch statistics at inference time. The log-determinant is H × W × Σ log|scale_c|, computed in O(c) time.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class Actnorm(nn.Module):
+    &quot;&quot;&quot;Data-dependent init: after first batch, output has mean=0, std=1.&quot;&quot;&quot;
+    def __init__(self, c):
+        super().__init__()
+        self.scale = nn.Parameter(torch.ones(1, c, 1, 1))
+        self.bias  = nn.Parameter(torch.zeros(1, c, 1, 1))
+        self.initialized = False
+
+    @torch.no_grad()
+    def initialize(self, x):
+        mean = x.mean([0, 2, 3], keepdim=True)
+        std  = x.std([0, 2, 3],  keepdim=True).clamp(min=1e-6)
+        self.bias.copy_(-mean)
+        self.scale.copy_(1.0 / std)
+        self.initialized = True
+
+    def forward(self, x):
+        if not self.initialized:
+            self.initialize(x)
+        _, _, H, W = x.shape
+        z = self.scale * (x + self.bias)
+        log_det = H * W * self.scale.abs().log().sum()
+        return z, log_det
+
+    def inverse(self, z):
+        return z / self.scale - self.bias
+
+layer = Actnorm(3)
+x = torch.randn(16, 3, 8, 8) * 5 + 2
+z, ld = layer.forward(x)
+print(f&quot;Before: mean={x.mean():.3f}  std={x.std():.3f}&quot;)
+print(f&quot;After:  mean={z.mean():.3f}  std={z.std():.3f}&quot;)
+print(f&quot;Reconstruction: {(x - layer.inverse(z)).abs().max():.2e}&quot;)
+</code></pre>
+<h2>Invertible 1×1 Convolution</h2>
+<p>RealNVP uses fixed channel permutations (reverse or shuffle) between coupling layers. Glow generalizes this to a learned square matrix W applied as a 1×1 convolution. The log-determinant is H × W × log|det W|, which naively costs O(c³). The LU decomposition W = P L U reduces this to O(c): log|det W| = Σ log|diag(U)_i|, computed from the diagonal of U alone. P is a fixed permutation matrix, L and U are triangular with learnable entries.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class Invertible1x1Conv(nn.Module):
+    &quot;&quot;&quot;LU-decomposed invertible 1x1 conv: log|det W| = sum(log|diag S|), O(c).&quot;&quot;&quot;
+    def __init__(self, c):
+        super().__init__()
+        W = torch.linalg.qr(torch.randn(c, c))[0]
+        self.register_buffer('P', torch.eye(c)[torch.randperm(c)])
+        self.L     = nn.Parameter(torch.tril(W, -1) + torch.eye(c))
+        self.U     = nn.Parameter(torch.triu(W,  1))
+        self.log_s = nn.Parameter(W.diag().abs().log())
+        self.s_sgn = nn.Parameter(W.diag().sign(), requires_grad=False)
+        self.c = c
+
+    def _W(self):
+        L = torch.tril(self.L, -1) + torch.eye(self.c, device=self.L.device)
+        U = torch.triu(self.U,  1) + torch.diag(self.s_sgn * self.log_s.exp())
+        return self.P @ L @ U
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        z = F.conv2d(x, self._W().view(C, C, 1, 1))
+        return z, H * W * self.log_s.sum()
+
+    def inverse(self, z):
+        W_inv = torch.linalg.inv(self._W()).view(self.c, self.c, 1, 1)
+        return F.conv2d(z, W_inv)
+
+c, B, H = 8, 2, 4
+layer = Invertible1x1Conv(c)
+x = torch.randn(B, c, H, H)
+z, ld = layer.forward(x)
+print(f&quot;Reconstruction error: {(x - layer.inverse(z)).abs().max():.2e}&quot;)
+print(f&quot;Log-det: {ld.item():.4f}&quot;)
+print(&quot;Cost: O(c^3) matrix multiply once, O(c) log-det from diagonal of S&quot;)
+</code></pre>
+<h2>Affine Coupling Layer and Full Glow Step</h2>
+<p>The affine coupling layer splits channels into two halves x_a, x_b. The first half passes through unchanged; a small convolutional network computes (log_s, t) = NN(x_a), and x_b is transformed as z_b = x_b ∘ exp(log_s) + t. The inverse is exact: x_b = (z_b - t) ∘ exp(-log_s). One Glow step stacks: Actnorm → Inv-1×1-Conv → Affine-Coupling, each contributing to the total log-det.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class AffineCoupling(nn.Module):
+    def __init__(self, c_half, hidden=128):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(c_half, hidden, 3, padding=1), nn.ReLU(),
+            nn.Conv2d(hidden, hidden, 1), nn.ReLU(),
+            nn.Conv2d(hidden, c_half * 2, 3, padding=1))
+
+    def forward(self, x):
+        xa, xb = x.chunk(2, dim=1)
+        log_s, t = self.net(xa).chunk(2, dim=1)
+        log_s = log_s.tanh()
+        zb = xb * log_s.exp() + t
+        return torch.cat([xa, zb], dim=1), log_s.sum([1, 2, 3])
+
+    def inverse(self, z):
+        za, zb = z.chunk(2, dim=1)
+        log_s, t = self.net(za).chunk(2, dim=1)
+        xb = (zb - t) * (-log_s.tanh()).exp()
+        return torch.cat([za, xb], dim=1)
+
+class GlowStep(nn.Module):
+    &quot;&quot;&quot;One Glow step: Actnorm -&gt; Inv-1x1-Conv -&gt; Affine Coupling.&quot;&quot;&quot;
+    def __init__(self, c):
+        super().__init__()
+        self.actnorm  = Actnorm(c)
+        self.inv1x1   = Invertible1x1Conv(c)
+        self.coupling = AffineCoupling(c // 2)
+
+    def forward(self, x):
+        x, ld1 = self.actnorm(x)
+        x, ld2 = self.inv1x1(x)
+        x, ld3 = self.coupling(x)
+        return x, ld1 + ld2 + ld3
+
+c, B, H = 8, 4, 8
+step = GlowStep(c)
+x = torch.randn(B, c, H, H)
+z, log_det = step.forward(x)
+print(f&quot;x: {x.shape} -&gt; z: {z.shape}  log_det.mean={log_det.mean():.3f}&quot;)
+</code></pre>
+<h2>Multi-Scale Architecture</h2>
+<p>Glow uses a multi-scale design where, after every L steps, half the channels are factored out: z_factored = x[:, :c//2], x = x[:, c//2:]. The factored-out channels are combined with the output at the end. This reduces spatial resolution and channel count as depth increases, keeping memory and computation tractable. The factored-out portions form independent Gaussian factors; the final log-likelihood sums over all levels.</p>
+<ul>
+<li>Level 0: K flow steps on full (C, H, W) feature map, factor out C//2 channels.</li>
+<li>Level 1: K flow steps on (C//2, H//2, W//2) after squeeze, factor out half again.</li>
+<li>Level L-1: final level processes smallest spatial resolution, all channels retained.</li>
+<li>Squeeze operation: reshape (C, H, W) -&gt; (4C, H/2, W/2) before each new level.</li>
+<li>At generation: sample each factored tensor from N(0, σ²), run all inverse flows.</li>
+</ul>
+<h2>Latent Space Manipulation</h2>
+<p>Because Glow learns an exact invertible mapping, attribute manipulation is precise: encode a dataset of images, separate by attribute label, compute the mean z-vector for each class, and the difference δ = z_pos_mean - z_neg_mean is an attribute direction. Adding αδ to any latent code moves the image along that attribute while preserving other features. This works for smile, age, gender, and other CelebA attributes.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+
+def compute_attribute_direction(z_pos_list, z_neg_list):
+    &quot;&quot;&quot;Mean difference in z-space between positive and negative attribute examples.&quot;&quot;&quot;
+    z_pos = torch.cat(z_pos_list).mean(0)
+    z_neg = torch.cat(z_neg_list).mean(0)
+    delta = z_pos - z_neg
+    return delta / delta.norm()   # unit direction vector
+
+def apply_attribute(model_inv, z, attr_vec, strengths=(-2, -1, 0, 1, 2)):
+    &quot;&quot;&quot;Traverse latent space along attribute direction at multiple strengths.&quot;&quot;&quot;
+    results = {}
+    with torch.no_grad():
+        for alpha in strengths:
+            z_edit = z + alpha * attr_vec.to(z.device)
+            results[alpha] = model_inv(z_edit)
+    return results
+
+torch.manual_seed(42)
+d_z = 512
+z_pos = [torch.randn(32, d_z) + 0.5 for _ in range(3)]
+z_neg = [torch.randn(32, d_z) - 0.5 for _ in range(3)]
+attr_smile = compute_attribute_direction(z_pos, z_neg)
+
+z_test = torch.randn(1, d_z)
+for alpha in [-2.0, 0.0, 2.0]:
+    z_edit = z_test + alpha * attr_smile
+    dist = (z_edit - z_test).norm().item()
+    print(f&quot;alpha={alpha:+.1f}  ||z_edit - z||={dist:.3f}  mean={z_edit.mean():.3f}&quot;)
+print(&quot;Linear interpolation in z-space corresponds to smooth attribute morphing&quot;)
+</code></pre>
+<blockquote>
+<p><strong>Temperature Scaling at Synthesis</strong>: Sampling z ~ N(0, σ²) with σ &lt; 1 (e.g. σ=0.7) produces sharper, more realistic images at the cost of diversity. The model was trained with σ=1 but inference benefits from lower temperature. This is because the model learns to assign low-likelihood regions to unlikely but still plausible data; sampling from a tighter distribution avoids these artifacts.</p>
+</blockquote>
+<h2>RealNVP vs Glow Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>RealNVP</th>
+<th>Glow</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Channel permutation</td>
+<td>Fixed reverse or shuffle</td>
+<td>Learnable 1×1 conv (W = PLU)</td>
+</tr>
+<tr>
+<td>Normalization</td>
+<td>Batch Norm (batch-dependent)</td>
+<td>Actnorm (data-init, no batch dep.)</td>
+</tr>
+<tr>
+<td>Log-det cost</td>
+<td>O(1) — coupling only</td>
+<td>O(c) — diagonal of U in LU decomp</td>
+</tr>
+<tr>
+<td>Bits/dim on CelebA 256</td>
+<td>~3.49</td>
+<td>~3.35 (improved by learnable perm)</td>
+</tr>
+<tr>
+<td>Latent manipulation</td>
+<td>Approximate (fixed permutation)</td>
+<td>Precise arithmetic in z-space</td>
+</tr>
+<tr>
+<td>Multi-scale</td>
+<td>Yes (factor out half per level)</td>
+<td>Yes (same pattern, more levels)</td>
+</tr>
+</tbody>
+</table>
+<h2>Synthesis and Interpolation</h2>
+<p>To generate an image: sample z ~ N(0, σ²I) and pass through the inverse flow f⁻¹(z). For interpolation between two images x₁, x₂: encode both to z₁ = f(x₁), z₂ = f(x₂), then decode z(λ) = (1-λ)z₁ + λz₂ for λ ∈ [0,1]. Interpolation in z-space is linear; the resulting images smoothly transition. This works better than pixel-space interpolation because z-space has a structured Gaussian geometry.</p>
+    </article>
+  </main>
+</body>
+</html>

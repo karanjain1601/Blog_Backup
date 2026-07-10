@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Restricted Boltzmann Machines — Visible/Hidden Units and CD Training | Notes Backup</title>
+  <meta name="description" content="RBMs are bipartite undirected graphical models with tractable conditional distributions that enable efficient Gibbs sampling and contrastive divergence training, forming the building block for Deep Belief Networks and the historical foundation of modern deep learning." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Restricted Boltzmann Machines — Visible/Hidden Units and CD Training</h1>
+      <ul class='note-meta'><li><strong>description:</strong> RBMs are bipartite undirected graphical models with tractable conditional distributions that enable efficient Gibbs sampling and contrastive divergence training, forming the building block for Deep Belief Networks and the historical foundation of modern deep learning.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Restricted Boltzmann Machines — Visible/Hidden Units and CD Training</h1>
+<p>Restricted Boltzmann Machines (RBMs) are shallow generative models that represent a joint distribution over visible variables v (observed data) and hidden variables h (latent features) via an energy function. The 'restricted' refers to the bipartite structure: connections exist only between visible and hidden layers, with no intra-layer connections. This restriction makes the conditional distributions p(h|v) and p(v|h) fully factorised and easy to compute — the key property that makes Gibbs sampling efficient and enables CD-k training. RBMs were the critical building block for Deep Belief Networks (2006) and reignited interest in deep learning before modern backpropagation took over.</p>
+<h2>RBM Structure and Energy Function</h2>
+<p>The energy of a configuration (v, h) is: E(v,h) = -vᵀWh - bᵀv - cᵀh, where W is the weight matrix (|v|×|h|), b is the visible bias, and c is the hidden bias. The joint distribution is p(v,h) ∝ exp(-E(v,h)). The partition function Z = Σ_{v,h} exp(-E(v,h)) is intractable for continuous or large discrete v — but the marginal p(v) = Σ_h p(v,h) and the conditional p(h|v) are tractable because of the bipartite structure.</p>
+<h2>Tractable Conditional Distributions</h2>
+<p>The absence of intra-layer connections means that given v, all hidden units h_j are conditionally independent: p(h|v) = Π_j p(h_j|v), where p(h_j=1|v) = σ(Wⱼᵀv + c_j) for binary units. Similarly p(v_i=1|h) = σ(W_i·h + b_i). These factorisations enable block Gibbs sampling: sample all h in parallel from p(h|v), then all v in parallel from p(v|h), alternating. One full cycle (v→h→v) is a single Gibbs step and is the basis of CD-1 training.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class RBM(nn.Module):
+    &quot;&quot;&quot;Binary Restricted Boltzmann Machine with CD-k training.&quot;&quot;&quot;
+    def __init__(self, n_visible, n_hidden):
+        super().__init__()
+        self.W = nn.Parameter(torch.randn(n_visible, n_hidden) * 0.01)
+        self.b = nn.Parameter(torch.zeros(n_visible))   # visible bias
+        self.c = nn.Parameter(torch.zeros(n_hidden))    # hidden bias
+
+    def sample_h(self, v):
+        &quot;&quot;&quot;Sample hidden units given visible: p(h|v) = sigmoid(W^T v + c).&quot;&quot;&quot;
+        p_h = torch.sigmoid(v @ self.W + self.c)  # (B, n_hidden)
+        return torch.bernoulli(p_h), p_h
+
+    def sample_v(self, h):
+        &quot;&quot;&quot;Sample visible units given hidden: p(v|h) = sigmoid(W h + b).&quot;&quot;&quot;
+        p_v = torch.sigmoid(h @ self.W.t() + self.b)  # (B, n_visible)
+        return torch.bernoulli(p_v), p_v
+
+    def free_energy(self, v):
+        &quot;&quot;&quot;Free energy F(v) = -b^T v - sum_j log(1 + exp(W_j^T v + c_j)).&quot;&quot;&quot;
+        bv_term  = v @ self.b
+        wx_plus_c = v @ self.W + self.c
+        hidden_term = torch.log(1 + wx_plus_c.exp()).sum(dim=1)
+        return -bv_term - hidden_term
+
+rbm = RBM(n_visible=784, n_hidden=256)
+v = torch.bernoulli(torch.rand(16, 784))
+h_sample, p_h = rbm.sample_h(v)
+v_recon, p_v = rbm.sample_v(h_sample)
+print(f'RBM: v={v.shape} -&gt; h={h_sample.shape} -&gt; v_recon={v_recon.shape}')
+print(f'Free energy mean: {rbm.free_energy(v).mean():.4f}')
+</code></pre>
+<h2>CD-1 Training on MNIST</h2>
+<p>CD-1 (Contrastive Divergence with k=1) is the standard training algorithm for RBMs. The gradient of the negative log-likelihood is approximated by the difference between data statistics and one-step reconstruction statistics. The training loop: (1) clamp visible units to data x; (2) sample hidden units h ~ p(h|x); (3) sample reconstructed visible units x' ~ p(v|h); (4) gradient ≈ -∇_W E(x,h) + ∇_W E(x',h') where h' ~ p(h|x'). This can be computed without knowing Z. The reconstruction error ‖x - p(v|h)‖² serves as an informal quality metric.</p>
+<pre><code class="language-python">import torch
+import torch.optim as optim
+from torchvision import datasets, transforms
+
+def train_rbm_cd1(rbm, n_epochs=5, batch_size=64, lr=0.01):
+    &quot;&quot;&quot;Train RBM on binary MNIST with CD-1 using free energy gradient.&quot;&quot;&quot;
+    transform = transforms.Compose([transforms.ToTensor(),
+                                     transforms.Lambda(lambda x: torch.bernoulli(x.view(-1)))])
+    try:
+        dataset = datasets.MNIST('./data', train=True, download=True, transform=transform)
+        loader  = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    except Exception:
+        print('MNIST not available — using synthetic binary data')
+        loader = [(torch.bernoulli(torch.rand(batch_size, 784)), None) for _ in range(50)]
+    optimizer = optim.SGD(rbm.parameters(), lr=lr, momentum=0.5)
+    for epoch in range(n_epochs):
+        recon_errs = []
+        for batch_idx, (v_data, _) in enumerate(loader):
+            v_data = v_data.view(-1, 784)
+            # Positive phase
+            h_data, _ = rbm.sample_h(v_data)
+            # Negative phase (CD-1)
+            v_recon, p_v_recon = rbm.sample_v(h_data)
+            h_recon, _ = rbm.sample_h(v_recon)
+            # Free energy contrastive loss
+            loss = (rbm.free_energy(v_data) - rbm.free_energy(v_recon)).mean()
+            optimizer.zero_grad(); loss.backward(); optimizer.step()
+            recon_errs.append((v_data - p_v_recon).pow(2).mean().item())
+            if batch_idx &gt;= 49: break
+        print(f'Epoch {epoch+1}: recon error = {sum(recon_errs)/len(recon_errs):.4f}')
+
+rbm = RBM(n_visible=784, n_hidden=256)
+train_rbm_cd1(rbm, n_epochs=3)
+</code></pre>
+<h2>Fantasy Particles</h2>
+<p>Fantasy particles are samples obtained by running the Gibbs chain from random noise rather than from data. They show what the model has learned to 'imagine' as valid data. Early in training, fantasy particles look like noise. After convergence on MNIST, they should look like digit images — blurry but recognisable. Inspecting fantasy particles is the primary qualitative diagnostic for RBM training. If they resemble data, the model has captured the data distribution. If they are noisy or mode-collapsed (all digits look similar), the model needs more hidden units or longer MCMC chains.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+
+def generate_fantasy_particles(rbm, n_samples=16, n_gibbs_steps=1000):
+    &quot;&quot;&quot;Run extended Gibbs sampling from random init to get model samples.&quot;&quot;&quot;
+    v = torch.bernoulli(torch.rand(n_samples, rbm.b.shape[0]))  # random init
+    with torch.no_grad():
+        for step in range(n_gibbs_steps):
+            h, _ = rbm.sample_h(v)
+            v, p_v = rbm.sample_v(h)
+            if step % 200 == 0:
+                recon_var = p_v.var(dim=0).mean().item()
+                print(f'  Gibbs step {step:4d}: pixel variance = {recon_var:.4f}')
+    return v, p_v  # binary samples and probabilities
+
+def check_fantasy_digit_like(p_v, n_visible=784):
+    &quot;&quot;&quot;Check if fantasies have digit-like sparsity (only ~15-20% pixels active).&quot;&quot;&quot;
+    mean_activation = p_v.mean().item()
+    print(f'Mean pixel activation: {mean_activation:.4f} (digits: ~0.12-0.20)')
+    return 0.05 &lt; mean_activation &lt; 0.50
+
+rbm_small = RBM(n_visible=784, n_hidden=64)
+print('Generating fantasy particles (untrained RBM — expect noise):')
+v_fantasy, p_fantasy = generate_fantasy_particles(rbm_small, n_samples=8, n_gibbs_steps=600)
+check_fantasy_digit_like(p_fantasy)
+</code></pre>
+<h2>Deep Belief Networks</h2>
+<p>A Deep Belief Network (DBN, Hinton et al. 2006) is built by stacking RBMs greedily: train the first RBM on raw data, use its hidden activations as input to train a second RBM, and so on. Each layer learns a higher-level representation. After greedy pretraining, the DBN is typically fine-tuned discriminatively via backpropagation with the RBM weights as initialisation. This pretraining-then-finetuning approach was the first practical method for training deep networks before Xavier/He initialisation and ReLU activations became standard.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def greedy_rbm_stack(layer_sizes, data, n_epochs=3, lr=0.01):
+    &quot;&quot;&quot;
+    Greedy layer-wise RBM pretraining.
+    layer_sizes: e.g. [784, 512, 256, 128]
+    Returns list of trained RBMs and final hidden representations.
+    &quot;&quot;&quot;
+    rbms = []
+    current_data = data
+    for i in range(len(layer_sizes) - 1):
+        n_vis, n_hid = layer_sizes[i], layer_sizes[i + 1]
+        print(f'Training RBM layer {i+1}: {n_vis} -&gt; {n_hid} hidden')
+        rbm = RBM(n_visible=n_vis, n_hidden=n_hid)
+        opt = torch.optim.SGD(rbm.parameters(), lr=lr)
+        for epoch in range(n_epochs):
+            h_data, _ = rbm.sample_h(current_data)
+            v_recon, _ = rbm.sample_v(h_data)
+            loss = (rbm.free_energy(current_data) - rbm.free_energy(v_recon)).mean()
+            opt.zero_grad(); loss.backward(); opt.step()
+        # Use hidden probabilities as input to next layer
+        with torch.no_grad():
+            _, current_data = rbm.sample_h(current_data)
+        rbms.append(rbm)
+        print(f'  Layer {i+1} done: hidden repr shape = {current_data.shape}')
+    return rbms, current_data
+
+torch.manual_seed(0)
+data = torch.bernoulli(torch.rand(200, 784))
+rbm_stack, deep_repr = greedy_rbm_stack([784, 256, 128, 64], data, n_epochs=2)
+print(f'DBN pretrained: {len(rbm_stack)} layers, final repr: {deep_repr.shape}')
+</code></pre>
+<h2>Deep Boltzmann Machines</h2>
+<p>Deep Boltzmann Machines (DBMs, Salakhutdinov &amp; Hinton 2009) differ from DBNs in two important ways: all layers are undirected (unlike DBN's directed top layer), and inference is intractable — approximate mean-field inference is required even for computing hidden activations given visible units. DBMs support a richer joint distribution but are harder to train and slower to sample from. Greedy pretraining with modified RBMs (doubling weights for interior layers) provides a good initialisation before mean-field fine-tuning.</p>
+<h2>Historical Role and Modern Perspective</h2>
+<p>RBMs and DBNs were central to the deep learning revival of 2006-2012. Hinton's 2006 Science paper showing that greedy RBM pretraining enabled training deep networks was the catalyst for the modern deep learning era. By 2012, ReLU activations, dropout, and He initialisation made pretraining unnecessary, and RBMs faded from practical use. Today, RBMs are studied as canonical examples of energy-based learning, and their CD training algorithm is directly related to the contrastive learning losses used in SimCLR and MoCo. The core insight — that the difference between data and model statistics shapes a useful energy landscape — remains foundational.</p>
+<blockquote>
+<p><strong>Modern Use Cases for RBMs</strong>: While RBMs are no longer competitive for image generation (diffusion models dominate), they remain relevant for: (1) collaborative filtering with binary ratings — the Netflix Prize showed RBMs effective for recommendation; (2) categorical data modelling where Gaussian assumptions of VAEs are inappropriate; (3) understanding energy-based learning before tackling modern EBMs or diffusion models. RBMs are also the simplest example of a model where MCMC is the only inference option — understanding their failure modes teaches intuition for all EBM training.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Training Method</th>
+<th>Depth</th>
+<th>Inference</th>
+<th>Generation Quality</th>
+<th>Historical Role</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>RBM</td>
+<td>CD-k (Gibbs sampling)</td>
+<td>1 hidden layer</td>
+<td>Exact conditionals, Gibbs sampling</td>
+<td>Moderate (blurry digits)</td>
+<td>Key pre-deep-learning component (2006)</td>
+</tr>
+<tr>
+<td>DBN</td>
+<td>Greedy RBM pretraining + BP fine-tune</td>
+<td>Multiple directed layers</td>
+<td>Ancestral sampling (top-down)</td>
+<td>Good for MNIST era</td>
+<td>First practical deep net (2006 Science paper)</td>
+</tr>
+<tr>
+<td>DBM</td>
+<td>Mean-field + greedy RBM pretraining</td>
+<td>Multiple undirected layers</td>
+<td>Approximate mean-field</td>
+<td>Moderate — hard to train</td>
+<td>Richer joint distribution, rarely used</td>
+</tr>
+<tr>
+<td>Modern EBM</td>
+<td>Persistent CD / SGLD</td>
+<td>Deep MLP energy net</td>
+<td>Langevin MCMC (slow)</td>
+<td>Competitive but below diffusion</td>
+<td>OOD detection, density estimation</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>RBM conditionals p(h|v) and p(v|h) are fully factorised — all units are independent given the other layer.</li>
+<li>CD-1 is sufficient for RBMs; CD-k (k&gt;1) helps for larger models where the chain needs more steps to mix.</li>
+<li>Fantasy particles should visually resemble data after training — use them as the primary qualitative diagnostic.</li>
+<li>DBN greedy pretraining improved deep network accuracy by 1-2% on MNIST in the pre-ReLU era.</li>
+<li>The connection: RBM score function = -∇_v E(v) = b + Wσ(W^T v + c), directly analogous to denoising score matching targets.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

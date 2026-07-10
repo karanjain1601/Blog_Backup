@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bias-Variance Tradeoff | Notes Backup</title>
+  <meta name="description" content="Derive the bias-variance decomposition of expected test error, visualise the U-shaped error curve, demonstrate double descent in overparameterised models, and show how bagging and boosting each address one side of the tradeoff." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Bias-Variance Tradeoff</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Derive the bias-variance decomposition of expected test error, visualise the U-shaped error curve, demonstrate double descent in overparameterised models, and show how bagging and boosting each address one side of the tradeoff.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Bias-Variance Tradeoff</h1>
+<p>Every supervised learning model makes an error that can be decomposed into three orthogonal components: bias (systematic error from model assumptions), variance (sensitivity to the specific training set drawn), and irreducible noise (inherent randomness in the data-generating process). Understanding this decomposition explains why simple models underfit, complex models overfit, and how regularisation, ensembles, and larger datasets help — each targeting a different component.</p>
+<h2>Deriving the Bias-Variance Decomposition</h2>
+<p>Let f(x) be the true function, ŷ(x) the model prediction (a random variable over training sets), and ε ~ N(0,σ²) irreducible noise. The expected squared error at a point x decomposes as: E[(y − ŷ)²] = E[(f(x) + ε − ŷ)²]. Add and subtract E[ŷ]: = E[(f(x) − E[ŷ])²] + E[(E[ŷ] − ŷ)²] + σ² = Bias²(ŷ) + Var(ŷ) + σ². The cross terms vanish because ε is independent of ŷ and E[ε]=0.</p>
+<p>Bias = E[ŷ] − f(x) is the average difference between model predictions and the true function — it is zero for a model flexible enough to represent f exactly. Variance = E[(ŷ − E[ŷ])²] measures how much the model fluctuates across different training sets of the same size. A high-capacity model (deep tree, high-degree polynomial) fits each training set closely: low bias, high variance. A simple model (constant, linear with few features): high bias, low variance.</p>
+<h2>Simulating the Decomposition via Bootstrap</h2>
+<p>To empirically estimate bias and variance, repeatedly draw B training sets from the same distribution, train the model on each, and evaluate on a fixed test set. The average prediction over B models estimates E[ŷ]; the variance of predictions estimates Var(ŷ); the squared gap between the average prediction and the true function estimates Bias². This is computationally intensive but gives exact empirical estimates for any model class.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.tree import DecisionTreeRegressor
+
+def bias_variance_decomp(max_depth, n_bootstraps=200, n_train=60,
+                          n_test=400, noise=0.5, seed=0):
+    rng = np.random.RandomState(seed)
+    X_test = np.linspace(-3, 3, n_test).reshape(-1, 1)
+    f_true = np.sin(X_test).ravel()
+    preds = np.zeros((n_bootstraps, n_test))
+    for b in range(n_bootstraps):
+        X_tr = rng.uniform(-3, 3, n_train).reshape(-1, 1)
+        y_tr = np.sin(X_tr).ravel() + rng.randn(n_train) * noise
+        model = DecisionTreeRegressor(max_depth=max_depth)
+        model.fit(X_tr, y_tr)
+        preds[b] = model.predict(X_test)
+    mean_pred = preds.mean(axis=0)
+    bias_sq  = np.mean((mean_pred - f_true) ** 2)
+    variance  = np.mean(preds.var(axis=0))
+    noise_sq  = noise ** 2
+    return bias_sq, variance, noise_sq
+
+print(f'{&quot;Depth&quot;:&gt;6} {&quot;Bias^2&quot;:&gt;8} {&quot;Var&quot;:&gt;8} {&quot;Noise&quot;:&gt;8} {&quot;Total&quot;:&gt;8}')
+for depth in [1, 2, 4, 8, 16]:
+    b2, v, n = bias_variance_decomp(depth)
+    print(f'{depth:&gt;6} {b2:&gt;8.4f} {v:&gt;8.4f} {n:&gt;8.4f} {b2+v+n:&gt;8.4f}')
+</code></pre>
+<h2>Test Error Curve vs Model Complexity</h2>
+<p>As model complexity increases (e.g., polynomial degree, tree depth, network width), training error monotonically decreases while test error follows a U-shape: high (underfitting) for simple models, minimum at optimal complexity, rising again (overfitting) for complex models. The gap between training and test error is approximately 2 × Variance / n for many model classes. Cross-validation estimates the test error curve without requiring a holdout set.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import cross_val_score
+
+np.random.seed(0)
+X = np.random.uniform(-3, 3, 120).reshape(-1, 1)
+y = np.sin(X).ravel() + 0.4 * np.random.randn(120)
+
+degrees = range(1, 16)
+train_errs, cv_errs = [], []
+for d in degrees:
+    pipe = Pipeline([
+        ('poly', PolynomialFeatures(degree=d, include_bias=False)),
+        ('lr',   LinearRegression())
+    ])
+    cv_scores = cross_val_score(
+        pipe, X, y, cv=5, scoring='neg_mean_squared_error'
+    )
+    pipe.fit(X, y)
+    train_errs.append(np.mean((y - pipe.predict(X))**2))
+    cv_errs.append(-cv_scores.mean())
+
+best_d = list(degrees)[np.argmin(cv_errs)]
+print(f'{&quot;Deg&quot;:&gt;4} {&quot;Train MSE&quot;:&gt;10} {&quot;CV MSE&quot;:&gt;10}')
+for d, tr, cv in zip(degrees, train_errs, cv_errs):
+    marker = ' &lt;-- best' if d == best_d else ''
+    print(f'{d:&gt;4} {tr:&gt;10.4f} {cv:&gt;10.4f}{marker}')
+</code></pre>
+<h2>Double Descent Phenomenon</h2>
+<p>Classical statistical learning theory predicts a U-shaped bias-variance tradeoff. But modern overparameterised models (deep networks, random features, kernel machines) exhibit double descent: test error rises near the interpolation threshold (where model capacity ≈ n) and then decreases again as capacity continues to grow. The minimum-norm interpolating solution in the overparameterised regime implicitly regularises, achieving low variance despite zero training error.</p>
+<blockquote>
+<p><strong>Why Double Descent Happens</strong>: Near the interpolation threshold the model barely fits the data — small perturbations cause large coefficient swings (high variance). Beyond the threshold there are many solutions that fit perfectly; gradient descent or pseudoinverse selects the minimum-norm one, which is smooth and generalises well. This breaks the classical U-curve and challenges the bias-variance framing for modern models.</p>
+</blockquote>
+<pre><code class="language-python">import numpy as np
+
+np.random.seed(42)
+n_train = 50
+rng = np.random.RandomState(42)
+X_full = rng.randn(n_train, 300)
+y_train = rng.randn(n_train)          # pure noise — no true signal
+X_test  = rng.randn(500, 300)
+y_test  = rng.randn(500)
+
+p_values = list(range(5, 300, 5))
+test_mse = []
+for p in p_values:
+    Xtr = X_full[:, :p]
+    Xte = X_test[:, :p]
+    # Minimum-norm (pseudoinverse) solution
+    coef, _, _, _ = np.linalg.lstsq(Xtr, y_train, rcond=None)
+    pred = Xte @ coef
+    test_mse.append(np.mean((y_test - pred)**2))
+
+peak_p = p_values[int(np.argmax(test_mse))]
+print(f'Interpolation threshold n = {n_train}')
+print(f'Peak test MSE at p = {peak_p}: {max(test_mse):.2f}')
+print(f'Test MSE at p=5:   {test_mse[0]:.4f}')
+print(f'Test MSE at p=295: {test_mse[-1]:.4f}')
+print('MSE rises near n=p, then falls again as p &gt;&gt; n (double descent).')
+</code></pre>
+<h2>Regularisation and Ensembles</h2>
+<p>Regularisation (L1, L2, dropout, early stopping) adds bias to reduce variance — trading a slightly wrong answer for a much more stable one. Bagging (Bootstrap AGGregating) averages predictions over B models trained on bootstrap samples, reducing variance by ~1/B without increasing bias. Boosting fits models sequentially on residuals, reducing bias at the cost of some variance. Random forests combine bagging with feature randomisation for additional variance reduction.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.tree import DecisionTreeRegressor
+
+rng = np.random.RandomState(0)
+n_train, n_test = 60, 300
+n_bags, n_bootstraps = 50, 100
+X_test = np.linspace(-3, 3, n_test).reshape(-1, 1)
+f_true = np.sin(X_test).ravel()
+noise = 0.5
+
+single_preds = np.zeros((n_bootstraps, n_test))
+bag_preds    = np.zeros((n_bootstraps, n_test))
+
+for b in range(n_bootstraps):
+    X_tr = rng.uniform(-3, 3, n_train).reshape(-1, 1)
+    y_tr = np.sin(X_tr).ravel() + rng.randn(n_train) * noise
+    single_preds[b] = DecisionTreeRegressor().fit(X_tr, y_tr).predict(X_test)
+    bag_pred = np.zeros(n_test)
+    for _ in range(n_bags):
+        idx = rng.randint(0, n_train, n_train)
+        bag_pred += DecisionTreeRegressor().fit(X_tr[idx], y_tr[idx]).predict(X_test)
+    bag_preds[b] = bag_pred / n_bags
+
+for name, preds in [('Single tree', single_preds), ('Bagging', bag_preds)]:
+    v = np.mean(preds.var(axis=0))
+    b2 = np.mean((preds.mean(axis=0) - f_true)**2)
+    print(f'{name:&gt;12}: Bias^2={b2:.4f}  Var={v:.4f}  Total≈{b2+v+noise**2:.4f}')
+</code></pre>
+<h2>Model Class Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Bias</th>
+<th>Variance</th>
+<th>Typical Fix</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Logistic regression (linear boundary)</td>
+<td>High if true boundary is nonlinear</td>
+<td>Low — few parameters</td>
+<td>Add polynomial features or switch model</td>
+</tr>
+<tr>
+<td>Shallow decision tree (depth 1–2)</td>
+<td>High — can only split once</td>
+<td>Low</td>
+<td>Increase depth or use boosting</td>
+</tr>
+<tr>
+<td>Deep decision tree (unpruned)</td>
+<td>Low — fits complex shapes</td>
+<td>High — sensitive to data</td>
+<td>Prune, limit depth, or use bagging</td>
+</tr>
+<tr>
+<td>Random forest</td>
+<td>Low-moderate</td>
+<td>Low — bagging reduces variance</td>
+<td>Tune n_estimators and max_features</td>
+</tr>
+<tr>
+<td>Deep neural network (no regularisation)</td>
+<td>Low</td>
+<td>Very high</td>
+<td>Dropout, weight decay, early stopping</td>
+</tr>
+<tr>
+<td>Kernel SVM (RBF, small γ)</td>
+<td>High — smooth decision boundary</td>
+<td>Low</td>
+<td>Increase γ or use polynomial kernel</td>
+</tr>
+</tbody>
+</table>
+<h2>Practical Implications</h2>
+<p>To diagnose whether your model has a bias or variance problem: plot learning curves (training and validation error vs n). High bias: both curves plateau high and close together — collect more features or use a more complex model. High variance: large gap between training and validation curves — collect more data, regularise, or reduce model complexity. Reducing dataset noise (better labels, feature engineering) directly reduces the irreducible error floor.</p>
+<ul>
+<li>High bias signal: training error ≈ validation error, both unacceptably high.</li>
+<li>High variance signal: training error ≪ validation error (large gap).</li>
+<li>Bagging reduces variance without changing bias — good for high-variance models like deep trees.</li>
+<li>Boosting reduces bias by sequentially correcting errors — good for high-bias weak learners.</li>
+<li>Regularisation (L1/L2, dropout) shifts the bias-variance balance toward more bias, less variance.</li>
+<li>More training data helps high-variance models most; it does not help high-bias models significantly.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

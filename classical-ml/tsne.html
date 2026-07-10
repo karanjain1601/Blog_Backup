@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>t-SNE — Perplexity, Crowding Problem, and Pitfalls | Notes Backup</title>
+  <meta name="description" content="How t-SNE converts pairwise similarities to probabilities, why the Student-t distribution solves the crowding problem, the KL divergence objective, Barnes-Hut approximation, and the five most common pitfalls when interpreting t-SNE plots." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>t-SNE — Perplexity, Crowding Problem, and Pitfalls</h1>
+      <ul class='note-meta'><li><strong>description:</strong> How t-SNE converts pairwise similarities to probabilities, why the Student-t distribution solves the crowding problem, the KL divergence objective, Barnes-Hut approximation, and the five most common pitfalls when interpreting t-SNE plots.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>t-SNE — Perplexity, Crowding Problem, and Pitfalls</h1>
+<p>t-SNE (t-distributed Stochastic Neighbor Embedding) is a nonlinear dimensionality reduction technique designed to preserve local structure: nearby points in the high-dimensional space should remain nearby in the 2D or 3D embedding. It is the dominant technique for visualising high-dimensional data, but comes with severe pitfalls that make naive interpretation dangerous.</p>
+<h2>High-Dimensional Similarities</h2>
+<p>For each pair of points i,j, t-SNE computes a conditional Gaussian similarity: pⱼ|ᵢ = exp(-‖xᵢ-xⱼ‖²/2σᵢ²) / Σₖ≠ᵢ exp(-‖xᵢ-xₖ‖²/2σᵢ²). The bandwidth σᵢ is tuned per point so that the perplexity Perp(Pᵢ) = 2^H(Pᵢ) matches the user-specified perplexity hyperparameter. The symmetrised joint probability is pᵢⱼ = (pⱼ|ᵢ + pᵢ|ⱼ)/(2n).</p>
+<h2>Low-Dimensional Similarities and the Crowding Problem</h2>
+<p>The crowding problem: in high-dimensional space, many points can be roughly equidistant from a centre point (the sphere surface grows as rᵈ). When compressed to 2D, a Gaussian kernel would assign near-zero probability to all but a few neighbours — crushing many natural neighbours together in a tiny region. t-SNE fixes this by using a Student-t distribution with 1 degree of freedom (Cauchy) for low-dimensional similarities: qᵢⱼ = (1 + ‖yᵢ-yⱼ‖²)⁻¹ / Σₖ≠ₗ(1 + ‖yₖ-yₗ‖²)⁻¹. The heavy tails allocate much more probability mass to moderate distances.</p>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+
+# Illustrate why Student-t solves the crowding problem
+rng = np.random.default_rng(42)
+d_high = 100  # intrinsic dimensionality of high-dim sphere
+
+# Simulate distances from a centre point to neighbours on a sphere
+distances = np.sqrt(rng.chisquare(d_high, size=2000) / d_high)
+
+# Gaussian low-dim similarity (vanilla SNE)
+sigma = 0.3
+q_gauss = np.exp(-distances**2 / (2 * sigma**2))
+q_gauss /= q_gauss.sum()
+
+# Student-t similarity (t-SNE)
+q_t = 1.0 / (1.0 + distances**2)
+q_t /= q_t.sum()
+
+fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+axes[0].hist(q_gauss * 1000, bins=80, alpha=0.7, color='steelblue')
+axes[0].set_title('Gaussian q — crowded near zero')
+axes[0].set_xlabel('Scaled similarity')
+
+axes[1].hist(q_t * 1000, bins=80, alpha=0.7, color='coral')
+axes[1].set_title('Student-t q — better spread')
+axes[1].set_xlabel('Scaled similarity')
+
+eff_gauss = (q_gauss &gt; 0.001 / len(distances)).sum()
+eff_t = (q_t &gt; 0.001 / len(distances)).sum()
+print(f'Effective neighbours (Gaussian): {eff_gauss}')
+print(f'Effective neighbours (Student-t): {eff_t}')
+</code></pre>
+<h2>KL Divergence Objective</h2>
+<p>t-SNE minimises the Kullback-Leibler divergence between the high-dim joint distribution P and the low-dim distribution Q: Cost = KL(P‖Q) = Σᵢⱼ pᵢⱼ log(pᵢⱼ/qᵢⱼ). Because KL is asymmetric, placing well-separated high-dim neighbours (large pᵢⱼ) far in the low-dim space (small qᵢⱼ) incurs a large penalty. But placing non-neighbours (small pᵢⱼ) together incurs little cost — hence t-SNE can create spurious cluster structure.</p>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.datasets import fetch_openml
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+from sklearn.preprocessing import StandardScaler
+
+# MNIST subset — pre-reduce with PCA first (recommended)
+mnist = fetch_openml('mnist_784', version=1, as_frame=False)
+X = mnist.data[:3000].astype(float)
+y = mnist.target[:3000].astype(int)
+X = StandardScaler().fit_transform(X)
+X_pca = PCA(n_components=50, random_state=42).fit_transform(X)
+
+perplexities = [5, 30, 50, 100]
+fig, axes = plt.subplots(1, 4, figsize=(20, 5))
+
+for ax, perp in zip(axes, perplexities):
+    tsne = TSNE(n_components=2, perplexity=perp, random_state=42,
+                n_iter=500, method='barnes_hut')
+    X_tsne = tsne.fit_transform(X_pca)
+    sc = ax.scatter(X_tsne[:, 0], X_tsne[:, 1], c=y, cmap='tab10', s=5, alpha=0.7)
+    ax.set_title(f'Perplexity = {perp}')
+    ax.axis('off')
+
+plt.suptitle('t-SNE on MNIST — Effect of Perplexity', fontsize=13)
+plt.colorbar(sc, ax=axes, label='Digit')
+plt.tight_layout()
+plt.show()
+</code></pre>
+<blockquote>
+<p><strong>t-SNE Pitfalls</strong>: Cluster sizes in t-SNE plots are meaningless — a large cluster does not mean more points. Inter-cluster distances are also meaningless — clusters far apart in 2D may be neighbours in high-dim space. t-SNE is stochastic; run it multiple times and compare. Perplexity dramatically changes apparent structure. Never draw quantitative conclusions from t-SNE alone.</p>
+</blockquote>
+<h2>Barnes-Hut Approximation</h2>
+<p>Naïve t-SNE gradient computation costs O(n²) per iteration — intractable for n &gt; 5,000. Barnes-Hut t-SNE uses a quad-tree (2D) or octree (3D) to approximate repulsive forces in O(n log n): cells far from a point contribute a single summarised force. This reduces wall time from hours to minutes for n ~ 10,000–100,000.</p>
+<pre><code class="language-python">import numpy as np
+import time
+from sklearn.datasets import fetch_openml
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from sklearn.manifold import TSNE
+
+mnist = fetch_openml('mnist_784', version=1, as_frame=False)
+X = mnist.data[:5000].astype(float)
+y = mnist.target[:5000]
+X = StandardScaler().fit_transform(X)
+X_pca = PCA(n_components=50, random_state=42).fit_transform(X)
+
+# sklearn TSNE with Barnes-Hut
+t0 = time.time()
+X_tsne_sk = TSNE(n_components=2, perplexity=30, random_state=42,
+                  method='barnes_hut', n_iter=500).fit_transform(X_pca)
+sk_time = time.time() - t0
+print(f'sklearn TSNE (Barnes-Hut): {sk_time:.1f}s')
+
+# openTSNE — faster, supports out-of-sample extension
+try:
+    from openTSNE import TSNE as openTSNE
+    t0 = time.time()
+    tsne_open = openTSNE(perplexity=30, random_state=42, n_jobs=-1, n_iter=500)
+    X_tsne_open = tsne_open.fit(X_pca)
+    open_time = time.time() - t0
+    print(f'openTSNE: {open_time:.1f}s  (speedup: {sk_time / open_time:.1f}x)')
+    # Out-of-sample: embed new points without refitting
+    X_new_embedded = tsne_open.transform(X_pca[:50])
+    print(f'New points embedded shape: {X_new_embedded.shape}')
+except ImportError:
+    print('pip install opentsne for faster t-SNE')
+</code></pre>
+<h2>Demonstrating Pitfalls with Synthetic Data</h2>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.manifold import TSNE
+
+rng = np.random.default_rng(42)
+
+# Three clusters: different sizes AND different densities
+small_tight = rng.normal([0, 0], 0.5, (20, 10))
+large_spread = rng.normal([8, 0], 3.0, (200, 10))
+small_far = rng.normal([20, 0], 0.5, (20, 10))
+
+X = np.vstack([small_tight, large_spread, small_far])
+labels = np.array([0]*20 + [1]*200 + [2]*20)
+
+# PCA — shows true relative positions
+from sklearn.decomposition import PCA
+X_pca = PCA(n_components=2).fit_transform(X)
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+axes[0].scatter(X_pca[:, 0], X_pca[:, 1], c=labels, cmap='Set1', s=20)
+axes[0].set_title('PCA — true: different sizes &amp; distances')
+
+# t-SNE — distorts both cluster size and inter-cluster distance
+X_tsne = TSNE(n_components=2, perplexity=30, random_state=42, n_iter=1000).fit_transform(X)
+axes[1].scatter(X_tsne[:, 0], X_tsne[:, 1], c=labels, cmap='Set1', s=20)
+axes[1].set_title('t-SNE — sizes and distances ARE MEANINGLESS')
+plt.suptitle('t-SNE Pitfall: Cluster Size and Distance Not Preserved')
+plt.tight_layout()
+plt.show()
+</code></pre>
+<h2>Pitfall Reference Table</h2>
+<table>
+<thead>
+<tr>
+<th>Myth</th>
+<th>Reality</th>
+<th>Why</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Cluster size indicates number of points</td>
+<td>False — size is arbitrary</td>
+<td>KL asymmetry allows compact or expanded clusters</td>
+</tr>
+<tr>
+<td>Distance between clusters is meaningful</td>
+<td>False — only local structure preserved</td>
+<td>Repulsive forces push all clusters apart similarly</td>
+</tr>
+<tr>
+<td>A single t-SNE plot is enough</td>
+<td>False — always try multiple seeds</td>
+<td>Objective has many local minima</td>
+</tr>
+<tr>
+<td>Perplexity does not matter much</td>
+<td>False — it controls neighbourhood radius</td>
+<td>Low perplexity → fragmented; high → merged clusters</td>
+</tr>
+<tr>
+<td>Isolated points are genuine outliers</td>
+<td>False — may be misplaced by crowding</td>
+<td>Points with few neighbours are pushed far away</td>
+</tr>
+</tbody>
+</table>
+<h2>Practical Recommendations</h2>
+<ul>
+<li>Pre-reduce with PCA to 50 dimensions before running t-SNE — reduces noise and speeds computation</li>
+<li>Use perplexity in the range 5–50 for most datasets; try several values and compare</li>
+<li>Run for at least 1000 iterations; watch the KL divergence until it plateaus</li>
+<li>Use openTSNE or RAPIDS cuML for large datasets (n &gt; 50,000)</li>
+<li>Combine t-SNE with cluster labels from k-means or HDBSCAN for quantitative validation</li>
+<li>Never use t-SNE as input features for downstream models — use PCA or UMAP instead</li>
+</ul>
+<blockquote>
+<p><strong>Running t-SNE Reliably</strong>: Always pre-reduce to 50 PCA dimensions before t-SNE — it removes noise and can reduce wall time 10×. Use at least 1000 iterations (n_iter=1000) and wait for the KL divergence to plateau. Run 3–5 times with different random seeds; if the high-level cluster topology changes dramatically between runs, your sample size may be too small for stable results.</p>
+</blockquote>
+<hr />
+<p>t-SNE excels at producing visually compelling low-dimensional layouts that reveal cluster structure. Used correctly — with awareness of its pitfalls, multiple runs, and complementary quantitative analysis — it is invaluable for data exploration. For preserving global structure or embedding new points, UMAP is generally the better choice.</p>
+    </article>
+  </main>
+</body>
+</html>

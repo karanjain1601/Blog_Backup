@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DenseNet — Dense Connections and Feature Reuse | Notes Backup</title>
+  <meta name="description" content="DenseNet (Huang et al., 2017) connects every layer to every subsequent layer within a dense block, maximising gradient flow and feature reuse. Growth rate k controls new feature maps per layer; bottleneck + compression (DenseNet-BC) reduces parameters; gradient checkpointing addresses O(n²) memory." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>DenseNet — Dense Connections and Feature Reuse</h1>
+      <ul class='note-meta'><li><strong>description:</strong> DenseNet (Huang et al., 2017) connects every layer to every subsequent layer within a dense block, maximising gradient flow and feature reuse. Growth rate k controls new feature maps per layer; bottleneck + compression (DenseNet-BC) reduces parameters; gradient checkpointing addresses O(n²) memory.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>DenseNet — Dense Connections and Feature Reuse</h1>
+<p>DenseNet (Huang et al., 2017) takes the connectivity pattern of ResNet to its logical extreme: instead of connecting each layer to only the next layer (plain net) or adding a skip connection from the layer two levels back (ResNet), every layer receives feature maps from all preceding layers within a dense block. Layer l receives concatenated feature maps [x₀, x₁, ..., x_{l-1}] as input and produces k new feature maps (the growth rate). This dense connectivity maximises gradient flow, promotes feature reuse, and achieves state-of-the-art accuracy with significantly fewer parameters than ResNet — all at the cost of higher memory usage during training.</p>
+<h2>Dense Connectivity: Every Layer to Every Layer</h2>
+<p>In a dense block with L layers and growth rate k, layer l has k₀ + k×(l−1) input channels (k₀ = initial channels entering the block). The total number of connections within a block is L(L+1)/2 — quadratic in depth. For L=6, k=32, k₀=64: layer 1 has 64 inputs, layer 2 has 96, ..., layer 6 has 224 inputs. Unlike ResNet's y = F(x) + x (addition), DenseNet uses y = H([x₀, x₁, ..., x_{l-1}]) (concatenation). Concatenation preserves all prior features explicitly — early edge detectors remain directly available to deep layers — while ResNet's addition mixes them irreversibly.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class DenseLayer(nn.Module):
+    '''Single DenseNet layer: BN-ReLU-Conv1x1(bottleneck)-BN-ReLU-Conv3x3.'''
+    def __init__(self, in_ch, growth_rate=32, bottleneck=True):
+        super().__init__()
+        mid_ch = 4 * growth_rate if bottleneck else in_ch
+        layers = []
+        if bottleneck:
+            layers += [nn.BatchNorm2d(in_ch), nn.ReLU(inplace=True),
+                       nn.Conv2d(in_ch, mid_ch, 1, bias=False)]
+        layers += [nn.BatchNorm2d(mid_ch), nn.ReLU(inplace=True),
+                   nn.Conv2d(mid_ch, growth_rate, 3, padding=1, bias=False)]
+        self.layer = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return torch.cat([x, self.layer(x)], dim=1)  # concatenate, not add
+
+class DenseBlock(nn.Module):
+    '''Dense block: each layer receives all preceding feature maps.'''
+    def __init__(self, in_ch, n_layers, growth_rate=32):
+        super().__init__()
+        layers, ch = [], in_ch
+        for _ in range(n_layers):
+            layers.append(DenseLayer(ch, growth_rate))
+            ch += growth_rate
+        self.layers = nn.Sequential(*layers)
+        self.out_channels = ch
+
+    def forward(self, x): return self.layers(x)
+
+block = DenseBlock(in_ch=64, n_layers=6, growth_rate=32)
+x = torch.randn(2, 64, 56, 56)
+out = block(x)
+params = sum(p.numel() for p in block.parameters()) / 1e3
+print('DenseBlock input: {} -&gt; output: {}'.format(x.shape, out.shape))
+print('Output channels: 64 + 6*32 = {} (concat, not add)'.format(64 + 6*32))
+print('Parameters: {:.1f}K'.format(params))
+</code></pre>
+<h2>Growth Rate and Feature Reuse</h2>
+<p>The growth rate k is a key hyperparameter: it controls how many new feature maps each layer contributes to the collective knowledge. A small k (e.g., k=12 or k=32) is sufficient because each layer adds to all accumulated features rather than overwriting them. DenseNet-121 uses k=32 and achieves comparable accuracy to ResNet-50 with 8M vs 25M parameters. Huang et al. analysed filter activations and found that all layers within a dense block actively use features from all preceding layers — including the very first layer's edge detectors — confirming genuine feature reuse rather than redundant recomputation.</p>
+<h2>Bottleneck and Compression: DenseNet-BC</h2>
+<p>DenseNet-B (Bottleneck): each layer uses a 1×1 conv before the 3×3 to reduce the growing input channels to 4k, preventing the parameter count from growing quadratically with depth. DenseNet-C (Compression): between dense blocks, a transition layer reduces channels by a factor θ (typically 0.5) before downsampling. DenseNet-BC combines both: DenseNet-BC-L-k denotes a network with L layers per block, growth rate k, bottlenecks, and θ=0.5 compression. DenseNet-BC-190-40 achieves 3.46% error on CIFAR-10 — state-of-the-art at the time — with 25M parameters.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class TransitionLayer(nn.Module):
+    '''DenseNet transition: 1x1 conv compression + 2x2 avg pool downsampling.
+    theta &lt; 1 compresses channels to reduce parameter growth between blocks.
+    '''
+    def __init__(self, in_ch, theta=0.5):
+        super().__init__()
+        out_ch = int(in_ch * theta)
+        self.transition = nn.Sequential(
+            nn.BatchNorm2d(in_ch), nn.ReLU(inplace=True),
+            nn.Conv2d(in_ch, out_ch, 1, bias=False),
+            nn.AvgPool2d(2, stride=2))
+        self.out_channels = out_ch
+
+    def forward(self, x): return self.transition(x)
+
+# Simulate DenseNet-121 after first dense block: 64 + 6*32 = 256 channels
+in_channels = 256
+transition = TransitionLayer(in_channels, theta=0.5)
+x = torch.randn(2, in_channels, 56, 56)
+out = transition(x)
+print('Transition input:  {}'.format(x.shape))
+print('Transition output: {}'.format(out.shape))
+print('Channels: {} -&gt; {}  (theta=0.5)'.format(in_channels, transition.out_channels))
+print('Spatial:  56x56 -&gt; 28x28  (2x2 avg pool)')
+params = sum(p.numel() for p in transition.parameters()) / 1e3
+print('Parameters: {:.1f}K'.format(params))
+</code></pre>
+<blockquote>
+<p><strong>Memory Cost is O(n²) Without Optimisation</strong>: A naive DenseNet implementation allocates separate tensors for all L(L+1)/2 intermediate feature maps and keeps them in GPU memory for the backward pass. For DenseNet-264 with L=64 layers per block, this is 64×65/2 = 2,080 tensor allocations per block. The PyTorch DenseNet implementation uses a shared memory allocation trick: all input concatenations reference the same pre-allocated memory buffer, reducing peak memory from O(n²) to near O(n). Gradient checkpointing (torch.utils.checkpoint) provides an alternative: recompute activations during the backward pass rather than storing them.</p>
+</blockquote>
+<h2>Memory-Efficient Implementation</h2>
+<p>Gradient checkpointing trades compute for memory: instead of storing intermediate activations for the backward pass, they are recomputed on the fly during backpropagation. For DenseNet, where each layer's input is the concatenation of all prior outputs, checkpointing the concatenation operation is especially effective. torch.utils.checkpoint.checkpoint wraps a function and discards its intermediate activations, recomputing them during the backward pass. This typically doubles training time (since activations are computed twice) but reduces memory by up to 10× for deep DenseNets.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from torch.utils.checkpoint import checkpoint
+
+class CheckpointedDenseLayer(nn.Module):
+    '''DenseNet layer using gradient checkpointing to trade memory for compute.'''
+    def __init__(self, in_ch, growth_rate=32):
+        super().__init__()
+        mid_ch = 4 * growth_rate
+        self.bn1   = nn.BatchNorm2d(in_ch)
+        self.conv1 = nn.Conv2d(in_ch, mid_ch, 1, bias=False)
+        self.bn2   = nn.BatchNorm2d(mid_ch)
+        self.conv2 = nn.Conv2d(mid_ch, growth_rate, 3, padding=1, bias=False)
+        self.relu  = nn.ReLU(inplace=True)
+
+    def _forward(self, x):
+        out = self.conv1(self.relu(self.bn1(x)))
+        return self.conv2(self.relu(self.bn2(out)))
+
+    def forward(self, x):
+        new_feat = checkpoint(self._forward, x, use_reentrant=False)
+        return torch.cat([x, new_feat], dim=1)
+
+class MemEfficientDenseBlock(nn.Module):
+    def __init__(self, in_ch, n_layers, growth_rate=32):
+        super().__init__()
+        self.layers = nn.ModuleList()
+        ch = in_ch
+        for _ in range(n_layers):
+            self.layers.append(CheckpointedDenseLayer(ch, growth_rate))
+            ch += growth_rate
+        self.out_channels = ch
+
+    def forward(self, x):
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
+block = MemEfficientDenseBlock(in_ch=64, n_layers=12, growth_rate=32)
+x = torch.randn(2, 64, 28, 28)
+out = block(x)
+print('Checkpointed DenseBlock: {} -&gt; {}'.format(x.shape, out.shape))
+print('Output channels: 64 + 12*32 = {}'.format(64 + 12*32))
+</code></pre>
+<h2>Feature Reuse Visualisation</h2>
+<p>Huang et al. visualised which source features each layer actually uses by analysing the absolute weight magnitudes in the 1×1 bottleneck convolutions. If layer l allocates high weight to features from layer j, it genuinely reuses them. The analysis revealed that all source layers contribute non-trivially — including the very first layer's low-level features at deep layers. This is in contrast to ResNets where early features are effectively forgotten (overwritten by addition) as the network deepens. DenseNet's feature reuse pattern is like a committee: every member (layer) always has access to all prior evidence.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+class AnalysisDenseLayer(nn.Module):
+    def __init__(self, in_ch, growth_rate=32):
+        super().__init__()
+        mid_ch = 4 * growth_rate
+        self.bn1   = nn.BatchNorm2d(in_ch)
+        self.conv1 = nn.Conv2d(in_ch, mid_ch, 1, bias=False)  # weights to analyse
+        self.bn2   = nn.BatchNorm2d(mid_ch)
+        self.conv2 = nn.Conv2d(mid_ch, growth_rate, 3, padding=1, bias=False)
+        self.relu  = nn.ReLU(inplace=True)
+    def forward(self, x):
+        out = self.conv1(self.relu(self.bn1(x)))
+        return torch.cat([x, self.conv2(self.relu(self.bn2(out)))], dim=1)
+
+n_layers, k, in_ch = 6, 32, 64
+layers = [AnalysisDenseLayer(in_ch + i*k, k) for i in range(n_layers)]
+# Compute mean absolute weight per source feature block in conv1
+print('Feature reuse matrix (rows=layer, cols=source contribution):')
+print('{:&lt;10} '.format('Layer') + '  '.join('src{}'.format(i) for i in range(n_layers+1)))
+for l_idx, layer in enumerate(layers):
+    w = layer.conv1.weight.data.abs()   # shape: (4k, in_ch + l_idx*k, 1, 1)
+    ch_ptr, contribs = 0, []
+    for src in range(l_idx + 1):
+        src_ch = in_ch if src == 0 else k
+        contribs.append(w[:, ch_ptr:ch_ptr+src_ch].mean().item())
+        ch_ptr += src_ch
+    row = '  '.join('{:.3f}'.format(c) for c in contribs)
+    print('Layer {:&gt;2}:  {}'.format(l_idx+1, row))
+</code></pre>
+<h2>Why Dense Connections Work</h2>
+<p>Dense connectivity provides several orthogonal benefits: (1) implicit deep supervision — every layer receives gradient from the loss through multiple paths of varying lengths, similar to auxiliary classifiers but without extra parameters; (2) feature reuse — earlier layers' filters remain accessible throughout, so the network does not need to relearn low-level features; (3) regularisation — the shared feature map pool acts as a form of dropout in feature space, forcing layers to be complementary rather than redundant; (4) parameter efficiency — k new features per layer suffices because each layer builds on all accumulated context rather than starting from scratch. DenseNet achieves ResNet-level accuracy with 3× fewer parameters on ImageNet.</p>
+<ul>
+<li>Implicit deep supervision: gradients reach early layers through O(L) direct paths rather than the single chained path in plain networks.</li>
+<li>Feature reuse: edge detectors learned in layer 1 are directly available to layer L without being diluted by repeated addition.</li>
+<li>Complementary filters: each layer adds exactly k new feature maps, incentivising it to learn features distinct from all prior layers.</li>
+<li>Collective knowledge: the concatenated feature map is a shared, ever-growing representation — analogous to an ensemble's prediction pool.</li>
+<li>Connection to FPN: dense blocks are a form of all-to-all feature pyramid, whereas FPN builds a top-down pyramid of fixed resolution levels.</li>
+</ul>
+<h2>DenseNet vs ResNet vs PlainNet</h2>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>PlainNet</th>
+<th>ResNet</th>
+<th>DenseNet</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Connection type</td>
+<td>Sequential, layer to next</td>
+<td>Skip: add x to F(x)</td>
+<td>Dense: concat all prior to each</td>
+</tr>
+<tr>
+<td>Feature reuse</td>
+<td>None — overwritten each layer</td>
+<td>Partial — addition mixes features</td>
+<td>Full — all prior features always available</td>
+</tr>
+<tr>
+<td>Gradient paths</td>
+<td>1 path per layer</td>
+<td>2 paths per block (main + skip)</td>
+<td>O(L) paths per layer</td>
+</tr>
+<tr>
+<td>Parameters</td>
+<td>High (redundant relearning)</td>
+<td>Medium</td>
+<td>Low (k per layer suffices)</td>
+</tr>
+<tr>
+<td>Memory (training)</td>
+<td>O(L)</td>
+<td>O(L)</td>
+<td>O(L²) naive; O(L) with shared alloc</td>
+</tr>
+<tr>
+<td>Depth scalability</td>
+<td>Poor (vanishing gradients)</td>
+<td>Excellent (1000+ layers)</td>
+<td>Good (hundreds of layers practical)</td>
+</tr>
+</tbody>
+</table>
+<p>DenseNet is most effective when parameter efficiency matters more than inference speed: its dense connections create many small tensors that are cache-unfriendly on GPU, making it slower at inference than ResNet at equal accuracy. For deployment-constrained scenarios, MobileNet (depthwise separable + inverted residuals) and EfficientNet (compound scaling) typically dominate. DenseNet remains the architecture of choice for medical image segmentation (as the encoder in U-Net variants) and tasks where intermediate feature reuse is critical.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

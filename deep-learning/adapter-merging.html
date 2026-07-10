@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Adapter Merging — TIES, DARE, and Model Soup for Combining Fine-Tuned Models | Notes Backup</title>
+  <meta name="description" content="Combine multiple fine-tuned models or adapters without additional training. Covers model soup weight averaging, TIES merging (trim, elect, disjoint merge), DARE random delta dropping, SLERP spherical interpolation, and LoRA merging in weight space." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Adapter Merging — TIES, DARE, and Model Soup for Combining Fine-Tuned Models</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Combine multiple fine-tuned models or adapters without additional training. Covers model soup weight averaging, TIES merging (trim, elect, disjoint merge), DARE random delta dropping, SLERP spherical interpolation, and LoRA merging in weight space.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Adapter Merging — TIES, DARE, and Model Soup for Combining Fine-Tuned Models</h1>
+<p>Model merging combines the capabilities of multiple fine-tuned models — or adapters — into a single model without any additional training. Instead of multi-task training from scratch, you start with task-specific fine-tunes and merge their weights. The resulting model inherits capabilities from all source models while requiring only a single inference deployment. Merging is especially useful with LoRA adapters: you can fine-tune dozens of specializations cheaply and merge the best subset on demand.</p>
+<h2>Why Merge Models Instead of Training Multi-Task</h2>
+<p>Multi-task training requires all task data simultaneously, careful loss balancing, and is prone to task interference — where learning one task degrades another. Merging avoids these problems: each model is trained independently to its optimum, then combined. The merged model is also easy to update: swap one task's fine-tune for a newer version and re-merge rather than re-running the entire multi-task pipeline. Weight interpolation θ_merged = Σ αᵢθᵢ is the simplest form, with Σ αᵢ = 1 ensuring the merged model stays in the same weight magnitude regime as the originals.</p>
+<h2>Model Soup — Weight Averaging</h2>
+<p>Model soup (Wortsman et al., 2022) averages the weights of models fine-tuned from the same pretrained base, typically with different hyperparameters or data augmentation seeds. The average outperforms any individual model on the held-out evaluation, because different fine-tunes explore different loss basin regions and their average lands in a flatter, higher-accuracy basin. The key constraint is that all models must be fine-tuned from the same pretrained checkpoint — averaging weights from different initializations produces incoherent results.</p>
+<pre><code class="language-python">import torch
+from collections import OrderedDict
+
+def model_soup(base_state_dict, finetuned_state_dicts, weights=None):
+    &quot;&quot;&quot;Average weights from multiple fine-tuned models (model soup).&quot;&quot;&quot;
+    n = len(finetuned_state_dicts)
+    if weights is None:
+        weights = [1.0 / n] * n
+    assert abs(sum(weights) - 1.0) &lt; 1e-6, &quot;Weights must sum to 1&quot;
+    soup = OrderedDict()
+    for key in base_state_dict:
+        soup[key] = sum(
+            w * sd[key].float() for w, sd in zip(weights, finetuned_state_dicts)
+        )
+    return soup
+
+# Demo: simulate 3 fine-tuned checkpoints from same pretrained base
+torch.manual_seed(42)
+base = {&quot;enc.w&quot;: torch.zeros(4, 4), &quot;head.w&quot;: torch.zeros(4)}
+ft_models = [
+    {&quot;enc.w&quot;: base[&quot;enc.w&quot;] + torch.randn(4, 4) * 0.1,
+     &quot;head.w&quot;: base[&quot;head.w&quot;] + torch.randn(4) * 0.1}
+    for _ in range(3)
+]
+soup_sd = model_soup(base, ft_models)
+print(f&quot;Soup weight norm (enc): {soup_sd['enc.w'].norm():.4f}&quot;)
+for i, ft in enumerate(ft_models):
+    print(f&quot;Model {i+1} weight norm: {ft['enc.w'].norm():.4f}&quot;)
+print(&quot;Soup averages across all fine-tuned checkpoints — lands in a flatter loss basin.&quot;)
+</code></pre>
+<h2>TIES Merging — Trim, Elect, Disjoint Merge</h2>
+<p>Simple weight averaging fails when models are fine-tuned on very different tasks, because opposing weight updates cancel each other out — a weight pushed positive by task A and negative by task B averages to near zero, losing both capabilities. TIES merging (Yadav et al., 2023) solves this with three steps: (1) Trim — set task vector deltas with small magnitude to zero, keeping only the top-k% by magnitude; (2) Elect — for each parameter, determine the dominant sign across all task vectors by majority vote; (3) Disjoint Merge — average only the parameters whose sign agrees with the elected sign, excluding conflicting updates.</p>
+<pre><code class="language-python">import torch
+from collections import OrderedDict
+
+def ties_merge(task_vectors, base_state_dict, top_k=0.2, scale=1.0):
+    &quot;&quot;&quot;TIES merging: Trim, Elect, Disjoint Merge over task vector deltas.&quot;&quot;&quot;
+    merged = OrderedDict()
+    for key in base_state_dict:
+        deltas = torch.stack([tv[key].float() for tv in task_vectors], dim=0)  # (n, ...)
+        # Step 1: Trim — zero out small deltas, keep top-k% by magnitude
+        threshold = deltas.abs().quantile(1.0 - top_k, dim=0, keepdim=True)
+        trimmed = torch.where(deltas.abs() &gt;= threshold, deltas, torch.zeros_like(deltas))
+        # Step 2: Elect — majority vote on sign per parameter
+        sign_sum = trimmed.sign().sum(dim=0)
+        elected_sign = torch.where(sign_sum &gt;= 0,
+                                   torch.ones_like(sign_sum),
+                                   -torch.ones_like(sign_sum))
+        # Step 3: Disjoint Merge — average only parameters that agree with elected sign
+        agree = (trimmed.sign() == elected_sign.unsqueeze(0)) | (trimmed == 0)
+        agreed = trimmed * agree.float()
+        n_agree = agree.float().sum(dim=0).clamp(min=1)
+        merged[key] = base_state_dict[key].float() + scale * agreed.sum(dim=0) / n_agree
+    return merged
+
+torch.manual_seed(0)
+base = {&quot;w&quot;: torch.zeros(6)}
+tvs = [{&quot;w&quot;: torch.tensor([0.5, -0.3, 0.2, -0.1, 0.4, 0.0])},
+       {&quot;w&quot;: torch.tensor([-0.2, 0.4, 0.3, 0.2, -0.1, 0.5])},
+       {&quot;w&quot;: torch.tensor([0.3, 0.1, -0.2, 0.4, 0.3, -0.2])}]
+result = ties_merge(tvs, base, top_k=0.5)
+print(f&quot;TIES merged: {[round(v,3) for v in result['w'].tolist()]}&quot;)
+print(&quot;Sign conflicts resolved; destructive interference eliminated.&quot;)
+</code></pre>
+<h2>DARE — Random Delta Dropping</h2>
+<p>DARE (Yu et al., 2023) addresses inter-model interference by randomly dropping task vector deltas before merging — analogous to dropout applied to weight differences rather than activations. Each delta element is dropped independently with probability p, and surviving elements are rescaled by 1/(1-p) to maintain the expected magnitude. This stochastic pruning reduces the number of conflicts between task vectors, especially for parameters where two models learned opposing updates. DARE can be combined with TIES for further improvement.</p>
+<pre><code class="language-python">import torch
+from collections import OrderedDict
+
+def dare_merge(task_vectors, base_state_dict, drop_rate=0.5, scale=1.0, seed=42):
+    &quot;&quot;&quot;DARE: randomly drop task vector deltas, rescale, apply to base model.&quot;&quot;&quot;
+    torch.manual_seed(seed)
+    merged = OrderedDict()
+    for key in base_state_dict:
+        deltas = torch.stack([tv[key].float() for tv in task_vectors], dim=0)
+        # Randomly drop each delta element with probability drop_rate
+        keep_mask = (torch.rand_like(deltas) &gt; drop_rate).float()
+        # Rescale to maintain expected magnitude
+        rescaled = deltas * keep_mask / (1.0 - drop_rate + 1e-8)
+        merged[key] = base_state_dict[key].float() + scale * rescaled.mean(dim=0)
+    return merged
+
+base = {&quot;w&quot;: torch.zeros(8)}
+tvs = [
+    {&quot;w&quot;: torch.tensor([0.4, -0.3, 0.5, -0.2, 0.1, 0.6, -0.4, 0.3])},
+    {&quot;w&quot;: torch.tensor([-0.2, 0.5, -0.3, 0.4, -0.5, 0.2, 0.3, -0.1])},
+]
+for drop in [0.0, 0.3, 0.5, 0.7]:
+    result = dare_merge(tvs, base, drop_rate=drop)
+    print(f&quot;drop_rate={drop:.1f}: merged norm={result['w'].norm():.4f}  &quot;
+          f&quot;values={[round(v,2) for v in result['w'].tolist()]}&quot;)
+print(&quot;DARE reduces interference; higher drop_rate means more regularization.&quot;)
+</code></pre>
+<h2>SLERP — Spherical Linear Interpolation</h2>
+<p>Linear interpolation between two model weight sets (LERP) travels in a straight line through parameter space, potentially passing through low-quality regions near the center. SLERP (Spherical Linear Interpolation) interpolates along the geodesic on the unit sphere: it maintains constant angular velocity and constant magnitude along the interpolation path. For two models θ₁ and θ₂ with angle ω between them, SLERP at interpolation parameter t returns sin((1-t)ω)/sin(ω) · θ₁ + sin(tω)/sin(ω) · θ₂. When ω ≈ 0 (nearly parallel), SLERP degenerates to LERP.</p>
+<pre><code class="language-python">import torch
+from collections import OrderedDict
+
+def slerp(theta1, theta2, t=0.5):
+    &quot;&quot;&quot;Spherical Linear Interpolation between two model weight sets.&quot;&quot;&quot;
+    merged = OrderedDict()
+    for key in theta1:
+        v0 = theta1[key].float().flatten()
+        v1 = theta2[key].float().flatten()
+        v0_norm = v0 / (v0.norm() + 1e-8)
+        v1_norm = v1 / (v1.norm() + 1e-8)
+        dot = torch.clamp((v0_norm * v1_norm).sum(), -1.0, 1.0)
+        omega = torch.acos(dot)
+        if omega.abs() &lt; 1e-6:
+            # Vectors nearly parallel: fall back to linear interpolation
+            merged[key] = ((1 - t) * theta1[key].float() + t * theta2[key].float())
+        else:
+            s = torch.sin(omega)
+            merged[key] = (
+                (torch.sin((1 - t) * omega) / s) * v0 +
+                (torch.sin(t * omega) / s) * v1
+            ).reshape(theta1[key].shape)
+    return merged
+
+torch.manual_seed(1)
+m1 = {&quot;enc&quot;: torch.randn(4, 4), &quot;head&quot;: torch.randn(2, 4)}
+m2 = {&quot;enc&quot;: torch.randn(4, 4), &quot;head&quot;: torch.randn(2, 4)}
+for t_val in [0.0, 0.25, 0.5, 0.75, 1.0]:
+    blended = slerp(m1, m2, t=t_val)
+    enc_norm = blended[&quot;enc&quot;].norm().item()
+    print(f&quot;t={t_val}: enc_norm={enc_norm:.4f}&quot;)
+print(&quot;SLERP traces constant-speed path on unit sphere; LERP cuts through center.&quot;)
+</code></pre>
+<h2>LoRA Merging in Weight Space vs Adapter Space</h2>
+<p>LoRA adapters can be merged at two levels. In adapter space, the LoRA matrices A and B are averaged or combined before computing the update Δ W = BA. In weight space, each adapter's full weight update Δ Wᵢ = BᵢAᵢ is computed first, then the full-rank updates are merged (e.g., via TIES or DARE). Weight-space merging is more flexible — you can apply any merging algorithm — but loses the low-rank structure. Adapter-space merging preserves low rank but is limited to methods that operate on the factored matrices. For task arithmetic and TIES/DARE, weight-space merging is standard.</p>
+<h2>Practical Guidelines and Method Comparison</h2>
+<ul>
+<li>Model soup: use when merging checkpoints from the same training run with different hyperparameters or data seeds.</li>
+<li>TIES: preferred when merging models fine-tuned on very different tasks — sign conflict resolution prevents destructive interference.</li>
+<li>DARE: add when merging many models (4+); the random dropping reduces pairwise interference without needing explicit sign resolution.</li>
+<li>SLERP: best for merging exactly two models when magnitude preservation matters (e.g., instruction-tuned + DPO-tuned versions).</li>
+<li>Task arithmetic: use when you want additive composition — each task vector contributes independently with a tunable scale λ.</li>
+<li>All methods require fine-tuning from the same pretrained base to avoid catastrophic interference from mismatched feature spaces.</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Conflict Resolution</th>
+<th>Parameter Count</th>
+<th>Quality vs Individual</th>
+<th>Compute Cost</th>
+<th>Best For</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Model Soup</td>
+<td>None (simple average)</td>
+<td>Same as one model</td>
+<td>Better (flatter basin)</td>
+<td>Trivial — one pass</td>
+<td>Same-task hyperparameter ensembling</td>
+</tr>
+<tr>
+<td>Task Arithmetic</td>
+<td>None (additive)</td>
+<td>Same as one model</td>
+<td>Comparable at low scale</td>
+<td>Trivial — vector add</td>
+<td>Additive multi-task composition</td>
+</tr>
+<tr>
+<td>TIES</td>
+<td>Sign majority vote per param</td>
+<td>Same as one model</td>
+<td>Better than soup for cross-task</td>
+<td>Low — one trimming pass</td>
+<td>Different-task merging, up to ~8 models</td>
+</tr>
+<tr>
+<td>DARE</td>
+<td>Stochastic drop + rescale</td>
+<td>Same as one model</td>
+<td>Good for many models</td>
+<td>Low — random mask</td>
+<td>Merging 4+ models, high interference</td>
+</tr>
+<tr>
+<td>SLERP</td>
+<td>None (geodesic path)</td>
+<td>Same as one model</td>
+<td>Best for 2-model blend</td>
+<td>Low — per-layer trig</td>
+<td>Two-model interpolation, magnitude-sensitive</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>TIES Outperforms Simple Averaging for Cross-Task Merging</strong>: TIES merging outperforms simple weight averaging when merging models fine-tuned on very different tasks — the sign conflict resolution step prevents destructive interference between opposing weight updates that degrade both tasks. Use top-k=0.2 (keep 20% of deltas) as a starting point; larger k retains more task signal but increases interference. For LoRA merging, merge in weight space (compute BA first) so TIES can see the full-rank updates.</p>
+</blockquote>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

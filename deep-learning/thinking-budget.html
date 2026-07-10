@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Thinking Budget: Controlling Reasoning Depth in LLMs | Notes Backup</title>
+  <meta name="description" content="How to set and manage thinking token budgets in extended-thinking APIs — covering budget_tokens, thinking block streaming, budget vs accuracy tradeoffs, and adaptive budget allocation strategies." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Thinking Budget: Controlling Reasoning Depth in LLMs</h1>
+      <ul class='note-meta'><li><strong>description:</strong> How to set and manage thinking token budgets in extended-thinking APIs — covering budget_tokens, thinking block streaming, budget vs accuracy tradeoffs, and adaptive budget allocation strategies.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Thinking Budget: Controlling Reasoning Depth in LLMs</h1>
+<p>Extended thinking in large language models is a paradigm where the model is allocated a dedicated budget of tokens for internal deliberation before producing its final response. Unlike conventional generation where every token produced is part of the visible output, extended thinking separates the reasoning process into two phases: a private thinking phase — invisible to the user and governed by the budget_tokens parameter — and a final response phase that produces the answer. The thinking budget acts as a computational allowance: higher budgets enable the model to explore more solution paths, verify intermediate steps, and recover from dead ends. The practical result is a controllable quality-cost trade-off that developers can tune to match the difficulty of each task. Understanding how to set budget_tokens correctly — and how to stream, parse, and evaluate the resulting thinking blocks — is essential for building efficient, accurate applications on extended-thinking APIs.</p>
+<h2>Overview</h2>
+<p>A thinking budget is a soft upper bound on the number of tokens the model may consume during its internal reasoning phase. The budget_tokens parameter is passed alongside the standard API parameters and tells the model how much computational effort it is permitted to spend before producing the final answer. The model may use fewer tokens than the budget if the problem is simple — on a basic arithmetic question, a model with an 8K budget may consume only 200-400 thinking tokens, leaving most of the budget unused. Conversely, on a challenging multi-step reasoning problem, the model will utilise the full budget and may produce a more accurate answer than it would with a lower budget. budget_tokens must always be smaller than max_tokens, since the thinking tokens count toward the total token limit of the response. The minimum budget is typically 1,024 tokens, and the maximum supported value depends on the model — Claude Opus supports up to 32,000 budget_tokens as of mid-2026.</p>
+<ul>
+<li>budget_tokens sets a soft upper limit on internal reasoning tokens; actual usage is often lower on easy problems</li>
+<li>Thinking tokens are billed as output tokens and count against the max_tokens response limit</li>
+<li>Thinking content is streamed as a separate block type (thinking) before the final text block</li>
+<li>The model chooses when to stop thinking; higher budgets give it permission to think longer, not a requirement</li>
+<li>budget_tokens must be less than max_tokens — set max_tokens = budget_tokens + expected_response_tokens</li>
+<li>Minimum effective budget is 1,024 tokens; budgets below this threshold may produce little benefit</li>
+</ul>
+<h2>Extended Thinking APIs</h2>
+<p>Anthropic introduced extended thinking in the Claude 3.7 Sonnet release in early 2025, making it the first production API to expose a controllable thinking-token budget. The feature is activated by passing a thinking object to the API alongside the standard messages array. The thinking object has two fields: type, which must be set to "enabled", and budget_tokens, which specifies the maximum number of tokens the model may spend on internal reasoning. When extended thinking is enabled, the response content array contains two block types: a thinking block with the model's internal deliberation text, followed by a text block with the final response. The thinking block is not redacted or summarised — it contains the full, raw chain-of-thought that the model produced internally, including dead ends, self-corrections, and exploratory computations that did not appear in the final answer.</p>
+<p>Extended thinking is available on Claude 3.7 Sonnet and Claude Opus 4 (claude-opus-4-5) via both the synchronous Messages API and the streaming Messages API. The synchronous API returns thinking and text blocks as part of the content array in the completed response object. The streaming API emits content_block_start events (announcing a new block and its type), content_block_delta events (carrying incremental thinking_delta or text_delta chunks), and content_block_stop events (marking the end of each block). For interactive applications where the user can observe the model thinking in real time, the streaming API is strongly preferred — it allows the UI to display the thinking text progressively rather than waiting for the full response. Extended thinking is not compatible with certain API features: it cannot be used alongside prompt caching of the thinking block, and tool use with extended thinking requires special handling to preserve the thinking block across multi-turn tool calls.</p>
+<pre><code class="language-python">import anthropic
+client = anthropic.Anthropic()
+def call_with_thinking(prompt: str, budget_tokens: int = 8000) -&gt; dict:
+    thinking_text, response_text = &quot;&quot;, &quot;&quot;
+    with client.messages.stream(
+        model=&quot;claude-opus-4-5&quot;, max_tokens=16000,
+        thinking={&quot;type&quot;: &quot;enabled&quot;, &quot;budget_tokens&quot;: budget_tokens},
+        messages=[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: prompt}],
+    ) as stream:
+        for event in stream:
+            if event.type != &quot;content_block_delta&quot;:
+                continue
+            d = event.delta
+            if d.type == &quot;thinking_delta&quot;:
+                thinking_text += d.thinking
+            elif d.type == &quot;text_delta&quot;:
+                response_text += d.text
+    return {&quot;thinking&quot;: thinking_text, &quot;response&quot;: response_text}
+</code></pre>
+<h2>Budget Tokens Parameter</h2>
+<p>The budget_tokens parameter is the primary lever for controlling how much reasoning the model performs before answering. It is an integer specifying the maximum number of tokens that may be spent in the thinking phase. The key constraint is that budget_tokens must be strictly less than max_tokens: if you set budget_tokens=8000, then max_tokens must be at least 8001, and in practice you should set it to budget_tokens plus the expected length of the final response (typically 1,000-4,000 extra tokens). Failing to set max_tokens large enough will truncate the response. The relationship between budget_tokens and accuracy is not linear: accuracy gains are large when moving from a very low budget (1K) to a moderate budget (4K-8K), and diminish significantly when increasing from 8K to 16K or beyond. For most tasks, 4,096-8,192 tokens is the sweet spot that captures the majority of accuracy gains at moderate cost.</p>
+<p>Empirically, the model's actual thinking token consumption follows a right-skewed distribution: on easy problems it uses a small fraction of the budget, while on hard problems it approaches the budget ceiling. Budget utilisation rate — actual tokens used divided by budget_tokens — is a useful diagnostic metric. A utilisation rate consistently near 100% signals that the model is hitting the budget ceiling and would benefit from a higher limit; a utilisation rate below 30% on all problems signals that the budget is too generous for the workload and can be reduced without accuracy loss. The minimum effective budget is around 1,024 tokens: below this threshold the model produces very shallow reasoning that barely exceeds what it would do without extended thinking. Budgets in the range 2,048-4,096 are appropriate for moderately difficult problems; 8,192-16,384 for hard multi-step reasoning and competitive math; and 16,384-32,000 for AIME-level problems requiring extensive exploration of solution strategies.</p>
+<pre><code class="language-python">import anthropic
+from typing import List, Dict
+client  = anthropic.Anthropic()
+BUDGETS = [1024, 4096, 8192, 16384]
+PROBLEM = &quot;Find the sum of all prime numbers less than 50.&quot;
+def sweep_budgets() -&gt; List[Dict]:
+    out = []
+    for budget in BUDGETS:
+        r = client.messages.create(
+            model=&quot;claude-opus-4-5&quot;, max_tokens=budget + 2048,
+            thinking={&quot;type&quot;: &quot;enabled&quot;, &quot;budget_tokens&quot;: budget},
+            messages=[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: PROBLEM}])
+        ans  = next((b.text for b in r.content if b.type == &quot;text&quot;), &quot;&quot;)
+        used = r.usage.output_tokens
+        ok   = &quot;328&quot; in ans
+        print(f&quot;budget={budget:&lt;6}  output_tokens={used:&lt;5}  correct={ok}&quot;)
+        out.append({&quot;budget&quot;: budget, &quot;output_tokens&quot;: used, &quot;correct&quot;: ok})
+    return out
+</code></pre>
+<blockquote>
+<p><strong>Tip</strong>: Budget tokens set an upper limit, not a guarantee — models often use far fewer tokens than the budget on easy problems. Start with a moderate budget (4K-8K) and only increase if accuracy is insufficient. Monitor the budget utilisation rate (actual tokens used / budget_tokens) across your workload: if utilisation is consistently below 40%, halve the budget and re-evaluate accuracy. This alone can cut inference costs by 30-50% with no accuracy penalty on typical production workloads.</p>
+</blockquote>
+<h2>Streaming Thinking Blocks</h2>
+<p>When using the streaming API with extended thinking enabled, the response arrives as a sequence of server-sent events. The thinking block is streamed first, before the final text block. The event flow for a typical extended-thinking response is: a content_block_start event with type="thinking", followed by many content_block_delta events each carrying a thinking_delta object whose thinking field contains a new chunk of thinking text, then a content_block_stop event marking the end of the thinking block. Immediately after, another content_block_start event with type="text" begins the final response, followed by text_delta events and a final content_block_stop. Applications that want to display thinking text in real time should accumulate thinking_delta chunks and render them progressively; applications that only need the final response can skip thinking_delta events entirely and collect only text_delta chunks.</p>
+<p>There are several practical considerations for robust streaming of thinking blocks. First, thinking blocks can be very long — a 16K budget can produce thinking text of 60,000-100,000 characters, which takes several seconds to stream even on a fast connection. Implement incremental display rather than buffering the full thinking text before rendering. Second, thinking blocks are not guaranteed to appear in every response: if the model determines that the problem requires no deliberation, it may omit the thinking block entirely and stream only the text block. Always check the block type before appending to the thinking buffer. Third, the thinking block is semantically opaque — the model may produce self-contradictory statements, explore wrong paths, and correct itself mid-thought. Do not present raw thinking content as the model's authoritative reasoning without user education about its exploratory nature.</p>
+<pre><code class="language-python">from typing import Dict
+import anthropic
+client = anthropic.Anthropic()
+def call_and_parse(prompt: str, budget: int = 8000) -&gt; Dict:
+    msg = client.messages.create(
+        model=&quot;claude-opus-4-5&quot;, max_tokens=budget + 2048,
+        thinking={&quot;type&quot;: &quot;enabled&quot;, &quot;budget_tokens&quot;: budget},
+        messages=[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: prompt}])
+    thinking_text, response_text, tokens_used = &quot;&quot;, &quot;&quot;, 0
+    for block in msg.content:
+        if block.type == &quot;thinking&quot;:
+            thinking_text, tokens_used = block.thinking, getattr(block, &quot;thinking_input_tokens&quot;, 0)
+        elif block.type == &quot;text&quot;:
+            response_text = block.text
+    util = tokens_used / budget if budget else 0.0
+    print(f&quot;budget={budget}  used={tokens_used}  util={util:.1%}  chars={len(thinking_text)}&quot;)
+    return {&quot;thinking&quot;: thinking_text, &quot;response&quot;: response_text, &quot;used&quot;: tokens_used, &quot;util&quot;: util}
+</code></pre>
+<h2>Budget vs Accuracy Tradeoffs</h2>
+<p>The relationship between thinking budget and task accuracy follows a diminishing-returns curve that varies substantially by task type. For simple question-answering tasks — where the model already knows the answer from its training data — accuracy is nearly flat across all budget levels: moving from 1K to 16K thinking tokens produces less than a 3-percentage-point improvement because the model does not need extended deliberation to retrieve factual knowledge. For multi-step mathematical reasoning, the accuracy curve is steepest in the 1K-8K range: a 7B-parameter model solving GSM8K improves from 74% with no thinking to 88% at 4K budget, with only a 2-point further gain from 4K to 16K. For AIME-level competition problems, the gains continue to accrue at higher budgets — accuracy at 32K budget can be 20-30 percentage points higher than at 4K — because these problems genuinely require extended exploration of multiple solution strategies.</p>
+<p>Cost scales linearly with the thinking tokens actually consumed (billed as output tokens at the model's output token rate), while accuracy scales sub-linearly. This asymmetry means the cost-effectiveness of thinking budgets decreases as the budget grows. A useful framework is to compute the accuracy gain per 1,000 additional thinking tokens: for multi-step math, this figure drops from roughly 3.5 percentage points per 1K tokens in the 1K-4K range to under 0.5 percentage points per 1K in the 8K-16K range. Latency scales approximately linearly with thinking tokens at a given model size and hardware configuration — each 1,000 thinking tokens adds roughly 0.8-1.5 seconds of latency on a single A100 GPU for a 70B-parameter model. Latency sensitivity determines the maximum viable budget for interactive applications: a 5-second latency budget allows roughly 4K-6K thinking tokens for a 70B model.</p>
+<table>
+<thead>
+<tr>
+<th>Task type</th>
+<th>Recommended budget</th>
+<th>Accuracy gain</th>
+<th>Latency overhead</th>
+<th>Cost overhead</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Simple QA</td>
+<td>1,024 tokens</td>
+<td>+2–4%</td>
+<td>+0.5–1 s</td>
+<td>+3–6%</td>
+</tr>
+<tr>
+<td>Multi-step math</td>
+<td>8,192 tokens</td>
+<td>+15–25%</td>
+<td>+4–8 s</td>
+<td>+20–40%</td>
+</tr>
+<tr>
+<td>Coding</td>
+<td>4,096 tokens</td>
+<td>+10–18%</td>
+<td>+2–5 s</td>
+<td>+12–25%</td>
+</tr>
+<tr>
+<td>Complex reasoning</td>
+<td>16,384 tokens</td>
+<td>+20–35%</td>
+<td>+8–15 s</td>
+<td>+40–80%</td>
+</tr>
+<tr>
+<td>AIME-level</td>
+<td>32,000 tokens</td>
+<td>+35–55%</td>
+<td>+15–30 s</td>
+<td>+80–150%</td>
+</tr>
+</tbody>
+</table>
+<h2>Adaptive Budget Allocation</h2>
+<p>Fixed thinking budgets are wasteful: a 16K budget applied uniformly to all queries spends the full allocation on easy problems that need only 500 tokens of thinking. Adaptive budget allocation solves this by selecting the thinking budget dynamically based on estimated problem difficulty before the API call. The simplest adaptive strategy is a heuristic classifier that maps problem characteristics to a budget tier: short factual questions get a low budget (1K), problems with multiple equations or multi-step structure get a medium budget (8K), and problems with olympiad keywords or long problem statements get a high budget (16K-32K). More sophisticated strategies use a fast, cheap model (or a small embedding-based classifier) to predict the required thinking depth, then set the budget proportionally. In production systems with diverse query distributions, adaptive budget allocation typically reduces average thinking token consumption by 40-60% compared to a fixed maximum budget, with less than 1 percentage point of accuracy loss on the overall workload.</p>
+<pre><code class="language-python">import re
+from typing import Optional
+BUDGETS = {&quot;simple_arithmetic&quot;: 1024, &quot;multi_step_math&quot;: 8192, &quot;aime_level&quot;: 16384}
+AIME_KW = [&quot;aime&quot;, &quot;olympiad&quot;, &quot;competition&quot;, &quot;diophantine&quot;, &quot;number theory&quot;]
+MATH_KW = [&quot;prove&quot;, &quot;integral&quot;, &quot;series&quot;, &quot;geometry&quot;, &quot;probability&quot;, &quot;equation&quot;]
+def classify_problem(problem: str) -&gt; str:
+    p = problem.lower()
+    if any(k in p for k in AIME_KW) or len(problem.split()) &gt; 60:
+        return &quot;aime_level&quot;
+    if any(k in p for k in MATH_KW) or len(re.findall(r&quot;\d+&quot;, problem)) &gt; 4:
+        return &quot;multi_step_math&quot;
+    return &quot;simple_arithmetic&quot;
+def select_budget(problem: str, override: Optional[int] = None) -&gt; int:
+    if override is not None:
+        return override
+    category = classify_problem(problem)
+    print(f&quot;Classified '{category}' -&gt; budget_tokens={BUDGETS[category]}&quot;)
+    return BUDGETS[category]
+</code></pre>
+<p>A more principled adaptive approach uses calibration data to build a regression model that predicts required thinking tokens from problem features. Features include problem token length, number of numeric constants, presence of multi-step connectives ("then", "therefore", "prove that"), and subject-domain embeddings. Training the regressor on a dataset of (problem, budget_tokens, accuracy) triples collected from prior API calls gives a model-specific predictor that learns the accuracy-budget curve for the target deployment workload. At inference time, the predictor outputs an estimated optimal budget, which is rounded up to the nearest power of two (1K, 2K, 4K, 8K, 16K, 32K) to align with the natural budget tiers. This approach reduces average costs by 50-65% in mixed-difficulty workloads while matching the accuracy of the maximum fixed budget on hard problems. A practical safety mechanism is to maintain a fallback retry path: if the model produces an incorrect answer (detected by a symbolic verifier), rerun the query with twice the budget, up to a maximum cap.</p>
+<h2>Key Takeaways</h2>
+<p>Thinking budgets transform extended thinking from a binary on/off feature into a precise control knob for reasoning depth. The budget_tokens parameter sets a soft upper limit on the internal deliberation phase — the model may use far fewer tokens than allocated on easy problems, making budget utilisation rate an essential monitoring metric. The accuracy-budget curve follows a diminishing-returns pattern across all task types: gains are largest in the 1K-8K range and taper off above 8K except for the hardest reasoning tasks. For production deployments, adaptive budget allocation that classifies queries by difficulty before the API call reduces average thinking token consumption by 40-65% with negligible accuracy loss. Streaming thinking blocks progressively and separating thinking content from final response content are implementation requirements for responsive user experiences. Monitoring both utilisation rate and per-tier accuracy on held-out validation sets is the recommended way to tune budget tiers for a specific workload.</p>
+<ul>
+<li>Set budget_tokens to the maximum tokens the model may spend thinking; actual use is often 30-70% of the budget on typical workloads</li>
+<li>Always set max_tokens &gt;= budget_tokens + expected_response_length to avoid truncation</li>
+<li>Stream thinking blocks with thinking_delta events; collect text_delta events separately for the final answer</li>
+<li>Accuracy gains follow diminishing returns: 1K-8K range captures most of the improvement, with minimal gains beyond 16K except on AIME-level problems</li>
+<li>Adaptive budget allocation based on problem classification reduces average thinking costs by 40-65% vs a fixed maximum budget</li>
+<li>Monitor utilisation rate (used/budget): consistently near 100% signals the budget is too low; below 30% signals over-allocation</li>
+<li>For interactive apps, cap budget at 4K-6K tokens to keep latency under 5s on a 70B model; use higher budgets for offline batch inference</li>
+<li>Retry with doubled budget on verifier-detected incorrect answers as a cost-effective accuracy recovery strategy</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

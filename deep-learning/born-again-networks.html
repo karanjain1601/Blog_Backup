@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Born-Again Networks — Sequential Self-Distillation | Notes Backup</title>
+  <meta name="description" content="Born-again networks (Furlanello et al. 2018) distil from a teacher into a same-capacity student, yielding accuracy gains despite no compression. Covers BAN training chains, the GESD ensemble, dark knowledge, calibration, and the connection to snapshot ensembles." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Born-Again Networks — Sequential Self-Distillation</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Born-again networks (Furlanello et al. 2018) distil from a teacher into a same-capacity student, yielding accuracy gains despite no compression. Covers BAN training chains, the GESD ensemble, dark knowledge, calibration, and the connection to snapshot ensembles.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Born-Again Networks — Sequential Self-Distillation</h1>
+<p>Born-again networks (BANs), introduced by Furlanello et al. (2018), apply knowledge distillation in an unexpected direction: instead of compressing a large teacher into a smaller student, they distil a model into an identical-capacity copy. The result is a student that consistently outperforms the teacher on the same task despite having the same number of parameters. This violates the naive intuition that distillation only helps when the student is smaller — the benefit comes not from compression but from the richer supervision signal encoded in the teacher's soft probability outputs.</p>
+<h2>What Are Born-Again Networks?</h2>
+<p>A born-again network is a model trained by minimising the KL divergence between its output distribution and the soft probabilities of a teacher with identical architecture. Because teacher and student have the same capacity, the student cannot exploit the teacher's knowledge through compression. Instead, it learns a smoother decision boundary shaped by inter-class similarity information in the teacher's soft labels. The teacher's non-argmax probabilities — for example, assigning probability 0.03 to 'automobile' when classifying a 'truck' — encode semantic relationships that act as regularisation, reducing effective label noise on ambiguous examples.</p>
+<h2>The BAN Training Chain</h2>
+<p>BANs are applied sequentially: G₁ is the baseline model trained on hard labels. G₂ (BAN-1) is trained using G₁'s soft targets at temperature T. G₃ (BAN-2) uses G₂'s soft targets, and so on. Unlike traditional KD where the teacher is a fixed larger model, the BAN teacher improves with each generation, providing progressively richer supervision. Temperature T controls softness — higher T spreads probability mass more evenly across classes, revealing more inter-class structure. A combined loss blends hard labels (cross-entropy) and soft targets (KL divergence), weighted by alpha.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+
+def train_ban_generation(teacher, student, train_loader, device,
+                         temperature=4.0, alpha=0.5, epochs=10, lr=1e-3):
+    &quot;&quot;&quot;Train student as a BAN of teacher using soft target distillation.&quot;&quot;&quot;
+    teacher.eval()
+    student.train()
+    optimizer = optim.Adam(student.parameters(), lr=lr)
+    criterion = nn.CrossEntropyLoss()
+    for epoch in range(epochs):
+        total_loss = 0.0
+        for X, y in train_loader:
+            X, y = X.to(device), y.to(device)
+            optimizer.zero_grad()
+            with torch.no_grad():
+                teacher_logits = teacher(X)
+                soft_targets = F.softmax(teacher_logits / temperature, dim=-1)
+            student_logits = student(X)
+            hard_loss = criterion(student_logits, y)
+            soft_loss = F.kl_div(
+                F.log_softmax(student_logits / temperature, dim=-1),
+                soft_targets, reduction='batchmean'
+            ) * (temperature ** 2)
+            loss = (1 - alpha) * hard_loss + alpha * soft_loss
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+        print(f'Epoch {epoch+1}/{epochs}: loss={total_loss/len(train_loader):.4f}')
+    return student
+
+# BAN chain: G1 (baseline) -&gt; G2 (BAN-1) -&gt; G3 (BAN-2)
+print('BAN chain: G1 -&gt; G2 via G1 soft targets, G2 -&gt; G3 via G2 soft targets')
+</code></pre>
+<h2>GESD — Generating Ensemble by Sequential Distillation</h2>
+<p>After training multiple BAN generations G₁, G₂, ..., Gₙ, Furlanello et al. propose GESD (Generating Ensemble by Sequential Distillation): combine all generations by averaging their softmax predictions. This ensemble exploits the diversity introduced by sequential distillation — each generation makes different types of errors because it was trained on a different supervision signal. GESD consistently outperforms both a standard ensemble of independently trained models and any single BAN generation, at no additional training cost once all generations exist.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+from typing import List
+
+def gesd_ensemble_predict(models: List[torch.nn.Module],
+                           x: torch.Tensor,
+                           temperature: float = 1.0) -&gt; torch.Tensor:
+    &quot;&quot;&quot;GESD: average softmax probabilities from all BAN generations G1...Gn.&quot;&quot;&quot;
+    all_probs = []
+    for model in models:
+        model.eval()
+        with torch.no_grad():
+            logits = model(x)
+            probs = F.softmax(logits / temperature, dim=-1)
+            all_probs.append(probs)
+    return torch.stack(all_probs, dim=0).mean(dim=0)
+
+def evaluate_gesd(models, test_loader, device):
+    &quot;&quot;&quot;Evaluate GESD ensemble accuracy on test set.&quot;&quot;&quot;
+    correct, total = 0, 0
+    for X, y in test_loader:
+        X, y = X.to(device), y.to(device)
+        avg_probs = gesd_ensemble_predict(models, X)
+        preds = avg_probs.argmax(dim=-1)
+        correct += (preds == y).sum().item()
+        total += y.size(0)
+    return correct / total
+
+# GESD outperforms any single BAN due to complementary error patterns
+print('GESD: G1, G2, G3 each trained on the previous generation soft targets.')
+print('Ensemble of sequentially distilled models captures complementary errors.')
+</code></pre>
+<h2>Why Same-Capacity Distillation Improves Accuracy</h2>
+<p>Three mechanisms explain why a same-capacity student outperforms its teacher. First, soft targets provide a richer gradient signal: the KL divergence loss carries information about every class probability, not just the correct class. Second, the teacher's soft labels reduce effective label noise — misclassified training examples receive softer supervision, dampening gradient spikes from hard labels. Third, the distillation loss acts as implicit regularisation, encouraging the student to produce calibrated, smooth distributions rather than sharply peaked ones. This smoother distribution generalises better. Dark knowledge — the signal embedded in small non-maximum class probabilities — is the mechanism underlying all three effects.</p>
+<h2>Accuracy Per Generation — Empirical Results</h2>
+<p>Furlanello et al. evaluated BANs on DenseNet-40 on CIFAR-10 and CIFAR-100. The baseline achieves 93.12% on CIFAR-10. BAN-1 improves to 93.85% (+0.73%), BAN-2 to 94.10% (+0.25% over BAN-1), and BAN-3 to 94.21% (+0.11% over BAN-2). Gains diminish with each generation as the teacher-student quality gap narrows. The GESD ensemble of all four generations achieves 94.71%, surpassing any single generation and outperforming an independently trained ensemble of four models.</p>
+<pre><code class="language-python">import numpy as np
+
+# Empirical results: DenseNet-40 on CIFAR-10 and CIFAR-100 (Furlanello et al. 2018)
+generations  = ['G1 (Baseline)', 'G2 (BAN-1)', 'G3 (BAN-2)', 'G4 (BAN-3)']
+cifar10_acc  = [93.12, 93.85, 94.10, 94.21]
+cifar100_acc = [70.48, 71.14, 71.62, 71.89]
+
+print('DenseNet-40 Born-Again Network Generations:')
+print(f'{&quot;Generation&quot;:&lt;20} {&quot;CIFAR-10&quot;:&gt;10} {&quot;CIFAR-100&quot;:&gt;10} {&quot;Delta10&quot;:&gt;9} {&quot;Delta100&quot;:&gt;10}')
+print('-' * 63)
+for i, (g, c10, c100) in enumerate(zip(generations, cifar10_acc, cifar100_acc)):
+    d10  = c10  - cifar10_acc[0]  if i &gt; 0 else 0.0
+    d100 = c100 - cifar100_acc[0] if i &gt; 0 else 0.0
+    print(f'{g:&lt;20} {c10:&gt;10.2f} {c100:&gt;10.2f} {d10:&gt;+9.2f} {d100:&gt;+10.2f}')
+
+# GESD ensemble results
+gesd_c10, gesd_c100 = 94.71, 72.89
+print(f'\n{&quot;GESD (ensemble)&quot;:&lt;20} {gesd_c10:&gt;10.2f} {gesd_c100:&gt;10.2f}', end='')
+print(f' {gesd_c10-cifar10_acc[0]:&gt;+9.2f} {gesd_c100-cifar100_acc[0]:&gt;+10.2f}')
+print(f'\nBAN chain + GESD gain: CIFAR-10={gesd_c10-cifar10_acc[0]:+.2f}%, CIFAR-100={gesd_c100-cifar100_acc[0]:+.2f}%')
+print('Key insight: BAN-1 already improves over G1 despite identical capacity.')
+</code></pre>
+<h2>Dark Knowledge and Soft Target Quality</h2>
+<p>Hinton et al. (2015) coined 'dark knowledge' to describe information embedded in a model's non-maximum class probabilities. A well-trained classifier assigns non-negligible probability to visually similar classes: a cat image may receive probability 0.04 on 'tiger' and 0.02 on 'dog', but near-zero on 'truck'. This inter-class similarity is absent in one-hot labels. Expected Calibration Error (ECE) measures how well confidence aligns with accuracy. Soft targets from a calibrated teacher have lower ECE than hard one-hot labels, indicating they convey more honest uncertainty and richer information per training example.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def expected_calibration_error(probs: torch.Tensor, labels: torch.Tensor,
+                                n_bins: int = 10) -&gt; float:
+    &quot;&quot;&quot;Compute ECE: |accuracy - confidence| weighted by bin fraction.&quot;&quot;&quot;
+    confidences, predictions = probs.max(dim=-1)
+    accuracies = predictions.eq(labels)
+    ece = 0.0
+    edges = torch.linspace(0, 1, n_bins + 1)
+    for i in range(n_bins):
+        lo, hi = edges[i].item(), edges[i + 1].item()
+        in_bin = (confidences &gt;= lo) &amp; (confidences &lt; hi)
+        if in_bin.sum() == 0:
+            continue
+        bin_acc  = accuracies[in_bin].float().mean().item()
+        bin_conf = confidences[in_bin].mean().item()
+        bin_frac = in_bin.float().mean().item()
+        ece += bin_frac * abs(bin_acc - bin_conf)
+    return ece
+
+torch.manual_seed(42)
+n, C = 1000, 10
+teacher_logits = torch.randn(n, C)
+teacher_probs  = F.softmax(teacher_logits, dim=-1)
+labels = teacher_logits.argmax(dim=-1)
+hard_probs = F.one_hot(labels, C).float()
+
+ece_soft = expected_calibration_error(teacher_probs, labels)
+ece_hard = expected_calibration_error(hard_probs, labels)
+print(f'Soft target ECE: {ece_soft:.4f}   (teacher probability distribution)')
+print(f'Hard label ECE:  {ece_hard:.4f}  (one-hot: 100% confident)')
+print(f'ECE reduction from soft targets: {ece_hard - ece_soft:.4f}')
+print('Soft targets encode inter-class similarity: cats similar to tigers, not trucks.')
+</code></pre>
+<h2>Connection to Snapshot Ensembles</h2>
+<p>Huang et al. (2017) proposed Snapshot Ensembles: use a cyclical learning rate schedule to converge to multiple local minima in a single training run, saving checkpoints at each trough. The ensemble outperforms any individual snapshot. BANs achieve diversity by a different mechanism — sequential distillation changes the effective loss landscape seen by each generation — but both approaches produce ensembles of models with complementary error patterns. The key difference is that GESD members are fully independently trained, while snapshot members share all training history up to each LR cycle.</p>
+<blockquote>
+<p><strong>When to Use BANs Instead of Larger Models</strong>: If you are at a compute budget limit and cannot train a larger architecture, run 2-3 BAN generations on your existing architecture. Each generation adds the same training cost as the original run, but consistently improves accuracy by 0.5-1.0% on classification benchmarks without changing model size or inference cost. This is particularly effective when you have already tuned hyperparameters for the base architecture and want further gains at zero model-size cost.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Params</th>
+<th>CIFAR-10 Acc</th>
+<th>Inference Cost</th>
+<th>Training Cost</th>
+<th>Diversity Mechanism</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>G1 (Baseline)</td>
+<td>1x</td>
+<td>93.12%</td>
+<td>1x</td>
+<td>1x</td>
+<td>Random init + SGD</td>
+</tr>
+<tr>
+<td>G2 (BAN-1)</td>
+<td>1x</td>
+<td>93.85%</td>
+<td>1x</td>
+<td>2x</td>
+<td>G1 soft targets</td>
+</tr>
+<tr>
+<td>G3 (BAN-2)</td>
+<td>1x</td>
+<td>94.10%</td>
+<td>1x</td>
+<td>3x</td>
+<td>G2 soft targets</td>
+</tr>
+<tr>
+<td>G4 (BAN-3)</td>
+<td>1x</td>
+<td>94.21%</td>
+<td>1x</td>
+<td>4x</td>
+<td>G3 soft targets</td>
+</tr>
+<tr>
+<td>GESD (G1-G4)</td>
+<td>4x (combined)</td>
+<td>94.71%</td>
+<td>4x</td>
+<td>4x</td>
+<td>Sequential distillation</td>
+</tr>
+<tr>
+<td>Standard ensemble (4x)</td>
+<td>4x</td>
+<td>94.41%</td>
+<td>4x</td>
+<td>4x</td>
+<td>Independent random inits</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>BAN training uses KL divergence loss at temperature T=4, combined with hard cross-entropy at weight alpha.</li>
+<li>Gains per generation diminish: BAN-1 +0.73%, BAN-2 +0.25%, BAN-3 +0.11% on CIFAR-10.</li>
+<li>GESD averages softmax probabilities (not logits) across all generations G1...Gn.</li>
+<li>Temperature T controls dark knowledge visibility: T=4 is standard; T=1 degrades to hard distillation.</li>
+<li>BANs work for any architecture — CNNs, transformers, MLPs — and any classification dataset.</li>
+<li>GESD beats a standard ensemble of 4 independently trained models by ~0.3% on CIFAR-10.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

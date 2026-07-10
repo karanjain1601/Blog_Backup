@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SimPO — Simple Preference Optimization with Length-Normalized Rewards | Notes Backup</title>
+  <meta name="description" content="SimPO (Meng et al., 2024) eliminates DPO&#x27;s reference model and length bias by using average per-token log-probability as the implicit reward, combined with a target margin gamma that prevents preference collapse, consistently outperforming DPO on AlpacaEval 2 LC-WR." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>SimPO — Simple Preference Optimization with Length-Normalized Rewards</h1>
+      <ul class='note-meta'><li><strong>description:</strong> SimPO (Meng et al., 2024) eliminates DPO&#x27;s reference model and length bias by using average per-token log-probability as the implicit reward, combined with a target margin gamma that prevents preference collapse, consistently outperforming DPO on AlpacaEval 2 LC-WR.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>SimPO — Simple Preference Optimization with Length-Normalized Rewards</h1>
+<p>SimPO (Simple Preference Optimization, Meng et al. 2024) addresses two independent problems with DPO that have different roots but interact harmfully: (1) DPO requires a reference model, doubling GPU memory; (2) DPO's implicit reward — the total log-probability under the policy — is biased toward longer responses regardless of quality. SimPO fixes both problems in a single design: replace the reference-model-relative reward with a length-normalized average log-probability, and add a target margin gamma that prevents the optimization from collapsing when chosen and rejected rewards are similar. The result is a simpler, cheaper, and empirically stronger alignment algorithm.</p>
+<h2>DPO's Length Bias: Why Verbose Responses Win</h2>
+<p>DPO's implicit reward for a response y given prompt x is r_DPO(x,y) = beta * log pi_theta(y|x) - beta * log pi_ref(y|x). The term log pi_theta(y|x) = sum_{t=1}^{|y|} log pi_theta(y_t | x, y_{&lt;t}) is a SUM over tokens — it grows linearly with sequence length even if per-token quality is identical. Consider two responses with the same per-token log-probability mu: a 50-token response has total log-prob 50<em>mu, while a 200-token response has 200</em>mu. DPO would rank the 200-token response as 4× better. This creates an incentive for models to produce verbose responses: the DPO policy learns that adding filler text ('Great question! I am happy to explain...') increases its own reward even if it reduces per-token quality.</p>
+<h2>SimPO Implicit Reward: Length-Normalized Log-Probs</h2>
+<p>SimPO replaces DPO's total log-prob reward with an average per-token log-probability: r_SimPO(x,y) = (beta / |y|) * sum_{t=1}^{|y|} log pi_theta(y_t | x, y_{&lt;t}). This is the mean conditional log-likelihood of the response tokens, scaled by beta. Length normalization makes the reward length-agnostic: a 50-token response and a 200-token response with the same per-token quality receive identical rewards. Crucially, SimPO has no reference model — the reward is purely from the current policy — which eliminates the need to store pi_ref in GPU memory.</p>
+<h2>SimPO Loss with Target Margin gamma</h2>
+<p>Without a reference model, the preference margin can collapse to zero if the policy learns to assign similar rewards to chosen and rejected responses. SimPO adds a target margin gamma: L_SimPO = -E[log sigma(r(x,y_w) - r(x,y_l) - gamma)] = -E[log sigma(beta*(avg_logp(y_w) - avg_logp(y_l)) - gamma)]. The margin gamma enforces that chosen responses must be preferred by at least gamma in the reward space — the optimization is non-trivially satisfied when the margin exactly equals gamma. Default values from the paper: beta=2.5, gamma=0.5. SimPO consistently outperforms DPO on AlpacaEval 2 LC-WR (length-controlled win rate) with these hyperparameters on Mistral and Llama base models.</p>
+<h2>SimPO Loss Implementation</h2>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def simpo_loss(
+    policy_chosen_logps,      # sum of log-probs over response tokens
+    policy_rejected_logps,
+    chosen_lengths,            # response token counts for normalization
+    rejected_lengths,
+    beta=2.5,
+    gamma=0.5,
+):
+    # Length-normalized average log-prob = SimPO implicit reward r(x,y)
+    r_chosen   = policy_chosen_logps   / chosen_lengths.float()
+    r_rejected = policy_rejected_logps / rejected_lengths.float()
+    # Enforce beta*(r_w - r_l) &gt; gamma (target margin prevents collapse)
+    reward_diff = beta * (r_chosen - r_rejected) - gamma
+    loss = -F.logsigmoid(reward_diff).mean()
+    return loss, r_chosen.detach(), r_rejected.detach()
+
+bsz = 8
+chosen_lens   = torch.randint(80, 150, (bsz,))
+rejected_lens = torch.randint(50, 250, (bsz,))  # rejected can be longer or shorter
+chosen_logps   = -chosen_lens.float() * 0.9      # sum logp proportional to length
+rejected_logps = -rejected_lens.float() * 1.1    # rejected has worse per-token logp
+loss, rw, rr = simpo_loss(chosen_logps, rejected_logps, chosen_lens, rejected_lens)
+print(f'SimPO loss: {loss:.4f}  avg reward chosen: {rw.mean():.3f}  rejected: {rr.mean():.3f}')
+</code></pre>
+<h2>Length Normalization: DPO vs SimPO Reward Assignment</h2>
+<p>The key empirical test of length bias is: given two responses with identical per-token quality but different lengths, which does the algorithm prefer? DPO, using total log-prob, prefers the longer one in proportion to its length advantage. SimPO, using average log-prob, assigns identical rewards to both. This is not merely a theoretical concern — on AlpacaEval 2, DPO-trained models produce responses that are on average 30-50% longer than the reference, while SimPO-trained models match reference length, explaining SimPO's superior LC-WR (length-controlled win rate) despite often having lower raw win rate.</p>
+<pre><code class="language-python">import torch
+
+def dpo_reward(logps_sum, ref_logps_sum, beta=0.1):
+    # DPO: unnormalized total log-prob difference
+    return beta * (logps_sum - ref_logps_sum)
+
+def simpo_reward(logps_sum, length, beta=2.5):
+    # SimPO: average per-token log-prob (length-normalized)
+    return beta * logps_sum / length.float()
+
+# Two responses: same per-token quality, 4x length difference
+per_tok = -1.2
+short_len, long_len = torch.tensor(60), torch.tensor(240)
+short_logps = per_tok * short_len.float()
+long_logps  = per_tok * long_len.float()
+ref_short   = per_tok * 0.9 * short_len.float()
+ref_long    = per_tok * 0.9 * long_len.float()
+
+dpo_s  = dpo_reward(short_logps, ref_short)
+dpo_l  = dpo_reward(long_logps,  ref_long)
+simpo_s = simpo_reward(short_logps, short_len)
+simpo_l = simpo_reward(long_logps,  long_len)
+print(f'Equal per-token quality. DPO: short={dpo_s:.1f}, long={dpo_l:.1f}  -&gt; long wins by {dpo_l/dpo_s:.1f}x')
+print(f'SimPO:                        short={simpo_s:.3f}, long={simpo_l:.3f} -&gt; length-neutral')
+</code></pre>
+<h2>SimPO Training Loop Without Reference Model</h2>
+<p>SimPO's training loop differs from DPO in two key ways: no reference model forward pass, and explicit length tracking for the normalization. The response length is the number of non-padding tokens in the response portion of the sequence (not the full prompt+response length). In practice, this requires a response mask that marks which tokens are part of the assistant's response, separate from the prompt tokens. This is important: normalizing by the total sequence length (including prompt) would penalize long prompts unfairly.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+from torch.optim import AdamW
+
+def compute_response_logps(model, input_ids, attention_mask, response_start):
+    # Compute sum and count of log-probs over response tokens only (not prompt)
+    outputs  = model(input_ids=input_ids, attention_mask=attention_mask)
+    logits   = outputs.logits[:, :-1].contiguous()
+    labels   = input_ids[:, 1:].contiguous()
+    lp       = F.log_softmax(logits, dim=-1)
+    tok_lp   = lp.gather(2, labels.unsqueeze(-1)).squeeze(-1)
+    resp_mask = torch.zeros_like(tok_lp)
+    resp_mask[:, response_start:] = attention_mask[:, response_start + 1:].float()
+    sum_lp  = (tok_lp * resp_mask).sum(dim=1)
+    lengths = resp_mask.sum(dim=1)
+    return sum_lp, lengths
+
+def simpo_train_step(model, optimizer, chosen_ids, rejected_ids,
+                     c_mask, r_mask, resp_start, beta=2.5, gamma=0.5):
+    optimizer.zero_grad()
+    logps_c, lens_c = compute_response_logps(model, chosen_ids,   c_mask, resp_start)
+    logps_r, lens_r = compute_response_logps(model, rejected_ids, r_mask, resp_start)
+    r_c   = beta * logps_c / lens_c
+    r_r   = beta * logps_r / lens_r
+    loss  = -F.logsigmoid(r_c - r_r - gamma).mean()
+    loss.backward()
+    optimizer.step()
+    return loss.item()
+
+print('SimPO: 1 model in GPU, response-only length normalization, margin gamma=0.5')
+</code></pre>
+<h2>Margin Sensitivity Analysis</h2>
+<p>The gamma margin in SimPO serves as a minimum acceptable preference gap. When gamma=0, the loss reduces to a simple contrastive loss without an explicit target — the optimization is satisfied whenever chosen reward exceeds rejected reward by any amount, which can lead to small, noisy gradients. As gamma increases, the effective win-rate threshold rises (the model must achieve a stronger preference to satisfy the loss), which provides larger gradients when the policy is near the decision boundary but harder optimization when the data is noisy.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+torch.manual_seed(0)
+beta  = 2.5
+r_w   = torch.randn(1000) * 0.4 + 0.8   # chosen avg log-prob
+r_l   = torch.randn(1000) * 0.4 + 0.0   # rejected avg log-prob
+rew_diff = beta * (r_w - r_l)
+
+gammas = [0.0, 0.2, 0.5, 1.0, 2.0, 3.0]
+print(f'  gamma   win_rate   loss       grad_magnitude')
+print('-' * 50)
+for g in gammas:
+    probs = torch.sigmoid(rew_diff - g)
+    loss  = -F.logsigmoid(rew_diff - g).mean()
+    grad  = torch.sigmoid(-(rew_diff - g)).mean()  # gradient weight
+    print(f'  {g:.1f}     {probs.mean():.3f}    {loss.item():.4f}    {grad.item():.4f}')
+print()
+print('Larger gamma: fewer satisfied pairs, larger gradients on unsatisfied ones')
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Reference Model</th>
+<th>Length Norm</th>
+<th>Margin Term</th>
+<th>Memory 7B</th>
+<th>AlpacaEval 2 LC-WR</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DPO</td>
+<td>Yes (frozen)</td>
+<td>No (total logp)</td>
+<td>No</td>
+<td>~28 GB</td>
+<td>Baseline</td>
+</tr>
+<tr>
+<td>SimPO</td>
+<td>No</td>
+<td>Yes (avg logp)</td>
+<td>Yes (gamma)</td>
+<td>~14 GB</td>
+<td>+3 to +5 pts vs DPO</td>
+</tr>
+<tr>
+<td>ORPO</td>
+<td>No</td>
+<td>Partial (mean tok)</td>
+<td>No</td>
+<td>~14 GB</td>
+<td>Competitive with DPO</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>SimPO's Length-Normalized Reward</strong>: SimPO's length-normalized reward is theoretically equivalent to maximizing per-token conditional log-likelihood of chosen over rejected — this directly prevents the 'add filler text' failure mode where DPO policies learn to be verbose to maximize total log-prob. The length-controlled win rate (LC-WR) metric on AlpacaEval 2 measures quality independent of response length, making it the right metric for evaluating SimPO's advantage over DPO.</p>
+</blockquote>
+<p>SimPO hyperparameter guidance: beta=2.5 and gamma=0.5 are the defaults from the paper, validated across Mistral-7B, Llama-3-8B, and Llama-3-70B base models. For smaller models (&lt; 3B), reduce gamma to 0.2-0.3 since the reward distribution has higher variance. For models trained with more SFT data (reducing the gap between chosen and rejected base probabilities), increase beta to 3.0-4.0 to amplify the preference signal. Always evaluate using LC-WR rather than raw win rate when comparing against DPO baselines.</p>
+<hr />
+<p>SimPO demonstrates that the two most impactful changes to DPO — removing the reference model and normalizing by length — can be made independently and are complementary. Its consistent empirical superiority on AlpacaEval 2 LC-WR across multiple model families, combined with the theoretical clarity of the per-token log-probability reward, makes SimPO a strong default choice for offline preference optimization when memory efficiency and alignment quality are both priorities. The DPO-to-SimPO comparison is a case study in how a small algorithmic insight (divide by length) can have large practical impact on alignment outcomes.</p>
+    </article>
+  </main>
+</body>
+</html>

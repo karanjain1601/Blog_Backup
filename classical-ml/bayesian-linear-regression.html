@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bayesian Linear Regression | Notes Backup</title>
+  <meta name="description" content="Derive the analytical posterior over weights, compute predictive distributions with uncertainty that grows away from training data, implement evidence maximisation for hyperparameter selection, and compare with frequentist ridge regression." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Bayesian Linear Regression</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Derive the analytical posterior over weights, compute predictive distributions with uncertainty that grows away from training data, implement evidence maximisation for hyperparameter selection, and compare with frequentist ridge regression.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Bayesian Linear Regression</h1>
+<p>Bayesian linear regression treats the weight vector w as a random variable and computes a full posterior distribution over w given the data, rather than a single point estimate. This gives predictions with principled uncertainty quantification: the predictive distribution is a Gaussian whose variance reflects both aleatoric noise (irreducible data noise) and epistemic uncertainty (uncertainty about the weights). Unlike frequentist confidence intervals (which require asymptotic approximations), Bayesian uncertainty is exact under the Gaussian prior-likelihood model and grows naturally in regions far from the training data.</p>
+<h2>Prior, Likelihood, and Posterior</h2>
+<p>Setup: Gaussian prior p(w) = N(0, α⁻¹I) with precision α (inverse variance). Gaussian likelihood p(y|X,w) = N(Xw, β⁻¹I) with noise precision β. By Bayes' theorem: p(w|X,y) ∝ p(y|X,w)·p(w) = N(μ_N, Σ_N) where Σ_N = (αI + βXᵀX)⁻¹ and μ_N = βΣ_N Xᵀy. This is a Gaussian posterior — the conjugate property of Gaussian priors with Gaussian likelihoods gives an analytically tractable posterior. As n→∞, the posterior concentrates on the MLE and the prior becomes irrelevant. The MAP estimate (posterior mode) is identical to the ridge regression solution with λ = α/β.</p>
+<pre><code class="language-python">import numpy as np
+
+np.random.seed(42)
+
+def bayesian_lr_posterior(X, y, alpha=1.0, beta=25.0):
+    &quot;&quot;&quot;Gaussian posterior for Bayesian linear regression.
+    Prior: w ~ N(0, alpha^{-1} I)
+    Likelihood: y | X,w ~ N(Xw, beta^{-1} I)
+    Returns: mu_N (posterior mean), Sigma_N (posterior covariance)
+    &quot;&quot;&quot;
+    p = X.shape[1]
+    Sigma_N_inv = alpha * np.eye(p) + beta * X.T @ X
+    Sigma_N = np.linalg.inv(Sigma_N_inv)
+    mu_N = beta * Sigma_N @ X.T @ y
+    return mu_N, Sigma_N
+
+true_w = np.array([1.5, -0.8])
+n = 30
+X = np.column_stack([np.ones(n), np.random.uniform(-3, 3, n)])
+y = X @ true_w + 0.2 * np.random.randn(n)
+
+alpha, beta = 2.0, 25.0
+mu_N, Sigma_N = bayesian_lr_posterior(X, y, alpha, beta)
+
+print(f'True weights:   {true_w}')
+print(f'Posterior mean: {mu_N.round(4)}')
+print(f'Posterior std:  {np.sqrt(np.diag(Sigma_N)).round(4)}')
+ridge_map = np.linalg.solve(alpha/beta * np.eye(2) + X.T @ X, X.T @ y)
+print(f'Ridge MAP:      {ridge_map.round(4)}  (should equal posterior mean)')
+</code></pre>
+<h2>Predictive Distribution with Epistemic Uncertainty</h2>
+<p>Given a new point x<em>, the predictive distribution integrates out the weight uncertainty: p(y</em>|x<em>, X, y) = ∫ p(y</em>|x<em>,w) p(w|X,y) dw = N(μ_Nᵀx</em>, σ²<em>(x</em>)) where σ²<em>(x</em>) = β⁻¹ + x<em>ᵀΣ_N x</em>. The first term β⁻¹ is irreducible aleatoric noise. The second term x<em>ᵀΣ_Nx</em> is epistemic uncertainty — it grows as x* moves away from the training data, giving naturally wider confidence bands in extrapolation regions. This automatic uncertainty growth is the key advantage over frequentist prediction intervals, which require large-n approximations and do not automatically grow in data-sparse regions.</p>
+<pre><code class="language-python">import numpy as np
+
+np.random.seed(42)
+true_w = np.array([0.5, 1.2])
+n = 20
+X_train_1d = np.random.uniform(-2, 2, n)
+X_train = np.column_stack([np.ones(n), X_train_1d])
+y_train = X_train @ true_w + 0.3 * np.random.randn(n)
+
+alpha, beta = 1.0, 11.0
+Sigma_N_inv = alpha * np.eye(2) + beta * X_train.T @ X_train
+Sigma_N = np.linalg.inv(Sigma_N_inv)
+mu_N = beta * Sigma_N @ X_train.T @ y_train
+
+x_test_1d = np.linspace(-5, 5, 200)  # includes extrapolation regions
+X_test = np.column_stack([np.ones(200), x_test_1d])
+
+y_pred_mean = X_test @ mu_N
+y_pred_var  = 1.0/beta + np.array([x @ Sigma_N @ x for x in X_test])
+y_pred_std  = np.sqrt(y_pred_var)
+
+print('Predictive uncertainty grows in extrapolation region:')
+for x_val, mu_val, std_val in zip(x_test_1d[::40], y_pred_mean[::40], y_pred_std[::40]):
+    print(f'  x*={x_val:&gt;6.2f}: pred={mu_val:.3f} +/- {1.96*std_val:.3f} (95% CI)')
+</code></pre>
+<h2>Sequential Bayesian Updating</h2>
+<p>One elegant property of Bayesian regression is sequential updating: the posterior after seeing n observations serves as the prior for observation n+1. Starting with p(w) = N(m_0, S_0), after observing (x_n, y_n) the posterior is N(m_n, S_n) where S_n⁻¹ = S_{n-1}⁻¹ + βx_nxₙᵀ and m_n = S_n(S_{n-1}⁻¹m_{n-1} + βy_nx_n). This is exact online learning — no need to store past data, no approximation. The posterior precision (inverse covariance) grows with each observation, and the uncertainty decreases monotonically. This makes Bayesian regression naturally suited for real-time systems where data arrives sequentially.</p>
+<pre><code class="language-python">import numpy as np
+
+np.random.seed(42)
+true_w = np.array([1.0, -0.5, 0.8])
+beta, alpha, p_dim = 9.0, 1.0, 3
+
+m = np.zeros(p_dim)
+S_inv = alpha * np.eye(p_dim)
+S = np.linalg.inv(S_inv)
+
+for n in range(1, 101):
+    x_n = np.random.randn(p_dim)
+    y_n = x_n @ true_w + np.random.randn() / np.sqrt(beta)
+    # Rank-1 Bayesian update
+    S_inv_new = S_inv + beta * np.outer(x_n, x_n)
+    S_new = np.linalg.inv(S_inv_new)
+    m_new = S_new @ (S_inv @ m + beta * y_n * x_n)
+    S_inv, S, m = S_inv_new, S_new, m_new
+    if n in [1, 5, 10, 25, 50, 100]:
+        std_w = np.sqrt(np.diag(S))
+        print(f'n={n:&gt;3}: mean={m.round(3)}, std={std_w.round(3)}')
+
+print(f'True w: {true_w}')
+</code></pre>
+<h2>Evidence Maximisation for Hyperparameter Selection</h2>
+<p>The marginal likelihood (evidence) p(y|X, α, β) = ∫ p(y|X,w) p(w|α) dw integrates out the weights, giving a measure of how well the model (at given α, β) explains the data. Maximising the evidence over α and β (called Type-II ML or empirical Bayes) selects hyperparameters without cross-validation — using all training data. The evidence favours models that are complex enough to fit the data but not so complex that they spread prior mass over too many irrelevant regions (Occam's Razor). This is the principled alternative to held-out validation for hyperparameter selection.</p>
+<pre><code class="language-python">import numpy as np
+from scipy.optimize import minimize_scalar
+
+np.random.seed(0)
+true_w = np.array([2.0, -1.0])
+n = 50
+X = np.column_stack([np.ones(n), np.random.uniform(-3, 3, n)])
+y = X @ true_w + 0.5 * np.random.randn(n)
+
+def neg_log_evidence(log_alpha, X, y, beta=4.0):
+    alpha = np.exp(log_alpha)
+    p = X.shape[1]
+    A = alpha * np.eye(p) + beta * X.T @ X
+    A_inv = np.linalg.inv(A)
+    mu_N = beta * A_inv @ X.T @ y
+    _, logdet_A = np.linalg.slogdet(A)
+    resid = y - X @ mu_N
+    log_ev = (0.5 * p * np.log(alpha)
+              + 0.5 * n * np.log(beta)
+              - 0.5 * beta * resid @ resid
+              - 0.5 * alpha * mu_N @ mu_N
+              - 0.5 * logdet_A
+              - 0.5 * n * np.log(2*np.pi))
+    return -log_ev
+
+beta_fixed = 4.0
+result = minimize_scalar(neg_log_evidence, bounds=(-5, 5), method='bounded',
+                          args=(X, y, beta_fixed))
+opt_alpha = np.exp(result.x)
+print(f'Evidence-optimal alpha = {opt_alpha:.4f}')
+print(f'Equivalent ridge lambda = alpha/beta = {opt_alpha/beta_fixed:.4f}')
+</code></pre>
+<blockquote>
+<p><strong>MAP = Ridge, But Posterior Gives More</strong>: The posterior mode (MAP) of Bayesian linear regression with Gaussian prior is identical to the ridge regression solution with λ = α/β. However, ridge gives only a point estimate, while Bayesian regression gives the full posterior distribution. The posterior enables: (1) uncertainty quantification on predictions; (2) sequential updating without storing past data; (3) evidence maximisation for hyperparameter selection without cross-validation. All three are unavailable from ridge regression alone.</p>
+</blockquote>
+<h2>Connection to Gaussian Processes</h2>
+<p>Bayesian linear regression with a feature map φ(x) (basis functions: polynomials, RBFs, etc.) gives Bayesian polynomial/kernel regression. In the limit of infinite basis functions, the prior over functions induced by w ~ N(0, α⁻¹I) becomes a Gaussian Process prior p(f) = GP(0, k(x,x')) where k(x,x') = α⁻¹φ(x)ᵀφ(x') is the kernel. This connection shows that Gaussian Processes are the nonparametric limit of Bayesian linear regression — they extend the closed-form posterior and predictive distribution to any kernel function, providing the same uncertainty quantification without fixing a finite basis.</p>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Frequentist Ridge</th>
+<th>Bayesian Linear Regression</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Output</td>
+<td>Single point estimate θ̂</td>
+<td>Full posterior distribution N(μ_N, Σ_N)</td>
+</tr>
+<tr>
+<td>Uncertainty</td>
+<td>Bootstrap or asymptotic CI</td>
+<td>Exact posterior; grows in extrapolation regions</td>
+</tr>
+<tr>
+<td>Hyperparameter selection</td>
+<td>Cross-validation (needs held-out data)</td>
+<td>Evidence maximisation (uses all training data)</td>
+</tr>
+<tr>
+<td>Computation</td>
+<td>O(p³) matrix solve</td>
+<td>O(p³) matrix inversion — same cost</td>
+</tr>
+<tr>
+<td>Sequential update</td>
+<td>Refit from scratch</td>
+<td>Exact O(p²) rank-1 update per sample</td>
+</tr>
+<tr>
+<td>Prediction</td>
+<td>ŷ = μ_Nᵀx*</td>
+<td>p(y*</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>Gaussian priors over w correspond to L2 (Ridge) regularisation — the MAP solution is identical.</li>
+<li>Use evidence maximisation (Type-II ML) to select alpha and beta without cross-validation.</li>
+<li>Sequential updating enables exact online learning — ideal for streaming regression tasks.</li>
+<li>Predictive uncertainty grows in extrapolation regions — always plot the uncertainty bands.</li>
+<li>For nonlinear regression, extend to Gaussian Processes (the infinite-basis limit).</li>
+<li>For non-Gaussian likelihoods (classification), use Laplace approximation or variational inference for the posterior.</li>
+</ul>
+<blockquote>
+<p><strong>Aleatoric vs Epistemic Uncertainty</strong>: The predictive variance decomposes as sigma^2<em>(x</em>) = beta^{-1} + x<em>^T Sigma_N x</em>. The first term beta^{-1} is aleatoric uncertainty — irreducible noise inherent to the data generating process. The second term x<em>^T Sigma_N x</em> is epistemic uncertainty — uncertainty about the model weights due to limited data. Epistemic uncertainty shrinks toward zero as n grows and as x* moves into data-dense regions. This decomposition is not directly available from frequentist methods and is a key advantage of the Bayesian framework for safety-critical applications.</p>
+</blockquote>
+<p>The evidence (marginal likelihood) has an Occam factor interpretation. A model with diffuse prior (small alpha) can fit many possible datasets, but most don't look like y — so the evidence is spread thin. A model with concentrated prior (large alpha, weights near zero) fits fewer datasets, but when it fits y well the evidence is high. This automatic complexity penalisation means evidence maximisation avoids overfitting hyperparameters even without held-out data — it implements Occam's Razor formally.</p>
+<p>Bayesian linear regression with polynomial basis functions phi(x) = [1, x, x^2, ..., x^M]^T gives Bayesian polynomial regression. The prior w ~ N(0, alpha^{-1}I) combined with polynomial features induces a prior over polynomial functions. Evidence maximisation over alpha and M selects the optimal polynomial degree without cross-validation. In the limit of infinite basis functions (using a kernel function), Bayesian linear regression becomes a Gaussian Process — the nonparametric extension that provides the same closed-form posterior and predictive distribution for any kernel.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

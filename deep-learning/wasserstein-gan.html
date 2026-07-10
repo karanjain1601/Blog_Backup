@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Wasserstein GAN — Earth Mover Distance and Gradient Penalty | Notes Backup</title>
+  <meta name="description" content="WGAN replaces the JS divergence objective with the Wasserstein-1 (Earth Mover) distance, enforced via weight clipping or gradient penalty, providing a meaningful loss that correlates with sample quality and solving vanishing-gradient and mode collapse problems of standard GANs." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Wasserstein GAN — Earth Mover Distance and Gradient Penalty</h1>
+      <ul class='note-meta'><li><strong>description:</strong> WGAN replaces the JS divergence objective with the Wasserstein-1 (Earth Mover) distance, enforced via weight clipping or gradient penalty, providing a meaningful loss that correlates with sample quality and solving vanishing-gradient and mode collapse problems of standard GANs.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Wasserstein GAN — Earth Mover Distance and Gradient Penalty</h1>
+<p>The Wasserstein GAN (Arjovsky et al., 2017) identifies a fundamental flaw in the standard GAN training objective and replaces it with a theoretically motivated alternative. Standard GANs minimise the Jensen-Shannon divergence between p_data and p_g, but JS divergence is undefined (or saturated) when the two distributions have disjoint support — which is nearly always the case in high-dimensional spaces early in training. WGAN replaces JS with the Wasserstein-1 distance, which is always defined and provides meaningful gradients even when the distributions do not overlap.</p>
+<h2>The JS Divergence Problem</h2>
+<p>In high-dimensional spaces, the real data distribution p_data and the generated distribution p_g concentrate on low-dimensional manifolds that have measure zero relative to the ambient space. When these manifolds are disjoint (which happens almost certainly early in training), the JS divergence is exactly log(2) — a constant with gradient zero. This means the discriminator saturates, providing no gradient to the generator. The GAN then oscillates or stalls rather than improving.</p>
+<p>$$\text{JS}(p | q) = \frac{1}{2} KL!\left(p \,\Big|\, \frac{p+q}{2}\right) + \frac{1}{2} KL!\left(q \,\Big|\, \frac{p+q}{2}\right)$$</p>
+<h2>Wasserstein-1 Distance</h2>
+<p>The Wasserstein-1 (Earth Mover) distance W(p, q) measures the minimum cost of transporting mass from distribution p to distribution q, where cost is the distance moved times the mass moved. Unlike JS divergence, W(p,q) is defined and continuous even when p and q have disjoint supports — it returns the physical distance between the two distribution masses. As p_g moves toward p_data during training, W(p_g, p_data) decreases monotonically and provides useful gradient information throughout.</p>
+<p>$$W(p, q) = \inf_{\gamma \in \Pi(p,q)} \mathbb{E}_{(x,y) \sim \gamma}[|x - y|]$$</p>
+<h2>Kantorovich-Rubinstein Duality</h2>
+<p>Computing W(p,q) directly is intractable for high-dimensional distributions. The Kantorovich-Rubinstein duality provides a tractable dual formulation: W(p,q) = sup_{||f||_L ≤ 1} (E_p[f(x)] - E_q[f(x)]), where the supremum is over all 1-Lipschitz functions f. In WGAN, the critic (replacing the discriminator) parameterises f. Training maximises E[f(real)] - E[f(fake)] over the critic while enforcing the 1-Lipschitz constraint. The critic is not a classifier — it outputs unbounded real-valued scores, not probabilities.</p>
+<p>$$W(p, q) = \sup_{|f|<em _sim="\sim" p="p" x="x">L \leq 1} \left( \mathbb{E}</em>[f(x)] \right)$$}[f(x)] - \mathbb{E}_{x \sim q</p>
+<h2>WGAN Training with Weight Clipping</h2>
+<p>WGAN enforces the 1-Lipschitz constraint on the critic by clipping all critic weights to the interval [-c, c] after each gradient step (typically c=0.01). The critic is trained to near-convergence (n_critic=5 steps) before each generator update. Unlike standard GAN, WGAN uses RMSprop rather than Adam — the authors found Adam's momentum destabilises WGAN training. The generator loss is simply -E[f(G(z))], and the critic loss is -(E[f(real)] - E[f(fake)]).</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.optim as optim
+
+def train_wgan(generator, critic, dataloader,
+               num_epochs=100, n_critic=5, clip_c=0.01, latent_dim=100):
+    '''WGAN training with weight clipping. Critic outputs unbounded scalars.
+    Use RMSprop not Adam; clip critic weights to [-c, c] after each step.
+    '''
+    opt_G = optim.RMSprop(generator.parameters(), lr=5e-5)
+    opt_C = optim.RMSprop(critic.parameters(), lr=5e-5)
+    for epoch in range(num_epochs):
+        for real_imgs, _ in dataloader:
+            bs = real_imgs.size(0)
+            # --- Critic: n_critic steps per generator step ---
+            for _ in range(n_critic):
+                opt_C.zero_grad()
+                z = torch.randn(bs, latent_dim)
+                fake_imgs = generator(z).detach()
+                # Maximize E[f(real)] - E[f(fake)], i.e. minimise negation
+                c_real = critic(real_imgs).mean()
+                c_fake = critic(fake_imgs).mean()
+                c_loss = -(c_real - c_fake)
+                c_loss.backward()
+                opt_C.step()
+                # Enforce 1-Lipschitz constraint via weight clipping
+                for p in critic.parameters():
+                    p.data.clamp_(-clip_c, clip_c)
+            # --- Generator: maximize E[f(G(z))] ---
+            opt_G.zero_grad()
+            z = torch.randn(bs, latent_dim)
+            g_loss = -critic(generator(z)).mean()
+            g_loss.backward()
+            opt_G.step()
+        w_dist = (c_real - c_fake).item()
+        print(f'Epoch {epoch}: W_dist={w_dist:.4f}  G_loss={g_loss.item():.4f}')
+</code></pre>
+<pre><code class="language-python">import numpy as np
+from scipy.stats import wasserstein_distance, gaussian_kde
+
+def compare_w1_vs_js(mean1=0.0, std1=1.0, mean2=2.0, std2=1.0, n=20000):
+    '''Compare Wasserstein-1 and JS divergence on 1D Gaussians.
+    JS saturates at log(2) for disjoint distributions; W1 stays meaningful.
+    '''
+    p = np.random.normal(mean1, std1, n)
+    q = np.random.normal(mean2, std2, n)
+    w1 = wasserstein_distance(p, q)
+    kde_p, kde_q = gaussian_kde(p), gaussian_kde(q)
+    x = np.linspace(min(p.min(), q.min()), max(p.max(), q.max()), 500)
+    px, qx = kde_p(x) + 1e-10, kde_q(x) + 1e-10
+    mx = 0.5 * (px + qx)
+    js = 0.5 * (np.trapz(px * np.log(px / mx), x) +
+                np.trapz(qx * np.log(qx / mx), x))
+    return w1, js
+
+print(f'{&quot;Separation&quot;:&lt;12} {&quot;W1-distance&quot;:&lt;14} {&quot;JS-divergence&quot;:&lt;16} {&quot;JS saturated?&quot;}')
+print('-' * 58)
+for sep in [0.5, 2.0, 5.0, 10.0, 20.0]:
+    w1, js = compare_w1_vs_js(mean1=0.0, mean2=sep)
+    saturated = 'YES (no gradient!)' if js &gt; 0.65 else 'no'
+    print(f'{sep:&lt;12.1f} {w1:&lt;14.4f} {js:&lt;16.4f} {saturated}')
+print(f'JS saturates at log(2) = {np.log(2):.4f} for disjoint distributions.')
+print('W1 continues scaling linearly with separation — always a useful gradient signal.')
+</code></pre>
+<h2>Weight Clipping Problems</h2>
+<p>Weight clipping enforces the Lipschitz constraint, but it is crude. All weights are forced into [-c, c], which biases the critic toward linear functions — the simplest functions that respect the bound while using all available weight capacity. This dramatically reduces the critic's expressive power. With c too small, gradients vanish in deep critics; with c too large, the Lipschitz constraint is not meaningfully enforced. The WGAN authors themselves acknowledged clipping as a stopgap measure.</p>
+<blockquote>
+<p><strong>Weight Clipping Limitations</strong>: Weight clipping biases the critic toward linear functions because clipping all weights uniformly suppresses deep compositional features. This capacity underuse means the critic cannot fit the true Wasserstein distance well. The solution is WGAN-GP (Gulrajani 2017), which replaces clipping with a gradient penalty term: lambda * E[(||grad_x D(x_hat)||_2 - 1)^2] evaluated at interpolated points x_hat between real and fake samples. WGAN-GP is the preferred method in practice.</p>
+</blockquote>
+<h2>Training Stability and Loss as a Quality Metric</h2>
+<p>A major advantage of WGAN over standard GAN is that the critic loss is a meaningful proxy for sample quality. The critic loss (negative W estimate) decreases as the generator improves, and this decrease correlates with visual quality improvements and FID reduction. In standard GAN, neither the generator nor the discriminator loss is a reliable quality signal — D loss can drop to zero while G produces garbage, and G loss can be high even when images look good. WGAN eliminates this problem by construction.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import matplotlib.pyplot as plt
+
+def toy_training(mode='wgan', n_steps=400, seed=42):
+    '''Train GAN or WGAN on a toy 2D Gaussian. Returns loss histories for comparison.'''
+    torch.manual_seed(seed)
+    target = torch.tensor([3.0, 3.0])
+    G = nn.Sequential(nn.Linear(2, 64), nn.ReLU(), nn.Linear(64, 2))
+    D = nn.Sequential(nn.Linear(2, 64), nn.LeakyReLU(0.2), nn.Linear(64, 1))
+    if mode == 'wgan':
+        opt_G = torch.optim.RMSprop(G.parameters(), lr=5e-5)
+        opt_D = torch.optim.RMSprop(D.parameters(), lr=5e-5)
+    else:
+        D.add_module('sig', nn.Sigmoid())
+        opt_G = torch.optim.Adam(G.parameters(), lr=2e-4, betas=(0.5, 0.999))
+        opt_D = torch.optim.Adam(D.parameters(), lr=2e-4, betas=(0.5, 0.999))
+    losses_G, losses_D = [], []
+    for step in range(n_steps):
+        real = target + torch.randn(64, 2) * 0.5
+        z = torch.randn(64, 2)
+        fake = G(z)
+        if mode == 'wgan':
+            d_loss = -(D(real).mean() - D(fake.detach()).mean())
+        else:
+            bce = nn.BCELoss()
+            d_loss = bce(D(real), torch.ones(64, 1)) + bce(D(fake.detach()), torch.zeros(64, 1))
+        opt_D.zero_grad(); d_loss.backward(); opt_D.step()
+        if mode == 'wgan':
+            for p in D.parameters(): p.data.clamp_(-0.01, 0.01)
+            g_loss = -D(G(z)).mean()
+        else:
+            g_loss = bce(D(G(z)), torch.ones(64, 1))
+        opt_G.zero_grad(); g_loss.backward(); opt_G.step()
+        losses_G.append(g_loss.item()); losses_D.append(d_loss.item())
+    return losses_G, losses_D
+
+gan_G, gan_D = toy_training('gan')
+wgan_G, wgan_D = toy_training('wgan')
+print(f'GAN  final G_loss={gan_G[-1]:.4f}  D_loss={gan_D[-1]:.4f}')
+print(f'WGAN final G_loss={wgan_G[-1]:.4f}  W_dist={-wgan_D[-1]:.4f}')
+</code></pre>
+<pre><code class="language-python">import torch
+import numpy as np
+
+def track_w_distance_vs_quality(generator, critic, dataloader,
+                                 fid_fn=None, eval_interval=100):
+    '''Track WGAN critic W-distance estimate alongside FID.
+    A decreasing W estimate should correlate with improving (lower) FID scores.
+    '''
+    generator.eval(); critic.eval()
+    w_estimates, fid_scores, steps = [], [], []
+    step = 0
+    for real_imgs, _ in dataloader:
+        with torch.no_grad():
+            z = torch.randn(real_imgs.size(0), 100)
+            fake_imgs = generator(z)
+            c_real = critic(real_imgs).mean().item()
+            c_fake = critic(fake_imgs).mean().item()
+            w_est = c_real - c_fake
+        w_estimates.append(w_est)
+        if fid_fn is not None and step % eval_interval == 0:
+            fid = fid_fn(generator)
+            fid_scores.append(fid)
+            steps.append(step)
+            print(f'Step {step:5d}: W_estimate={w_est:.4f}  FID={fid:.2f}')
+        step += 1
+    if len(fid_scores) &gt; 1:
+        corr = np.corrcoef(w_estimates[:len(fid_scores)], fid_scores)[0, 1]
+        print(f'Correlation(W_estimate, FID) = {corr:.4f}')
+        print('Expected: negative (higher W_dist estimate -&gt; better/lower FID)')
+    return w_estimates, fid_scores
+</code></pre>
+<h2>GAN Variants Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Lipschitz Enforcement</th>
+<th>Loss Meaningful?</th>
+<th>Stability</th>
+<th>BatchNorm in Critic</th>
+<th>Relative Quality</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Standard GAN</td>
+<td>None (JS divergence)</td>
+<td>No — oscillates, not correlated with quality</td>
+<td>Low: mode collapse, vanishing gradients</td>
+<td>Allowed (avoid in practice)</td>
+<td>Baseline</td>
+</tr>
+<tr>
+<td>WGAN</td>
+<td>Weight clipping to [-c, c]</td>
+<td>Yes — W distance decreases as quality improves</td>
+<td>Moderate: clipping biases toward linear critics</td>
+<td>Not recommended</td>
+<td>Better than GAN</td>
+</tr>
+<tr>
+<td>WGAN-GP</td>
+<td>Gradient penalty on interpolated points</td>
+<td>Yes — more accurate W estimate than clipping</td>
+<td>High: stable across architectures and datasets</td>
+<td>Not allowed (use LayerNorm)</td>
+<td>Strong baseline</td>
+</tr>
+<tr>
+<td>SN-GAN</td>
+<td>Spectral norm on all critic weight matrices</td>
+<td>Partial — hinge loss, not true W distance</td>
+<td>High: no extra backward pass, fast</td>
+<td>Allowed</td>
+<td>Competitive FID</td>
+</tr>
+</tbody>
+</table>
+<p>WGAN-GP is the most widely adopted variant for research and production GAN training because it provides the strongest theoretical guarantees (gradient penalty directly enforces the dual constraint), works with most architectures, and produces reliably interpretable training curves. SN-GAN is preferred when computational efficiency matters, as spectral normalisation adds minimal overhead (one power iteration per layer per step) compared to WGAN-GP's extra backward pass through create_graph.</p>
+<ul>
+<li>Use RMSprop (not Adam) for WGAN with weight clipping — Adam's momentum destabilises Wasserstein training with clipping</li>
+<li>WGAN-GP uses Adam with betas=(0.0, 0.9) — zero first moment avoids momentum issues while second moment helps adaptation</li>
+<li>The critic loss in WGAN is a lower bound on the true W distance; a monotonically decreasing critic loss means the generator is improving</li>
+<li>Weight clipping constant c=0.01 is the standard starting point — if training is slow try c=0.05; if unstable try c=0.005</li>
+<li>WGAN-GP eliminates the need for batch normalisation in the critic entirely — use LayerNorm or GroupNorm instead for stable activations</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

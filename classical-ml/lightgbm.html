@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LightGBM — Leaf-Wise Growth and Histogram Splits | Notes Backup</title>
+  <meta name="description" content="LightGBM&#x27;s algorithmic innovations: leaf-wise best-first tree growth, histogram binning, Gradient-based One-Side Sampling (GOSS), Exclusive Feature Bundling (EFB), and native categorical support." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>LightGBM — Leaf-Wise Growth and Histogram Splits</h1>
+      <ul class='note-meta'><li><strong>description:</strong> LightGBM&#x27;s algorithmic innovations: leaf-wise best-first tree growth, histogram binning, Gradient-based One-Side Sampling (GOSS), Exclusive Feature Bundling (EFB), and native categorical support.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>LightGBM — Leaf-Wise Growth and Histogram Splits</h1>
+<h2>Leaf-Wise vs Level-Wise Tree Growth</h2>
+<p>XGBoost and sklearn's GBM use level-wise (breadth-first) growth: all leaves at the current depth are split before going deeper. LightGBM uses leaf-wise (best-first) growth: at each step it selects the single leaf with the highest split gain and splits only that leaf, regardless of depth. This means LightGBM achieves a lower loss for the same number of leaves but can produce asymmetric, deep trees. It is more efficient when the best splits are concentrated in a few branches.</p>
+<blockquote>
+<p><strong>Leaf-Wise Growth Risks Overfitting on Small Data</strong>: Leaf-wise growth can create very deep paths in one branch. On small datasets (&lt; 10,000 samples) this leads to overfitting. Always set num_leaves and min_data_in_leaf to constrain growth. A good starting point: num_leaves = 31, min_data_in_leaf = 20.</p>
+</blockquote>
+<h2>Histogram Algorithm for Fast Splits</h2>
+<p>Traditional GBDT evaluates splits by sorting feature values — O(n log n) per feature per tree. LightGBM instead bins continuous features into at most 255 discrete buckets (histogram algorithm), reducing split search to O(n_bins × n_features) per tree. Building histograms takes O(n × n_features) but histograms can be subtracted: hist(right) = hist(parent) − hist(left), halving the work. This typically yields a 10-20x speedup over exact split algorithms on large datasets.</p>
+<h2>GOSS — Gradient-Based One-Side Sampling</h2>
+<p>GOSS (Gradient-based One-Side Sampling) exploits the insight that instances with large gradients contribute more to the information gain estimate than those with small gradients. GOSS retains all instances with large gradients (top_rate fraction) and randomly samples only a small fraction (other_rate) of small-gradient instances. The small-gradient sample is upweighted by (1 − top_rate) / other_rate to correct for sampling bias. This dramatically reduces the effective dataset size for histogram construction without losing much information.</p>
+<blockquote>
+<p><strong>Why Large Gradients Matter More</strong>: An instance with a large gradient is one the current model predicts poorly — it carries more information for the next tree. Small-gradient instances are already well-fitted and contribute little to split gain. GOSS focuses computation where it matters most, reducing data size by 50-90% with minimal accuracy loss.</p>
+</blockquote>
+<h2>EFB — Exclusive Feature Bundling</h2>
+<p>High-dimensional data often has many sparse features that are mutually exclusive (they rarely take non-zero values simultaneously — common in one-hot encoded categoricals). EFB bundles such features into a single feature, reducing the effective feature count. Finding the optimal bundle is NP-hard, so LightGBM uses a greedy graph colouring approximation. EFB can reduce feature count by 40-60% on sparse datasets, speeding up histogram construction proportionally.</p>
+<h2>LightGBM vs XGBoost Speed Comparison</h2>
+<p>LightGBM is typically 5-20x faster than XGBoost on large datasets due to the histogram algorithm, GOSS, and EFB. Accuracy is comparable. The gap widens with more features and larger datasets. On small datasets (&lt; 5,000 samples) the difference is negligible.</p>
+<pre><code class="language-python">import lightgbm as lgb
+import xgboost as xgb
+import numpy as np
+import time
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+
+X, y = make_classification(n_samples=50000, n_features=50, n_informative=20,
+                            n_redundant=10, random_state=42)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
+
+t0 = time.time()
+lgb_model = lgb.LGBMClassifier(
+    n_estimators=200, learning_rate=0.05,
+    num_leaves=31, random_state=42, n_jobs=-1, verbose=-1)
+lgb_model.fit(X_tr, y_tr)
+lgb_time = time.time() - t0
+lgb_auc = roc_auc_score(y_te, lgb_model.predict_proba(X_te)[:, 1])
+
+t0 = time.time()
+xgb_model = xgb.XGBClassifier(
+    n_estimators=200, learning_rate=0.05,
+    max_depth=6, eval_metric='logloss', random_state=42, verbosity=0)
+xgb_model.fit(X_tr, y_tr)
+xgb_time = time.time() - t0
+xgb_auc = roc_auc_score(y_te, xgb_model.predict_proba(X_te)[:, 1])
+
+print(f'LightGBM: AUC={lgb_auc:.4f}  time={lgb_time:.2f}s')
+print(f'XGBoost:  AUC={xgb_auc:.4f}  time={xgb_time:.2f}s')
+print(f'LightGBM speedup: {xgb_time/lgb_time:.1f}x')
+</code></pre>
+<h2>Native Categorical Feature Support</h2>
+<p>LightGBM handles categorical features natively without one-hot encoding. It finds optimal binary splits by sorting categories by their mean target value (for regression/binary classification) and evaluating the split at each boundary — O(K log K) per feature. This is exact for binary targets and approximates optimal for multi-class. Pass categorical feature names to the fit() call — no label encoding required.</p>
+<pre><code class="language-python">import lightgbm as lgb
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+
+np.random.seed(42)
+n = 8000
+df = pd.DataFrame({
+    'age':       np.random.randint(18, 80, n),
+    'income':    np.random.exponential(50000, n),
+    'education': np.random.choice(['high_school','bachelor','master','phd'], n),
+    'city':      np.random.choice(['NYC','LA','Chicago','Houston','Phoenix'], n),
+    'score':     np.random.normal(600, 100, n)
+})
+df['education'] = df['education'].astype('category')
+df['city']      = df['city'].astype('category')
+y = (df['income'] &gt; df['income'].median()).astype(int)
+
+X_tr, X_te, y_tr, y_te = train_test_split(df, y, test_size=0.2, random_state=42)
+
+model = lgb.LGBMClassifier(n_estimators=100, random_state=42, verbose=-1)
+model.fit(X_tr, y_tr, categorical_feature=['education', 'city'])
+auc = roc_auc_score(y_te, model.predict_proba(X_te)[:, 1])
+print(f'AUC with native categoricals: {auc:.4f}')
+</code></pre>
+<h2>GOSS and EFB Parameters</h2>
+<p>GOSS is activated via data_sample_strategy='goss' (LightGBM &gt;= 4.0) or boosting_type='goss' (older). top_rate is the fraction of large-gradient instances always kept; other_rate is the sample rate for small-gradient instances. EFB is controlled by max_bin (histogram bins, default 255) and min_data_in_bin. Reducing max_bin speeds up training at the cost of split precision.</p>
+<pre><code class="language-python">import lightgbm as lgb
+import time
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+
+X, y = make_classification(n_samples=30000, n_features=100, n_informative=20,
+                            n_redundant=30, random_state=42)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
+
+configs = [
+    ('GOSS sampling',   {'data_sample_strategy': 'goss', 'top_rate': 0.2, 'other_rate': 0.1}),
+    ('Full data (bagging)', {'data_sample_strategy': 'bagging', 'bagging_fraction': 1.0, 'bagging_freq': 0}),
+]
+
+for name, extra in configs:
+    params = {'n_estimators': 150, 'learning_rate': 0.05, 'num_leaves': 31,
+              'random_state': 42, 'verbose': -1, **extra}
+    model = lgb.LGBMClassifier(**params)
+    t0 = time.time()
+    model.fit(X_tr, y_tr)
+    elapsed = time.time() - t0
+    auc = roc_auc_score(y_te, model.predict_proba(X_te)[:, 1])
+    print(f'{name:&lt;25} AUC={auc:.4f}  time={elapsed:.2f}s')
+</code></pre>
+<h2>LightGBM with SHAP Values</h2>
+<p>LightGBM integrates directly with SHAP's TreeExplainer, providing exact Shapley values at O(TLD²) cost. For binary classification, shap_values is a list of two arrays [neg_class, pos_class]; index [1] gives the positive class SHAP values. LightGBM also exposes predict(X, pred_contrib=True) for raw SHAP contributions without the shap package.</p>
+<pre><code class="language-python">import lightgbm as lgb
+import shap
+import numpy as np
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split
+
+data = load_breast_cancer()
+X, y = data.data, data.target
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
+
+model = lgb.LGBMClassifier(
+    n_estimators=100, learning_rate=0.05, num_leaves=31,
+    random_state=42, verbose=-1)
+model.fit(X_tr, y_tr)
+print(f'Test accuracy: {model.score(X_te, y_te):.4f}')
+
+explainer = shap.TreeExplainer(model)
+shap_values = explainer.shap_values(X_te)
+
+# Binary classification returns [neg_class_shap, pos_class_shap]
+sv = shap_values[1] if isinstance(shap_values, list) else shap_values
+print('Positive-class SHAP shape:', sv.shape)
+mean_abs = np.abs(sv).mean(0)
+top5 = np.argsort(mean_abs)[::-1][:5]
+for i in top5:
+    print(f'  {data.feature_names[i]:&lt;35s} {mean_abs[i]:.4f}')
+shap.summary_plot(sv, X_te, feature_names=data.feature_names, show=True)
+</code></pre>
+<h2>Framework Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Aspect</th>
+<th>LightGBM</th>
+<th>XGBoost</th>
+<th>CatBoost</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Speed</td>
+<td>Fastest (GOSS + EFB + histogram)</td>
+<td>Moderate (histogram in recent versions)</td>
+<td>Moderate (ordered boosting overhead)</td>
+</tr>
+<tr>
+<td>Categorical support</td>
+<td>Native — optimal binary splits</td>
+<td>Manual encoding required</td>
+<td>Native — ordered target statistics, no leakage</td>
+</tr>
+<tr>
+<td>Memory usage</td>
+<td>Low (histogram bins, not raw values)</td>
+<td>Moderate</td>
+<td>Moderate</td>
+</tr>
+<tr>
+<td>Accuracy (tabular)</td>
+<td>Excellent</td>
+<td>Excellent</td>
+<td>Excellent — especially strong on categoricals</td>
+</tr>
+<tr>
+<td>Key innovation</td>
+<td>Leaf-wise growth + GOSS + EFB</td>
+<td>Second-order Taylor + L1/L2 regularisation</td>
+<td>Ordered boosting to prevent target leakage</td>
+</tr>
+<tr>
+<td>Overfitting risk (small data)</td>
+<td>Higher (leaf-wise depth)</td>
+<td>Medium</td>
+<td>Lower (ordered boosting regularises)</td>
+</tr>
+<tr>
+<td>Typical num_leaves / max_depth</td>
+<td>num_leaves=31-255</td>
+<td>max_depth=4-8</td>
+<td>depth=4-10</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>LightGBM is typically 5-20x faster than XGBoost on large datasets — default choice for speed</li>
+<li>Use CatBoost when dataset has many high-cardinality categoricals and you want to avoid encoding</li>
+<li>XGBoost has the most mature ecosystem and best documentation — use it when in doubt</li>
+<li>All three support SHAP natively via TreeExplainer</li>
+<li>GOSS + EFB can be disabled for maximum accuracy on small datasets</li>
+<li>num_leaves is more important than max_depth in LightGBM — control both via num_leaves + min_data_in_leaf</li>
+</ul>
+<blockquote>
+<p><strong>LightGBM Quick-Start Configuration</strong>: lgb.LGBMClassifier(n_estimators=1000, learning_rate=0.05, num_leaves=63, min_child_samples=20, subsample=0.8, colsample_bytree=0.8, random_state=42) with early stopping on a validation set. This beats default configs on most structured datasets and trains fast enough for rapid iteration.</p>
+</blockquote>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

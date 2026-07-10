@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>torch.compile — Dynamo Tracing and Inductor Code Generation | Notes Backup</title>
+  <meta name="description" content="torch.compile wraps Python model code in three optimization stages — Dynamo bytecode analysis, AOT Autograd, and Inductor kernel generation — delivering 1.5–4x speedup with one line of code." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>torch.compile — Dynamo Tracing and Inductor Code Generation</h1>
+      <ul class='note-meta'><li><strong>description:</strong> torch.compile wraps Python model code in three optimization stages — Dynamo bytecode analysis, AOT Autograd, and Inductor kernel generation — delivering 1.5–4x speedup with one line of code.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>torch.compile — Dynamo Tracing and Inductor Code Generation</h1>
+<p>torch.compile (PyTorch 2.0+) transforms eager Python model code into optimized compiled kernels without requiring model rewrites. A single decorator — @torch.compile or torch.compile(model) — triggers three compilation stages that fuse operators, eliminate Python overhead, and generate hardware-optimized CUDA/Triton or C++ code.</p>
+<h2>Three Compilation Stages</h2>
+<p>Understanding each stage clarifies what torch.compile can and cannot optimize, and why graph breaks occur.</p>
+<ul>
+<li>Stage 1 — TorchDynamo: Python bytecode analysis; identifies compilable subgraphs; generates an FX graph; creates a graph break when Python control flow or side effects prevent tracing</li>
+<li>Stage 2 — AOT Autograd: captures the backward graph ahead of time (not lazily at backward() call); fuses forward and backward into a single compiled artifact</li>
+<li>Stage 3 — TorchInductor: takes the FX graph and generates optimized C++/OpenMP (CPU) or Triton (CUDA) kernels; performs operator fusion, memory layout optimization, and loop ordering</li>
+<li>Graph breaks: points where Dynamo gives up and falls back to eager — common causes: Python print, data-dependent shapes, unsupported Python builtins</li>
+<li>Compilation overhead: first forward pass triggers JIT compilation (seconds); subsequent calls use the compiled kernel (cached)</li>
+</ul>
+<h2>Basic Usage and Speedup Measurement</h2>
+<p>torch.compile wraps any callable — a model, a function, even a training step. The API is a single function call with no model modifications required.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import time
+
+class DeepMLP(nn.Module):
+    def __init__(self, dim: int = 512, depth: int = 8):
+        super().__init__()
+        layers = []
+        for _ in range(depth):
+            layers += [nn.Linear(dim, dim), nn.LayerNorm(dim), nn.GELU()]
+        self.net = nn.Sequential(*layers)
+        self.head = nn.Linear(dim, 10)
+
+    def forward(self, x: torch.Tensor) -&gt; torch.Tensor:
+        return self.head(self.net(x))
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+model_eager   = DeepMLP().to(device)
+model_compiled = torch.compile(model_eager, mode='default')
+
+x = torch.randn(256, 512, device=device)
+
+# Warm up both (compiled model JIT-compiles on first call)
+for _ in range(3):
+    _ = model_eager(x)
+    _ = model_compiled(x)
+
+if device == 'cuda':
+    torch.cuda.synchronize()
+
+t0 = time.perf_counter()
+for _ in range(100):
+    _ = model_eager(x)
+if device == 'cuda': torch.cuda.synchronize()
+eager_t = time.perf_counter() - t0
+
+t0 = time.perf_counter()
+for _ in range(100):
+    _ = model_compiled(x)
+if device == 'cuda': torch.cuda.synchronize()
+compiled_t = time.perf_counter() - t0
+
+print(f'Eager:    {eager_t*10:.2f} ms/iter')
+print(f'Compiled: {compiled_t*10:.2f} ms/iter')
+print(f'Speedup:  {eager_t/compiled_t:.2f}x')
+</code></pre>
+<h2>Compilation Modes</h2>
+<table>
+<thead>
+<tr>
+<th>Mode</th>
+<th>Compile Time</th>
+<th>Runtime Speedup</th>
+<th>Best For</th>
+<th>Graph Break Handling</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>default</td>
+<td>Seconds</td>
+<td>1.5–2x typical</td>
+<td>Balanced — first choice</td>
+<td>Allowed — falls back to eager</td>
+</tr>
+<tr>
+<td>reduce-overhead</td>
+<td>Longer</td>
+<td>2–3x (CUDA graphs)</td>
+<td>Inference with fixed shapes</td>
+<td>Allowed — CUDA graph captures entire loop</td>
+</tr>
+<tr>
+<td>max-autotune</td>
+<td>Minutes</td>
+<td>2–4x potential</td>
+<td>Production serving — fixed shapes</td>
+<td>Minimal — maximizes fusion</td>
+</tr>
+<tr>
+<td>eager (no compile)</td>
+<td>None</td>
+<td>1x baseline</td>
+<td>Debugging graph breaks</td>
+<td>N/A — runs in Python</td>
+</tr>
+</tbody>
+</table>
+<h2>Understanding Graph Breaks</h2>
+<p>A graph break occurs when Dynamo encounters Python code it cannot trace symbolically — typically data-dependent control flow, Python side effects, or unsupported operations. Each graph break adds overhead and reduces the optimization scope.</p>
+<pre><code class="language-python">import torch
+import torch._dynamo as dynamo
+
+# Model with a graph break (print is a side effect)
+class BreakingModel(torch.nn.Module):
+    def forward(self, x: torch.Tensor) -&gt; torch.Tensor:
+        x = torch.relu(x)
+        print(f'Shape: {x.shape}')  # &lt;-- graph break! print is a Python side effect
+        return x * 2
+
+# Explain graph breaks without actually compiling
+model = BreakingModel()
+explanation = dynamo.explain(model)(torch.randn(4, 8))
+print(f'Number of graphs: {explanation.graph_count}')
+print(f'Number of breaks: {explanation.break_reasons}')
+
+# Fixed model — remove print, use Tensor operations only
+class FixedModel(torch.nn.Module):
+    def forward(self, x: torch.Tensor) -&gt; torch.Tensor:
+        x = torch.relu(x)
+        return x * 2
+
+fixed_compiled = torch.compile(FixedModel())
+out = fixed_compiled(torch.randn(4, 8))
+print(f'Output shape: {out.shape}')
+</code></pre>
+<h2>CUDA Graph Capture with reduce-overhead</h2>
+<p>CUDA graphs capture an entire sequence of GPU operations and replay them with a single CPU launch — eliminating per-kernel CPU-GPU synchronization overhead. The reduce-overhead compile mode does this automatically.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+# reduce-overhead: best for fixed-shape inference (no dynamic shapes)
+model = nn.Sequential(
+    nn.Linear(512, 256), nn.GELU(),
+    nn.Linear(256, 128), nn.GELU(),
+    nn.Linear(128, 10)
+)
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+model = model.to(device)
+
+# Compile with CUDA graph mode
+compiled = torch.compile(model, mode='reduce-overhead')
+
+x = torch.randn(64, 512, device=device)
+
+# First few calls: warm up and capture the CUDA graph
+for _ in range(5):
+    with torch.no_grad():
+        out = compiled(x)
+
+if device == 'cuda':
+    torch.cuda.synchronize()
+    print(f'GPU memory: {torch.cuda.memory_allocated()/1e6:.1f} MB')
+
+# Note: input shape must stay fixed for CUDA graph to be valid
+# Changing x.shape triggers recompilation
+print(f'Output shape: {out.shape}')
+print('CUDA graph captured and ready for fast inference')
+</code></pre>
+<h2>Measuring Compilation Overhead</h2>
+<p>torch.compile incurs a one-time compilation cost on the first call. Subsequent calls are fast. For short-running scripts, the compile overhead can outweigh the runtime benefit — compile is worth it only when the compiled kernel will be called many times.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import time
+
+model = nn.Sequential(
+    nn.Linear(256, 512), nn.GELU(),
+    nn.Linear(512, 256), nn.GELU(),
+    nn.Linear(256, 10)
+)
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+model = model.to(device)
+compiled = torch.compile(model, mode='default')
+
+x = torch.randn(128, 256, device=device)
+
+# First call: triggers compilation (expensive)
+t0 = time.perf_counter()
+with torch.no_grad():
+    _ = compiled(x)
+if device == 'cuda': torch.cuda.synchronize()
+first_call_t = time.perf_counter() - t0
+
+# Subsequent calls: use cached compiled kernel
+times = []
+for _ in range(50):
+    t0 = time.perf_counter()
+    with torch.no_grad():
+        _ = compiled(x)
+    if device == 'cuda': torch.cuda.synchronize()
+    times.append(time.perf_counter() - t0)
+
+print(f'First call (compile): {first_call_t*1000:.1f} ms')
+print(f'Subsequent avg:       {sum(times)/len(times)*1000:.2f} ms')
+print(f'Break-even at:        {int(first_call_t / (sum(times)/len(times)))} inference calls')
+</code></pre>
+<hr />
+<blockquote>
+<p><strong>When torch.compile Helps Most</strong>: torch.compile delivers the largest speedups for (1) models with many small operations that benefit from fusion (Transformers, attention), (2) training loops where AOT Autograd fuses forward+backward into one kernel sequence, and (3) models running on A100/H100 GPUs with Triton-compatible operations. Small models on CPU may see negligible or negative speedup due to compilation overhead.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<ul>
+<li>torch.compile has three stages: Dynamo (Python trace → FX graph), AOT Autograd (fused forward+backward), Inductor (Triton/C++ kernels)</li>
+<li>Graph breaks reduce optimization scope — avoid Python print, data-dependent shapes, and side effects in compiled code</li>
+<li>default mode: balanced first choice; reduce-overhead: CUDA graphs for fixed-shape inference; max-autotune: tuned kernels for production</li>
+<li>First forward pass is slow (JIT compilation); subsequent calls use the cached compiled kernel</li>
+<li>Use torch._dynamo.explain(model)(x) to diagnose graph breaks before optimizing</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

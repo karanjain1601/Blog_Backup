@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BEiT — Masked Image Modeling with Visual Tokens | Notes Backup</title>
+  <meta name="description" content="How BEiT (Bao et al. 2022) applies BERT-style masked image modeling using discrete visual tokens from a pretrained dVAE tokenizer, block masking strategy, and the evolution to BEiT v2 and BEiT-3." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>BEiT — Masked Image Modeling with Visual Tokens</h1>
+      <ul class='note-meta'><li><strong>description:</strong> How BEiT (Bao et al. 2022) applies BERT-style masked image modeling using discrete visual tokens from a pretrained dVAE tokenizer, block masking strategy, and the evolution to BEiT v2 and BEiT-3.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>BEiT — Masked Image Modeling with Visual Tokens</h1>
+<p>BEiT (BERT Pre-Training of Image Transformers) by Bao et al. (2022) was one of the first methods to directly apply BERT-style masked prediction to vision. Unlike MAE which reconstructs raw pixels, BEiT predicts discrete visual tokens — quantized semantic codes from a pretrained image tokenizer — making the pretext task more semantically meaningful.</p>
+<h2>What is BEiT?</h2>
+<p>BEiT is a two-stage self-supervised pre-training framework for ViT. Stage 1 trains a discrete variational autoencoder (dVAE, borrowed from DALL-E) to produce a vocabulary of 8192 visual tokens. Stage 2 trains a ViT to predict the visual token IDs at masked positions using cross-entropy loss over the 8192-token vocabulary — exactly BERT's masked language modeling objective, but for images.</p>
+<h2>Stage 1 — Discrete Image Tokenizer</h2>
+<p>The image tokenizer is a VQ-VAE (Vector Quantized VAE) or dVAE that maps image patches to discrete code IDs from a fixed vocabulary. Given an input image, the tokenizer produces a grid of integer token IDs (one per patch). These IDs serve as the prediction targets during pre-training. BEiT uses the DALL-E dVAE with vocabulary size 8192, operating at 14x14 = 196 tokens for a 224px image.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class ImageEncoder(nn.Module):
+    # Simplified CNN encoder for the VQ tokenizer
+    def __init__(self, embed_dim=512):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(3, 128, 4, 2, 1), nn.ReLU(),
+            nn.Conv2d(128, 256, 4, 2, 1), nn.ReLU(),
+            nn.Conv2d(256, embed_dim, 1)
+        )
+    def forward(self, x): return self.net(x)
+
+class VQVAETokenizer(nn.Module):
+    def __init__(self, vocab_size=8192, embed_dim=512):
+        super().__init__()
+        self.encoder  = ImageEncoder(embed_dim)
+        self.codebook = nn.Embedding(vocab_size, embed_dim)
+        self.vocab_size = vocab_size
+
+    def forward(self, x):
+        # Encode image to continuous embeddings: [B, D, H, W]
+        z = self.encoder(x)
+        B, D, H, W = z.shape
+
+        # Reshape for distance computation: [B*H*W, D]
+        z_flat = z.permute(0, 2, 3, 1).reshape(-1, D)
+
+        # Compute L2 distances to all codebook entries
+        dists = (
+            z_flat.pow(2).sum(1, keepdim=True)
+            + self.codebook.weight.pow(2).sum(1)
+            - 2 * z_flat @ self.codebook.weight.T
+        )
+        # Assign to nearest codebook entry -&gt; discrete token IDs
+        token_ids = dists.argmin(1).reshape(B, H * W)
+        return token_ids   # [B, N] integer token IDs
+
+    @torch.no_grad()
+    def tokenize(self, x): return self.forward(x)
+</code></pre>
+<h2>Stage 2 — Blockwise Masking</h2>
+<p>BEiT masks approximately 40% of patches using blockwise (contiguous rectangular) masking rather than random uniform masking. Masking contiguous blocks is harder than masking random scattered patches because adjacent visible patches cannot trivially fill in the missing region. This increases task difficulty and encourages the model to reason about semantic structure.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+
+def blockwise_masking(N, grid_size, mask_ratio=0.40, min_block=4, max_block=25):
+    # Block-wise masking: mask contiguous rectangular regions
+    # Returns binary mask of shape [N], values 1=masked / 0=visible
+    h = w = grid_size
+    mask = torch.zeros(h, w, dtype=torch.bool)
+    target = int(N * mask_ratio)
+    masked_count = 0
+
+    while masked_count &lt; target:
+        # Sample a random block aspect ratio and area
+        aspect      = np.random.uniform(0.3, 1 / 0.3)
+        block_area  = np.random.randint(min_block, max_block + 1)
+        bh = max(1, int(np.sqrt(block_area * aspect)))
+        bw = max(1, int(np.sqrt(block_area / aspect)))
+        bh, bw = min(bh, h), min(bw, w)
+
+        # Random top-left corner within valid range
+        top  = np.random.randint(0, h - bh + 1)
+        left = np.random.randint(0, w - bw + 1)
+        mask[top:top + bh, left:left + bw] = True
+        masked_count = mask.sum().item()
+
+    # Trim any over-masked patches to hit the exact ratio
+    mask_flat = mask.flatten()
+    masked_idx = mask_flat.nonzero(as_tuple=True)[0]
+    if len(masked_idx) &gt; target:
+        n_drop = len(masked_idx) - target
+        drop_idx = masked_idx[torch.randperm(len(masked_idx))[:n_drop]]
+        mask_flat[drop_idx] = False
+
+    return mask_flat.long()  # [N], 1=masked, 0=visible
+</code></pre>
+<h2>BEiT Pre-training Objective</h2>
+<p>The training objective is cross-entropy over the visual token vocabulary at masked positions. The ViT receives all patches (including mask tokens at masked positions) and must predict the correct token ID for each masked position. This is a classification task over 8192 classes per masked patch, making it fundamentally different from MAE's regression objective.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class BEiTModel(nn.Module):
+    def __init__(self, vocab_size=8192, patch_size=16, img_size=224,
+                 embed_dim=768, depth=12, num_heads=12):
+        super().__init__()
+        num_patches = (img_size // patch_size) ** 2
+        self.patch_embed = nn.Conv2d(3, embed_dim, patch_size, stride=patch_size)
+        self.cls_token   = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.pos_embed   = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
+        self.mask_token  = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.blocks = nn.ModuleList([TransformerBlock(embed_dim, num_heads) for _ in range(depth)])
+        self.norm = nn.LayerNorm(embed_dim)
+        self.head = nn.Linear(embed_dim, vocab_size)  # predict over 8192 visual tokens
+
+def beit_forward(model, imgs, token_ids, mask):
+    # mask: [B, N], 1=masked 0=visible
+    B = imgs.shape[0]
+    x = model.patch_embed(imgs).flatten(2).transpose(1, 2)  # [B, N, D]
+    x = x + model.pos_embed[:, 1:, :]
+
+    # Substitute masked patch embeddings with the learnable mask token
+    mask_expanded = mask.unsqueeze(-1).float()
+    x = x * (1 - mask_expanded) + model.mask_token * mask_expanded
+
+    # Prepend cls token and run ViT blocks
+    cls = model.cls_token.expand(B, -1, -1)
+    x   = torch.cat([cls, x], dim=1)
+    for block in model.blocks:
+        x = block(x)
+    logits = model.head(model.norm(x)[:, 1:, :])   # [B, N, 8192]
+
+    # Cross-entropy only on masked positions
+    loss = F.cross_entropy(logits[mask.bool()], token_ids[mask.bool()])
+    return loss, logits
+</code></pre>
+<blockquote>
+<p><strong>Semantic vs Pixel Targets</strong>: BEiT's discrete token targets filter out high-frequency pixel noise and focus prediction on semantic content. A patch showing a cat's eye and a patch showing random texture may look similar in raw pixels but have very different token IDs. This semantic discretization is BEiT's main advantage over MAE-style pixel prediction, though it comes at the cost of requiring a pre-trained tokenizer.</p>
+</blockquote>
+<h2>Evaluation — Linear Probe</h2>
+<p>Linear probing (training only a linear classifier on frozen features) is a standard way to evaluate the quality of self-supervised representations. Unlike fine-tuning which adapts all weights, linear probing directly measures how linearly separable the learned features are. The following code extracts CLS token features and trains a logistic regression classifier for comparison.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score
+
+def extract_cls_features(model, dataloader, device='cuda'):
+    model.eval()
+    features, labels = [], []
+    with torch.no_grad():
+        for imgs, lbls in dataloader:
+            imgs = imgs.to(device)
+            # Forward pass through frozen backbone — use CLS token as features
+            x = model.patch_embed(imgs).flatten(2).transpose(1, 2)
+            x = x + model.pos_embed[:, 1:, :]
+            cls = model.cls_token.expand(imgs.shape[0], -1, -1)
+            x   = torch.cat([cls, x], dim=1)
+            for block in model.blocks:
+                x = block(x)
+            feats = model.norm(x)[:, 0].cpu().numpy()  # CLS token
+            features.append(feats)
+            labels.append(lbls.numpy())
+    return np.concatenate(features), np.concatenate(labels)
+
+def linear_probe(model, train_loader, val_loader, device='cuda'):
+    print('Extracting train features...')
+    X_tr, y_tr = extract_cls_features(model, train_loader, device)
+    print('Extracting val features...')
+    X_val, y_val = extract_cls_features(model, val_loader, device)
+
+    # L2 normalize (standard practice for ViT features)
+    X_tr  = X_tr  / (np.linalg.norm(X_tr,  axis=1, keepdims=True) + 1e-8)
+    X_val = X_val / (np.linalg.norm(X_val, axis=1, keepdims=True) + 1e-8)
+
+    clf = LogisticRegression(max_iter=1000, C=1.0)
+    clf.fit(X_tr, y_tr)
+    acc = accuracy_score(y_val, clf.predict(X_val))
+    print(f'Linear probe top-1: {acc * 100:.2f}%')
+    return acc
+</code></pre>
+<h2>BEiT v2 and BEiT-3</h2>
+<p>BEiT v2 replaces the DALL-E dVAE tokenizer with VQ-KD tokens distilled from a CLIP model, producing more semantically meaningful targets. BEiT-3 unifies vision-language pretraining by treating image patches and text tokens uniformly — both masked with the same objective — enabling a single model to handle image classification, captioning, VQA, and retrieval.</p>
+<ul>
+<li>BEiT (2022): dVAE tokens from DALL-E, block masking 40%, ViT-L reaches 86.3% ImageNet top-1</li>
+<li>BEiT v2 (2022): VQ-KD tokens from CLIP teacher, more semantic targets, improved linear probing</li>
+<li>BEiT-3 (2022): multimodal foundation model, treats image patches and text tokens uniformly</li>
+<li>All variants require a pre-trained tokenizer — unlike MAE which needs nothing beyond image data</li>
+</ul>
+<h2>Comparison Table</h2>
+<p>The table below compares BEiT variants against MAE and iGPT (autoregressive pixel prediction) across key design dimensions. Note the trade-off between tokenizer requirement and representation quality.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Prediction Target</th>
+<th>Mask Ratio</th>
+<th>Tokenizer Needed</th>
+<th>Masking Strategy</th>
+<th>IN-1K Fine-tune Top-1</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>BEiT</td>
+<td>dVAE visual tokens</td>
+<td>40%</td>
+<td>Yes (DALL-E dVAE)</td>
+<td>Block masking</td>
+<td>86.3% (ViT-L)</td>
+</tr>
+<tr>
+<td>BEiT v2</td>
+<td>VQ-KD (CLIP) tokens</td>
+<td>40%</td>
+<td>Yes (CLIP teacher)</td>
+<td>Block masking</td>
+<td>87.3% (ViT-L)</td>
+</tr>
+<tr>
+<td>MAE</td>
+<td>Normalized pixels</td>
+<td>75%</td>
+<td>No</td>
+<td>Random masking</td>
+<td>87.8% (ViT-H)</td>
+</tr>
+<tr>
+<td>iGPT</td>
+<td>Quantized RGB clusters</td>
+<td>N/A (autoregressive)</td>
+<td>Yes (k-means colors)</td>
+<td>None (autoregressive)</td>
+<td>72.0% (iGPT-L)</td>
+</tr>
+</tbody>
+</table>
+<p>BEiT's tokenizer dependency is both its main cost and its main advantage: the pre-trained tokenizer constrains the model to predict structured semantic codes rather than noisy pixel values, producing features that generalize better to semantic downstream tasks like object detection and dense prediction.</p>
+    </article>
+  </main>
+</body>
+</html>

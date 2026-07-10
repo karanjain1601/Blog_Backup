@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Autoencoders — Undercomplete, Denoising, Sparse, Contractive | Notes Backup</title>
+  <meta name="description" content="A comprehensive guide to autoencoder variants: undercomplete bottlenecks, denoising autoencoders as score function estimators, sparse autoencoders with L1 and KL penalties, contractive autoencoders with Jacobian regularisation, and the connection to PCA and VAEs." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Autoencoders — Undercomplete, Denoising, Sparse, Contractive</h1>
+      <ul class='note-meta'><li><strong>description:</strong> A comprehensive guide to autoencoder variants: undercomplete bottlenecks, denoising autoencoders as score function estimators, sparse autoencoders with L1 and KL penalties, contractive autoencoders with Jacobian regularisation, and the connection to PCA and VAEs.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Autoencoders — Undercomplete, Denoising, Sparse, Contractive</h1>
+<p>An autoencoder is a neural network trained to reconstruct its input through a compressed bottleneck. The encoder f: X→Z maps input to a latent code, the decoder g: Z→X̂ maps back to input space, and training minimises the reconstruction loss ‖x - g(f(x))‖². Different regularisation strategies produce qualitatively different latent representations.</p>
+<h2>Architecture and Reconstruction Loss</h2>
+<p>The simplest autoencoder uses a single bottleneck hidden layer: x → h (encoder) → x̂ (decoder), with MSE loss ‖x-x̂‖² for continuous inputs or binary cross-entropy for binary inputs. The bottleneck dimension d_z &lt; d_x forces compression. The key insight: a linear autoencoder with MSE loss recovers exactly the PCA subspace — it finds the same directions of maximum variance.</p>
+<h2>Undercomplete Autoencoder vs PCA</h2>
+<pre><code class="language-python">import numpy as np
+import torch
+import torch.nn as nn
+from sklearn.datasets import load_digits
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+
+X, y = load_digits(return_X_y=True)
+X = StandardScaler().fit_transform(X).astype(np.float32)
+X_t = torch.tensor(X)
+
+class Autoencoder(nn.Module):
+    def __init__(self, input_dim=64, latent_dim=2):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, 32), nn.ReLU(),
+            nn.Linear(32, latent_dim)
+        )
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, 32), nn.ReLU(),
+            nn.Linear(32, input_dim)
+        )
+    def forward(self, x):
+        return self.decoder(self.encoder(x))
+
+model = Autoencoder(latent_dim=2)
+opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+for epoch in range(300):
+    loss = nn.MSELoss()(model(X_t), X_t)
+    opt.zero_grad(); loss.backward(); opt.step()
+    if epoch % 100 == 0:
+        print(f'Epoch {epoch}: loss={loss.item():.4f}')
+
+with torch.no_grad():
+    Z_ae = model.encoder(X_t).numpy()
+Z_pca = PCA(n_components=2).fit_transform(X)
+print(f'AE latent shape: {Z_ae.shape},  PCA shape: {Z_pca.shape}')
+</code></pre>
+<h2>Denoising Autoencoder</h2>
+<p>A denoising autoencoder (DAE) trains on corrupted inputs x̃ and reconstructs the clean x. The corruption can be Gaussian noise, masking (dropout), or salt-and-pepper noise. The key insight (Vincent et al. 2011): the DAE learns to estimate the gradient of the log data density ∂log p(x)/∂x — a score function. This forces the model to understand the data manifold rather than just memorising inputs.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+import torch.nn as nn
+from sklearn.datasets import load_digits
+from sklearn.preprocessing import MinMaxScaler
+
+X, y = load_digits(return_X_y=True)
+X = MinMaxScaler().fit_transform(X).astype(np.float32)
+X_t = torch.tensor(X)
+noise_std = 0.3
+
+class DenoisingAE(nn.Module):
+    def __init__(self, dim=64):
+        super().__init__()
+        self.enc = nn.Sequential(
+            nn.Linear(dim, 128), nn.ReLU(),
+            nn.Linear(128, 32), nn.ReLU()
+        )
+        self.dec = nn.Sequential(
+            nn.Linear(32, 128), nn.ReLU(),
+            nn.Linear(128, dim), nn.Sigmoid()
+        )
+    def forward(self, x):
+        return self.dec(self.enc(x))
+
+model = DenoisingAE()
+opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+
+for epoch in range(300):
+    noise = torch.randn_like(X_t) * noise_std
+    X_noisy = torch.clamp(X_t + noise, 0.0, 1.0)  # corrupt
+    X_recon = model(X_noisy)                        # reconstruct
+    loss = nn.MSELoss()(X_recon, X_t)               # target: clean!
+    opt.zero_grad(); loss.backward(); opt.step()
+    if epoch % 100 == 0:
+        print(f'Epoch {epoch}: loss={loss.item():.4f}')
+
+with torch.no_grad():
+    noise = torch.randn_like(X_t[:8]) * noise_std
+    X_noisy_test = torch.clamp(X_t[:8] + noise, 0, 1)
+    X_clean = model(X_noisy_test)
+print(f'Denoising MSE: {nn.MSELoss()(X_clean, X_t[:8]).item():.4f}')
+</code></pre>
+<blockquote>
+<p><strong>Denoising AE and Score Matching</strong>: The optimal DAE output satisfies E[x | x̃] ≈ x̃ + σ² ∂log p(x̃)/∂x̃. This means the DAE implicitly estimates the score function of the data distribution — the same quantity used in score-based generative models and diffusion models.</p>
+</blockquote>
+<h2>Sparse Autoencoder</h2>
+<p>A sparse autoencoder uses an overcomplete representation (d_z &gt; d_x) but forces sparse activations via an L1 penalty or a KL divergence between the average activation and a target sparsity ρ. Unlike undercomplete AEs, sparsity (not bottleneck size) provides the compression pressure. Sparse features tend to be more interpretable and disentangled.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+import torch.nn as nn
+from sklearn.datasets import load_digits
+from sklearn.preprocessing import MinMaxScaler
+
+X, y = load_digits(return_X_y=True)
+X = MinMaxScaler().fit_transform(X).astype(np.float32)
+X_t = torch.tensor(X)
+
+class SparseAE(nn.Module):
+    def __init__(self, input_dim=64, hidden_dim=256):
+        super().__init__()
+        # Overcomplete: hidden_dim &gt; input_dim
+        self.encoder = nn.Sequential(nn.Linear(input_dim, hidden_dim), nn.ReLU())
+        self.decoder = nn.Linear(hidden_dim, input_dim)
+    def forward(self, x):
+        h = self.encoder(x)
+        return self.decoder(h), h
+
+model = SparseAE(hidden_dim=256)
+opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+lambda_l1 = 1e-4
+
+for epoch in range(300):
+    x_recon, h = model(X_t)
+    recon_loss = nn.MSELoss()(x_recon, X_t)
+    sparse_loss = lambda_l1 * h.abs().mean()  # L1 sparsity on activations
+    loss = recon_loss + sparse_loss
+    opt.zero_grad(); loss.backward(); opt.step()
+    if epoch % 100 == 0:
+        active_frac = (h.detach() &gt; 0.1).float().mean().item()
+        print(f'Epoch {epoch}: recon={recon_loss:.4f}, active={active_frac:.1%}')
+
+with torch.no_grad():
+    _, h = model(X_t)
+    print(f'Average active units: {(h &gt; 0.1).float().mean():.1%}')
+</code></pre>
+<h2>Contractive Autoencoder</h2>
+<p>A contractive autoencoder (CAE) penalises the Frobenius norm of the encoder Jacobian ‖∂h/∂x‖_F². This forces the encoder to be insensitive to small perturbations of the input — the latent code changes slowly as x moves slightly. For a sigmoid encoder, the Jacobian penalty simplifies to Σⱼ h_j²(1-h_j)² Σᵢ W_ji², which is cheap to compute analytically.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+import torch.nn as nn
+from sklearn.datasets import load_digits
+from sklearn.preprocessing import MinMaxScaler
+
+X, y = load_digits(return_X_y=True)
+X = MinMaxScaler().fit_transform(X).astype(np.float32)
+X_t = torch.tensor(X)
+d_in, d_h = 64, 32
+
+class ContractiveAE(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.enc_layer = nn.Linear(d_in, d_h)
+        self.dec = nn.Sequential(nn.Linear(d_h, d_in), nn.Sigmoid())
+    def forward(self, x):
+        h = torch.sigmoid(self.enc_layer(x))
+        return self.dec(h), h
+
+def jacobian_frob(h, W):
+    # Analytic Frobenius norm for sigmoid encoder
+    s = h * (1.0 - h)               # (n, d_h) — sigmoid derivative
+    return (s**2 @ (W**2).sum(dim=1)).mean()
+
+model = ContractiveAE()
+opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+lambda_c = 1e-4
+
+for epoch in range(300):
+    x_recon, h = model(X_t)
+    recon = nn.MSELoss()(x_recon, X_t)
+    contract = lambda_c * jacobian_frob(h, model.enc_layer.weight)
+    loss = recon + contract
+    opt.zero_grad(); loss.backward(); opt.step()
+    if epoch % 100 == 0:
+        print(f'Epoch {epoch}: recon={recon:.4f}, contract={contract:.6f}')
+print('Training complete')
+</code></pre>
+<h2>Linear AE = PCA, and VAE Preview</h2>
+<p>A linear autoencoder with MSE loss (no nonlinearities) spans the same subspace as PCA: the learned encoder directions are the top k eigenvectors of XᵀX. They may be rotated relative to the true PCs, but the subspace is identical. The VAE (Variational Autoencoder) extends this framework probabilistically: the encoder outputs a distribution q(z|x) = N(μ(x), σ²(x)) and the loss adds a KL term to enforce a smooth, continuous latent space — enabling generation.</p>
+<ul>
+<li>Undercomplete AE: compression via bottleneck; equivalent to PCA when linear</li>
+<li>Denoising AE: corruption + reconstruction; learns data manifold and score function</li>
+<li>Sparse AE: overcomplete + L1 or KL penalty; disentangled, interpretable features</li>
+<li>Contractive AE: Jacobian penalty; stable latent code invariant to perturbations</li>
+<li>VAE: probabilistic encoder; continuous, generative latent space</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Variant</th>
+<th>Regularisation</th>
+<th>Latent Structure</th>
+<th>Best For</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Undercomplete</td>
+<td>Bottleneck size</td>
+<td>Compact, dense</td>
+<td>Dimensionality reduction</td>
+</tr>
+<tr>
+<td>Denoising</td>
+<td>Input corruption</td>
+<td>Manifold-aligned</td>
+<td>Robust features, image restoration</td>
+</tr>
+<tr>
+<td>Sparse</td>
+<td>L1 or KL on activations</td>
+<td>Sparse, overcomplete</td>
+<td>Interpretable features, dictionary learning</td>
+</tr>
+<tr>
+<td>Contractive</td>
+<td>Jacobian Frobenius</td>
+<td>Smooth, stable</td>
+<td>Noise-robust representations</td>
+</tr>
+<tr>
+<td>VAE</td>
+<td>KL(q(z</td>
+<td>x)</td>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>All autoencoder variants share the encoder-decoder skeleton but differ in what they regularise. The choice of regularisation determines the geometry of the latent space: a bottleneck produces a compact subspace (like PCA), corruption pressure produces a manifold-aligned code, L1 penalty produces a sparse dictionary, and Jacobian penalty produces a flat, locally-linear mapping. Each regularisation strategy is suited to a different downstream goal.</p>
+<hr />
+<blockquote>
+<p><strong>Choosing an Autoencoder Variant</strong>: For dimensionality reduction comparable to PCA: undercomplete AE. For learning representations that generalise under noise: denoising AE. For human-interpretable features: sparse AE. For smooth latent spaces needed for interpolation or generation: VAE. For production feature extractors that are stable under input perturbations: contractive AE.</p>
+</blockquote>
+    </article>
+  </main>
+</body>
+</html>

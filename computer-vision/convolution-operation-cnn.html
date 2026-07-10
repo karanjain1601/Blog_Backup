@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Convolution Operation in CNNs | Notes Backup</title>
+  <meta name="description" content="The 2D convolution operation — kernel sliding, stride, padding, dilation, output size formula, and grouped convolutions — with worked examples in PyTorch." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Convolution Operation in CNNs</h1>
+      <ul class='note-meta'><li><strong>description:</strong> The 2D convolution operation — kernel sliding, stride, padding, dilation, output size formula, and grouped convolutions — with worked examples in PyTorch.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Convolution Operation in CNNs</h1>
+<h2>Overview</h2>
+<p>Convolution is the fundamental operation in convolutional neural networks. A learnable kernel slides across the input feature map, computing dot products at each position to produce an output feature map. This local connectivity and weight sharing dramatically reduce parameters compared to fully connected layers, while preserving spatial structure in visual data.</p>
+<p>CNNs exploit three key properties: local connectivity (each output depends on a small input region), weight sharing (the same kernel is applied everywhere), and translation equivariance (shifting the input shifts the output by the same amount). These properties make convolutions ideal for image data where patterns can appear anywhere in the scene.</p>
+<h2>2D Convolution Math</h2>
+<p>For a 2D input X of shape (H, W) and kernel K of shape (kH, kW), the output Y at position (i, j) is computed as a sum of element-wise products: Y[i,j] = Σ_m Σ_n X[i+m, j+n] · K[m,n]. In deep learning, this operation is technically cross-correlation (no kernel flip), but is universally called convolution. Learnable bias is added after the summation.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+import torch.nn.functional as F
+
+def manual_cross_correlate(x, k):
+    H, W = x.shape
+    kH, kW = k.shape
+    out = np.zeros((H - kH + 1, W - kW + 1))
+    for i in range(out.shape[0]):
+        for j in range(out.shape[1]):
+            out[i, j] = (x[i:i+kH, j:j+kW] * k).sum()
+    return out
+
+x_np = np.random.randn(6, 6).astype(np.float32)
+k_np = np.random.randn(3, 3).astype(np.float32)
+manual_out = manual_cross_correlate(x_np, k_np)
+torch_out = F.conv2d(torch.tensor(x_np[None,None]), torch.tensor(k_np[None,None]))
+print(np.allclose(manual_out, torch_out.numpy()[0,0], atol=1e-5))  # True
+</code></pre>
+<p>The output spatial size after convolution is determined by input size, kernel size, stride, and padding. For a 1D case: output_length = floor((input + 2*padding - kernel) / stride) + 1. In PyTorch, nn.Conv2d handles this automatically, but understanding the formula helps diagnose shape mismatches and design architectures with specific output resolutions.</p>
+<h2>Stride and Padding</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def output_size(H, W, K, S, P):
+    out_H = (H + 2*P - K) // S + 1
+    out_W = (W + 2*P - K) // S + 1
+    return out_H, out_W
+
+# Standard: stride=1, no padding
+print(output_size(32, 32, 3, 1, 0))   # (30, 30)
+# Same padding: output == input
+print(output_size(32, 32, 3, 1, 1))   # (32, 32)
+# Stride-2 halving
+print(output_size(32, 32, 3, 2, 1))   # (16, 16)
+# Verify with nn.Conv2d
+conv = nn.Conv2d(1, 1, kernel_size=3, stride=2, padding=1)
+x = torch.zeros(1, 1, 32, 32)
+print(conv(x).shape)  # torch.Size([1, 1, 16, 16])
+</code></pre>
+<p>Stride controls how far the kernel moves at each step. Stride=1 preserves spatial resolution; stride=2 halves it without explicit pooling, which is used in modern architectures like ResNet to reduce computation. Padding adds zeros around the input boundary. 'Same' padding (P = (K-1)/2 for odd kernels) maintains spatial dimensions and prevents information loss at edges.</p>
+<h2>Dilated Convolutions</h2>
+<p>Dilated (atrous) convolutions insert gaps between kernel elements, expanding the receptive field without increasing parameters or losing spatial resolution. A dilation rate d=2 on a 3×3 kernel covers a 5×5 region; d=4 covers 9×9. This is especially useful for dense prediction tasks (segmentation, detection) where large context is needed at full resolution, as used in DeepLab and WaveNet architectures.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+x = torch.arange(25, dtype=torch.float32).reshape(1, 1, 5, 5)
+print(&quot;Input:\n&quot;, x[0,0])
+
+# Standard 3x3 conv: sees 3x3 region
+conv_std = nn.Conv2d(1, 1, 3, dilation=1, padding=0)
+print(&quot;Standard output shape:&quot;, conv_std(x).shape)  # [1,1,3,3]
+
+# Dilated 3x3 conv (d=2): sees 5x5 region, same params
+conv_dil = nn.Conv2d(1, 1, 3, dilation=2, padding=0)
+# With dilation=2, effective kernel size = 2*(3-1)+1 = 5
+print(&quot;Dilated output shape:&quot;, conv_dil(x).shape)   # [1,1,1,1]
+print(&quot;Receptive field: 5x5 from 9 params&quot;)
+</code></pre>
+<h2>Grouped and Depthwise Convolutions</h2>
+<p>Grouped convolutions split the input channels into G groups and apply separate convolutions to each. When groups equals the number of input channels, each channel gets its own filter — this is depthwise convolution. Combining depthwise conv with a 1×1 pointwise conv gives depthwise separable convolution, which achieves similar capacity as standard convolution with a fraction of the parameters and FLOPs.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+C_in, C_out, H, W = 32, 64, 8, 8
+x = torch.randn(1, C_in, H, W)
+
+# Standard conv
+std = nn.Conv2d(C_in, C_out, 3, padding=1)
+std_params = sum(p.numel() for p in std.parameters())
+
+# Depthwise separable conv
+dw = nn.Conv2d(C_in, C_in, 3, padding=1, groups=C_in)  # depthwise
+pw = nn.Conv2d(C_in, C_out, 1)                          # pointwise
+dws_params = sum(p.numel() for p in list(dw.parameters()) + list(pw.parameters()))
+
+print(f&quot;Standard params: {std_params}&quot;)     # 18,496
+print(f&quot;DWS params:      {dws_params}&quot;)     # 2,336  (~8x fewer)
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Conv Type</th>
+<th>Params</th>
+<th>FLOPs</th>
+<th>Receptive Field</th>
+<th>Use Case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Standard</td>
+<td>C_in × C_out × kH × kW</td>
+<td>High</td>
+<td>k × k</td>
+<td>General feature extraction</td>
+</tr>
+<tr>
+<td>Depthwise</td>
+<td>C_in × kH × kW</td>
+<td>Very low</td>
+<td>k × k per channel</td>
+<td>Spatial filtering (MobileNet)</td>
+</tr>
+<tr>
+<td>Pointwise (1×1)</td>
+<td>C_in × C_out</td>
+<td>Low</td>
+<td>1 × 1</td>
+<td>Channel mixing / projection</td>
+</tr>
+<tr>
+<td>Grouped (G groups)</td>
+<td>C_in × C_out × kH × kW / G</td>
+<td>Medium</td>
+<td>k × k</td>
+<td>Efficient channel separation (ResNeXt)</td>
+</tr>
+<tr>
+<td>Dilated</td>
+<td>C_in × C_out × kH × kW</td>
+<td>High</td>
+<td>d×(k-1)+1 × d×(k-1)+1</td>
+<td>Segmentation, dense prediction (DeepLab)</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>info</strong>: Depthwise separable convolution reduces params by ~8–9× vs standard convolution at similar accuracy — this is the core insight behind MobileNet.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<p>The output size formula (H+2P-K)/S+1 is essential for architectural design. Stride-2 convolutions replace pooling in modern networks. Dilated convolutions expand receptive field without downsampling — critical for dense tasks. Depthwise separable convolutions (depthwise + pointwise) offer the best efficiency trade-off and power lightweight models like MobileNet, EfficientNet, and ShuffleNet.</p>
+<p>Grouped convolutions with G=32 or G=64 (as in ResNeXt) offer a middle ground: more expressive than depthwise but more efficient than standard. The 1×1 pointwise convolution is the Swiss Army knife of CNNs — it mixes channels, changes dimensionality, and adds non-linearity at minimal cost. Combining these building blocks enables designing efficient architectures for any compute budget.</p>
+    </article>
+  </main>
+</body>
+</html>

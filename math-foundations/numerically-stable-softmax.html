@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Numerically Stable Softmax and Log-Softmax | Notes Backup</title>
+  <meta name="description" content="Derivation of naive softmax instabilities, the max-shift stabilization, log-softmax, PyTorch F.cross_entropy internals, temperature scaling, and online softmax for streaming inference." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Numerically Stable Softmax and Log-Softmax</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Derivation of naive softmax instabilities, the max-shift stabilization, log-softmax, PyTorch F.cross_entropy internals, temperature scaling, and online softmax for streaming inference.</li><li><strong>topic:</strong> math-foundations</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Numerically Stable Softmax and Log-Softmax</h1>
+<p>Softmax is the most widely used normalization function in deep learning — it appears in output layers, attention mechanisms, mixture models, and policy networks. Despite its simple formula, naive softmax implementations fail catastrophically for large or small logits. Understanding why softmax is numerically unstable, how the max-shift trick fixes it, and how log-softmax and cross-entropy compose into a safe pipeline is essential for anyone implementing custom attention, loss functions, or inference kernels. The online softmax algorithm, used by FlashAttention, further shows how to compute softmax in a single streaming pass without materializing the full denominator.</p>
+<h2>Core Definition</h2>
+<p>Given a vector x = (x₁, …, xₙ), softmax produces a probability distribution:</p>
+<p>softmax(x)ᵢ = exp(xᵢ) / Σⱼ exp(xⱼ)</p>
+<p>Properties: all outputs are in (0,1), outputs sum to 1, translation-invariant (softmax(x+c) = softmax(x) for any scalar c), and preserves relative ordering.</p>
+<p>Naive implementation problems:
+- If any xᵢ &gt; 88.72 in fp32, exp(xᵢ) = ∞, making the denominator ∞, and 0/∞ = NaN or ∞/∞ = NaN.
+- If all xᵢ &lt; −87.34 in fp32, all exp(xᵢ) underflow to 0, giving 0/0 = NaN.
+- These failures are common in early training (random initialization can produce large logits), with temperature T &lt; 1, and in attention with large d_k.</p>
+<p>The fix: exploit translation invariance. Subtract m = max(x) before exponentiating.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+import torch.nn.functional as F
+
+# Naive softmax fails with large or small logits
+def naive_softmax(x):
+    e = np.exp(x)
+    return e / e.sum()
+
+# Stable softmax: subtract max first
+def stable_softmax(x):
+    e = np.exp(x - x.max())
+    return e / e.sum()
+
+# Test cases
+test_cases = {
+    &quot;normal&quot;:      np.array([1.0, 2.0, 3.0]),
+    &quot;large pos&quot;:   np.array([100.0, 101.0, 102.0]),
+    &quot;extreme pos&quot;: np.array([1000.0, 1001.0, 1002.0]),
+    &quot;large neg&quot;:   np.array([-100.0, -101.0, -102.0]),
+}
+
+print(f&quot;{'Case':&lt;15} {'naive':&lt;25} {'stable':&lt;25}&quot;)
+print(&quot;-&quot; * 65)
+for name, x in test_cases.items():
+    naive  = naive_softmax(x)
+    stable = stable_softmax(x)
+    print(f&quot;{name:&lt;15} {str(np.round(naive,4)):&lt;25} {str(np.round(stable,4)):&lt;25}&quot;)
+
+# Mathematical equivalence: softmax(x) = softmax(x - c) for any c
+x = np.array([1.0, 2.0, 3.0])
+print(&quot;\n=== Mathematical Equivalence ===&quot;)
+print(f&quot;softmax(x):     {stable_softmax(x)}&quot;)
+print(f&quot;softmax(x-100): {stable_softmax(x - 100.0)}&quot;)
+print(f&quot;softmax(x+100): {stable_softmax(x + 100.0)}&quot;)
+# All identical — softmax is translation-invariant
+</code></pre>
+<h2>Mathematical Derivation of Stability</h2>
+<p>The translation invariance of softmax is the key insight:</p>
+<p>softmax(x)ᵢ = exp(xᵢ) / Σⱼ exp(xⱼ)
+             = exp(xᵢ − m) × exp(m) / [Σⱼ exp(xⱼ − m) × exp(m)]   (multiply num/denom by exp(−m))
+             = exp(xᵢ − m) / Σⱼ exp(xⱼ − m)</p>
+<p>With m = max(x):
+- The largest exponent argument is xₘₐₓ − m = 0, so exp(0) = 1. No overflow.
+- All other arguments are ≤ 0, so all exp values are in (0, 1]. No overflow.
+- The minimum argument is x_min − m. For typical logit ranges (&lt; 100 units), exp(−100) ≈ 3.7×10⁻⁴⁴ in fp32, which is close to the underflow threshold but the underflowed-to-zero terms contribute negligibly to the denominator anyway.</p>
+<p>This algebraic identity comes at no accuracy cost and requires only one extra pass to find the maximum.</p>
+<h2>Log-Softmax and Cross-Entropy</h2>
+<p>Log-softmax is log applied to softmax:</p>
+<p>log softmax(x)ᵢ = log(exp(xᵢ) / Σⱼ exp(xⱼ))
+               = xᵢ − log Σⱼ exp(xⱼ)
+               = xᵢ − logsumexp(x)
+               = xᵢ − m − log Σⱼ exp(xⱼ − m)    (stable form)</p>
+<p>This is a pure subtraction on the output — no exp on the result side. The only exp calls are in computing Σⱼ exp(xⱼ − m), which is safe because all arguments are ≤ 0.</p>
+<p>Negative log-likelihood (NLL) loss for class c: loss = −log softmax(x)_c = −log softmax(x)[c].</p>
+<p>PyTorch's F.cross_entropy(logits, target) implements exactly this: it computes log_softmax stably and then selects the negative value at the target index. It is the preferred pattern and should be used instead of manual softmax → log → index.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+import numpy as np
+
+# Stable log-softmax from scratch
+def stable_log_softmax(x):
+    &quot;&quot;&quot;Numerically stable log-softmax using logsumexp trick.&quot;&quot;&quot;
+    m = x.max()
+    log_Z = m + np.log(np.sum(np.exp(x - m)))  # stable logsumexp
+    return x - log_Z
+
+# Comparison: unstable vs stable log-softmax
+logits = np.array([1000.0, 1001.0, 1002.0], dtype=np.float32)
+
+# Naive: log(softmax(x)) — two-step, fails
+naive_sm  = np.exp(logits) / np.sum(np.exp(logits))   # overflow
+print(&quot;Naive softmax:     &quot;, naive_sm)                  # nan
+
+# Stable from scratch
+print(&quot;Stable log_softmax:&quot;, stable_log_softmax(logits))  # [-2.408, -1.408, -0.408]
+
+# PyTorch (use this in practice)
+logits_t = torch.tensor(logits)
+print(&quot;F.log_softmax:     &quot;, F.log_softmax(logits_t, dim=0).numpy())
+
+# Cross-entropy: fused stable operation
+batch   = torch.tensor([[1000.0, 1001.0, 1002.0]])
+target  = torch.tensor([2])  # correct class = 2
+
+# WRONG: manual pipeline
+probs = torch.softmax(batch, dim=1)         # nan
+loss_bad = -torch.log(probs[:, 2])
+print(&quot;\nManual softmax-&gt;log-&gt;NLL:&quot;, loss_bad.item())   # nan
+
+# CORRECT: fused
+loss_good = F.cross_entropy(batch, target)
+print(&quot;F.cross_entropy:         &quot;, loss_good.item())    # 0.4076
+
+# Internals of F.cross_entropy
+log_sm   = F.log_softmax(batch, dim=1)
+loss_nll = F.nll_loss(log_sm, target)
+print(&quot;log_softmax + NLL:       &quot;, loss_nll.item())     # 0.4076 (same)
+</code></pre>
+<h2>Temperature Scaling</h2>
+<p>Temperature scaling modifies softmax sharpness:</p>
+<p>softmax(x/T)ᵢ = exp(xᵢ/T) / Σⱼ exp(xⱼ/T)</p>
+<ul>
+<li>T → 0: argmax (one-hot distribution)</li>
+<li>T = 1: standard softmax</li>
+<li>T → ∞: uniform distribution</li>
+</ul>
+<p>Small T &lt; 1 (sharpening) divides logits by T, amplifying their magnitude by 1/T. This increases overflow risk significantly. For temperature T = 0.1 and initial logits near 50 (not unusual in large models), the effective logits become 500 — far above the fp32 overflow threshold of 88.72.</p>
+<p>The stable implementation: apply the max-shift trick after dividing by T. PyTorch's F.softmax(logits / T) does this correctly because F.softmax is internally stable. A manual implementation must explicitly subtract the max after dividing.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+import torch.nn.functional as F
+
+# Temperature scaling
+def temp_softmax(x, T=1.0):
+    &quot;&quot;&quot;Numerically stable temperature-scaled softmax.&quot;&quot;&quot;
+    scaled = x / T
+    scaled = scaled - scaled.max()  # max-shift AFTER temperature scaling
+    e = np.exp(scaled)
+    return e / e.sum()
+
+x = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+print(&quot;=== Effect of Temperature ===&quot;)
+for T in [0.1, 0.5, 1.0, 2.0, 10.0]:
+    s = temp_softmax(x, T)
+    print(f&quot;T={T:4.1f}: {np.round(s, 3)}&quot;)
+# T=0.1 → very peaked; T=10 → nearly uniform
+
+# Overflow with naive temperature scaling
+x_large = np.array([50.0, 60.0, 70.0], dtype=np.float32)
+T = 0.1
+print(&quot;\n=== Overflow with small T ===&quot;)
+scaled_naive = x_large / T   # [500, 600, 700] — far above fp32 overflow threshold
+print(f&quot;Logits / T = {scaled_naive}&quot;)
+print(f&quot;np.exp(700) = {np.exp(np.float32(700))}&quot;)  # inf
+naive = np.exp(scaled_naive); print(f&quot;Naive softmax: {naive / naive.sum()}&quot;)  # nan
+
+# Stable: subtract max AFTER dividing by T
+scaled_stable = scaled_naive - scaled_naive.max()
+e = np.exp(scaled_stable); print(f&quot;Stable softmax: {np.round(e / e.sum(), 4)}&quot;)
+
+# PyTorch F.softmax is always stable
+logits_t = torch.tensor(x_large)
+print(f&quot;F.softmax(x/T=0.1): {F.softmax(logits_t / T, dim=0).numpy()}&quot;)
+</code></pre>
+<h2>Online Softmax for Streaming Inference</h2>
+<p>Standard softmax requires two passes over the input: one to find the maximum (for stability), and one to compute exp and normalize. For memory-constrained inference (e.g., FlashAttention processing attention scores in tiles), an online one-pass algorithm is needed.</p>
+<p>The online softmax algorithm maintains a running maximum m and a running sum s. When a new element xₜ arrives:
+- m_new = max(m_old, xₜ)
+- s_new = s_old × exp(m_old − m_new) + exp(xₜ − m_new)</p>
+<p>The correction factor exp(m_old − m_new) rescales previously accumulated exp values to the new running maximum. At each step, the current estimate softmax(x_{1:t}) can be computed as exp(xᵢ − m_t) / s_t for any previous xᵢ, though in practice FlashAttention computes the weighted value accumulation online without materializing individual softmax values.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+
+def online_softmax(x):
+    &quot;&quot;&quot;
+    Online (one-pass) softmax — the algorithm behind FlashAttention.
+    Returns softmax values with numerically stable running max/sum.
+    &quot;&quot;&quot;
+    m = -np.inf   # running maximum
+    s = 0.0       # running sum of exp(xᵢ - m)
+    for xi in x:
+        m_new = max(m, xi)
+        s = s * np.exp(m - m_new) + np.exp(xi - m_new)  # rescale old, add new
+        m = m_new
+    return np.array([np.exp(xi - m) / s for xi in x])
+
+def two_pass_softmax(x):
+    &quot;&quot;&quot;Standard two-pass stable softmax for comparison.&quot;&quot;&quot;
+    e = np.exp(x - x.max())
+    return e / e.sum()
+
+# Verify correctness
+test_cases = [
+    np.array([1.0, 2.0, 3.0]),
+    np.array([1000.0, 1001.0, 1002.0]),
+    np.array([-100.0, -50.0, 0.0, 50.0]),
+]
+print(&quot;=== Online vs Two-Pass Softmax ===&quot;)
+for x in test_cases:
+    online    = online_softmax(x)
+    two_pass  = two_pass_softmax(x)
+    max_diff  = np.max(np.abs(online - two_pass))
+    print(f&quot;x~[{x[0]:.0f}..{x[-1]:.0f}]: online={np.round(online,4)}  max_diff={max_diff:.2e}&quot;)
+
+# Online softmax for attention (simplified FlashAttention pattern)
+def flash_attention_simple(Q, K, V, scale):
+    &quot;&quot;&quot;Single-head attention with online softmax (no materialized attention matrix).&quot;&quot;&quot;
+    T_q, T_k = Q.shape[0], K.shape[0]
+    output = np.zeros_like(Q)
+    for i in range(T_q):
+        scores = (Q[i] @ K.T) * scale   # (T_k,)
+        attn   = online_softmax(scores)  # online stable softmax
+        output[i] = attn @ V
+    return output
+
+np.random.seed(42)
+d, T = 8, 4
+Q = np.random.randn(T, d); K = np.random.randn(T, d); V = np.random.randn(T, d)
+out = flash_attention_simple(Q, K, V, scale=1.0/np.sqrt(d))
+print(f&quot;\nAttention output shape: {out.shape}, norm: {np.linalg.norm(out):.4f}&quot;)
+</code></pre>
+<h2>Pitfalls</h2>
+<p>Common softmax implementation mistakes:</p>
+<ol>
+<li>
+<p><strong>Computing log(softmax(x)) in two steps</strong>: always use log_softmax or F.cross_entropy instead.</p>
+</li>
+<li>
+<p><strong>Forgetting max-shift after temperature scaling</strong>: temperature &lt; 1 amplifies logits before the max-shift is applied in naive implementations.</p>
+</li>
+<li>
+<p><strong>Using fp16 for attention scores without overflow check</strong>: Q@K^T/√d can produce values above the fp16 overflow threshold of ~11 for large models with high-dimensional keys.</p>
+</li>
+<li>
+<p><strong>Applying softmax along the wrong dimension</strong>: in batched settings, softmax must be applied along dim=1 (over classes) not dim=0 (over batch). A bug here produces valid-looking outputs with wrong semantics.</p>
+</li>
+</ol>
+<h2>Practical Guidance</h2>
+<p>Best practices for softmax in production:</p>
+<ul>
+<li><strong>For classification</strong>: always use F.cross_entropy(logits, target), never compute softmax probabilities manually and then log them.</li>
+<li><strong>For inference probabilities</strong>: use F.softmax(logits, dim=-1) — PyTorch's implementation is internally stable.</li>
+<li><strong>For temperature sampling</strong>: compute F.softmax(logits / T, dim=-1) in one step rather than dividing after softmax.</li>
+<li><strong>For custom attention</strong>: ensure the softmax is computed over the correct sequence dimension and consider using F.scaled_dot_product_attention which handles numerical stability internally.</li>
+<li><strong>For numerical testing</strong>: verify that your implementation matches F.softmax on both normal inputs [1,2,3] and extreme inputs [1000,1001,1002].</li>
+</ul>
+<blockquote>
+<p><strong>TIP: Use F.scaled_dot_product_attention</strong></p>
+<p>PyTorch 2.0+ includes F.scaled_dot_product_attention which dispatches to FlashAttention when possible, handling numerical stability (online softmax), memory efficiency (no materialized attention matrix), and mask handling correctly. Unless implementing a custom attention variant, prefer this over manual Q@K^T / sqrt(d) + softmax patterns.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Pattern</th>
+<th>Numerically Safe?</th>
+<th>Preferred Alternative</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>np.exp(x)/np.exp(x).sum()</td>
+<td>No (overflow)</td>
+<td>stable_softmax(x - x.max())</td>
+</tr>
+<tr>
+<td>torch.log(torch.softmax(x,d))</td>
+<td>No (nan chain)</td>
+<td>F.log_softmax(x, dim=d)</td>
+</tr>
+<tr>
+<td>-log(softmax(x)[target])</td>
+<td>No (two-step)</td>
+<td>F.cross_entropy(x, target)</td>
+</tr>
+<tr>
+<td>softmax(x/T) with T&lt;1 (manual)</td>
+<td>No (overflow)</td>
+<td>F.softmax(x/T, dim=-1)</td>
+</tr>
+<tr>
+<td>Q@K.T/sqrt(d) + softmax manually</td>
+<td>Risky in fp16</td>
+<td>F.scaled_dot_product_attention</td>
+</tr>
+<tr>
+<td>logaddexp.reduce(x)</td>
+<td>Yes</td>
+<td>torch.logsumexp(x, dim=0)</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>Key Takeaways</h2>
+<ul>
+<li>Naive softmax overflows for x_i &gt; 88.72 (fp32) or &gt; 11.09 (fp16) and underflows to NaN when all logits are very negative.</li>
+<li>The max-shift trick softmax(x − max(x)) is mathematically identical to softmax(x) but numerically safe; it costs one extra pass to find the maximum.</li>
+<li>Log-softmax = x − logsumexp(x) = xᵢ − m − log Σ exp(xⱼ − m); the final output is a pure subtraction with no overflow risk.</li>
+<li>Always use F.cross_entropy in PyTorch — it fuses log_softmax and NLL loss in one stable operation.</li>
+<li>Temperature T &lt; 1 amplifies logits by 1/T before the max-shift — always apply the max-shift after temperature scaling, not before.</li>
+<li>Online softmax maintains a running (max, sum) pair and rescales previously seen values when a new maximum is encountered — this is the algorithm behind FlashAttention's tiled computation.</li>
+<li>For production inference, use F.scaled_dot_product_attention (PyTorch 2.0+) which dispatches to FlashAttention and handles all stability and memory concerns automatically.</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

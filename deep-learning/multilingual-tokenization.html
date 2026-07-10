@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Multilingual Tokenization — Token Fertility Across Scripts and Languages | Notes Backup</title>
+  <meta name="description" content="Token fertility measures how many subword tokens a tokenizer produces per word across languages. Covers fertility imbalances between English and non-Latin scripts, mBERT/XLM vocabulary allocation, alpha-sampling for low-resource upsampling, and practical API cost implications." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Multilingual Tokenization — Token Fertility Across Scripts and Languages</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Token fertility measures how many subword tokens a tokenizer produces per word across languages. Covers fertility imbalances between English and non-Latin scripts, mBERT/XLM vocabulary allocation, alpha-sampling for low-resource upsampling, and practical API cost implications.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Multilingual Tokenization — Token Fertility Across Scripts and Languages</h1>
+<p>Token fertility is the average number of subword tokens a tokenizer produces per word. For English, vocabularies trained predominantly on English text achieve fertility near 1.0–1.3 tokens per word — most common words appear directly in the vocabulary. For languages with complex morphology or non-Latin scripts, the same tokenizer can produce 2–5× more tokens for equivalent semantic content. This imbalance drives up inference costs, consumes more context window, and degrades model quality for low-resource languages in production deployments.</p>
+<h2>Token Fertility — English Baseline and Script Comparison</h2>
+<p>Fertility is formally defined as tokens produced per word. English achieves near-baseline fertility because its morphology is simple and corpus dominance ensures rich vocabulary coverage. Thai lacks word boundaries and uses compound characters, reaching 3–5× English fertility. Arabic's rich morphology and right-to-left script produce roughly 2× fertility. Finnish's agglutinative morphology causes common compound words to split into 3–4 tokens despite using the Latin alphabet. Chinese and Japanese typically yield 2–3× fertility since individual characters encode more meaning per slot than English words, yet require 2–3 tokens each in most BPE vocabularies.</p>
+<h2>Cross-Lingual Fertility Analysis</h2>
+<pre><code class="language-python">import tiktoken
+
+def compute_fertility(encode_fn, texts_by_lang):
+    # avg tokens per character for each language
+    results = {}
+    for lang, texts in texts_by_lang.items():
+        total_tokens = sum(len(encode_fn(t)) for t in texts)
+        total_chars = sum(len(t) for t in texts)
+        results[lang] = total_tokens / max(total_chars, 1)
+    return results
+
+enc = tiktoken.get_encoding('cl100k_base')
+sample_texts = {
+    'en': ['The attention mechanism revolutionized NLP.', 'machine learning models'],
+    'zh': ['注意力机制改变了自然语言处理。', '机器学习'],
+    'ar': ['آلية الانتباه في معالجة اللغة الطبيعية.'],
+    'th': ['กลไกความสนใจการประมวลผลภาษาธรรมชาติ'],
+    'fi': ['Huomiokyky mullisti luonnollisen kielen kasittelyn.', 'koneoppimismallit'],
+    'hi': ['ध्यान तंत्र ने एनएलपी में क्रांति ला दी।'],
+    'ko': ['주의 메커니즘이 자연어 처리를 혁신했습니다.'],
+    'de': ['Der Aufmerksamkeitsmechanismus revolutionierte NLP-Forschung.'],
+    'ja': ['注意機構は自然言語処理に革命をもたらした。'],
+    'ru': ['Механизм внимания произвёл революцию в обработке языка.'],
+}
+fertility = compute_fertility(enc.encode, sample_texts)
+en_rate = fertility['en']
+print('Language  Tok/Char  Relative')
+for lang, rate in fertility.items():
+    rel = rate / en_rate
+    print(f'{lang:&lt;10} {rate:.4f}   {rel:.2f}x')
+</code></pre>
+<h2>Vocabulary Coverage in Multilingual Models</h2>
+<p>In mBERT and XLM-R, the shared vocabulary is allocated proportionally to corpus size after alpha-smoothing. English, Chinese, and German receive the largest vocabulary slices. Languages like Swahili or Burmese, with small web corpora, receive far fewer vocabulary slots and rely on byte-fallback or character-level tokenization. This creates a vocabulary coverage disparity: equivalent concepts require more tokens in low-resource languages, degrading model capacity and generation throughput. The proportion of a language's vocabulary coverage directly correlates with its downstream task performance in multilingual benchmarks.</p>
+<pre><code class="language-python">from transformers import AutoTokenizer
+
+def analyze_vocab_coverage(model_name, texts_by_lang):
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    results = {}
+    for lang, texts in texts_by_lang.items():
+        all_ids = []
+        for text in texts:
+            ids = tokenizer.encode(text, add_special_tokens=False)
+            all_ids.extend(ids)
+        unk_id = tokenizer.unk_token_id
+        unk_count = sum(1 for t in all_ids if t == unk_id)
+        results[lang] = {
+            'total_tokens': len(all_ids),
+            'unique_types': len(set(all_ids)),
+            'unk_rate': unk_count / max(len(all_ids), 1),
+        }
+    return results
+
+model_name = 'xlm-roberta-base'
+texts = {
+    'en': ['Transformer architecture with self-attention layers.'],
+    'zh': ['具有自注意力层的变换器架构。'],
+    'ar': ['بنية المحول مع طبقات الانتباه الذاتي.'],
+    'sw': ['Muundo wa transformer na tabaka za kujizingatia.'],
+    'gu': ['ટ્રાન્સફોર્મર આર્કિટેક્ચર સ્વ-ધ્યાન સ્તરો સાથે.'],
+}
+coverage = analyze_vocab_coverage(model_name, texts)
+print(f'Coverage: {model_name}')
+for lang, stats in coverage.items():
+    total = stats['total_tokens']
+    unk = stats['unk_rate']
+    uniq = stats['unique_types']
+    print(f'  {lang}: {total} tokens, unique={uniq}, unk_rate={unk:.3f}')
+</code></pre>
+<h2>Temperature-Based Upsampling for Vocabulary Training</h2>
+<p>Alpha-sampling adjusts how many tokens each language contributes during vocabulary training. With alpha=1.0, sampling is proportional to corpus size — large corpora dominate. With alpha=0.7 (default in XLM and mBERT), small corpora are upsampled: a language with 1/100 the data of English receives roughly 1/100^0.7 ≈ 1/21 of the probability mass instead of 1/100. This gives low-resource languages more vocabulary coverage at the cost of slightly lower vocabulary efficiency for high-resource languages. The typical range is alpha=0.5 to 0.7; alpha=1.0 reproduces raw proportional sampling.</p>
+<pre><code class="language-python">import numpy as np
+
+def alpha_sampling_weights(corpus_sizes, alpha=0.7):
+    # alpha=1.0: proportional to corpus size (favours large corpora)
+    # alpha=0.0: uniform across all languages
+    # alpha=0.7: typical multilingual compromise used in XLM/mBERT
+    langs = list(corpus_sizes.keys())
+    sizes = np.array([corpus_sizes[l] for l in langs], dtype=float)
+    smoothed = sizes ** alpha
+    probs = smoothed / smoothed.sum()
+    return dict(zip(langs, probs))
+
+corpus_sizes = {
+    'en': 50_000_000, 'zh': 10_000_000, 'ar': 3_000_000,
+    'sw': 200_000,    'my': 100_000,    'th': 1_500_000,
+    'fi': 2_000_000,  'hi': 4_000_000,
+}
+print('Language  Corpus       p(a=1.0)  p(a=0.7)  p(a=0.3)')
+for lang, size in corpus_sizes.items():
+    p10 = alpha_sampling_weights(corpus_sizes, alpha=1.0)[lang]
+    p07 = alpha_sampling_weights(corpus_sizes, alpha=0.7)[lang]
+    p03 = alpha_sampling_weights(corpus_sizes, alpha=0.3)[lang]
+    print(f'{lang:&lt;5}  {size:&gt;12,}  {p10:.4f}    {p07:.4f}    {p03:.4f}')
+sw_10 = alpha_sampling_weights(corpus_sizes, 1.0)['sw']
+sw_07 = alpha_sampling_weights(corpus_sizes, 0.7)['sw']
+print(f'Swahili upsampling gain (a=0.7 vs a=1.0): {sw_07/sw_10:.1f}x')
+</code></pre>
+<h2>Multilingual Tokenizer Usage with mT5 and XLM-R</h2>
+<pre><code class="language-python">from transformers import AutoTokenizer
+
+def tokenize_multilingual(text_by_lang, model_name):
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    results = {}
+    for lang, text in text_by_lang.items():
+        ids = tokenizer.encode(text, add_special_tokens=False)
+        tokens = tokenizer.convert_ids_to_tokens(ids)
+        results[lang] = {'ids': ids, 'tokens': tokens, 'n': len(ids)}
+    return results
+
+sentence = {
+    'en': 'The tokenizer splits text into subword units.',
+    'zh': '分词器将文本拆分为子词单元。',
+    'ar': 'يقسم المحلل النصي النص إلى وحدات كلمة فرعية.',
+    'ja': 'トークナイザーはテキストをサブワード単位に分割します。',
+    'fi': 'Tokenisaattori jakaa tekstin aliosiin.',
+    'th': 'ตัวแยกคำแบ่งข้อความออกเป็นหน่วยย่อย',
+}
+for model in ['google/mt5-small', 'xlm-roberta-base']:
+    print(f'Model: {model}')
+    results = tokenize_multilingual(sentence, model)
+    for lang, info in results.items():
+        n_tok = info['n']
+        toks = info['tokens'][:6]
+        print(f'  {lang}: {n_tok} tokens | {toks}')
+    print()
+</code></pre>
+<h2>Token Fertility by Language</h2>
+<table>
+<thead>
+<tr>
+<th>Language</th>
+<th>Script Family</th>
+<th>Tokens/Word (approx)</th>
+<th>Relative to English</th>
+<th>Tokenizer Sensitivity</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>English</td>
+<td>Latin</td>
+<td>1.2</td>
+<td>1.0x (baseline)</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>Spanish</td>
+<td>Latin</td>
+<td>1.3</td>
+<td>1.1x</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>French</td>
+<td>Latin</td>
+<td>1.4</td>
+<td>1.2x</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>German</td>
+<td>Latin (compounds)</td>
+<td>1.8</td>
+<td>1.5x</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>Chinese</td>
+<td>Logographic (CJK)</td>
+<td>2.0–2.5</td>
+<td>1.8x</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Japanese</td>
+<td>CJK + Kana</td>
+<td>2.0–3.0</td>
+<td>2.1x</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Korean</td>
+<td>Hangul (agglutinative)</td>
+<td>2.5–3.5</td>
+<td>2.4x</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Arabic</td>
+<td>Abjad (RTL)</td>
+<td>2.0–2.5</td>
+<td>2.1x</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Thai</td>
+<td>Abugida (no spaces)</td>
+<td>3.0–5.0</td>
+<td>3.5x</td>
+<td>Very High</td>
+</tr>
+<tr>
+<td>Hindi</td>
+<td>Devanagari</td>
+<td>2.0–3.0</td>
+<td>2.3x</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Finnish</td>
+<td>Latin (agglutinative)</td>
+<td>1.8–2.5</td>
+<td>1.7x</td>
+<td>Medium-High</td>
+</tr>
+<tr>
+<td>Code (Python)</td>
+<td>ASCII + symbols</td>
+<td>1.0–1.5</td>
+<td>1.1x</td>
+<td>Low (tokenizer-dependent)</td>
+</tr>
+</tbody>
+</table>
+<h2>Zero-Shot Cross-Lingual Transfer and Code-Switching</h2>
+<p>Zero-shot cross-lingual transfer — training on English and evaluating on another language — works partly because multilingual models share subword tokens for cognates, technical terms, named entities, and numerals. English 'transformer' and German 'Transformer' often map to identical tokens. URLs, code identifiers, and proper nouns are frequently identical across languages, creating strong cross-lingual anchors in the embedding space. The proportion of shared tokens between a language pair strongly correlates with zero-shot transfer performance on benchmarks like XTREME and XGLUE.</p>
+<p>Code-switching refers to mixed-language sequences where users switch languages within a single prompt. SentencePiece handles this via byte-fallback: any character not in the trained vocabulary is encoded as its individual UTF-8 bytes (e.g., &lt;0xE4&gt;&lt;0xB8&gt;&lt;0xAD&gt;), ensuring no out-of-vocabulary failures at the cost of very high fertility for rare scripts. LangID prefix tokens like <strong>en</strong> or <strong>zh</strong> can be prepended to signal the target language, guiding mT5 and NLLB models toward the correct generation language without changing the tokenizer's vocabulary allocation.</p>
+<h2>API Cost and Infrastructure Implications</h2>
+<blockquote>
+<p><strong>API Cost Varies 3–5x by Language</strong>: API cost for multilingual LLM applications can vary 3–5x based on language — always benchmark token counts in your target languages before estimating infrastructure costs. A Thai or Arabic response with equivalent semantic content to an English response consumes proportionally more tokens, directly increasing per-request cost and reducing effective context window capacity. Use the tokenizer's encode() method on representative production samples in each target language before committing to an API pricing tier.</p>
+</blockquote>
+<ul>
+<li>Fertility affects API pricing: charge-per-token APIs cost 3–5x more for high-fertility languages at equal content.</li>
+<li>Context window: a 4096-token window holds significantly less content for Arabic or Thai than for English.</li>
+<li>Generation latency: higher token counts increase autoregressive generation time proportionally.</li>
+<li>Batching efficiency: mixed-language batches have variable sequence lengths, reducing GPU utilization.</li>
+<li>Vocabulary allocation: reserve minimum vocabulary slots per script when training custom multilingual tokenizers.</li>
+<li>Benchmark fertility on real production samples — synthetic test sentences often underestimate real-world fertility.</li>
+</ul>
+<p>Practical mitigation strategies include using language-specific tokenizers for single-language deployments (achieving lower fertility than multilingual tokenizers), compressing prompts by removing redundant tokens before API calls, and monitoring per-language token counts in production observability dashboards. For mT5 and NLLB-based deployments, the tokenizers are specifically calibrated for multilingual coverage, achieving materially lower fertility for non-English languages than GPT-series tokenizers trained predominantly on English corpora.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

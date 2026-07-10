@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Scikit-learn — Pipeline, ColumnTransformer, and Cross-Validation | Notes Backup</title>
+  <meta name="description" content="Scikit-learn&#x27;s Pipeline and ColumnTransformer prevent data leakage, enable hyperparameter search over preprocessing, and compose mixed-type tabular transformations cleanly." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Scikit-learn — Pipeline, ColumnTransformer, and Cross-Validation</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Scikit-learn&#x27;s Pipeline and ColumnTransformer prevent data leakage, enable hyperparameter search over preprocessing, and compose mixed-type tabular transformations cleanly.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Scikit-learn — Pipeline, ColumnTransformer, and Cross-Validation</h1>
+<p>Scikit-learn's Pipeline is the cornerstone of leak-free ML workflows: preprocessing steps are fitted only on training data and applied to validation/test data automatically. Combined with ColumnTransformer for mixed-type features and GridSearchCV for hyperparameter tuning, it provides a complete, reproducible ML pipeline in pure Python.</p>
+<h2>Why Pipeline Prevents Data Leakage</h2>
+<p>The most common source of data leakage is fitting a scaler or imputer on the entire dataset before cross-validation. Pipeline fixes this: during CV, fit() is called only on the training fold, and transform() is applied to the validation fold with the fitted parameters.</p>
+<ul>
+<li>Pipeline.fit(X_train, y_train): calls fit_transform on each step except the last, which calls fit</li>
+<li>Pipeline.predict(X_test): calls transform on each preprocessing step, then predict on the estimator</li>
+<li>Cross-validation with Pipeline: sklearn handles fold splitting and refitting automatically — no manual fit on train, transform on val</li>
+<li>set_params API: Pipeline('step__param', value) allows grid search over any step's parameters</li>
+<li>named_steps attribute: access individual fitted transformers for inspection</li>
+</ul>
+<h2>Pipeline with ColumnTransformer</h2>
+<p>ColumnTransformer applies different transformers to different columns, then concatenates the results. This is the standard pattern for tabular data with a mix of numerical and categorical features.</p>
+<pre><code class="language-python">import numpy as np
+import pandas as pd
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
+from sklearn.impute import SimpleImputer
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.datasets import make_classification
+
+# Simulated mixed-type dataset
+X_num = np.random.randn(500, 5).astype(np.float32)
+X_cat = np.random.choice(['A', 'B', 'C'], size=(500, 2))
+X = pd.DataFrame(
+    np.hstack([X_num, X_cat]),
+    columns=[f'num_{i}' for i in range(5)] + ['cat_0', 'cat_1']
+)
+y = (X['num_0'].astype(float) + X['num_1'].astype(float) &gt; 0).astype(int).values
+
+numeric_cols     = [f'num_{i}' for i in range(5)]
+categorical_cols = ['cat_0', 'cat_1']
+
+numeric_transformer = Pipeline([
+    ('imputer', SimpleImputer(strategy='median')),
+    ('scaler',  StandardScaler())
+])
+categorical_transformer = Pipeline([
+    ('imputer', SimpleImputer(strategy='most_frequent')),
+    ('onehot',  OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+])
+
+preprocessor = ColumnTransformer([
+    ('num', numeric_transformer,     numeric_cols),
+    ('cat', categorical_transformer, categorical_cols)
+])
+full_pipeline = Pipeline([
+    ('preprocessor', preprocessor),
+    ('classifier',   GradientBoostingClassifier(n_estimators=100, random_state=42))
+])
+print(full_pipeline)
+</code></pre>
+<h2>Cross-Validation with Pipeline</h2>
+<p>Using cross_val_score on a Pipeline guarantees no leakage: the entire preprocessing + fitting happens inside each fold. The validation fold is transformed with parameters fitted on the training fold only.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import cross_val_score, StratifiedKFold
+from sklearn.datasets import make_classification
+
+X, y = make_classification(
+    n_samples=1000, n_features=20, n_informative=10,
+    n_redundant=5, random_state=42
+)
+
+# Pipeline: scale → PCA → Random Forest
+leaky_pipeline = Pipeline([
+    ('scaler', StandardScaler()),
+    ('pca',    PCA(n_components=10)),
+    ('clf',    RandomForestClassifier(n_estimators=100, random_state=42))
+])
+
+# StratifiedKFold preserves class balance per fold
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+scores = cross_val_score(
+    leaky_pipeline, X, y, cv=skf, scoring='accuracy', n_jobs=-1
+)
+print(f'CV accuracy: {scores.mean():.4f} +/- {scores.std():.4f}')
+print(f'Per-fold:    {[f&quot;{s:.3f}&quot; for s in scores]}')
+</code></pre>
+<h2>GridSearchCV Over Pipeline Parameters</h2>
+<p>GridSearchCV on a Pipeline searches over preprocessing hyperparameters (PCA components, imputation strategy) simultaneously with model hyperparameters. The double-underscore __ syntax accesses nested step parameters.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.model_selection import GridSearchCV, StratifiedKFold
+from sklearn.datasets import make_classification
+
+X, y = make_classification(n_samples=800, n_features=15, n_informative=8, random_state=42)
+
+pipeline = Pipeline([
+    ('scaler', StandardScaler()),
+    ('pca',    PCA()),
+    ('clf',    GradientBoostingClassifier(random_state=42))
+])
+
+# Search over PCA components AND GBM hyperparameters simultaneously
+param_grid = {
+    'pca__n_components':        [5, 10, 15],
+    'clf__n_estimators':        [100, 200],
+    'clf__max_depth':           [3, 5],
+    'clf__learning_rate':       [0.05, 0.1]
+}
+
+grid_search = GridSearchCV(
+    pipeline, param_grid,
+    cv=StratifiedKFold(n_splits=3, shuffle=True, random_state=42),
+    scoring='accuracy', n_jobs=-1, verbose=1
+)
+grid_search.fit(X, y)
+print(f'Best score:  {grid_search.best_score_:.4f}')
+print(f'Best params: {grid_search.best_params_}')
+</code></pre>
+<h2>Custom Transformers</h2>
+<p>Custom transformers integrate seamlessly with Pipeline by inheriting from BaseEstimator and TransformerMixin. This provides fit, transform, fit_transform, get_params, and set_params automatically.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.datasets import make_classification
+from sklearn.model_selection import cross_val_score
+
+class ClipTransformer(BaseEstimator, TransformerMixin):
+    &quot;&quot;&quot;Clip feature values to [mean - n_std, mean + n_std] to remove outliers.&quot;&quot;&quot;
+    def __init__(self, n_std: float = 3.0):
+        self.n_std = n_std
+
+    def fit(self, X, y=None):
+        self.mean_ = np.mean(X, axis=0)
+        self.std_  = np.std(X, axis=0) + 1e-8  # avoid division by zero
+        return self
+
+    def transform(self, X):
+        lo = self.mean_ - self.n_std * self.std_
+        hi = self.mean_ + self.n_std * self.std_
+        return np.clip(X, lo, hi)
+
+X, y = make_classification(n_samples=500, n_features=10, random_state=0)
+
+pipe = Pipeline([
+    ('clip',   ClipTransformer(n_std=3.0)),
+    ('scaler', StandardScaler()),
+    ('clf',    LogisticRegression(max_iter=500))
+])
+
+scores = cross_val_score(pipe, X, y, cv=5)
+print(f'Pipeline with ClipTransformer: {scores.mean():.4f} +/- {scores.std():.4f}')
+</code></pre>
+<hr />
+<h2>Cross-Validation Strategies</h2>
+<table>
+<thead>
+<tr>
+<th>Strategy</th>
+<th>Class</th>
+<th>Use Case</th>
+<th>Leakage Prevention</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>K-Fold</td>
+<td>KFold</td>
+<td>Regression, balanced classification</td>
+<td>Yes — fits only on train fold</td>
+<td>Shuffle=True recommended</td>
+</tr>
+<tr>
+<td>Stratified K-Fold</td>
+<td>StratifiedKFold</td>
+<td>Imbalanced classification</td>
+<td>Yes — fold-level stratification</td>
+<td>Default for classification in cross_val_score</td>
+</tr>
+<tr>
+<td>Time Series Split</td>
+<td>TimeSeriesSplit</td>
+<td>Time series — never use future data</td>
+<td>Yes — forward-only splits</td>
+<td>No shuffle; gap parameter available</td>
+</tr>
+<tr>
+<td>Group K-Fold</td>
+<td>GroupKFold</td>
+<td>Groups must not split across folds (patients, users)</td>
+<td>Yes — groups in train or val, not both</td>
+<td>Prevents within-group leakage</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Leakage with Pandas Operations Outside Pipeline</strong>: Performing any global operation (fillna, label encoding, outlier removal) on the full dataset before creating train/val splits introduces leakage. Move ALL preprocessing inside Pipeline. If using pandas, pass the DataFrame directly to Pipeline and use ColumnTransformer — do not call df.fillna() before splitting.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<ul>
+<li>Pipeline chains preprocessing + estimator steps; fit/transform is called only on training data during CV</li>
+<li>ColumnTransformer applies different transformers to different column groups and concatenates results</li>
+<li>GridSearchCV with Pipeline searches preprocessing and model hyperparameters simultaneously without leakage</li>
+<li>Custom transformers: inherit BaseEstimator + TransformerMixin, implement fit and transform</li>
+<li>Use StratifiedKFold for classification, TimeSeriesSplit for temporal data, GroupKFold for grouped samples</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

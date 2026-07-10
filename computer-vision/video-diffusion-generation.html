@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Video Diffusion Models: Temporal Coherence in Generative Video | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Video Diffusion Models: Temporal Coherence in Generative Video</h1>
+      
+      <h1>Video Diffusion Models: Temporal Coherence in Generative Video</h1>
+<p>Video diffusion models extend image diffusion to generate temporally coherent video sequences. Rather than independently denoising each frame, these models apply noise across the temporal dimension and learn to reverse the diffusion process jointly over all frames. The key challenge is maintaining consistency across frames while producing high-quality spatial detail.</p>
+<blockquote>
+<p>****: Video diffusion's core challenge is temporal consistency — generated frames must be coherent over time, not just individually realistic. Temporal attention between frames (not just spatial attention within each frame) is the standard fix.</p>
+</blockquote>
+<p>Image diffusion models operate on 2D feature maps using UNets with spatial attention. Extending to video requires handling the temporal axis by inflating 2D operations to 3D. A video of T frames at resolution H×W becomes a tensor of shape (B, C, T, H, W), and each spatial layer must also attend across time to learn motion and temporal consistency.</p>
+<p>Two common inflation strategies exist: (1) replacing Conv2d with Conv3d to capture local spatio-temporal patterns, and (2) inserting temporal attention layers between spatial attention layers. The first captures local motion patterns; the second captures long-range temporal dependencies across all frames simultaneously, at higher computational cost.</p>
+<p>The 3D U-Net replaces each 2D convolution with a 3D convolution over (time, height, width). After every spatial self-attention block, a temporal attention block reshapes the feature map — treating each spatial position as a sequence over time — and applies multi-head self-attention along the temporal axis to share information across frames.</p>
+<pre><code class="language-python"># 3D U-Net temporal inflation
+conv = nn.Conv3d(C, C, kernel_size=3, padding=(1, 1, 1))
+
+# Temporal attention after each spatial attention layer
+def forward(x):  # x shape: (B, C, T, H, W)
+    out = spatial_attn(x)
+    # Reshape for temporal attention
+    x_t = rearrange(x, 'b c t h w -&gt; (b h w) t c')
+    out = out + temporal_attn(x_t)  # residual
+    return out
+</code></pre>
+<p>Temporal attention uses the same mechanism as spatial attention but operates on the time dimension. The rearrange converts shape (B, C, T, H, W) to ((B<em>H</em>W), T, C), enabling standard transformer attention to attend across T timesteps for every spatial position. This is computationally expensive at high resolutions but critical for temporal coherence.</p>
+<p>Video diffusion models are often trained to generate videos conditioned on a set of clean context frames, making the model learn to extend or interpolate temporal sequences. During training, the first n_cond frames are provided clean while remaining frames are noised to timestep t. The model learns to denoise conditioned on the clean context frames provided.</p>
+<pre><code class="language-python"># Frame conditioning during training
+noisy_frames = q_sample(video_frames, t)  # noise all frames
+cond_frames = video_frames[:, :, :n_cond]  # clean context
+# Concatenate along channel dim for model input
+model_input = torch.cat([noisy_frames, cond_frames], dim=1)
+# Denoise conditioned on first n_cond clean frames
+pred_noise = model(model_input, t, text_emb)
+</code></pre>
+<pre><code class="language-python"># Classifier-free guidance for video generation
+# Run model twice: unconditional and conditional
+uncond = unet(x_t, t, text_emb='')
+cond   = unet(x_t, t, text_emb=text_prompt)
+# Scale difference to strengthen text conditioning
+pred   = uncond + guidance_scale * (cond - uncond)
+# Guidance applied uniformly at the frame level
+pred_frames = pred.chunk(T, dim=2)
+</code></pre>
+<p>Classifier-free guidance (CFG) is applied at the frame level during inference. The model is run twice — once with the text prompt and once without — and the difference is scaled to strengthen text alignment. Guidance scales between 7.0 and 12.0 are typical; higher values improve text adherence but reduce diversity and can introduce visual artifacts in frames.</p>
+<p>Text-to-video (T2V) models condition the generation process on a CLIP or T5 text embedding. Early models like CogVideo and ModelScope operated at low resolutions (256×256) with short durations (4–16 frames). Modern approaches like Open-Sora scale to higher resolutions and longer clips using DiT (Diffusion Transformer) backbones in place of traditional UNets.</p>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Architecture</th>
+<th>FVD (UCF-101)</th>
+<th>Text Align</th>
+<th>Max Frames</th>
+<th>Open</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>VDM</td>
+<td>3D U-Net</td>
+<td>2880</td>
+<td>None</td>
+<td>16</td>
+<td>No</td>
+</tr>
+<tr>
+<td>Make-A-Video</td>
+<td>Pseudo-3D UNet</td>
+<td>367</td>
+<td>CLIP-Sim</td>
+<td>76</td>
+<td>No</td>
+</tr>
+<tr>
+<td>CogVideo</td>
+<td>Transformer</td>
+<td>701</td>
+<td>CLIP-Sim</td>
+<td>32</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>ModelScope</td>
+<td>3D UNet+Attn</td>
+<td>550</td>
+<td>CLIP-Sim</td>
+<td>16</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Sora-like</td>
+<td>DiT (3D)</td>
+<td>~180</td>
+<td>VQA Score</td>
+<td>240+</td>
+<td>No</td>
+</tr>
+<tr>
+<td>Open-Sora</td>
+<td>DiT (3D)</td>
+<td>~300</td>
+<td>CLIP-Sim</td>
+<td>204</td>
+<td>Yes</td>
+</tr>
+</tbody>
+</table>
+<p>FVD (Fréchet Video Distance) is the standard metric for video generation quality. It measures the Fréchet distance between I3D feature distributions of real and generated videos, capturing both spatial realism and temporal coherence. Lower FVD indicates generated videos closer to real video statistics on the benchmark dataset used for evaluation.</p>
+<pre><code class="language-python"># FVD evaluation pipeline
+from pytorch_i3d import InceptionI3d
+i3d = InceptionI3d(pretrained=True)
+
+# Extract features from real and generated videos
+real_feats = i3d(real_videos)   # shape: (N, 400)
+gen_feats  = i3d(gen_videos)    # shape: (N, 400)
+
+# Compute Fréchet distance in feature space
+fvd = frechet_distance(real_feats, gen_feats)
+print(f'FVD: {fvd:.2f}')  # lower = better temporal realism
+</code></pre>
+<p>Beyond FVD, CLIP-Sim measures text-video alignment by computing cosine similarity between CLIP text and video embeddings. IS (Inception Score) evaluates diversity and quality independently. For human evaluation, temporal coherence ratings and text alignment scores are collected via structured preference studies comparing generated videos to real reference clips.</p>
+<p>Video diffusion models are the dominant paradigm for high-quality video generation. The core architectural decisions — 3D convolutions vs. temporal attention, frame conditioning vs. full noise — directly affect quality, length, and computational cost. Pseudo-3D architectures that alternate spatial and temporal layers offer a practical efficiency compromise for production.</p>
+<p>Evaluation remains challenging: FVD captures distributional quality but not fine-grained temporal coherence or text alignment. A full evaluation pipeline should include FVD on a held-out test set, CLIP-Sim for text alignment, and human studies for perceptual quality. No single metric captures all relevant dimensions of video generation quality adequately.</p>
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Classifier Guidance — Conditional Generation via Gradient Steering | Notes Backup</title>
+  <meta name="description" content="Derive classifier guidance from the conditional score, implement a noisy classifier trained at all noise levels, integrate classifier gradients into the DDPM denoising loop, sweep the guidance scale, and compare quality-diversity tradeoffs against unconditional and CFG baselines." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Classifier Guidance — Conditional Generation via Gradient Steering</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Derive classifier guidance from the conditional score, implement a noisy classifier trained at all noise levels, integrate classifier gradients into the DDPM denoising loop, sweep the guidance scale, and compare quality-diversity tradeoffs against unconditional and CFG baselines.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Classifier Guidance — Conditional Generation via Gradient Steering</h1>
+<p>Classifier guidance (Dhariwal &amp; Nichol 2021) was the first method to reliably push class-conditional diffusion models past GANs on ImageNet. The core idea: sample from p(x|y) ∝ p(x)·p(y|x) by steering each denoising step with the gradient of a classifier. The unconditional diffusion model provides the score ∇_x log p(x), while a separately trained classifier provides ∇_x log p(y|x). Combining them yields the conditional score — no conditional retraining of the diffusion model is required.</p>
+<h2>Conditional Generation via Bayes' Rule</h2>
+<p>The conditional distribution p(x|y) = p(x)·p(y|x)/p(y). Taking log-gradients: ∇<em x_t="x_t">x log p(x|y) = ∇_x log p(x) + ∇_x log p(y|x). The first term is the unconditional score (provided by the diffusion model); the second is the classifier gradient at x. At each denoising step t, we work with the noisy versions: ∇</em> log p(x_t|y) = ∇<em x_t="x_t">{x_t} log p_t(x_t) + ∇</em> log p_φ(y|x_t), where s &gt; 1 is the guidance scale.} log p_φ(y|x_t). The modified epsilon is then ε̃ = ε_θ(x_t,t) − √(1−ᾱ_t)·s·∇_{x_t</p>
+<h2>Noisy Classifier Training</h2>
+<p>The classifier p_φ(y|x_t) must be trained on noisy images at all noise levels t, not clean images. A classifier trained on clean images cannot provide reliable gradients in high-noise regions where x_t looks like pure noise. During training, the noise level t is sampled uniformly, x_t = √ᾱ_t·x + √(1−ᾱ_t)·ε is computed, and the classifier predicts the class from x_t. This trains the classifier to extract class signal from corrupted inputs across the full noise spectrum, enabling meaningful gradient signals at every denoising step.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+
+class NoisyClassifier(nn.Module):
+    def __init__(self, in_dim=32, n_classes=10, T=1000):
+        super().__init__()
+        self.time_embed = nn.Embedding(T, 16)
+        self.net = nn.Sequential(
+            nn.Linear(in_dim + 16, 128), nn.SiLU(),
+            nn.Linear(128, 64), nn.SiLU(),
+            nn.Linear(64, n_classes)
+        )
+    def forward(self, x_t, t):
+        t_emb = self.time_embed(t)
+        return self.net(torch.cat([x_t, t_emb], dim=-1))
+
+def train_noisy_classifier(clf, data, labels, alpha_bar, n_steps=300):
+    opt = torch.optim.Adam(clf.parameters(), lr=1e-3)
+    T = len(alpha_bar)
+    for step in range(n_steps):
+        idx = torch.randint(0, len(data), (64,))
+        x0, y = data[idx], labels[idx]
+        t = torch.randint(0, T, (64,))
+        eps = torch.randn_like(x0)
+        ab = alpha_bar[t].unsqueeze(1)
+        x_t = torch.sqrt(ab) * x0 + torch.sqrt(1 - ab) * eps
+        logits = clf(x_t, t)
+        loss = F.cross_entropy(logits, y)
+        opt.zero_grad(); loss.backward(); opt.step()
+        if step % 100 == 0:
+            print(f'Step {step}: classifier loss = {loss.item():.4f}')
+    return clf
+
+torch.manual_seed(0)
+alpha_bar = torch.cumprod(1 - torch.linspace(1e-4, 0.02, 1000), dim=0)
+data = torch.randn(500, 32)
+labels = torch.randint(0, 10, (500,))
+clf = NoisyClassifier(in_dim=32)
+train_noisy_classifier(clf, data, labels, alpha_bar, n_steps=300)
+</code></pre>
+<h2>Classifier Guidance in the Denoising Loop</h2>
+<p>At each denoising step, the classifier gradient steers the epsilon prediction toward higher class probability. The perturbed epsilon is: ε̃ = ε_θ(x_t,t) − s·√(1−ᾱ_t)·∇<em x_t="x_t">{x_t} log p_φ(y|x_t). The factor √(1−ᾱ_t) converts the gradient from x-space to epsilon-space (since ε and ∇</em> log p_t are related by this factor). The guidance scale s &gt; 1 amplifies the class signal beyond what the training distribution supports, trading diversity for fidelity. For s=1 this reduces to simple Bayesian conditioning; for s=5–10 the mode-seeking effect is strong.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+@torch.no_grad()
+def guided_sampling(eps_model, classifier, y, alpha_bar,
+                    timesteps, guidance_scale=3.0, shape=(4, 32)):
+    &quot;&quot;&quot;Classifier-guided DDPM sampling loop.&quot;&quot;&quot;
+    x = torch.randn(shape)
+    B = shape[0]
+    for t in timesteps:
+        ab_t = alpha_bar[t]
+        ab_prev = alpha_bar[t - 1] if t &gt; 0 else torch.tensor(1.0)
+        t_batch = torch.full((B,), t, dtype=torch.long)
+        # Unconditional score (epsilon prediction)
+        eps_uncond = eps_model(x, t_batch)
+        # Classifier gradient
+        x_grad = x.detach().requires_grad_(True)
+        with torch.enable_grad():
+            logits = classifier(x_grad, t_batch)
+            log_prob = logits.log_softmax(dim=-1)[range(B), y]
+            grad = torch.autograd.grad(log_prob.sum(), x_grad)[0]
+        # Perturb epsilon by classifier gradient
+        eps_guided = eps_uncond - guidance_scale * torch.sqrt(1 - ab_t) * grad.detach()
+        # Standard DDPM reverse step
+        coef1 = 1.0 / torch.sqrt(1 - alpha_bar[t] / ab_prev)
+        x_prev_mean = coef1 * (x - (1 - ab_t/ab_prev) / torch.sqrt(1 - ab_t) * eps_guided)
+        noise = torch.randn_like(x) * torch.sqrt(1 - ab_prev) if t &gt; 0 else 0.0
+        x = x_prev_mean + noise
+    return x
+
+print('Classifier guidance: steer eps at each step by classifier log-prob gradient')
+</code></pre>
+<h2>ADM Architecture</h2>
+<p>Dhariwal &amp; Nichol (2021) also introduced ADM (Ablated Diffusion Model) — a U-Net with adaptive group normalization, attention at multiple resolutions, and BigGAN residual blocks. ADM with classifier guidance achieved FID 4.59 on ImageNet 256×256, surpassing the best GANs (BigGAN-deep: FID 6.95). Key architectural improvements: attention heads with 64 channels instead of 128, multi-resolution attention (32×32, 16×16, 8×8), and increased depth. These architectural gains combined with classifier guidance established diffusion models as the new state-of-the-art on high-resolution class-conditional synthesis.</p>
+<h2>Guidance Scale Trade-off</h2>
+<p>The guidance scale s controls the fidelity-diversity trade-off. At s=1, samples are drawn from the true conditional distribution p(x|y). At s &gt; 1, the sampling steers beyond the support of the training distribution toward high-class-probability modes. FID improves with s up to a point (typically s=2–5 for ImageNet), then degrades as samples become over-sharpened artifacts with unnatural colors. Inception Score (IS) measures class fidelity and keeps increasing with s. The s that minimizes FID ≠ the s that maximizes IS — practitioners plot both curves.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+def simulate_guidance_tradeoff(guidance_scales, n_samples=200, seed=0):
+    &quot;&quot;&quot;Simulate FID vs IS tradeoff as guidance scale increases.&quot;&quot;&quot;
+    torch.manual_seed(seed)
+    results = []
+    for s in guidance_scales:
+        # Simulate quality (lower variance = higher fidelity but less diverse)
+        # At s=1: diverse but impure modes; at high s: mode-collapsed
+        rng = np.random.RandomState(seed)
+        # FID: U-shaped around optimal guidance
+        fid = 10.0 + (s - 3.5) ** 2 * 1.2 + rng.randn() * 0.3
+        # IS: monotonically increases with guidance (class fidelity)
+        inception_score = 20.0 + 8.0 * np.log(s + 1) + rng.randn() * 0.5
+        # Diversity (recall): decreases with guidance
+        recall = 0.60 * np.exp(-0.15 * (s - 1)) + rng.randn() * 0.02
+        results.append((s, max(fid, 1.0), inception_score, max(recall, 0.05)))
+    return results
+
+scales = [1, 1.5, 2, 3, 4, 5, 7, 10]
+print(f'{&quot;Scale&quot;:&gt;6} | {&quot;FID&quot;:&gt;6} | {&quot;IS&quot;:&gt;8} | {&quot;Recall&quot;:&gt;7}')
+print('-' * 36)
+for s, fid, IS, rec in simulate_guidance_tradeoff(scales):
+    print(f'{s:6.1f} | {fid:6.2f} | {IS:8.2f} | {rec:7.3f}')
+</code></pre>
+<h2>Unconditional vs Guided Generation</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+def compare_guidance(eps_model, classifier, alpha_bar, n_steps=50, D=16, B=8):
+    &quot;&quot;&quot;Compare unconditional vs guided sampling at same NFE budget.&quot;&quot;&quot;
+    timesteps = list(range(0, 1000, 1000 // n_steps))[::-1]
+    y = torch.zeros(B, dtype=torch.long)  # class 0
+
+    def sample(guidance_scale):
+        torch.manual_seed(42)
+        x = torch.randn(B, D)
+        for t in timesteps:
+            ab = alpha_bar[t]
+            t_b = torch.full((B,), t, dtype=torch.long)
+            eps = eps_model(x, t_b)
+            if guidance_scale &gt; 1.0:
+                x_g = x.detach().requires_grad_(True)
+                with torch.enable_grad():
+                    lp = classifier(x_g, t_b).log_softmax(-1)[range(B), y]
+                    grad = torch.autograd.grad(lp.sum(), x_g)[0].detach()
+                eps = eps - guidance_scale * torch.sqrt(1 - ab) * grad
+            ab_p = alpha_bar[max(t-20, 0)]
+            x0 = (x - torch.sqrt(1-ab)*eps) / torch.sqrt(ab)
+            x = torch.sqrt(ab_p)*x0.clamp(-1,1) + torch.sqrt(1-ab_p)*eps
+        return x
+
+    for s in [1.0, 3.0, 7.0]:
+        out = sample(s)
+        print(f'guidance_scale={s:4.1f}: norm={out.norm():.2f} std={out.std():.3f}')
+
+class DummyEps(nn.Module):
+    def forward(self, x, t): return x * 0.05
+class DummyClf(nn.Module):
+    def forward(self, x, t): return x[:, :10]  # treat first 10 dims as logits
+alpha_bar = torch.cumprod(1 - torch.linspace(1e-4, 0.02, 1000), dim=0)
+compare_guidance(DummyEps(), DummyClf(), alpha_bar)
+</code></pre>
+<h2>Limitations of Classifier Guidance</h2>
+<p>Classifier guidance has three practical limitations: (1) It requires a separately trained noisy classifier — double the training cost and complexity. (2) Every denoising step requires a gradient computation through the classifier (torch.autograd.grad), adding ~50% compute per step. (3) The classifier is trained on noisy images which is an unusual distribution — small training bugs can produce misleading gradients. These limitations motivated classifier-free guidance (Ho &amp; Salimans 2022), which achieves the same effect using a single network with conditioning dropout.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Requires classifier</th>
+<th>Guidance formula</th>
+<th>FID (ImageNet 256)</th>
+<th>Diversity</th>
+<th>Practical complexity</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Unconditional DDPM</td>
+<td>No</td>
+<td>ε_θ(x_t, t) only</td>
+<td>~26 (class-agnostic)</td>
+<td>High</td>
+<td>Low — one network</td>
+</tr>
+<tr>
+<td>Classifier Guidance (s=3)</td>
+<td>Yes — noisy classifier</td>
+<td>ε_θ − s·√(1−ᾱ)·∇ log p(y</td>
+<td>x_t)</td>
+<td>~4.6 (ADM+guidance)</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>CFG (w=7)</td>
+<td>No — joint model</td>
+<td>ε_uncond + w·(ε_cond − ε_uncond)</td>
+<td>~3.8 (LDM)</td>
+<td>Medium</td>
+<td>Low — one network, two forward passes</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Gradient Quality Degrades at High Noise</strong>: Classifier gradients ∇_{x_t} log p_φ(y|x_t) become unreliable at high noise levels (t close to T) where x_t is nearly pure noise. If you see diverging samples or NaN outputs, check the gradient magnitude at high t — consider clipping the guidance signal (e.g. clamp gradient norm to 1.0) for the first 20% of denoising steps.</p>
+</blockquote>
+<ul>
+<li>Classifier guidance samples from p(x|y) ∝ p(x)·p(y|x) — theoretically grounded Bayesian conditioning.</li>
+<li>The noisy classifier must be trained on {x_t, t} pairs across all t — training on only clean images fails.</li>
+<li>Guidance scale s &gt; 1 amplifies class signal beyond the training distribution, trading recall for precision.</li>
+<li>ADM + classifier guidance first beat GANs on ImageNet 256×256 (FID 4.59 vs BigGAN-deep 6.95).</li>
+<li>Every step requires autograd through the classifier — adds ~50% compute vs unconditional sampling.</li>
+<li>Classifier-free guidance (CFG) achieves similar or better quality without a separate classifier.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CLIP Zero-Shot Transfer: Contrastive Image-Language Pretraining | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>CLIP Zero-Shot Transfer: Contrastive Image-Language Pretraining</h1>
+      
+      <h1>CLIP Zero-Shot Transfer: Contrastive Image-Language Pretraining</h1>
+<h2>Overview</h2>
+<p>CLIP (Contrastive Language-Image Pretraining) is a model trained by OpenAI on 400 million image-text pairs scraped from the internet. Unlike supervised models trained on fixed label sets, CLIP learns a shared embedding space for images and text, enabling zero-shot transfer to arbitrary downstream tasks.</p>
+<p>The key insight is natural language supervision: instead of predicting discrete labels, the model learns to associate images with free-form text descriptions. At inference time, class names are embedded as text and compared against image embeddings — no task-specific fine-tuning required.</p>
+<blockquote>
+<p><strong>info</strong>: CLIP's zero-shot transfer works because it learns visual concepts from natural language supervision rather than fixed label sets. The key is the contrastive objective — it pushes matching pairs together and unmatched pairs apart in a shared embedding space.</p>
+</blockquote>
+<p>CLIP uses two encoders: a Vision Transformer (ViT) or ResNet for images, and a Transformer for text. Both encoders project their inputs into a shared 512-dimensional embedding space. The training signal comes entirely from whether an image and text were originally paired.</p>
+<h2>Contrastive Pretraining Objective</h2>
+<p>The contrastive loss operates on a batch of N image-text pairs. For each batch, CLIP computes an N×N similarity matrix between all image and text embeddings. The diagonal entries are positive pairs; all off-diagonal entries are negatives. The loss maximizes diagonal similarity while minimizing off-diagonal.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def clip_loss(image_features, text_features, temperature):
+    # Normalize embeddings
+    image_features = F.normalize(image_features, dim=-1)
+    text_features = F.normalize(text_features, dim=-1)
+    # Scaled cosine similarity
+    logits = image_features @ text_features.T * temperature
+    B = logits.shape[0]
+    labels = torch.arange(B, device=logits.device)
+    loss_i = F.cross_entropy(logits, labels)
+    loss_t = F.cross_entropy(logits.T, labels)
+    return (loss_i + loss_t) / 2
+</code></pre>
+<p>The temperature parameter (learned, initialized to 0.07) scales the logits before softmax. A lower temperature makes the distribution peakier, which is important early in training. CLIP uses a symmetric loss: it classifies both images given texts, and texts given images, averaging both cross-entropy terms.</p>
+<h2>Zero-Shot Classification</h2>
+<p>Zero-shot classification with CLIP requires no labeled examples. At inference time, class names are wrapped in a prompt template (e.g., 'a photo of a {class}'), encoded by the text encoder, and compared to the image embedding. The class with the highest cosine similarity is the prediction.</p>
+<pre><code class="language-python">import clip
+import torch
+
+def zero_shot_classify(image, classes, model, preprocess, device):
+    templates = [&quot;a photo of a {}.&quot;.format(c) for c in classes]
+    tokens = clip.tokenize(templates).to(device)
+    with torch.no_grad():
+        image_feat = model.encode_image(preprocess(image).unsqueeze(0).to(device))
+        text_feat = model.encode_text(tokens)
+        image_feat = image_feat / image_feat.norm(dim=-1, keepdim=True)
+        text_feat = text_feat / text_feat.norm(dim=-1, keepdim=True)
+        scores = (image_feat @ text_feat.T).squeeze(0)
+    return scores.argmax(-1).item()
+</code></pre>
+<p>This approach transfers to any task expressible as a classification problem with named categories. CLIP achieves 76.2% zero-shot accuracy on ImageNet-1K with ViT-L/14@336px — matching supervised ResNet-50 performance from 2019, but without ever seeing ImageNet labels during training.</p>
+<h2>Linear Probe vs Zero-Shot</h2>
+<p>Linear probing freezes the pretrained image encoder and trains only a linear classification head on labeled features. This requires labeled data but significantly outperforms zero-shot CLIP on most benchmarks. The comparison reveals how much task-specific information exists in CLIP's frozen features.</p>
+<pre><code class="language-python">import clip
+import torch
+import numpy as np
+from sklearn.linear_model import LogisticRegression
+
+def linear_probe(train_loader, test_loader, model, device):
+    model.eval()
+    def extract(loader):
+        feats, labels = [], []
+        with torch.no_grad():
+            for imgs, lbls in loader:
+                f = model.encode_image(imgs.to(device))
+                feats.append(f.cpu().numpy())
+                labels.append(lbls.numpy())
+        return np.concatenate(feats), np.concatenate(labels)
+    X_train, y_train = extract(train_loader)
+    X_test, y_test = extract(test_loader)
+    clf = LogisticRegression(max_iter=1000).fit(X_train, y_train)
+    return clf.score(X_test, y_test)
+</code></pre>
+<p>Linear probing with CLIP ViT-B/32 achieves 84.2% on ImageNet vs 63.2% zero-shot — a gap of 21 points. This gap narrows at larger model scales. On specialized datasets like EuroSAT (satellite imagery) and MNIST (handwritten digits), zero-shot underperforms significantly, revealing domain gaps in training data.</p>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>ViT Variant</th>
+<th>Params (M)</th>
+<th>IN-1K Zero-Shot %</th>
+<th>IN-1K Linear Probe %</th>
+<th>Training Data</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CLIP</td>
+<td>ViT-B/32</td>
+<td>151</td>
+<td>63.2</td>
+<td>84.2</td>
+<td>400M WIT</td>
+</tr>
+<tr>
+<td>CLIP</td>
+<td>ViT-B/16</td>
+<td>150</td>
+<td>68.3</td>
+<td>86.3</td>
+<td>400M WIT</td>
+</tr>
+<tr>
+<td>CLIP</td>
+<td>ViT-L/14</td>
+<td>428</td>
+<td>75.5</td>
+<td>87.8</td>
+<td>400M WIT</td>
+</tr>
+<tr>
+<td>CLIP</td>
+<td>ViT-L/14@336px</td>
+<td>428</td>
+<td>76.2</td>
+<td>88.3</td>
+<td>400M WIT</td>
+</tr>
+<tr>
+<td>OpenCLIP</td>
+<td>ViT-H/14</td>
+<td>986</td>
+<td>78.0</td>
+<td>89.3</td>
+<td>LAION-2B</td>
+</tr>
+</tbody>
+</table>
+<h2>Prompt Engineering</h2>
+<p>The choice of text prompt significantly affects zero-shot accuracy. Using 'a photo of a {class}' outperforms using the raw class name by about 1.3% on ImageNet. More elaborate prompt ensembles — averaging embeddings across 80 diverse templates — yield an additional 3.5% improvement.</p>
+<pre><code class="language-python">imagenet_templates = [
+    &quot;a photo of a {}.&quot;,
+    &quot;a blurry photo of a {}.&quot;,
+    &quot;a black and white photo of a {}.&quot;,
+    &quot;a low contrast photo of a {}.&quot;,
+    &quot;a high contrast photo of a {}.&quot;,
+    &quot;a bad photo of a {}.&quot;,
+    &quot;a good photo of a {}.&quot;,
+    &quot;a rendering of a {}.&quot;,
+]
+
+def ensemble_text_features(classes, model, templates, device):
+    with torch.no_grad():
+        class_feats = []
+        for cls in classes:
+            tokens = clip.tokenize([t.format(cls) for t in templates]).to(device)
+            feats = model.encode_text(tokens)
+            feats = feats / feats.norm(dim=-1, keepdim=True)
+            class_feats.append(feats.mean(0))
+    return torch.stack(class_feats)
+</code></pre>
+<p>Context matters beyond just the class name. Prompts like 'a photo of a {class}, a type of pet' for fine-grained animal classification or 'a centered satellite photo of {}' for EuroSAT substantially improve accuracy. Domain-specific prompt engineering can close much of the gap to supervised baselines.</p>
+<h2>Key Takeaways</h2>
+<p>CLIP demonstrated that web-scale image-text data, combined with a contrastive objective, produces powerful visual representations without task-specific supervision. The model's generality is its defining property: a single trained model transfers competitively across dozens of benchmarks.</p>
+<p>Limitations remain: CLIP struggles with abstract reasoning, counting objects, and fine-grained spatial relationships. Its zero-shot performance on highly specialized domains (medical imaging, satellite imagery) lags supervised models. Prompt engineering requires domain expertise to bridge these gaps effectively.</p>
+<p>CLIP became the de facto visual encoder backbone for subsequent multimodal models including DALL-E, Stable Diffusion, LLaVA, and BLIP-2. Its contrastive pretraining paradigm influenced the broader field of self-supervised and weakly supervised representation learning.</p>
+    </article>
+  </main>
+</body>
+</html>

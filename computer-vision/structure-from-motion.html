@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Structure from Motion: 3D Reconstruction from Unordered Images | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Structure from Motion: 3D Reconstruction from Unordered Images</h1>
+      
+      <h1>Structure from Motion: 3D Reconstruction from Unordered Images</h1>
+<h2>Overview</h2>
+<p>Structure from Motion (SfM) recovers 3D structure and camera poses simultaneously from a collection of unordered 2D images. It underpins photogrammetry, autonomous driving map creation, and cultural heritage digitization. The pipeline alternates between geometric estimation and nonlinear optimization to produce sparse 3D point clouds.</p>
+<p>SfM assumes a static scene photographed from multiple viewpoints. Given N images with unknown camera poses, SfM jointly estimates all poses and the 3D positions of scene points visible across images. Modern systems like COLMAP scale to thousands of images with sub-centimeter accuracy on textured scenes.</p>
+<p>The pipeline has four major stages: (1) feature extraction and matching across image pairs, (2) geometric verification with the essential or fundamental matrix, (3) incremental or global pose estimation, and (4) bundle adjustment to minimize total reprojection error. Each stage builds on the previous one.</p>
+<h2>Feature Extraction and Matching</h2>
+<p>SIFT (Scale-Invariant Feature Transform) remains the gold standard for SfM feature extraction due to its robustness to scale, rotation, and illumination changes. Each keypoint is described by a 128-dimensional gradient histogram. SuperPoint and DISK are learned alternatives offering better performance on textureless surfaces.</p>
+<pre><code class="language-python">import cv2\nimport numpy as np\n\nsift = cv2.SIFT_create()\nkp1, des1 = sift.detectAndCompute(img1, None)\nkp2, des2 = sift.detectAndCompute(img2, None)\n\nbf = cv2.BFMatcher()\nmatches = bf.knnMatch(des1, des2, k=2)\n\n# Lowe's ratio test\ngood = [m for m, n in matches if m.distance &lt; 0.75 * n.distance]\npts1 = np.float32([kp1[m.queryIdx].pt for m in good])\npts2 = np.float32([kp2[m.trainIdx].pt for m in good])
+</code></pre>
+<p>Exhaustive matching between all image pairs is O(N^2) and becomes a bottleneck at scale. Vocabulary tree retrieval (used in COLMAP) preselects candidate pairs by visual similarity, reducing matching to O(N log N). SuperGlue further uses graph neural networks to establish matches directly without ratio test pruning.</p>
+<h2>Essential Matrix and Pose Estimation</h2>
+<p>Given matched keypoints across two calibrated images, the Essential matrix E encodes the relative rotation and translation between them. E has rank 2 and satisfies the epipolar constraint: x2^T E x1 = 0 for corresponding normalized image coordinates x1, x2. RANSAC is used to robustly estimate E in the presence of outliers.</p>
+<pre><code class="language-python"># Estimate Essential matrix with RANSAC\nE, mask = cv2.findEssentialMat(\n    pts1, pts2, K,\n    method=cv2.RANSAC,\n    prob=0.999,\n    threshold=1.0\n)\n\n# Recover relative pose (4 solutions; cheirality resolves)\n_, R, t, mask_pose = cv2.recoverPose(E, pts1, pts2, K)\n\nprint(f'Inliers: {mask_pose.sum()} / {len(pts1)}')
+</code></pre>
+<p>recoverPose returns the rotation R and unit translation t (scale is ambiguous for a single pair). Scale can only be recovered with a known baseline (stereo) or by fusing IMU measurements. For monocular SfM, scale is fixed arbitrarily for the first pair and propagated via triangulated points in subsequent image registrations.</p>
+<h2>Incremental SfM Pipeline</h2>
+<p>Incremental SfM starts with a reliable two-view initialization (well-separated cameras, many matches, low homography ratio) and registers new cameras one at a time. Each new image is localized via PnP (Perspective-n-Point) against the existing 3D point cloud, then new points are triangulated and added to the model.</p>
+<pre><code class="language-python"># Triangulate matched points between two views\nP1 = K @ np.hstack([np.eye(3), np.zeros((3,1))])\nP2 = K @ np.hstack([R, t])\n\npts4D = cv2.triangulatePoints(P1, P2, pts1.T, pts2.T)\npts3D = (pts4D[:3] / pts4D[3]).T\n\n# Filter by positive depth and reprojection error\nproj, _ = cv2.projectPoints(pts3D, np.zeros(3), np.zeros(3), K, None)\nerr = np.linalg.norm(proj.squeeze() - pts1, axis=1)\nvalid = (pts3D[:,2] &gt; 0) &amp; (err &lt; 2.0)
+</code></pre>
+<p>After each new camera is registered, a local bundle adjustment is run on the newly added cameras and their visible points. A global BA is run periodically. The image selection order matters: images with many matches to the existing model register more reliably, so COLMAP uses a next-best-view scoring function based on visible point count and angular coverage.</p>
+<h2>Bundle Adjustment</h2>
+<blockquote>
+<p><strong>info</strong>: Bundle adjustment is the backbone of all accurate SfM systems — it jointly optimizes all camera poses and 3D point positions to minimize total reprojection error. Without BA, drift accumulates multiplicatively across images, producing warped reconstructions.</p>
+</blockquote>
+<p>Bundle adjustment minimizes sum_i sum_j || x_ij - pi(R_i, t_i, X_j) ||^2 over all visible point-camera pairs, where pi is the projection function. The Jacobian is sparse because each 3D point is visible in only a subset of cameras. Ceres Solver exploits this sparsity via the Schur complement trick.</p>
+<pre><code class="language-python"># Conceptual bundle adjustment with g2o\nimport g2o\n\noptimizer = g2o.SparseOptimizer()\nsolver = g2o.BlockSolverSE3(g2o.LinearSolverCholmodSE3())\noptimizer.set_algorithm(g2o.OptimizationAlgorithmLevenberg(solver))\n\n# Add SE3 pose nodes and 3D point nodes\nfor cam in cameras: optimizer.add_vertex(cam.to_g2o_vertex())\nfor pt in points3d: optimizer.add_vertex(pt.to_g2o_vertex())\n\n# Add reprojection edges\nfor obs in observations: optimizer.add_edge(obs.to_g2o_edge())\n\noptimizer.optimize(max_iterations=50)
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Type</th>
+<th>Max Images</th>
+<th>Accuracy</th>
+<th>Speed</th>
+<th>Open Source</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>COLMAP</td>
+<td>Incremental SfM + MVS</td>
+<td>10 000+</td>
+<td>Very High</td>
+<td>Slow</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>OpenSfM</td>
+<td>Incremental SfM</td>
+<td>5 000+</td>
+<td>High</td>
+<td>Moderate</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>VisualSFM</td>
+<td>Incremental SfM</td>
+<td>1 000+</td>
+<td>High</td>
+<td>Moderate</td>
+<td>Free binary</td>
+</tr>
+<tr>
+<td>RealityCapture</td>
+<td>Global SfM + MVS</td>
+<td>Unlimited</td>
+<td>Very High</td>
+<td>Fast</td>
+<td>No</td>
+</tr>
+<tr>
+<td>Meshroom</td>
+<td>Incremental SfM + MVS</td>
+<td>1 000+</td>
+<td>High</td>
+<td>Slow</td>
+<td>Yes</td>
+</tr>
+</tbody>
+</table>
+<p>The Schur complement eliminates the 3D point variables analytically, reducing the BA problem to solving only over camera parameters. This reduced camera system (RCS) is dense but much smaller than the full system, enabling efficient factorization with CHOLMOD or iterative solvers like PCG with a block-diagonal preconditioner.</p>
+<h2>Key Takeaways</h2>
+<p>SIFT with ratio-test matching and RANSAC-based geometric verification remains robust and is the default in COLMAP. Learned matchers (SuperGlue, LightGlue) improve performance on challenging scenes. Always verify match quality by checking the inlier ratio — below 20% usually means poor overlap or incorrect image pairing.</p>
+<p>Bundle adjustment is non-negotiable for accurate reconstructions. Run local BA after every new camera registration and global BA at regular intervals. Use Huber loss in BA to downweight large residuals from incorrect matches that survived geometric verification. Parameterize rotations with quaternions to avoid gimbal lock.</p>
+<p>For large-scale scenes, hierarchical or distributed SfM (e.g., HSfM, DistributedMapper) partitions the image graph into submodels, runs independent BA on each, and then merges them. This enables reconstruction of city-scale scenes with millions of images that would be infeasible with standard incremental SfM.</p>
+<p>Dense reconstruction follows sparse SfM: multi-view stereo (MVS) algorithms like PatchMatch (used in COLMAP's MVS) estimate depth maps per image and fuse them into a dense point cloud or mesh. Gaussian Splatting and NeRF use SfM poses as initialization to learn neural scene representations that render novel views.</p>
+    </article>
+  </main>
+</body>
+</html>

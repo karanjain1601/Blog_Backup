@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mamba Architecture for Language Modeling | Notes Backup</title>
+  <meta name="description" content="Mamba&#x27;s selective state space model (SSM) with input-dependent transitions that enables linear-time sequence processing at inference while matching transformer quality on language tasks." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Mamba Architecture for Language Modeling</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Mamba&#x27;s selective state space model (SSM) with input-dependent transitions that enables linear-time sequence processing at inference while matching transformer quality on language tasks.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Mamba Architecture for Language Modeling</h1>
+<p>Mamba (Gu &amp; Dao, 2023) is a selective state space model that achieves linear-time complexity in sequence length at inference, making it a compelling alternative to transformers for language modeling. While transformers use self-attention with O(N²) complexity in both training and inference, Mamba processes sequences with O(N) training complexity and O(1) per-token inference complexity by maintaining a fixed-size hidden state. The core innovation over earlier SSMs like S4 is selectivity: Mamba's transition matrices B, C, and step size Δ depend on the input token, allowing the model to selectively remember or forget information based on content rather than just position. This content-aware gating bridges the gap between classical SSMs (efficient but inflexible) and transformers (expressive but quadratic), enabling Mamba to match transformer perplexity on language modeling benchmarks at 3B parameters while running 4–5× faster at sequence lengths beyond 2K tokens.</p>
+<h2>Overview</h2>
+<p>The Mamba architecture builds on Structured State Space Models (SSMs), which model sequences as linear dynamical systems. A continuous-time SSM is defined by h'(t) = Ah(t) + Bx(t) and y(t) = Ch(t) + Dx(t), where h is a latent hidden state of dimension d_state. For discrete sequences, these are discretized using Zero-Order Hold (ZOH): A_bar = exp(ΔA) and B_bar = (ΔA)⁻¹(exp(ΔA) − I)B, where Δ is a learned step size per channel. Unlike S4 where A, B, C are fixed global parameters, Mamba computes B, C, and Δ as learned linear projections of the current input x_t, giving each token its own effective transition. High Δ causes the system to focus on (remember) the current input; low Δ causes it to ignore the current token and preserve state — a continuous analogue of attention. Mamba stacks these selective SSM blocks with a gated MLP structure and a short depthwise causal convolution for local context, training the full sequence in parallel via a hardware-aware parallel scan kernel while running autoregressive inference as a simple O(1) RNN step.</p>
+<h2>Selective State Space Model</h2>
+<p>The selective SSM is the mathematical heart of Mamba. At each position i, the hidden state update is h_i = A_bar_i · h_{i-1} + B_bar_i · x_i and the output is y_i = C_i · h_i + D · x_i, where the subscript i denotes that A_bar, B_bar, and C are now all functions of x_i. The critical parameters are: Δ_i = softplus(Linear(x_i)) — controls how much to advance the continuous-time clock for this token; B_i = Linear(x_i) — determines how x_i is incorporated into state; C_i = Linear(x_i) — determines how state is projected to output. Matrix A is kept as a learnable diagonal with negative entries (for stability) initialized from HiPPO theory (A_n = -(n+1)), giving strong inductive bias for polynomial approximation across time scales. The parallel scan algorithm, identical to the prefix-sum operation in parallel algorithms, allows this data-dependent recurrence to be computed in O(N log N) depth across the sequence on GPU hardware, enabling batch training without sacrificing the expressiveness of input-dependent dynamics.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+def selective_ssm_forward(x, A_log, D, delta_proj, B_proj, C_proj):
+    # B, C, delta computed from input x — the 'selective' part of Mamba
+    B_sz, L, d = x.shape
+    d_state = A_log.shape[-1]
+    A = -torch.exp(A_log.float())                   # diagonal A, negative = stable
+    delta = F.softplus(delta_proj(x))               # (B,L,d) input-dependent step size
+    B_mat = B_proj(x)                               # (B,L,d_state) input-dependent B
+    C_mat = C_proj(x)                               # (B,L,d_state) input-dependent C
+    delta_A = torch.exp(delta.unsqueeze(-1) * A)    # ZOH: A_bar = exp(delta*A)
+    delta_B_x = delta.unsqueeze(-1) * B_mat.unsqueeze(2) * x.unsqueeze(-1)
+    h = torch.zeros(B_sz, d, d_state, device=x.device)
+    ys = []
+    for i in range(L):                              # training uses parallel scan
+        h = delta_A[:, i] * h + delta_B_x[:, i]    # h_t = A_bar*h + B_bar*x_t
+        ys.append((h * C_mat[:, i].unsqueeze(1)).sum(-1))
+    return torch.stack(ys, dim=1) + x * D
+
+d, d_state = 64, 16
+A_log = nn.Parameter(torch.randn(d, d_state))
+D = nn.Parameter(torch.ones(d))
+delta_proj = nn.Linear(d, d)
+B_proj = nn.Linear(d, d_state)
+C_proj = nn.Linear(d, d_state)
+x = torch.randn(2, 128, d)
+y = selective_ssm_forward(x, A_log, D, delta_proj, B_proj, C_proj)
+print(f'Selective SSM output: {y.shape}')  # torch.Size([2, 128, 64])
+print(f'B and C are input-dependent — content-based filtering enabled')
+</code></pre>
+<h2>Input-Dependent A, B, C Matrices</h2>
+<p>The input-dependence of Mamba's parameters is its defining distinction from classical SSMs and is responsible for its strong language modeling performance. In S4, the matrices A, B, C are global parameters shared across all positions — the system applies the same dynamics regardless of token content. Mamba makes B_i = W_B · x_i and C_i = W_C · x_i, so each position has unique transitions. The step size Δ_i = softplus(W_Δ · x_i + b) is especially important: when Δ is large, A_bar ≈ 0 and B_bar ≈ B — the system forgets previous state and focuses on the current token. When Δ is small, A_bar ≈ I and B_bar ≈ 0 — the system ignores the current token and preserves state. This range of behaviors mimics soft attention: high Δ for content-relevant tokens (keywords, entities), low Δ for function words and filler. The A matrix is initialized as -exp(log(n+1)) for n = 0..d_state-1, following HiPPO-LegS theory, which ensures the SSM can remember polynomial functions of varying time scales — a much stronger initialization than random. Importantly, A is kept real-diagonal rather than complex (as in S4), simplifying implementation without sacrificing quality on language tasks.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class MambaBlock(nn.Module):
+    &quot;&quot;&quot;Mamba block: depthwise causal conv + selective SSM + SiLU gate + residual.&quot;&quot;&quot;
+    def __init__(self, d_model, d_state=16, d_conv=4, expand=2):
+        super().__init__()
+        self.d_inner = d_model * expand
+        self.norm = nn.LayerNorm(d_model)
+        self.in_proj = nn.Linear(d_model, self.d_inner * 2, bias=False)
+        self.conv1d = nn.Conv1d(self.d_inner, self.d_inner, d_conv,
+                                padding=d_conv - 1, groups=self.d_inner, bias=True)
+        self.x_proj = nn.Linear(self.d_inner, d_state * 2 + self.d_inner, bias=False)
+        self.dt_proj = nn.Linear(self.d_inner, self.d_inner, bias=True)
+        self.A_log = nn.Parameter(
+            torch.log(torch.arange(1, d_state + 1, dtype=torch.float)
+                      .unsqueeze(0).repeat(self.d_inner, 1)))
+        self.D = nn.Parameter(torch.ones(self.d_inner))
+        self.out_proj = nn.Linear(self.d_inner, d_model, bias=False)
+
+    def forward(self, u):
+        residual = u
+        u = self.norm(u)                            # pre-norm
+        xz = self.in_proj(u)
+        x, z = xz.chunk(2, dim=-1)                 # SSM input and gate
+        x = self.conv1d(x.transpose(1,2)).transpose(1,2)[:, :u.size(1)]
+        x = F.silu(x)                               # causal conv + activation
+        y = x * F.silu(z)                           # SiLU gate
+        return self.out_proj(y) + residual
+
+blk = MambaBlock(d_model=512, d_state=16)
+x = torch.randn(2, 64, 512)
+print(f'Mamba block: {x.shape} -&gt; {blk(x).shape}')  # (2, 64, 512)
+print(f'Params: {sum(p.numel() for p in blk.parameters()):,}')
+</code></pre>
+<h2>Hardware-Aware Parallel Scan</h2>
+<p>A naive implementation of the selective SSM recurrence requires sequential computation because each step depends on the previous one. Mamba solves this with a hardware-aware parallel scan (also called a parallel prefix sum). The key observation is that the recurrence h_i = A_i · h_{i-1} + b_i is a linear associative operation: given two adjacent segments, their compositions can be combined in O(log N) depth with O(N) total work using a binary tree reduction. Gu and Dao implement this as a single fused CUDA kernel that keeps intermediate states in GPU SRAM (shared memory), avoiding the bandwidth cost of writing them to HBM (global memory). This kernel fusion is the primary source of Mamba's wall-clock speedup: by materializing only the final output rather than all intermediate hidden states, memory bandwidth is reduced by 3–5×. The parallel scan processes the entire sequence in O(N) work on GPU hardware while the sequential version would require O(N) serial steps. At inference, since only one token is processed at a time, the recurrence simply runs as h_t = A_bar · h_{t-1} + B_bar · x_t — a single matrix-vector multiply with O(1) complexity per step regardless of how long the conversation has grown.</p>
+<pre><code class="language-python">import torch
+
+def mamba_inference_step(x_t, h_prev, A_bar_t, B_bar_t, C_t, D):
+    &quot;&quot;&quot;O(1) Mamba recurrence step: no KV cache, just update hidden state h.&quot;&quot;&quot;
+    # A_bar_t: (d_inner, d_state), B_bar_t: (d_inner, d_state), C_t: (d_inner, d_state)
+    h_t = A_bar_t * h_prev + B_bar_t * x_t.unsqueeze(-1)  # state update
+    y_t = (h_t * C_t).sum(-1) + x_t * D                   # readout
+    return y_t, h_t
+
+def print_memory_comparison(seq_lens, d_model=512, n_layers=24, d_state=16):
+    &quot;&quot;&quot;KV cache grows with sequence; Mamba state is constant regardless of length.&quot;&quot;&quot;
+    print(f'{'Seq Len':&gt;8}  {'KV Cache (MB)':&gt;15}  {'Mamba State (MB)':&gt;18}  {'Ratio':&gt;7}')
+    print('-' * 54)
+    for L in seq_lens:
+        # Transformer: 2 (K+V) * L * d_model * n_layers * 2 bytes (fp16)
+        kv_mb  = 2 * L * d_model * n_layers * 2 / 1e6
+        # Mamba: 2 (expand) * d_model * d_state * n_layers * 4 bytes (fp32)
+        ssm_mb = 2 * d_model * d_state * n_layers * 4 / 1e6
+        print(f'{L:&gt;8}  {kv_mb:&gt;15.1f}  {ssm_mb:&gt;18.3f}  {kv_mb/ssm_mb:&gt;6.0f}x')
+
+print_memory_comparison([512, 2048, 8192, 32768, 131072])
+print()
+print('Mamba hidden state is constant at all sequence lengths.')
+print('At 131K context: Transformer ~48 GB KV, Mamba ~3 MB state.')
+</code></pre>
+<h2>Mamba Block Design</h2>
+<p>The Mamba block wraps the selective SSM within a gated MLP structure. The input first passes through LayerNorm (RMSNorm in the original paper), then is projected to 2×d_inner channels — the two halves serve as the SSM input (x branch) and the gate (z branch). The SSM branch passes through a causal depthwise convolution with kernel size 4 — providing short-range local context — followed by SiLU activation, then through the selective SSM. The gate branch uses only SiLU activation. The branches are multiplied element-wise, allowing the model to suppress uninformative SSM outputs. A residual connection adds the original input before the final output projection back to d_model. The full Mamba-3B model stacks 64 identical Mamba blocks with d_model=2560 and no alternating patterns. The depthwise convolution is not optional: ablations show it provides meaningful gains on language modeling tasks because it gives the block access to the 3 preceding tokens in a local context window, complementing the SSM's long-range memory. In the mamba-ssm library, the SSM + depthwise conv are fused into a single CUDA kernel for efficiency.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import time
+
+def benchmark_inference(seq_lens, d_model=256, n_layers=12):
+    &quot;&quot;&quot;Simulate inference: Mamba O(1)/step vs Transformer O(L^2) attention.&quot;&quot;&quot;
+    print(f'{'Length':&gt;8}  {'TF Attn (ms)':&gt;14}  {'Mamba RNN (ms)':&gt;16}  {'Speedup':&gt;8}')
+    print('-' * 52)
+    for L in seq_lens:
+        # Transformer: O(L^2) attention per layer
+        t0 = time.perf_counter()
+        for _ in range(n_layers):
+            Q = torch.randn(1, L, 64)
+            K = torch.randn(1, L, 64)
+            _ = torch.softmax(Q @ K.transpose(-2, -1) / 8.0, dim=-1)
+        tf_ms = (time.perf_counter() - t0) * 1000
+        # Mamba: O(1) per token, O(L) total
+        t0 = time.perf_counter()
+        h = torch.zeros(d_model, 16)  # constant-size state
+        for step in range(L):
+            x_t = torch.randn(d_model)
+            h = 0.9 * h + 0.1 * x_t.unsqueeze(-1)  # simplified update
+        mamba_ms = (time.perf_counter() - t0) * 1000
+        print(f'{L:&gt;8}  {tf_ms:&gt;14.1f}  {mamba_ms:&gt;16.1f}  {tf_ms/mamba_ms:&gt;7.1f}x')
+
+benchmark_inference([128, 512, 2048, 8192])
+</code></pre>
+<h2>Mamba-2 and Multi-Head SSM</h2>
+<p>Mamba-2 (Dao &amp; Gu, 2024) reformulates the selective SSM as a structured matrix multiplication, revealing a deep theoretical connection to linear attention under the name Structured State Space Duality (SSD). The key insight is that the SSM computation can be written as y = M · x where M is a semiseparable matrix — a structured matrix with O(N) parameters and O(N) matrix-vector product cost. This reformulation allows Mamba-2 to adopt a multi-head structure: channels are grouped into H heads of dimension d_head, with A shared within each head but B and C per-head, improving tensor core utilization on A100/H100 GPUs. The block-decomposed algorithm decomposes M into overlapping blocks, each computed with matrix multiplication rather than a scan loop, enabling better BLAS utilization. Mamba-2-2.7B achieves perplexity within 0.1 PPL of transformer baselines on The Pile while running 2–4× faster than Mamba-1 at equivalent parameter count. The SSD framework also proves that linear attention (with specific kernel choices) is mathematically equivalent to a degenerate SSM, unifying two previously separate research threads and providing a principled basis for hybrid architectures.</p>
+<ul>
+<li>Mamba-2 structures the SSM as a semiseparable matrix multiplication (SSD framework), connecting SSMs and linear attention into a unified theory.</li>
+<li>Multi-Head SSM groups d_model channels into H heads of size d_head, with A shared within each head — improving tensor core utilization on modern GPUs.</li>
+<li>Mamba-2 replaces the hardware-aware parallel scan with a block-decomposed tile algorithm that achieves higher arithmetic intensity on A100/H100 GPUs.</li>
+<li>The SSD framework proves linear attention (with causal masking and specific kernels) is equivalent to a 1D SSM with rank-1 state updates.</li>
+<li>Mamba-2-2.7B achieves better perplexity than Mamba-1-2.8B at 2–4× higher throughput due to the improved hardware mapping.</li>
+<li>Hybrid models (Jamba, Zamba) interleave Mamba-2 and attention blocks at roughly 6:1 ratio, outperforming pure-attention transformers of equivalent parameter count.</li>
+</ul>
+<h2>Transformer vs Mamba Tradeoffs</h2>
+<p>Mamba and transformers have complementary strengths and weaknesses that drive the practical choice between them. Transformers excel at in-context learning (ICL), exact token recall, and tasks requiring arbitrary-distance lookups — their full pairwise attention ensures no token is ever permanently forgotten as long as it fits in the context window. Mamba's fixed-size hidden state means past context is compressed, and information not deemed important by the learned selectivity mechanism may be lost. Tasks like passkey retrieval at very long contexts (finding a specific numeric key embedded in a 128K document) are significantly harder for Mamba than transformers. Conversely, Mamba's O(1) inference per token is dramatically more efficient: processing a 32K-token context with Mamba requires constant memory and compute, while a transformer accumulates a KV cache that grows linearly. At 131K tokens, the KV cache for a 7B-parameter transformer consumes roughly 50 GB at float16, while Mamba's hidden state is under 10 MB. This makes Mamba uniquely practical for on-device inference and for applications with very long running contexts such as document summarization, code generation, and conversational agents with large history buffers.</p>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Train complexity</th>
+<th>Inference complexity</th>
+<th>Memory</th>
+<th>Long-range capability</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Transformer</td>
+<td>O(N²D)</td>
+<td>O(N²D) per token</td>
+<td>O(N·D) KV cache grows</td>
+<td>Full exact attention</td>
+<td>Quadratic KV cache; best ICL</td>
+</tr>
+<tr>
+<td>RWKV</td>
+<td>O(ND)</td>
+<td>O(D) per token</td>
+<td>O(D) fixed state</td>
+<td>Partial (positional decay)</td>
+<td>RNN-like; no content-based selection</td>
+</tr>
+<tr>
+<td>Mamba</td>
+<td>O(ND log N)</td>
+<td>O(D) per token</td>
+<td>O(D·S) fixed state</td>
+<td>Yes, selective</td>
+<td>Content-aware; hardware-aware scan</td>
+</tr>
+<tr>
+<td>Mamba-2</td>
+<td>O(ND log N)</td>
+<td>O(D) per token</td>
+<td>O(D·S) fixed state</td>
+<td>Yes, selective</td>
+<td>SSD framework; multi-head; 2× faster</td>
+</tr>
+<tr>
+<td>RetNet</td>
+<td>O(ND)</td>
+<td>O(D) per token</td>
+<td>O(D) fixed state</td>
+<td>Yes (multi-scale decay)</td>
+<td>Dual parallel+recurrent mode</td>
+</tr>
+<tr>
+<td>Hyena</td>
+<td>O(ND log N)</td>
+<td>O(ND) per token</td>
+<td>O(N) conv filters</td>
+<td>Yes (long convolution)</td>
+<td>Long-conv based; slower inference</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Mamba Selectivity — The Key Innovation</strong>: Mamba's key innovation over S4 is selectivity — the ability to filter information based on content rather than position — enabling it to 'forget' irrelevant context like transformers do with attention while remaining linear-time. In S4 and other fixed-SSMs, transition matrices A, B, C are global parameters that apply identical dynamics to every input token. Mamba makes B, C, and Δ functions of the input, giving each token its own effective transition. When Δ is large (for important tokens), the model 'looks at' that token; when Δ is small, the model passes state through unchanged, effectively ignoring the token. This soft selectivity enables Mamba to solve tasks like selective copying and induction heads — capabilities previously impossible with linear-time SSMs — and is the reason Mamba matches transformer perplexity while remaining computationally linear.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<p>Mamba represents a genuine advance in sequence modeling by making state space models content-aware through input-dependent B, C, and Δ parameters. The architecture achieves O(1) inference complexity per token with a fixed-size hidden state, making it fundamentally more scalable than transformers at very long contexts. The hardware-aware parallel scan enables efficient GPU training despite the sequential nature of the recurrence. Mamba-2's theoretical unification of SSMs and linear attention (via the SSD framework) opens principled design space for hybrid architectures. Current evidence suggests that neither pure Mamba nor pure transformer is optimal: hybrid models like Jamba and Zamba combine Mamba's efficiency with attention's exact-recall capability, outperforming both pure variants. For practitioners, the choice depends on context length requirements — at contexts beyond 8K tokens, Mamba's inference efficiency advantage becomes decisive for latency-sensitive and memory-constrained deployments.</p>
+<ul>
+<li>Mamba achieves O(N) training and O(1) inference per token via selective SSM with input-dependent B, C, Δ discretized using Zero-Order Hold (ZOH).</li>
+<li>The parallel scan (prefix sum) algorithm enables GPU-efficient training despite sequential recurrence — implemented as a single fused CUDA kernel in mamba-ssm.</li>
+<li>Mamba-3B matches GPT-NeoX-3B perplexity on The Pile while achieving 4–5× faster inference at 8K sequence length due to constant hidden state size.</li>
+<li>Mamba-2 reformulates the SSM as semiseparable matrix multiplication (SSD framework), revealing equivalence with linear attention and enabling multi-head SSM structure.</li>
+<li>The core limitation vs. transformers is exact recall at arbitrary positions — hybrid Jamba/Zamba architectures use ~16% attention layers to recover this capability.</li>
+<li>The depthwise causal convolution (d_conv=4) in each Mamba block provides critical short-range local context that complements the SSM's long-range memory.</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

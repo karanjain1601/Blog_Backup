@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Recurrent Computation — Hidden State and Weight Sharing | Notes Backup</title>
+  <meta name="description" content="Derive the RNN recurrence equation, explore weight sharing across time, understand many-to-one/many-to-many architectures, implement stateful inference for long sequences, and compare RNN vs Transformer training speed." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Recurrent Computation — Hidden State and Weight Sharing</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Derive the RNN recurrence equation, explore weight sharing across time, understand many-to-one/many-to-many architectures, implement stateful inference for long sequences, and compare RNN vs Transformer training speed.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Recurrent Computation — Hidden State and Weight Sharing</h1>
+<p>A Recurrent Neural Network (RNN) processes sequences by maintaining a hidden state hₜ that summarises all information seen up to time t. At each step the same weight matrices are applied: hₜ = tanh(Wₕₓxₜ + Wₕₕhₜ₋₁ + b), yₜ = Wₒhₜ. This weight sharing across time is the defining property of RNNs — unlike a feedforward network with separate parameters per position, the RNN uses identical Wₕₕ at every step, giving it O(H²) recurrent parameters regardless of sequence length T. The same mechanism that enables variable-length processing also introduces the vanishing gradient problem and prevents parallelisation over the time axis.</p>
+<h2>The RNN Recurrence Equation</h2>
+<p>The core recurrence hₜ = tanh(Wₕₓxₜ + Wₕₕhₜ₋₁ + b) composes three operations: a linear projection of the input xₜ ∈ ℝᴵ via Wₕₓ ∈ ℝᴴˣᴵ, a linear projection of the previous hidden state hₜ₋₁ ∈ ℝᴴ via Wₕₕ ∈ ℝᴴˣᴴ, and a tanh nonlinearity that squashes the result to (-1, 1). The output yₜ = Wₒhₜ is a linear readout from the hidden state via Wₒ ∈ ℝᴼˣᴴ. Total parameters: H×I (Wₕₓ) + H×H (Wₕₕ) + H×O (Wₒ) + H (bias). Computational cost per step is O(H²) for the Wₕₕhₜ₋₁ product, giving O(T·H²) total for a sequence of length T.</p>
+<h2>Weight Sharing Across Time</h2>
+<p>Weight sharing means the same Wₕₕ is multiplied at every time step. This is analogous to a convolutional filter being applied at every spatial position — it allows the model to generalise temporal patterns regardless of when they occur. Theoretically, RNNs with sufficient hidden size are Turing complete: they can simulate any computable function on sequences. Practically, learning long-range dependencies is limited by the vanishing gradient problem. The hidden state hₜ must compress the entire history into H numbers, creating an information bottleneck for very long sequences.</p>
+<pre><code class="language-python">import numpy as np
+
+class VanillaRNN:
+    def __init__(self, input_size, hidden_size, output_size):
+        scale = 0.01
+        self.Wxh = np.random.randn(hidden_size, input_size) * scale
+        self.Whh = np.random.randn(hidden_size, hidden_size) * scale
+        self.Why = np.random.randn(output_size, hidden_size) * scale
+        self.bh  = np.zeros((hidden_size, 1))
+        self.by  = np.zeros((output_size, 1))
+
+    def forward(self, inputs, h_prev):
+        self.hs = {-1: h_prev}
+        self.ys = {}
+        for t, x in enumerate(inputs):
+            self.hs[t] = np.tanh(
+                self.Wxh @ x + self.Whh @ self.hs[t - 1] + self.bh
+            )
+            self.ys[t] = self.Why @ self.hs[t] + self.by
+        return self.ys, self.hs
+
+np.random.seed(42)
+T, I, H, O = 5, 4, 8, 3
+rnn = VanillaRNN(I, H, O)
+inputs = [np.random.randn(I, 1) for _ in range(T)]
+h0 = np.zeros((H, 1))
+ys, hs = rnn.forward(inputs, h0)
+print(f'Sequence length T={T}, hidden size H={H}')
+for t in range(T):
+    print(f'  t={t}: h shape={hs[t].shape}, y shape={ys[t].shape}')
+print(f'h_T norm = {np.linalg.norm(hs[T-1]):.4f}')
+print('Same Whh applied at every step -- weight sharing across time.')
+</code></pre>
+<h2>PyTorch nn.RNN — Many-to-One and Many-to-Many</h2>
+<p>PyTorch's nn.RNN wraps the recurrence in an optimised CUDA kernel. The output tensor contains hidden states at all T steps; h_n is the final hidden state. For many-to-one tasks (classification), use h_n directly. For many-to-many (tagging, translation), use the full output sequence. One-to-many (generation) repeats a seed input for T steps. Bidirectional RNNs run one forward and one backward pass, concatenating hidden states — doubling the parameter count and output dimension.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+torch.manual_seed(42)
+T, B, I, H = 10, 4, 8, 16  # seq_len, batch, input_dim, hidden_dim
+
+rnn = nn.RNN(input_size=I, hidden_size=H, batch_first=True)
+x = torch.randn(B, T, I)
+
+# Many-to-many: use all time-step outputs
+out, h_n = rnn(x)
+print(f'Many-to-many: out.shape={out.shape}, h_n.shape={h_n.shape}')
+
+# Many-to-one: last hidden state only
+last_hidden = h_n.squeeze(0)  # (B, H)
+print(f'Many-to-one: last_hidden.shape={last_hidden.shape}')
+
+# One-to-many: repeat single input for T steps
+single_input = torch.randn(B, 1, I).repeat(1, T, 1)
+out_otm, _ = rnn(single_input)
+print(f'One-to-many: out.shape={out_otm.shape}')
+
+# Bidirectional RNN
+rnn_bi = nn.RNN(input_size=I, hidden_size=H, batch_first=True, bidirectional=True)
+out_bi, h_bi = rnn_bi(x)
+print(f'Bidirectional: out.shape={out_bi.shape}, h_n.shape={h_bi.shape}')
+
+total_params = sum(p.numel() for p in rnn.parameters())
+print(f'Unidirectional RNN params: {total_params}')
+print(f'  Wxh: {I}x{H}={I*H}, Whh: {H}x{H}={H*H}, bh: {H}')
+</code></pre>
+<h2>Stateful Inference for Long Sequences</h2>
+<p>For sequences longer than the training context (e.g., streaming audio or very long documents), the hidden state must be carried between batches. The key is to pass h_state from the previous chunk as the initial state for the next chunk. Gradients are not tracked across chunks during inference. During training, the hidden state is detached (h.detach()) to stop gradient flow into earlier chunks — this is the truncated BPTT pattern. Carrying state allows the model to use information from the entire sequence history at inference time, even if gradients only flow within chunks at training time.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+torch.manual_seed(0)
+I, H, O, B = 8, 32, 4, 2
+TOTAL_LEN = 500
+CHUNK_SIZE = 50
+
+rnn = nn.RNN(input_size=I, hidden_size=H, batch_first=True)
+fc  = nn.Linear(H, O)
+rnn.eval(); fc.eval()
+
+long_seq = torch.randn(B, TOTAL_LEN, I)
+h_state  = torch.zeros(1, B, H)  # (num_layers, batch, hidden)
+
+outputs = []
+with torch.no_grad():
+    for start in range(0, TOTAL_LEN, CHUNK_SIZE):
+        chunk = long_seq[:, start:start + CHUNK_SIZE, :]
+        out, h_state = rnn(chunk, h_state)
+        # h_state carries to next chunk — stateful inference
+        logits = fc(out)
+        outputs.append(logits)
+
+all_out = torch.cat(outputs, dim=1)
+print(f'Input length: {TOTAL_LEN}, chunk size: {CHUNK_SIZE}')
+print(f'Number of chunks: {TOTAL_LEN // CHUNK_SIZE}')
+print(f'Final output shape: {all_out.shape}')
+print(f'Final hidden state norm: {h_state.norm().item():.4f}')
+print('Hidden state carried across chunks -- full-sequence context at inference.')
+</code></pre>
+<h2>RNN Architectures</h2>
+<table>
+<thead>
+<tr>
+<th>Architecture</th>
+<th>Use Case</th>
+<th>Hidden State Handling</th>
+<th>Batch Processing</th>
+<th>Example Task</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Many-to-many (aligned)</td>
+<td>Output at every input step</td>
+<td>h_t used at each t</td>
+<td>Pad to max length; mask output loss</td>
+<td>POS tagging, NER, frame-level prediction</td>
+</tr>
+<tr>
+<td>Many-to-one</td>
+<td>Single output for whole sequence</td>
+<td>Only final h_T used</td>
+<td>Pad + pack sequences for efficiency</td>
+<td>Sentiment analysis, sequence classification</td>
+</tr>
+<tr>
+<td>One-to-many</td>
+<td>Generate sequence from single input</td>
+<td>Decoded step-by-step from h_0</td>
+<td>Replicate input for T steps</td>
+<td>Image captioning, music generation</td>
+</tr>
+<tr>
+<td>Encoder-decoder</td>
+<td>Map sequence to sequence of different length</td>
+<td>Encoder h_T initialises decoder</td>
+<td>Fixed-length bottleneck; attention needed for long seqs</td>
+<td>Machine translation, summarization</td>
+</tr>
+</tbody>
+</table>
+<h2>Sequential Computation and GPU Limitations</h2>
+<p>The recurrence hₜ = f(hₜ₋₁, xₜ) creates a strict sequential dependency: step t cannot begin until step t-1 is complete. This prevents parallelisation over the time axis. On a GPU with thousands of cores, only the matrix multiplications Wₕₓxₜ and Wₕₕhₜ₋₁ at each single step are parallelisable — but these are small compared to what a Transformer can parallelise (all T positions simultaneously). For T=512 and H=512, an RNN requires 512 sequential matrix multiplications of size 512×512, while a Transformer computes all attention in a single batched operation.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import time
+
+torch.manual_seed(42)
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+B, T, I, H = 16, 64, 32, 64
+
+rnn = nn.RNN(input_size=I, hidden_size=H, batch_first=True).to(device)
+tf_layer = nn.TransformerEncoderLayer(
+    d_model=I, nhead=4, dim_feedforward=128, batch_first=True
+).to(device)
+
+x = torch.randn(B, T, I, device=device)
+n_iters = 50
+
+# RNN: sequential over T steps
+start = time.perf_counter()
+for _ in range(n_iters):
+    out_rnn, _ = rnn(x)
+    out_rnn.sum().backward()
+rnn_ms = (time.perf_counter() - start) / n_iters * 1000
+
+# Transformer: parallel over all T positions
+start = time.perf_counter()
+for _ in range(n_iters):
+    out_tf = tf_layer(x)
+    out_tf.sum().backward()
+tf_ms = (time.perf_counter() - start) / n_iters * 1000
+
+print(f'Device: {device}, T={T}, B={B}')
+print(f'RNN avg fwd+bwd:         {rnn_ms:.2f} ms')
+print(f'Transformer avg fwd+bwd: {tf_ms:.2f} ms')
+print('RNN is sequential over T; Transformer parallelises all T positions.')
+print('GPU utilisation is much lower for RNN -- T steps must be serial.')
+</code></pre>
+<h2>Computational Cost and Complexity</h2>
+<p>The dominant cost per RNN step is the Wₕₕhₜ₋₁ product: O(H²) FLOPs. Over T steps, total cost is O(T·H²) for the recurrent part, plus O(T·H·I) for input projections. Memory scales as O(T·H) to store all hidden states for backpropagation. In contrast, Transformers use O(T²·D) attention (quadratic in sequence length) but O(D²) per token for feed-forward layers. For short sequences (T&lt;200), RNNs can be competitive; for T&gt;1000, the Transformer's parallelism advantage dominates on modern hardware despite its quadratic attention cost.</p>
+<blockquote>
+<p><strong>Sequential Computation Bottleneck</strong>: The RNN's recurrence prevents GPU parallelisation over time. For H=512, T=256, a single forward pass requires 256 sequential matrix multiplications. This is why RNNs train 10–50x slower than Transformers on the same sequence length using modern GPUs. Transformers trade O(T²) attention memory for O(1/T) sequential steps — a worthwhile trade for T up to several thousand.</p>
+</blockquote>
+<h2>Why Transformers Replaced RNNs for Long Sequences</h2>
+<p>Transformers (Vaswani et al. 2017) solve two fundamental RNN limitations: (1) sequential computation by using self-attention that connects all positions in O(1) sequential steps, and (2) the vanishing gradient problem by providing direct gradient paths from every output position to every input position. RNNs remain relevant for streaming inference (constant memory, no sequence-length limit), edge deployment (small parameter count), and tasks where causality is required without future context. However, for pre-training on long text, audio, or video, Transformers (or their linear-attention variants) are the dominant architecture.</p>
+<ul>
+<li>RNN strength: O(H) memory at inference — no KV cache needed; ideal for streaming and embedded systems.</li>
+<li>RNN weakness: O(T) sequential steps prevent GPU parallelism; vanishing gradients limit effective memory to ~100 steps.</li>
+<li>Transformer strength: O(1) sequential steps; direct gradient paths; scales with data and compute.</li>
+<li>Transformer weakness: O(T²) attention memory; fixed context window; no native streaming.</li>
+<li>LSTM/GRU mitigate vanishing gradients with gating but preserve sequential computation bottleneck.</li>
+<li>Mamba/S4/linear RNNs aim to recover parallelisable training while retaining RNN-style inference efficiency.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

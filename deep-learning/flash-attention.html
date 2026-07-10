@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Flash Attention 1/2/3 — IO-Aware Attention Algorithm | Notes Backup</title>
+  <meta name="description" content="How FlashAttention eliminates O(N²) memory by tiling attention in SRAM, online softmax normalization, backward pass recomputation, and benchmarks vs standard attention." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Flash Attention 1/2/3 — IO-Aware Attention Algorithm</h1>
+      <ul class='note-meta'><li><strong>description:</strong> How FlashAttention eliminates O(N²) memory by tiling attention in SRAM, online softmax normalization, backward pass recomputation, and benchmarks vs standard attention.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Flash Attention 1/2/3 — IO-Aware Attention Algorithm</h1>
+<p>Standard attention requires materializing the full N×N attention matrix in GPU HBM (high-bandwidth memory), consuming O(N²) memory. For a sequence of length 8192 with 32 heads in float16, this is 8192² × 32 × 2 bytes ≈ 32 GB — exceeding typical GPU memory budgets. FlashAttention (Dao et al. 2022) reformulates attention as an IO-aware algorithm: compute attention in tiles that fit entirely in SRAM (on-chip cache), avoiding the roundtrip to HBM. The result is identical to standard attention mathematically, but uses O(N) memory and runs 2–4× faster on A100 GPUs.</p>
+<h2>Standard Attention: O(N²) Memory Problem</h2>
+<p>Standard scaled dot-product attention computes: S = QK^T/√d (N×N), P = softmax(S) (N×N), O = PV (N×d). The bottleneck is storing S and P in HBM. Each HBM read/write costs ~10–20 ns; SRAM access costs ~1 ns. A single attention computation for N=8192, d=64 requires writing 8192² float16 values = 128 MB to HBM. Across many layers and batch sizes this dominates training time — the GPU's tensor cores are idle waiting for memory transfers. The key insight of FlashAttention: the memory bottleneck, not FLOP count, limits attention speed.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+import math
+
+def standard_attention(Q, K, V, causal=False):
+    &quot;&quot;&quot;Naive attention that materializes the full N x N matrix in memory.&quot;&quot;&quot;
+    scale = math.sqrt(Q.shape[-1])
+    S = torch.matmul(Q, K.transpose(-2, -1)) / scale  # (B, H, N, N) -- O(N^2) memory
+    if causal:
+        N = Q.shape[-2]
+        mask = torch.tril(torch.ones(N, N, device=Q.device)).bool()
+        S = S.masked_fill(~mask, float('-inf'))
+    P = F.softmax(S, dim=-1)  # still O(N^2) in memory
+    return torch.matmul(P, V)  # (B, H, N, d_head)
+
+def flash_attention_reference(Q, K, V, block_size=64):
+    &quot;&quot;&quot;
+    Simplified block-wise attention for clarity (not the real CUDA kernel).
+    Computes the same result as standard attention using tiled softmax.
+    &quot;&quot;&quot;
+    B, H, N, d = Q.shape
+    O = torch.zeros_like(Q)
+    L = torch.zeros(B, H, N, device=Q.device)   # log-sum-exp running state
+    m = torch.full((B, H, N), float('-inf'), device=Q.device)  # running max
+    scale = d ** -0.5
+    for j in range(0, N, block_size):
+        Kj = K[:, :, j:j+block_size, :]
+        Vj = V[:, :, j:j+block_size, :]
+        S_block = (Q @ Kj.transpose(-2, -1)) * scale  # (B, H, N, block_size)
+        m_new = torch.maximum(m, S_block.max(dim=-1).values)
+        exp_block = torch.exp(S_block - m_new.unsqueeze(-1))
+        L = torch.exp(m - m_new) * L + exp_block.sum(dim=-1)
+        O = torch.exp(m - m_new).unsqueeze(-1) * O + exp_block @ Vj
+        m = m_new
+    return O / L.unsqueeze(-1)  # normalize
+
+B, H, N, d = 1, 1, 64, 32
+Q = torch.randn(B, H, N, d)
+K = torch.randn(B, H, N, d)
+V = torch.randn(B, H, N, d)
+out_std = standard_attention(Q, K, V)
+out_flash = flash_attention_reference(Q, K, V, block_size=16)
+print(f'Max diff: {(out_std - out_flash).abs().max().item():.2e}')  # near 0
+</code></pre>
+<h2>Online Softmax: Incremental Normalization</h2>
+<p>Standard softmax over a row requires two passes: one to find the maximum (for numerical stability) and one to compute exp and sum. When processing attention in tiles, the full row is never available at once. Online softmax maintains a running maximum m and a running sum L: for each new tile of scores, update m_new = max(m, max(new_tile)), then rescale the running sum and accumulator: L_new = exp(m − m_new) × L + Σexp(s − m_new), O_new = exp(m − m_new) × O + exp(s − m_new) × V. This produces identical output to two-pass softmax while never materializing the full N×N matrix.</p>
+<pre><code class="language-python">import torch
+
+def online_softmax_demo(scores_list):
+    &quot;&quot;&quot;
+    Demonstrate online softmax for a 1D sequence of score chunks.
+    Equivalent to softmax(torch.cat(scores_list)) but computed incrementally.
+    &quot;&quot;&quot;
+    m = float('-inf')  # running max
+    d = 0.0            # running denominator (sum of exp)
+    numerators = []    # store (chunk, correction_factor) pairs
+
+    for chunk in scores_list:
+        m_chunk = chunk.max().item()
+        if m_chunk &gt; m:
+            # Rescale previous denominator and numerators
+            correction = torch.exp(torch.tensor(m - m_chunk))
+            d = d * correction.item()
+            numerators = [(n * correction, c) for n, c in numerators]
+            m = m_chunk
+        exp_chunk = torch.exp(chunk - m)
+        d += exp_chunk.sum().item()
+        numerators.append((exp_chunk, 1.0))
+
+    # Normalize all chunks
+    result = torch.cat([n / d for n, _ in numerators])
+    return result
+
+# Verify against standard softmax
+torch.manual_seed(0)
+full_scores = torch.randn(32)
+chunks = full_scores.split(8)
+online_result = online_softmax_demo(list(chunks))
+standard_result = torch.softmax(full_scores, dim=0)
+print(f'Max error: {(online_result - standard_result).abs().max().item():.2e}')
+print(f'Sum: {online_result.sum().item():.6f} (should be 1.0)')
+</code></pre>
+<h2>Using Flash Attention in PyTorch</h2>
+<p>PyTorch 2.0+ exposes FlashAttention through torch.nn.functional.scaled_dot_product_attention. When inputs are on CUDA in float16 or bfloat16 and no custom mask is required, PyTorch automatically dispatches to the FlashAttention kernel. For causal (autoregressive) attention, pass is_causal=True. The API is a drop-in replacement for the naive implementation. Transformers library uses this internally when use_flash_attention_2=True.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+
+class FlashMHA(nn.Module):
+    &quot;&quot;&quot;Multi-Head Attention using PyTorch's built-in FlashAttention.&quot;&quot;&quot;
+    def __init__(self, d_model=512, n_heads=8, dropout=0.0):
+        super().__init__()
+        self.n_heads = n_heads
+        self.d_head = d_model // n_heads
+        self.qkv = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.proj = nn.Linear(d_model, d_model, bias=False)
+        self.dropout = dropout
+
+    def forward(self, x, is_causal=False):
+        B, T, C = x.shape
+        q, k, v = self.qkv(x).split(C, dim=-1)
+        def reshape(t):
+            return t.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
+        q, k, v = reshape(q), reshape(k), reshape(v)
+        # Dispatch to FlashAttention when on CUDA with float16/bfloat16
+        out = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=None,
+            dropout_p=self.dropout if self.training else 0.0,
+            is_causal=is_causal
+        )
+        return self.proj(out.transpose(1, 2).contiguous().view(B, T, C))
+
+mha = FlashMHA(d_model=512, n_heads=8)
+x = torch.randn(4, 128, 512)
+out = mha(x, is_causal=True)
+print(f'Output: {out.shape}')  # (4, 128, 512)
+print(f'Uses flash attention when on CUDA with float16')
+</code></pre>
+<h2>Benchmarking Standard vs Flash Attention</h2>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+import time
+import math
+
+def time_attention(fn, Q, K, V, n_warmup=5, n_runs=20):
+    for _ in range(n_warmup):
+        fn(Q, K, V)
+    if Q.is_cuda: torch.cuda.synchronize()
+    t0 = time.perf_counter()
+    for _ in range(n_runs):
+        fn(Q, K, V)
+    if Q.is_cuda: torch.cuda.synchronize()
+    return (time.perf_counter() - t0) / n_runs * 1000  # ms
+
+def naive_attn(Q, K, V):
+    scale = math.sqrt(Q.shape[-1])
+    return F.softmax(Q @ K.transpose(-2, -1) / scale, dim=-1) @ V
+
+def flash_attn(Q, K, V):
+    return F.scaled_dot_product_attention(Q, K, V, is_causal=True)
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+print(f'Device: {device}')
+seq_lens = [512, 1024, 2048, 4096]
+print(f'{'SeqLen':&gt;8} {'Naive (ms)':&gt;12} {'Flash (ms)':&gt;12} {'Naive MB':&gt;10} {'Speedup':&gt;8}')
+for N in seq_lens:
+    B, H, d = 1, 16, 64
+    Q = torch.randn(B, H, N, d, device=device, dtype=torch.float16)
+    K = torch.randn(B, H, N, d, device=device, dtype=torch.float16)
+    V = torch.randn(B, H, N, d, device=device, dtype=torch.float16)
+    naive_mb = B * H * N * N * 2 / 1e6  # float16 bytes
+    try:
+        t_naive = time_attention(naive_attn, Q, K, V)
+        t_flash = time_attention(flash_attn, Q, K, V)
+        speedup = t_naive / t_flash
+        print(f'{N:&gt;8} {t_naive:&gt;12.2f} {t_flash:&gt;12.2f} {naive_mb:&gt;10.1f} {speedup:&gt;8.2f}x')
+    except RuntimeError as e:
+        print(f'{N:&gt;8} OOM for naive; flash still works')
+</code></pre>
+<h2>FlashAttention Versions and Hardware</h2>
+<p>FlashAttention-1 (Dao et al. 2022) achieved 2–4× speedup on A100 by reducing HBM reads/writes. The backward pass recomputes attention weights from Q,K,V instead of storing the O(N²) attention matrix — trading compute for memory. FlashAttention-2 (Dao 2023) reduced non-matmul FLOPs and improved thread block partitioning, reaching ~72% of A100 peak utilization (up from ~25% for v1). FlashAttention-3 (Shah et al. 2024) targets H100: uses asynchronous Tensor Core pipelines and the H100 TMA instruction to overlap data movement with computation, reaching ~75% of H100's 989 TFLOPS.</p>
+<blockquote>
+<p><strong>When FlashAttention Cannot Be Used</strong>: PyTorch's SDPA dispatches to FlashAttention only when: (1) input is on CUDA, (2) dtype is float16 or bfloat16, (3) no custom attention mask is provided (only is_causal=True is supported natively). For arbitrary sparse masks, custom position biases (ALiBi, T5 relative bias), or cross-attention with different Q and K/V lengths, standard attention may be required unless you use the xformers or flash-attn package directly.</p>
+</blockquote>
+<h2>Summary: Standard vs FlashAttention Versions</h2>
+<table>
+<thead>
+<tr>
+<th>Attribute</th>
+<th>Standard</th>
+<th>FlashAttention-1</th>
+<th>FlashAttention-2</th>
+<th>FlashAttention-3</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Memory complexity</td>
+<td>O(N²)</td>
+<td>O(N)</td>
+<td>O(N)</td>
+<td>O(N)</td>
+</tr>
+<tr>
+<td>HBM reads/writes</td>
+<td>O(N²)</td>
+<td>O(N × d)</td>
+<td>O(N × d)</td>
+<td>O(N × d)</td>
+</tr>
+<tr>
+<td>Peak TFLOPS (A100)</td>
+<td>~10–15</td>
+<td>~60–70</td>
+<td>~72</td>
+<td>N/A (H100 target)</td>
+</tr>
+<tr>
+<td>Peak TFLOPS (H100)</td>
+<td>~25</td>
+<td>~130</td>
+<td>~200</td>
+<td>~740 (75% utilization)</td>
+</tr>
+<tr>
+<td>Causal masking</td>
+<td>Full mask in HBM</td>
+<td>Skip lower-tri blocks</td>
+<td>Fewer non-matmul ops</td>
+<td>Same + async pipeline</td>
+</tr>
+<tr>
+<td>Max seq length</td>
+<td>~4K (memory bound)</td>
+<td>~64K (compute bound)</td>
+<td>~128K</td>
+<td>~256K+</td>
+</tr>
+<tr>
+<td>Backend</td>
+<td>cuBLAS + custom</td>
+<td>Custom CUDA kernel</td>
+<td>Custom CUDA kernel</td>
+<td>H100 async WGMMA</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>Backward pass: FlashAttention recomputes attention from Q,K,V rather than storing the N×N attention matrix — O(N) memory for backward.</li>
+<li>Causal masking: FlashAttention skips lower-triangular blocks entirely (they contribute zero after −inf masking), halving computation for causal models.</li>
+<li>PyTorch integration: torch.nn.functional.scaled_dot_product_attention auto-selects FlashAttention kernel when conditions are met.</li>
+<li>xformers and flash-attn packages expose lower-level APIs for custom masks and variable-length sequences.</li>
+<li>All modern LLMs (LLaMA, Mistral, GPT-4, Gemini) use FlashAttention as a training and inference requirement.</li>
+</ul>
+<h2>Backward Pass: Activation Recomputation</h2>
+<p>Standard attention stores the N×N attention weight matrix P during the forward pass so the backward pass can compute gradients dL/dQ = dO · P^T and dL/dK = Q^T · dP without recomputing attention. FlashAttention-1 avoids storing P by recomputing it during the backward pass from the saved Q, K, V tensors. This trades an extra forward-pass compute (~33% overhead) for an N²→O(N) reduction in memory. The backward pass visits each tile of Q,K,V twice (once forward, once recomputed for gradients), so the total backward pass cost is ~2× the forward pass, same as standard backprop.</p>
+<p>FlashAttention is now a prerequisite for training any serious long-context model. Without it, a 4096-token sequence with 32 heads in float16 requires 4096² × 32 × 2 bytes = 1 GB just for attention matrices per layer — infeasible for multi-layer models. With FlashAttention the memory is O(N × d) ≈ 4096 × 128 × 2 bytes = 1 MB per layer. This 1000× reduction in attention memory is what made training LLaMA-2 (4096 context), Mistral (8192), and Llama-3 (131072) feasible on standard GPU clusters.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Hybrid Search for RAG | Notes Backup</title>
+  <meta name="description" content="Combining sparse BM25 and dense vector retrieval with reciprocal rank fusion or linear score combination to achieve higher recall than either method alone." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Hybrid Search for RAG</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Combining sparse BM25 and dense vector retrieval with reciprocal rank fusion or linear score combination to achieve higher recall than either method alone.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Hybrid Search for RAG</h1>
+<p>Hybrid search combines two fundamentally different retrieval signals — BM25 sparse keyword matching and dense vector semantic similarity — to achieve recall that consistently exceeds either method alone. Dense retrieval excels at semantic matching but fails on exact-phrase queries and rare terms; BM25 excels at exact matches but is blind to paraphrasing and semantic equivalence. A user querying 'cardiac drug therapy' and 'heart disease medication' means the same thing: BM25 will only find one if both phrases appear together, while a dense model will find both but may also retrieve irrelevant passages. By fusing both signals, hybrid search captures the strengths of each: high semantic recall from the dense component and high precision on exact queries from BM25. In production RAG systems at Microsoft (Azure AI Search), Google (Vertex AI Search), and Qdrant, hybrid search with RRF fusion is the default retrieval architecture.</p>
+<h2>Overview</h2>
+<p>Hybrid search in RAG works in three stages. First, a sparse retriever (BM25, Elasticsearch) and a dense retriever (FAISS + bi-encoder) are each run independently against the same corpus, producing two separate ranked lists of candidates for the user's query. Second, a fusion function merges these two ranked lists into a single combined ranking — either through Reciprocal Rank Fusion (RRF), which uses only rank positions and requires no score calibration, or through normalised score combination, which requires both retrievers to produce scores normalised to the same scale. Third, an optional cross-encoder reranker re-scores the top-k candidates from the fused list using the full (query, passage) pair, producing a more accurate relevance estimate at higher latency cost. The resulting 3-10 highly-relevant passages are passed as context to the LLM for answer generation. This three-stage pipeline — retrieve, fuse, rerank, generate — is the standard architecture for production RAG systems where retrieval recall is the primary quality bottleneck.</p>
+<h2>Why Neither Alone Is Sufficient</h2>
+<p>The complementary failure modes of BM25 and dense retrieval make hybrid search a near-universal improvement in practice. Dense retrieval fails on: exact keyword queries where the user knows the precise phrasing (searching 'RFC 7231' or 'errno 110 ECONNREFUSED' requires exact matching); rare entity names and product codes that appear infrequently in training data; and high-precision scenarios where the dense model's tendency to return semantically similar but off-topic passages is unacceptable. BM25 fails on: paraphrase and synonym queries ('cardiac arrest' vs 'heart attack'); implicit information needs ('why did my model overfit' matched to a passage about 'regularisation techniques'); and cross-lingual retrieval. BEIR benchmark results confirm this: across 18 diverse retrieval tasks, no single method (BM25, E5, BGE) wins on all tasks; a hybrid combination wins or ties across the full benchmark. The BEIR average of hybrid systems is consistently 2-5 NDCG points higher than the best individual retriever, with the largest gains on tasks that mix entity retrieval with semantic matching.</p>
+<h2>Reciprocal Rank Fusion</h2>
+<p>Reciprocal Rank Fusion (RRF; Cormack et al., 2009) is the most widely used and robust fusion method for hybrid retrieval. Given two ranked lists L1 (from BM25) and L2 (from dense retrieval), the RRF score for document d is the sum over each list of 1/(k + rank(d, L)), where rank(d, L) is the 1-indexed position of d in list L and k is a smoothing constant (default 60). Documents at the top of both lists receive the highest combined scores; documents in only one list receive a partial score based on their rank in that list. A critical advantage of RRF is that it requires no score calibration: BM25 and dense cosine scores are on completely different scales and cannot be combined directly without normalisation, but RRF uses only rank positions and is immune to score scale differences. RRF is also robust to the number of retrieved candidates: whether each retriever returns 100 or 10,000 candidates, the fusion produces consistent results. Microsoft, Elasticsearch, and Qdrant all use RRF as their default hybrid fusion method, and the k=60 default value has proven robust across a wide range of corpora and task types.</p>
+<pre><code class="language-python">from typing import List, Dict, Tuple
+import numpy as np
+
+def reciprocal_rank_fusion(
+        ranked_lists: List[List[str]], k: int = 60) -&gt; List[Tuple[str, float]]:
+    # Fuse multiple ranked lists: RRF score = sum(1 / (k + rank)) per document
+    scores: Dict[str, float] = {}
+    for ranked in ranked_lists:
+        for rank, doc_id in enumerate(ranked, start=1):
+            scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (k + rank)
+    return sorted(scores.items(), key=lambda x: x[1], reverse=True)
+
+def eval_retrieval(ranked: List[Tuple[str, float]], relevant: set, k: int = 10) -&gt; Dict[str, float]:
+    top_ids = [doc_id for doc_id, _ in ranked[:k]]
+    recall  = len(set(top_ids) &amp; relevant) / max(len(relevant), 1)
+    mrr     = next((1.0 / r for r, d in enumerate(top_ids, 1) if d in relevant), 0.0)
+    return {'recall': recall, 'mrr': mrr}
+
+bm25_ranked   = ['doc_3', 'doc_7', 'doc_1', 'doc_15', 'doc_22', 'doc_8', 'doc_4']
+dense_ranked  = ['doc_1', 'doc_3', 'doc_9', 'doc_7', 'doc_44', 'doc_2', 'doc_5']
+relevant_docs = {'doc_1', 'doc_3', 'doc_7'}
+
+hybrid_ranked = reciprocal_rank_fusion([bm25_ranked, dense_ranked], k=60)
+for label, r in [('BM25  ', [(d, 0) for d in bm25_ranked]),
+                  ('Dense ', [(d, 0) for d in dense_ranked]),
+                  ('Hybrid', hybrid_ranked)]:
+    m = eval_retrieval(r, relevant_docs, k=7)
+    print(f'{label}  Recall@7={m[&quot;recall&quot;]:.2f}  MRR={m[&quot;mrr&quot;]:.4f}')
+</code></pre>
+<h2>Score Normalization and Combination</h2>
+<p>An alternative to rank-based RRF is direct score combination: alpha * dense_score_norm + (1 - alpha) * sparse_score_norm. BM25 scores range from 0 to ~20 (corpus-dependent) while cosine similarity ranges from -1 to 1 — these cannot be combined directly. Min-max normalisation maps each retriever's scores to [0, 1] before combining: dense_norm = (dense - min) / (max - min + epsilon), and similarly for sparse. The alpha parameter (range 0-1) controls the relative weight of dense versus sparse; alpha=0.5 gives equal weight. The optimal alpha is corpus-dependent and must be tuned on a held-out evaluation set: for MS MARCO (general web passages), alpha=0.6-0.7 (slightly favouring dense) is typical; for medical or legal corpora, alpha=0.3-0.4 (favouring BM25 for exact terminology) often performs better. Score combination has a subtle issue: min-max normalisation is computed over the candidate set returned by each retriever, so combining pre-filtered lists from different-sized candidate pools can produce inconsistent results. RRF avoids this issue entirely, which is why it is generally preferred over score combination in production deployments.</p>
+<pre><code class="language-python">import numpy as np
+from rank_bm25 import BM25Okapi
+from sentence_transformers import SentenceTransformer
+from typing import List, Tuple
+
+def min_max_norm(arr: np.ndarray) -&gt; np.ndarray:
+    # Normalise scores to [0, 1] using min-max scaling
+    lo, hi = arr.min(), arr.max()
+    return (arr - lo) / (hi - lo + 1e-9)
+
+def hybrid_score_combine(query: str, corpus: List[str], model: SentenceTransformer,
+                          alpha: float = 0.5, k: int = 10) -&gt; List[Tuple[str, float]]:
+    # Hybrid: alpha * dense_norm + (1-alpha) * sparse_norm; both min-max scaled to [0,1]
+    bm25       = BM25Okapi([d.lower().split() for d in corpus])
+    sparse_raw = np.array(bm25.get_scores(query.lower().split()))
+    c_embs     = model.encode(corpus, normalize_embeddings=True, show_progress_bar=False)
+    q_emb      = model.encode([query], normalize_embeddings=True)
+    dense_raw  = (q_emb @ c_embs.T).flatten()
+    combined   = alpha * min_max_norm(dense_raw) + (1 - alpha) * min_max_norm(sparse_raw)
+    top_idxs   = np.argsort(-combined)[:k]
+    return [(corpus[i], float(combined[i])) for i in top_idxs]
+
+model  = SentenceTransformer('intfloat/e5-small-v2')
+corpus = [f'Article {i} on {[&quot;NLP&quot;,&quot;IR&quot;,&quot;ML&quot;,&quot;CV&quot;][i%4]} topic {i%20}' for i in range(1000)]
+for alpha in [0.0, 0.3, 0.5, 0.7, 1.0]:
+    hits = hybrid_score_combine('information retrieval neural ranking', corpus, model, alpha=alpha)
+    print(f'alpha={alpha:.1f}  top-1: {hits[0][1]:.4f}  {hits[0][0][:50]}')
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Recall@10 (BEIR avg)</th>
+<th>MRR@10 (MS MARCO)</th>
+<th>Latency (100K docs)</th>
+<th>Complexity</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>BM25 only</td>
+<td>42.1</td>
+<td>18.6</td>
+<td>5-10 ms</td>
+<td>Very low — inverted index only</td>
+</tr>
+<tr>
+<td>Dense only (E5-large)</td>
+<td>54.5</td>
+<td>37.4</td>
+<td>8-15 ms</td>
+<td>Medium — encode + FAISS ANN</td>
+</tr>
+<tr>
+<td>BM25 + Dense RRF</td>
+<td>57.3</td>
+<td>40.2</td>
+<td>15-25 ms</td>
+<td>Medium — both retrievers + RRF merge</td>
+</tr>
+<tr>
+<td>BM25 + Dense score mix</td>
+<td>56.8</td>
+<td>39.7</td>
+<td>15-25 ms</td>
+<td>Medium — requires min-max normalisation</td>
+</tr>
+<tr>
+<td>SPLADE + Dense</td>
+<td>59.1</td>
+<td>42.1</td>
+<td>20-35 ms</td>
+<td>High — SPLADE encoding + ANN search</td>
+</tr>
+<tr>
+<td>Hybrid + Cross-encoder reranker</td>
+<td>57.3</td>
+<td>44.8</td>
+<td>80-200 ms</td>
+<td>High — reranker over top-50 candidates</td>
+</tr>
+</tbody>
+</table>
+<h2>Reranking After Hybrid Retrieval</h2>
+<p>Hybrid retrieval produces a fused ranked list of typically 20-100 candidates. A cross-encoder reranker can then re-score these candidates using the full (query, document) pair in a single forward pass, producing significantly more accurate relevance estimates than the bi-encoder used for initial retrieval. Cross-encoders are slower (they cannot pre-compute document representations) but substantially more accurate: on MS MARCO, a MiniLM-L6 cross-encoder improves MRR@10 from 40.2 (hybrid retrieval alone) to 44.8 — a 4.6-point absolute improvement. The reranker is always applied to the top-k candidates from hybrid retrieval rather than the full corpus; k=20-50 is standard, balancing recall coverage against reranking latency. Popular open-source rerankers include cross-encoder/ms-marco-MiniLM-L-6-v2 (fast, 6-layer, 50ms), cross-encoder/ms-marco-electra-base (higher quality, 120ms), and Cohere Rerank API (highest quality, cloud-hosted). The full three-stage pipeline — hybrid retrieve, RRF fuse, cross-encoder rerank — is the recommended production architecture for RAG when retrieval latency budget allows 100-300 ms for the retrieval step.</p>
+<blockquote>
+<p><strong>Alpha is Dataset-Dependent</strong>: The optimal alpha for score combination (sparse vs dense weight) is highly dataset-dependent — what works for MS MARCO may not work for your domain. Legal and medical corpora often benefit from alpha=0.3 (favouring BM25 for exact terminology), while open-domain question answering corpora favour alpha=0.7 (dense-heavy). Always tune alpha on a held-out evaluation set with at least 100 labelled query-relevance pairs before deploying score-combination hybrid search in production. When in doubt, use RRF instead — it is parameter-free and consistently close to optimal.</p>
+</blockquote>
+<h2>Sparse-Dense Fusion Models (SPLADE)</h2>
+<p>SPLADE (Sparse Lexical and Expansion model; Formal et al., 2021) is a learned sparse retrieval model that bridges the gap between BM25 and dense retrieval. Unlike BM25 which uses raw term frequencies, SPLADE uses a BERT encoder to produce a sparse distribution over the full vocabulary for each token in a document, trained with a sparsity-inducing FLOPS regularisation term. The result is a bag-of-weighted-terms representation where the weights reflect semantic importance rather than raw frequency, and where the vocabulary is expanded with semantically related terms: a document about 'cardiac arrest' also has high weights for 'heart attack' in its SPLADE representation. SPLADE maintains the core advantage of sparse retrieval — compatibility with standard inverted index infrastructure — and can be deployed on Elasticsearch without any ANN vector index. On MS MARCO, SPLADE achieves MRR@10 of 34+ compared to BM25's 18.6. Combining SPLADE (as the sparse component) with a dense bi-encoder in a hybrid system produces the highest BEIR scores in the literature, exceeding either pure dense or BM25+dense hybrid systems. The trade-off is encoding cost: SPLADE requires a BERT forward pass per document at index time, compared to BM25's trivial tokenisation.</p>
+<pre><code class="language-python">from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams, PointStruct
+from qdrant_client.models import SparseVectorParams, SparseIndexParams
+from sentence_transformers import SentenceTransformer
+from typing import List
+import numpy as np
+
+def build_qdrant_collection(client: QdrantClient, name: str, dim: int = 384) -&gt; None:
+    # Create an in-memory Qdrant collection with dense vectors for hybrid-ready search
+    client.recreate_collection(name, vectors_config={
+        'dense': VectorParams(size=dim, distance=Distance.COSINE)})
+    print(f'Collection &quot;{name}&quot; ready (dim={dim})')
+
+def upsert_passages(client: QdrantClient, name: str, passages: List[str], model: SentenceTransformer) -&gt; None:
+    embs = model.encode(passages, normalize_embeddings=True, show_progress_bar=True)
+    pts  = [PointStruct(id=i, vector={'dense': embs[i].tolist()}, payload={'text': p})
+            for i, p in enumerate(passages)]
+    client.upsert(collection_name=name, points=pts)
+    print(f'Upserted {len(passages)} passages')
+
+def dense_search(client: QdrantClient, name: str, model: SentenceTransformer,
+                  query: str, k: int = 10):
+    q_vec   = model.encode([query], normalize_embeddings=True)[0].tolist()
+    results = client.search(name, query_vector=('dense', q_vec), limit=k, with_payload=True)
+    for r in results[:3]:
+        print(f'[{r.score:.4f}] {r.payload[&quot;text&quot;][:70]}')
+
+client = QdrantClient(':memory:')
+model  = SentenceTransformer('intfloat/e5-small-v2')
+corpus = [f'Passage {i}: dense and sparse retrieval hybrid search topic {i%15}' for i in range(500)]
+build_qdrant_collection(client, 'hybrid-demo', dim=384)
+upsert_passages(client, 'hybrid-demo', corpus, model)
+dense_search(client, 'hybrid-demo', model, 'What is hybrid retrieval?', k=5)
+</code></pre>
+<h2>Implementation Patterns</h2>
+<p>Production hybrid search systems follow several well-established implementation patterns. The dual-retriever pattern runs BM25 (Elasticsearch) and dense retrieval (FAISS or Qdrant) as independent services; fusion is performed in the application layer using RRF. This pattern offers the best operational flexibility and allows each retriever to be scaled independently, but adds a network round-trip for each retriever call. The integrated vector database pattern uses a single system like Qdrant, Weaviate, or Azure AI Search that manages both dense vectors and BM25 internally; hybrid search is a single API call with built-in RRF fusion. The pre-filtering pattern first uses BM25 to identify a candidate set (top-1000), then re-scores only those candidates with the dense model — cheaper than running dense retrieval over the entire corpus but risks missing dense-only relevant documents that BM25 ranked below 1000. For RAG-specific deployments, LangChain's EnsembleRetriever and LlamaIndex's QueryFusionRetriever both implement RRF fusion out of the box, accepting any combination of retriever backends including custom BM25 and FAISS implementations.</p>
+<pre><code class="language-python">import numpy as np
+from rank_bm25 import BM25Okapi
+from sentence_transformers import SentenceTransformer, CrossEncoder
+from typing import List
+
+def hybrid_retrieve(query: str, corpus: List[str], dense_model: SentenceTransformer,
+                     alpha: float = 0.5, top_k: int = 20) -&gt; List[str]:
+    # Normalised BM25 + dense score combination; return top-k candidate passages
+    bm25    = BM25Okapi([d.lower().split() for d in corpus])
+    sparse  = np.array(bm25.get_scores(query.lower().split()))
+    c_embs  = dense_model.encode(corpus, normalize_embeddings=True, show_progress_bar=False)
+    dense   = (dense_model.encode([query], normalize_embeddings=True) @ c_embs.T).flatten()
+    s_norm  = (sparse - sparse.min()) / (sparse.ptp() + 1e-9)
+    d_norm  = (dense  - dense.min())  / (dense.ptp()  + 1e-9)
+    combined = alpha * d_norm + (1 - alpha) * s_norm
+    return [corpus[i] for i in np.argsort(-combined)[:top_k]]
+
+def rerank(query: str, candidates: List[str], reranker: CrossEncoder, top_n: int = 3) -&gt; List[str]:
+    scores = reranker.predict([[query, c] for c in candidates])
+    return [candidates[i] for i in np.argsort(-scores)][:top_n]
+
+dense_model = SentenceTransformer('intfloat/e5-small-v2')
+reranker    = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+corpus      = [f'Fact {i}: {&quot;BM25&quot; if i%3==0 else &quot;dense retrieval&quot;} info v{i}' for i in range(200)]
+query       = 'How does hybrid retrieval improve RAG accuracy?'
+candidates  = hybrid_retrieve(query, corpus, dense_model, alpha=0.5, top_k=20)
+context     = rerank(query, candidates, reranker, top_n=3)
+for rank, doc in enumerate(context, 1):
+    print(f'Context {rank}: {doc[:80]}')
+</code></pre>
+<ul>
+<li>Start with dual-retriever pattern: BM25 + dense with RRF (k=60) — fastest to implement and robust</li>
+<li>RRF k=60 is a robust default; tuning k rarely yields more than 1% improvement across benchmarks</li>
+<li>Score combination: alpha * dense_norm + (1-alpha) * sparse_norm; tune alpha on held-out dev set</li>
+<li>Reranker after hybrid retrieval adds 50-150 ms but typically yields 3-6 additional MRR@10 points</li>
+<li>Qdrant and Weaviate support native hybrid search with built-in RRF — preferred for new deployments</li>
+<li>SPLADE as sparse component + dense bi-encoder gives the highest BEIR scores but adds encoding overhead</li>
+</ul>
+<h2>Key Takeaways</h2>
+<p>Hybrid search combining BM25 and dense retrieval is the recommended architecture for production RAG systems. Neither method alone is sufficient: BM25 misses semantic matches and paraphrases while dense retrieval misses exact-phrase queries and rare terms. Reciprocal Rank Fusion is the most robust fusion method because it requires no score calibration and is insensitive to the relative scales of the two retrievers. The standard three-stage pipeline is hybrid retrieve (20-100 candidates), RRF fuse, cross-encoder rerank (top 3-10), and then LLM generation. On BEIR, hybrid systems achieve 2-5 NDCG@10 points above the best individual retriever; with a cross-encoder reranker, MRR improvements on MS MARCO are typically 4-6 additional points. For implementation, Qdrant and Azure AI Search provide native hybrid search APIs; for custom stacks, LangChain's EnsembleRetriever implements RRF over any combination of retrieval backends. The optimal fusion parameters (RRF k, or score combination alpha) should always be tuned on a held-out evaluation set specific to your deployment domain.</p>
+<ul>
+<li>Hybrid = BM25 + dense; combined Recall@10 is 3-5 NDCG points higher than either alone on BEIR</li>
+<li>Reciprocal Rank Fusion (k=60) is the standard fusion method — no score calibration needed</li>
+<li>Score combination alternative: alpha * dense_norm + (1-alpha) * sparse_norm; tune alpha per domain</li>
+<li>Add a cross-encoder reranker after hybrid retrieval for 3-6 more MRR points at 80-200 ms latency</li>
+<li>Qdrant, Weaviate, and Azure AI Search provide built-in hybrid search with RRF fusion</li>
+<li>SPLADE as sparse component achieves the highest BEIR scores when encoding cost is acceptable</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

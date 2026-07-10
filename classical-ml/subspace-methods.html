@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Subspace Methods — Robust PCA and Sparse PCA | Notes Backup</title>
+  <meta name="description" content="How standard PCA fails under outliers, Robust PCA via Principal Component Pursuit decomposing M = L + S with nuclear norm and L1 penalties, ADMM optimisation, Sparse PCA for interpretable loadings, and NMF as a parts-based representation." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Subspace Methods — Robust PCA and Sparse PCA</h1>
+      <ul class='note-meta'><li><strong>description:</strong> How standard PCA fails under outliers, Robust PCA via Principal Component Pursuit decomposing M = L + S with nuclear norm and L1 penalties, ADMM optimisation, Sparse PCA for interpretable loadings, and NMF as a parts-based representation.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Subspace Methods — Robust PCA and Sparse PCA</h1>
+<p>Standard PCA minimises a squared-error (L2) objective, making it extremely sensitive to outliers: a single corrupted point can rotate an entire principal component. Robust PCA and Sparse PCA are extensions that handle corrupted data or enforce interpretable, sparse structure in the loadings. These methods are critical in computer vision, signal processing, and genomics.</p>
+<h2>Why Standard PCA Fails Under Outliers</h2>
+<p>The L2 objective ‖X - UₖΣₖVₖᵀ‖_F² assigns equal weight to all entries. A single gross outlier (e.g. a corrupted pixel or sensor spike) can contribute more to the objective than hundreds of normal observations. Because PCA minimises a global sum of squared residuals, it will tilt its principal components to partially accommodate the outlier at the expense of the true structure.</p>
+<h2>Robust PCA: Decomposition M = L + S</h2>
+<p>Robust PCA (Candès et al. 2011) decomposes the data matrix M into a low-rank matrix L (the 'background' or signal) and a sparse matrix S (the 'foreground' or outliers): M = L + S. The convex relaxation is Principal Component Pursuit: minimise nuclear_norm(L) + λ‖S‖₁ subject to L + S = M. The nuclear norm (sum of singular values) is the convex surrogate for rank(L); the L1 norm enforces sparsity in S. The optimal λ = 1/√max(m,n) under incoherence conditions.</p>
+<pre><code class="language-python">import numpy as np
+
+def robust_pca_admm(M, lam=None, mu=None, max_iter=500, tol=1e-6):
+    &quot;&quot;&quot;Principal Component Pursuit via ADMM.&quot;&quot;&quot;
+    m, n = M.shape
+    lam = lam or 1.0 / np.sqrt(max(m, n))
+    mu = mu or m * n / (4.0 * np.abs(M).sum())
+
+    L = np.zeros_like(M)
+    S = np.zeros_like(M)
+    Y = np.zeros_like(M)  # Lagrange multiplier
+
+    def svt(X, tau):
+        &quot;&quot;&quot;Singular value thresholding (nuclear norm prox).&quot;&quot;&quot;
+        U, s, Vt = np.linalg.svd(X, full_matrices=False)
+        s_t = np.maximum(s - tau, 0)
+        return U @ np.diag(s_t) @ Vt, (s_t &gt; 0).sum()
+
+    def soft(X, tau):
+        &quot;&quot;&quot;Element-wise soft thresholding (L1 prox).&quot;&quot;&quot;
+        return np.sign(X) * np.maximum(np.abs(X) - tau, 0)
+
+    for i in range(max_iter):
+        L, rank = svt(M - S + Y / mu, 1.0 / mu)
+        S = soft(M - L + Y / mu, lam / mu)
+        residual = M - L - S
+        Y = Y + mu * residual
+        err = np.linalg.norm(residual, 'fro') / (np.linalg.norm(M, 'fro') + 1e-10)
+        if err &lt; tol:
+            print(f'Converged at iter {i+1}, rank(L)={rank}')
+            return L, S
+    print(f'Max iter reached, rank(L)={rank}')
+    return L, S
+
+# Simulate video foreground/background separation
+rng = np.random.default_rng(42)
+n_frames, n_pixels = 100, 300
+background = rng.normal(0, 0.1, (n_frames, n_pixels))
+foreground = np.zeros((n_frames, n_pixels))
+foreground[20:70, 50:80] = rng.normal(2.0, 0.3, (50, 30))  # moving object
+M = background + foreground
+L, S = robust_pca_admm(M)
+print(f'S non-zeros: {(np.abs(S) &gt; 0.05).sum()} / {S.size}')
+</code></pre>
+<blockquote>
+<p><strong>Lambda Choice</strong>: The theoretical optimal λ = 1/√max(m,n) works well when the incoherence conditions hold (low-rank part is not too 'spiky', sparse part is not too 'dense'). In practice, increase λ to recover denser foreground or decrease it to tolerate denser anomalies. Cross-validate by reconstructing held-out corrupted test frames.</p>
+</blockquote>
+<h2>Sparse PCA</h2>
+<p>Sparse PCA (Zou et al. 2006) seeks principal components with sparse loadings — only a few features are non-zero in each component. This makes the components more interpretable: instead of a global mixture of all features, each PC can be attributed to a meaningful subset. sklearn implements this via an elastic net penalty on the loadings, alternating between updating scores and updating (sparse) loadings.</p>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.decomposition import SparsePCA, PCA
+from sklearn.datasets import fetch_olivetti_faces
+
+faces = fetch_olivetti_faces()
+X = faces.data  # (400, 4096)
+print(f'Faces dataset: {X.shape}')
+
+n_comp = 20
+pca = PCA(n_components=n_comp, random_state=42)
+X_pca = pca.fit_transform(X)
+
+spca = SparsePCA(n_components=n_comp, alpha=1.0,
+                  random_state=42, n_jobs=-1, max_iter=100)
+X_spca = spca.fit_transform(X)
+
+pca_density = (np.abs(pca.components_) &gt; 1e-3).mean()
+spca_density = (np.abs(spca.components_) &gt; 1e-3).mean()
+print(f'PCA loadings density:        {pca_density:.3f}')
+print(f'SparsePCA loadings density:  {spca_density:.3f}')
+
+fig, axes = plt.subplots(4, 5, figsize=(14, 12))
+for i, ax in enumerate(axes[:2].flat):
+    ax.imshow(pca.components_[i].reshape(64, 64), cmap='gray')
+    ax.set_title(f'PCA {i+1}'); ax.axis('off')
+for i, ax in enumerate(axes[2:].flat):
+    ax.imshow(spca.components_[i].reshape(64, 64), cmap='gray')
+    ax.set_title(f'SPCA {i+1}'); ax.axis('off')
+plt.suptitle('Standard PCA vs Sparse PCA Components')
+plt.tight_layout()
+plt.show()
+</code></pre>
+<h2>Sparse PCA for Feature Selection and Interpretability</h2>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.decomposition import SparsePCA, PCA
+from sklearn.datasets import load_breast_cancer
+from sklearn.preprocessing import StandardScaler
+
+data = load_breast_cancer()
+X = StandardScaler().fit_transform(data.data)
+feature_names = data.feature_names
+
+spca = SparsePCA(n_components=5, alpha=3.0, random_state=42, n_jobs=-1)
+X_spca = spca.fit_transform(X)
+
+pca = PCA(n_components=5)
+X_pca = pca.fit_transform(X)
+
+print('=== Sparse PCA: Active Features per Component ===')
+for k in range(5):
+    comp = spca.components_[k]
+    active_idx = np.where(np.abs(comp) &gt; 1e-3)[0]
+    n_active = len(active_idx)
+    names_str = ', '.join(feature_names[active_idx[:5]])
+    print(f'  PC{k+1} ({n_active}/{len(feature_names)} active): {names_str}')
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+for k in range(5):
+    axes[0].plot(np.abs(pca.components_[k]), label=f'PC{k+1}', alpha=0.7)
+    axes[1].plot(np.abs(spca.components_[k]), label=f'SPC{k+1}', alpha=0.7)
+axes[0].set_title('PCA — dense loadings'); axes[0].legend()
+axes[1].set_title('Sparse PCA — sparse loadings'); axes[1].legend()
+plt.suptitle('Feature Loadings: PCA vs Sparse PCA')
+plt.tight_layout()
+plt.show()
+</code></pre>
+<h2>NMF as Parts-Based Representation</h2>
+<p>NMF (Lee &amp; Seung 1999) decomposes a non-negative matrix V ≈ WH where both W and H are non-negative. For face images, this produces parts-based representations: individual components correspond to facial parts (eyes, nose, cheeks) rather than the holistic 'eigenfaces' of PCA. This occurs because non-negativity prevents cancellative combinations — features can only be added, not subtracted.</p>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.decomposition import NMF, PCA
+from sklearn.datasets import fetch_olivetti_faces
+from sklearn.preprocessing import MinMaxScaler
+
+faces = fetch_olivetti_faces()
+X = MinMaxScaler().fit_transform(faces.data)  # non-negative required for NMF
+n_comp = 16
+
+nmf = NMF(n_components=n_comp, init='nndsvd',
+           random_state=42, max_iter=500, alpha_W=0.01)
+W_nmf = nmf.fit_transform(X)
+H_nmf = nmf.components_  # parts
+
+pca = PCA(n_components=n_comp, random_state=42)
+pca.fit(X)
+
+fig, axes = plt.subplots(4, 8, figsize=(16, 9))
+for i, ax in enumerate(axes[:2].flat):
+    ax.imshow(pca.components_[i].reshape(64, 64), cmap='gray')
+    ax.set_title(f'EF {i+1}', fontsize=8); ax.axis('off')
+for i, ax in enumerate(axes[2:].flat):
+    ax.imshow(H_nmf[i].reshape(64, 64), cmap='hot')
+    ax.set_title(f'NMF {i+1}', fontsize=8); ax.axis('off')
+
+plt.suptitle('PCA Eigenfaces (holistic, can cancel) vs NMF Parts (additive only)')
+plt.tight_layout()
+plt.show()
+print(f'NMF reconstruction error: {nmf.reconstruction_err_:.4f}')
+</code></pre>
+<h2>When to Use Each Method</h2>
+<ul>
+<li>Standard PCA: clean data, linear structure, fast exploration — always try first</li>
+<li>Robust PCA: data with gross corruptions, missing data, surveillance video background separation</li>
+<li>Sparse PCA: when interpretability of individual features matters (genomics, finance, clinical)</li>
+<li>NMF: non-negative data (counts, spectra, images) where parts-based interpretation is desired</li>
+<li>Factor Analysis: when you want to model observation noise explicitly (common in psychometrics)</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>PCA</th>
+<th>Robust PCA</th>
+<th>Sparse PCA</th>
+<th>NMF</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Robust to outliers</td>
+<td>No</td>
+<td>Yes (L1 on S)</td>
+<td>No</td>
+<td>Moderate</td>
+</tr>
+<tr>
+<td>Sparse loadings</td>
+<td>No</td>
+<td>No</td>
+<td>Yes</td>
+<td>Yes (non-negative)</td>
+</tr>
+<tr>
+<td>Non-negative</td>
+<td>No</td>
+<td>No</td>
+<td>No</td>
+<td>Yes (required)</td>
+</tr>
+<tr>
+<td>Interpretable</td>
+<td>Moderate</td>
+<td>Low</td>
+<td>High</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Computational cost</td>
+<td>O(nd min(n,d))</td>
+<td>O(n²d) per ADMM</td>
+<td>O(n²k) alternating</td>
+<td>O(ndk) alternating</td>
+</tr>
+<tr>
+<td>Best use case</td>
+<td>Exploration</td>
+<td>Corrupted data</td>
+<td>Genomics, finance</td>
+<td>Spectra, images, text</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Choosing the Right Subspace Method</strong>: If your data has gross outliers (not just Gaussian noise): use Robust PCA. If you need to explain which features drive each component to a domain expert: use Sparse PCA with alpha tuned to the desired sparsity level. If your data is non-negative (gene counts, TF-IDF, spectrograms): NMF is the natural choice and often produces more interpretable components than sparse PCA.</p>
+</blockquote>
+<p>Beyond these four methods, varimax rotation of PCA components (orthogonal rotation to maximise component simplicity) and Factor Analysis (which adds a noise model: X = WZ + ε) are valuable when you want interpretable PCA-like components without the full sparsity constraint. Varimax is a computationally cheap post-processing step that often produces more interpretable loadings than raw PCA without any iterative optimisation.</p>
+<hr />
+<p>Robust PCA, Sparse PCA, and NMF are complementary extensions of standard PCA that trade off optimality for robustness, interpretability, or structural constraints. In practice, try standard PCA first, then apply Robust PCA if outliers are suspected, Sparse PCA if loadings must be interpretable, or NMF if non-negativity is semantically meaningful for your domain.</p>
+    </article>
+  </main>
+</body>
+</html>

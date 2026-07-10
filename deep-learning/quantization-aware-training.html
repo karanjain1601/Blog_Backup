@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Quantization — PTQ, QAT, and W4A16 for LLMs | Notes Backup</title>
+  <meta name="description" content="Reduce model precision from FP32 to INT8 or INT4. Covers symmetric and asymmetric quantization, per-channel scale, post-training quantization (PTQ), quantization-aware training (QAT) with straight-through estimator, LLM.int8, GPTQ, and bitsandbytes 4-bit loading." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Quantization — PTQ, QAT, and W4A16 for LLMs</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Reduce model precision from FP32 to INT8 or INT4. Covers symmetric and asymmetric quantization, per-channel scale, post-training quantization (PTQ), quantization-aware training (QAT) with straight-through estimator, LLM.int8, GPTQ, and bitsandbytes 4-bit loading.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Quantization — PTQ, QAT, and W4A16 for LLMs</h1>
+<p>Quantization maps floating-point weights and/or activations to lower-precision integers. A FP32 weight consumes 4 bytes; an INT8 weight consumes 1 byte; an INT4 weight consumes 0.5 bytes. Memory bandwidth is often the primary bottleneck for LLM inference — quantizing weights 4× reduces the bytes transferred per token, directly accelerating generation. Quantization also enables deployment on hardware without FP32 support (microcontrollers, mobile NPUs).</p>
+<h2>Symmetric and Asymmetric Quantization</h2>
+<p>Symmetric quantization: q(x) = clamp(round(x / scale), -2^(b-1), 2^(b-1)-1) where scale = max(|x|) / 2^(b-1). Dequantize: x̂ = q · scale. For INT8: range is [-128, 127], scale = max|x|/127. Asymmetric adds a zero-point z: q(x) = clamp(round(x/scale + z), 0, 2^b-1), x̂ = (q-z)·scale. Asymmetric covers non-symmetric distributions (ReLU outputs are always non-negative) but adds zero-point overhead. Per-tensor quantization uses one scale for the entire tensor; per-channel uses one scale per output channel, giving significantly better accuracy.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def symmetric_quantize(x: torch.Tensor, bits: int = 8):
+    &quot;&quot;&quot;Symmetric per-tensor quantization. Returns (quantized_int, scale).&quot;&quot;&quot;
+    qmax = 2 ** (bits - 1) - 1  # 127 for INT8
+    scale = x.abs().max() / qmax
+    scale = scale.clamp(min=1e-8)  # avoid division by zero
+    q = (x / scale).round().clamp(-qmax - 1, qmax)
+    return q.to(torch.int8), scale
+
+def dequantize(q: torch.Tensor, scale: torch.Tensor) -&gt; torch.Tensor:
+    return q.float() * scale
+
+def per_channel_quantize(weight: torch.Tensor, bits: int = 8):
+    &quot;&quot;&quot;Per output-channel symmetric quantization for conv/linear weights.&quot;&quot;&quot;
+    qmax = 2 ** (bits - 1) - 1
+    # Scale per output channel (dim 0)
+    scale = weight.abs().amax(dim=tuple(range(1, weight.ndim)), keepdim=True) / qmax
+    scale = scale.clamp(min=1e-8)
+    q = (weight / scale).round().clamp(-qmax - 1, qmax).to(torch.int8)
+    return q, scale
+
+# Compare per-tensor vs per-channel quantization error
+torch.manual_seed(0)
+W = torch.randn(64, 32)  # simulate a linear layer weight
+
+q_pt, s_pt = symmetric_quantize(W, bits=8)
+W_hat_pt = dequantize(q_pt, s_pt)
+err_pt = (W - W_hat_pt).abs().mean().item()
+
+q_pc, s_pc = per_channel_quantize(W, bits=8)
+W_hat_pc = dequantize(q_pc, s_pc.expand_as(W))
+err_pc = (W - W_hat_pc).abs().mean().item()
+
+print(f'Per-tensor  MAE: {err_pt:.5f}  scale={s_pt.item():.4f}')
+print(f'Per-channel MAE: {err_pc:.5f}  (one scale per row)')
+print(f'Per-channel is {err_pt/err_pc:.1f}x more accurate')
+</code></pre>
+<h2>Post-Training Quantization with Calibration</h2>
+<p>PTQ requires no retraining. A small calibration dataset (100–1000 samples) is forwarded through the model to gather activation statistics (min, max, or percentile). These statistics determine the quantization scale for each layer. Activation outliers inflate the scale, wasting precision on rare large values. Techniques like SmoothQuant migrate the quantization difficulty from activations to weights (which are easier to quantize) by multiplying activation scales into the weight.</p>
+<h2>Quantization-Aware Training (QAT)</h2>
+<p>QAT simulates quantization during training: in the forward pass, weights and activations are fake-quantized (quantize then dequantize, staying in FP32 dtype). The model learns to compensate for quantization error. Gradients flow through the fake-quantize operation using the straight-through estimator (STE): the gradient of the round function is treated as 1 within the clamp range and 0 outside. QAT typically recovers 1–2% accuracy lost by PTQ at INT8, and is essential for INT4 quantization where PTQ accuracy degrades significantly.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from torch.autograd import Function
+
+class FakeQuantize(Function):
+    &quot;&quot;&quot;Fake quantization with straight-through estimator.&quot;&quot;&quot;
+
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, scale: float, bits: int = 8):
+        qmax = 2 ** (bits - 1) - 1
+        # Quantize and dequantize (stays float, but has quantization error)
+        q = (x / scale).round().clamp(-qmax - 1, qmax)
+        x_hat = q * scale
+        # STE: pass gradient through clamp region, zero outside
+        ctx.save_for_backward(x)
+        ctx.scale = scale
+        ctx.qmax = qmax
+        return x_hat
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        x, = ctx.saved_tensors
+        qmax = ctx.qmax
+        scale = ctx.scale
+        # STE: gradient = 1 where x is in quantization range, else 0
+        in_range = ((x / scale) &gt;= -(qmax + 1)) &amp; ((x / scale) &lt;= qmax)
+        grad_input = grad_output * in_range.float()
+        return grad_input, None, None  # None for scale and bits
+
+class QATLinear(nn.Module):
+    def __init__(self, in_features, out_features, bits=8):
+        super().__init__()
+        self.linear = nn.Linear(in_features, out_features)
+        self.bits = bits
+
+    def forward(self, x: torch.Tensor) -&gt; torch.Tensor:
+        # Fake-quantize weights
+        W = self.linear.weight
+        scale_w = W.abs().max().item() / (2 ** (self.bits - 1) - 1)
+        W_fq = FakeQuantize.apply(W, scale_w, self.bits)
+        return nn.functional.linear(x, W_fq, self.linear.bias)
+
+# Verify gradient flows through fake quantize
+layer = QATLinear(32, 16, bits=8)
+x = torch.randn(4, 32)
+loss = layer(x).sum()
+loss.backward()
+print(f'Weight grad norm: {layer.linear.weight.grad.norm().item():.4f}')
+print('Gradient flows through fake quantize via STE.')
+</code></pre>
+<h2>LLM Quantization — GPTQ and W4A16</h2>
+<p>For LLMs with billions of parameters, QAT is infeasible (retraining costs). GPTQ (Frantar et al. 2022) does weight-only quantization: weights are quantized to INT4 (W4), activations remain FP16 (A16). GPTQ solves a layer-wise reconstruction problem using the Hessian of the layer's output with respect to its weights (via the Optimal Brain Surgeon framework). This produces INT4 weights that minimize the increase in layer output error, recovering close to FP16 accuracy without any gradient computation. LLM.int8 (Dettmers 2022) handles activation outliers via mixed precision: large outlier rows in the activation matrix are kept in FP16 and multiplied separately, while the majority of the matrix is quantized to INT8.</p>
+<pre><code class="language-python"># Requires: pip install bitsandbytes transformers
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+
+def load_model_4bit(model_name: str = 'facebook/opt-125m'):
+    &quot;&quot;&quot;Load a causal LM in 4-bit using bitsandbytes NF4 quantization.&quot;&quot;&quot;
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type='nf4',         # NormalFloat4 — optimal for normally distributed weights
+        bnb_4bit_compute_dtype=torch.float16,  # activations in FP16
+        bnb_4bit_use_double_quant=True,    # quantize the quantization constants too
+    )
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        quantization_config=bnb_config,
+        device_map='auto',
+    )
+    # Report memory
+    mem_mb = sum(p.numel() * p.element_size() for p in model.parameters()) / 1024**2
+    n_params = sum(p.numel() for p in model.parameters()) / 1e6
+    print(f'Model: {model_name}  Params: {n_params:.1f}M  Approx memory: {mem_mb:.0f} MB')
+    print(f'Quantization: W4A16 (NF4 weights, FP16 activations)')
+    return model, tokenizer
+
+# Expected output for OPT-125M:
+# Params: 125.0M  Approx memory: ~63 MB (vs 477 MB FP32)
+print('Load with: model, tok = load_model_4bit(&quot;facebook/opt-125m&quot;)')
+</code></pre>
+<blockquote>
+<p><strong>NF4 vs INT4 for LLM Weights</strong>: NormalFloat4 (NF4) is a data type optimized for normally distributed weights: the 16 quantization levels are spaced at equal quantiles of the standard normal distribution, not uniformly. Since pre-trained LLM weights are approximately normally distributed, NF4 uses its 4 bits more efficiently than uniform INT4, typically recovering 0.1–0.5 perplexity points at the same bit-width.</p>
+</blockquote>
+<h2>Quantization Format Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Format</th>
+<th>Memory (7B model)</th>
+<th>Inference Speedup</th>
+<th>Accuracy Loss</th>
+<th>PTQ vs QAT</th>
+<th>Best Use Case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FP32</td>
+<td>28 GB</td>
+<td>1× baseline</td>
+<td>None</td>
+<td>N/A</td>
+<td>Training, research</td>
+</tr>
+<tr>
+<td>FP16 / BF16</td>
+<td>14 GB</td>
+<td>1.5–2× (Tensor Core)</td>
+<td>Negligible</td>
+<td>N/A</td>
+<td>Training + inference</td>
+</tr>
+<tr>
+<td>INT8 (W8A8)</td>
+<td>7 GB</td>
+<td>2–3× (INT8 GEMM)</td>
+<td>-0.1 to -0.5%</td>
+<td>PTQ with calibration</td>
+<td>Production inference, CNNs</td>
+</tr>
+<tr>
+<td>W8A16 (LLM.int8)</td>
+<td>7 GB</td>
+<td>1.5× (bandwidth bound)</td>
+<td>-0.1%</td>
+<td>PTQ — outlier decompose</td>
+<td>LLM inference, outlier-heavy</td>
+</tr>
+<tr>
+<td>W4A16 (GPTQ/NF4)</td>
+<td>3.5 GB</td>
+<td>2–4× (bandwidth)</td>
+<td>-0.5 to -1%</td>
+<td>PTQ — OBS framework</td>
+<td>LLM on consumer GPU</td>
+</tr>
+</tbody>
+</table>
+<h2>SmoothQuant — Migrating Quantization Difficulty</h2>
+<p>LLM activations contain outlier channels: a small fraction of channels (0.1%) have values 100× larger than the rest. These outliers inflate the quantization scale, wasting most of the INT8 range on the few extreme values. SmoothQuant (Xiao et al. 2023) migrates the quantization difficulty from activations to weights: for each channel j, divide activation by a per-channel smoothing factor s_j and multiply the corresponding weight column by s_j. Activations become easier to quantize (smaller range) while weights absorb the scaling (weights are already easy to quantize because they do not have per-token outliers).</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def smoothquant_scale(activation_max: torch.Tensor,
+                      weight_max: torch.Tensor,
+                      alpha: float = 0.5) -&gt; torch.Tensor:
+    &quot;&quot;&quot;
+    Compute per-channel smoothing factor s for SmoothQuant.
+    s_j = max(|X_j|)^alpha / max(|W_j|)^(1-alpha)
+    alpha=0.5: equal migration; alpha→1: push all difficulty to weights.
+    activation_max: (C_in,) per-channel max activation magnitude
+    weight_max:     (C_in,) per-channel max weight magnitude
+    &quot;&quot;&quot;
+    s = (activation_max ** alpha) / (weight_max ** (1 - alpha) + 1e-8)
+    return s
+
+def apply_smoothquant(linear: nn.Linear,
+                      calibration_acts: torch.Tensor,
+                      alpha: float = 0.5):
+    &quot;&quot;&quot;
+    Apply SmoothQuant to a Linear layer.
+    calibration_acts: (N, C_in) — batch of activations for calibration.
+    &quot;&quot;&quot;
+    act_max = calibration_acts.abs().amax(dim=0)  # (C_in,)
+    W = linear.weight.data  # (C_out, C_in)
+    w_max = W.abs().amax(dim=0)  # (C_in,) per input channel
+
+    s = smoothquant_scale(act_max, w_max, alpha)
+    # Modify weight: W' = W * diag(s)
+    linear.weight.data = W * s.unsqueeze(0)
+    # The caller must divide activations by s before passing to this layer
+    print(f'Smoothing factors — min: {s.min():.3f}  max: {s.max():.3f}  mean: {s.mean():.3f}')
+    return s  # caller divides activations by s
+
+# Demo
+linear = nn.Linear(128, 64)
+calib_acts = torch.randn(64, 128)
+calib_acts[:, 3] *= 50   # simulate outlier channel 3
+calib_acts[:, 71] *= 80  # simulate outlier channel 71
+s = apply_smoothquant(linear, calib_acts, alpha=0.5)
+print(f'Outlier channels scaled down: ch3={s[3]:.2f}  ch71={s[71]:.2f}')
+</code></pre>
+<p>GPTQ quantizes layers sequentially from first to last. For each layer, it constructs the Hessian H = 2XX^T (where X is the layer's input activations over the calibration set) and minimizes the layer output reconstruction error ‖WX - W_qX‖² under the INT4 quantization constraint. The Optimal Brain Surgeon update adjusts remaining unquantized weights to compensate for the error introduced by quantizing the current weight. This per-layer sequential quantization takes 30–60 minutes for a 7B model on a single A100.</p>
+<ul>
+<li>PTQ calibration set: 512–1024 random samples are sufficient; more does not significantly improve accuracy.</li>
+<li>Per-channel scale: always use per-channel (not per-tensor) quantization for weights — 1–2% accuracy difference.</li>
+<li>Activation quantization: harder than weight quantization due to dynamic range variation across tokens.</li>
+<li>INT8 vs INT4 for LLMs: INT8 (W8A8) gives near-lossless quality; INT4 (W4A16) trades ~0.5 perplexity for 2× memory.</li>
+<li>Group quantization: W4 with group size 128 (one scale per 128 weights) improves accuracy vs per-tensor at low overhead.</li>
+<li>Double quantization (QLoRA): quantize the quantization scales themselves to INT8, saving additional 0.37 bits per weight.</li>
+</ul>
+<p>Mixed-precision quantization assigns different bit-widths to different layers based on their sensitivity. Sensitivity is measured by the Hessian trace of the loss with respect to each layer's weights: layers with high Hessian trace are sensitive (small weight perturbations cause large loss changes) and should use higher precision. Layers with low Hessian trace can use INT4 safely. HAQ (Hardware-Aware Mixed-Precision Quantization) uses reinforcement learning to search for bit-width assignments under a hardware constraint, achieving better accuracy-memory trade-offs than uniform quantization at the same average bit-width.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

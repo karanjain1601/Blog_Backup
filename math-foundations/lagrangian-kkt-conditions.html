@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lagrangian Optimization and KKT Conditions | Notes Backup</title>
+  <meta name="description" content="Derivation of Lagrangian mechanics for equality and inequality constraints, KKT conditions with complementary slackness, strong duality via Slater&#x27;s condition, SVM dual derivation, and constrained policy optimization in RL." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Lagrangian Optimization and KKT Conditions</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Derivation of Lagrangian mechanics for equality and inequality constraints, KKT conditions with complementary slackness, strong duality via Slater&#x27;s condition, SVM dual derivation, and constrained policy optimization in RL.</li><li><strong>topic:</strong> math-foundations</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Lagrangian Optimization and KKT Conditions</h1>
+<p>Constrained optimization appears throughout machine learning in forms that are not always recognizable as such. Support Vector Machines minimize weight norm subject to margin constraints. LASSO regression minimizes squared error subject to an L1 norm budget. PPO in reinforcement learning constrains the KL divergence between new and old policy. Fairness-aware models constrain the performance gap between demographic groups. In all these cases, the Lagrangian framework provides a unified mathematical language: replace the constrained problem with an unconstrained Lagrangian that penalizes constraint violations, then derive optimality conditions (the KKT conditions) that must hold at the solution. This note builds from the geometric intuition of Lagrange multipliers through KKT complementary slackness, strong duality via Slater's condition, and the SVM dual derivation that enables the kernel trick.</p>
+<h2>Equality Constraints: Lagrange Multipliers</h2>
+<p>Consider: minimize f(x) subject to g(x) = 0. The geometric insight: at the constrained optimum x<em>, the gradient ∇f(x</em>) must be parallel to ∇g(x<em>). If they were not parallel, we could move along the constraint surface (in the direction perpendicular to ∇g, staying on the constraint) and decrease f — contradicting optimality. This parallelism condition is formalized by the Lagrangian: L(x, λ) = f(x) + λg(x). The stationarity condition ∇_x L = 0 gives ∇f + λ∇g = 0, i.e., ∇f = −λ∇g (gradients are parallel with ratio −λ). Combined with feasibility g(x</em>) = 0, these are necessary and sufficient conditions for a local minimum (for smooth equality-constrained convex problems: sufficient for global minimum). The multiplier λ has an economic interpretation: λ = −∂f*/∂c where c is the right-hand side of g(x) = c. A positive λ means tightening the constraint increases the objective; a negative λ means loosening it does.</p>
+<pre><code class="language-python">import numpy as np
+from scipy.optimize import minimize
+
+# Constrained QP: minimize x^2 + y^2 subject to x + y = 1
+# Analytical solution: x* = y* = 0.5, lambda* = -1
+def objective(xy): return xy[0]**2 + xy[1]**2
+def constraint_eq(xy): return xy[0] + xy[1] - 1.0
+
+# Solve with scipy
+result = minimize(
+    objective,
+    x0=np.array([0.0, 0.0]),
+    method='SLSQP',
+    constraints={'type': 'eq', 'fun': constraint_eq}
+)
+print(&quot;Scipy solution x*:&quot;, result.x.round(6))
+print(&quot;Objective at x*:&quot;, round(result.fun, 6))
+
+# Verify KKT: stationarity ∇f + λ∇g = 0
+x_star = result.x
+gf = np.array([2 * x_star[0], 2 * x_star[1]])  # ∇f
+gg = np.array([1.0, 1.0])                         # ∇g
+# lambda* such that gf + lambda * gg = 0
+lambda_star = -gf[0] / gg[0]
+print(f&quot;lambda* = {lambda_star:.6f}&quot;)
+print(&quot;Stationarity satisfied:&quot;, np.allclose(gf + lambda_star * gg, 0))
+print(&quot;Feasibility satisfied:&quot;, np.isclose(constraint_eq(x_star), 0))
+print(&quot;Analytical x*: [0.5, 0.5], matches:&quot;, np.allclose(x_star, [0.5, 0.5]))
+</code></pre>
+<h2>Inequality Constraints and KKT Conditions</h2>
+<p>For the general constrained problem — minimize f(x) subject to hⱼ(x) ≤ 0 for j=1..m and gᵢ(x) = 0 for i=1..p — the Lagrangian is L(x, λ, μ) = f(x) + Σλᵢgᵢ(x) + Σμⱼhⱼ(x). The KKT conditions are four sets of requirements that must hold at any local minimum (given constraint qualifications): (1) Stationarity: ∇_x L = ∇f + Σλᵢ∇gᵢ + Σμⱼ∇hⱼ = 0; (2) Primal feasibility: hⱼ(x<em>) ≤ 0 and gᵢ(x</em>) = 0 for all j, i; (3) Dual feasibility: μⱼ ≥ 0 for all j (multipliers for inequality constraints must be non-negative); (4) Complementary slackness: μⱼhⱼ(x<em>) = 0 for all j. Complementary slackness is the key structural insight: either the inequality constraint is inactive (hⱼ(x</em>) &lt; 0, strict slack) and its multiplier is zero, OR the constraint is active (hⱼ(x*) = 0, binding) and its multiplier can be nonzero. This means only the active constraints (the binding ones) influence the optimal point via their multipliers. For convex problems, KKT conditions are both necessary and sufficient for global optimality.</p>
+<pre><code class="language-python">import numpy as np
+from scipy.optimize import minimize, LinearConstraint
+
+# QP: minimize (x-3)^2 + (y-4)^2 subject to x &lt;= 2, y &lt;= 3, x &gt;= 0, y &gt;= 0
+# Rewrite as h1: x-2 &lt;= 0, h2: y-3 &lt;= 0, h3: -x &lt;= 0, h4: -y &lt;= 0
+def obj(xy): return (xy[0]-3)**2 + (xy[1]-4)**2
+constraints = [
+    {'type': 'ineq', 'fun': lambda xy: 2 - xy[0]},  # x &lt;= 2, as 2-x &gt;= 0
+    {'type': 'ineq', 'fun': lambda xy: 3 - xy[1]},  # y &lt;= 3
+    {'type': 'ineq', 'fun': lambda xy: xy[0]},       # x &gt;= 0
+    {'type': 'ineq', 'fun': lambda xy: xy[1]},       # y &gt;= 0
+]
+res = minimize(obj, [1.0, 1.0], method='SLSQP', constraints=constraints)
+x_star = res.x
+print(&quot;Solution x*:&quot;, x_star.round(4), &quot;(expected: [2, 3])&quot;)
+
+# Verify KKT manually
+gf = np.array([2*(x_star[0]-3), 2*(x_star[1]-4)])
+h_vals = [2-x_star[0], 3-x_star[1], x_star[0], x_star[1]]
+print(&quot;Constraint values (should be &gt;= 0):&quot;, [round(h, 4) for h in h_vals])
+print(&quot;Active constraints (h=0):&quot;, [i for i, h in enumerate(h_vals) if abs(h) &lt; 1e-5])
+print(&quot;Primal feasibility:&quot;, all(h &gt;= -1e-6 for h in h_vals))
+print(&quot;Gradient ∇f at x*:&quot;, gf.round(4), &quot;(should be non-zero, offset by active constraints)&quot;)
+</code></pre>
+<h2>Strong Duality and Slater's Condition</h2>
+<p>The Lagrangian dual function g(λ, μ) = min_x L(x, λ, μ) is always concave in (λ, μ) (as a pointwise minimum of affine functions). Weak duality states g(λ, μ) ≤ f(x<em>) always — the dual objective is always a lower bound on the primal optimum. The duality gap is f(x</em>) − g(λ<em>, μ</em>) ≥ 0. Strong duality (zero duality gap) means g(λ<em>, μ</em>) = f(x*) — the dual can be solved to recover the primal solution. Slater's condition: for a convex primal problem, strong duality holds if there exists a strictly feasible point x̄ with hⱼ(x̄) &lt; 0 (strictly) for all j. Slater's condition is satisfied by almost all well-posed convex ML problems (it fails only on degenerate constraints). When strong duality holds, we can solve the dual (often a simpler problem) instead of the primal. The dual problem is always convex (we are maximizing a concave function), even if the primal was non-convex — this is how SVM's non-linear formulations become tractable via the kernel trick.</p>
+<h2>SVM Dual Derivation</h2>
+<p>SVM primal: minimize ½‖w‖² subject to yᵢ(wᵀxᵢ + b) ≥ 1 for all i (equivalently, hᵢ(w,b) = 1 − yᵢ(wᵀxᵢ+b) ≤ 0). Lagrangian: L = ½‖w‖² − Σαᵢ[yᵢ(wᵀxᵢ+b) − 1] with αᵢ ≥ 0. KKT stationarity with respect to w: ∂L/∂w = w − ΣαᵢyᵢXᵢ = 0, so w<em> = Σαᵢyᵢxᵢ. With respect to b: ∂L/∂b = −Σαᵢyᵢ = 0, so Σαᵢyᵢ = 0. Substituting w</em> back into L and simplifying gives the dual: maximize D(α) = Σαᵢ − ½Σᵢⱼ αᵢαⱼyᵢyⱼxᵢᵀxⱼ subject to αᵢ ≥ 0 and Σαᵢyᵢ = 0. This is a QP in n variables (training samples) instead of d variables (features). When n &lt; d, the dual is cheaper; for n &gt; d, the primal wins. More importantly, xᵢᵀxⱼ appears only as an inner product, which can be replaced by any kernel K(xᵢ, xⱼ) = φ(xᵢ)ᵀφ(xⱼ) — allowing non-linear decision boundaries without explicitly computing φ(x). By KKT complementary slackness: αᵢ·[yᵢ(wᵀxᵢ+b)−1] = 0, so either αᵢ = 0 (point is not a support vector, not on the margin) or yᵢ(wᵀxᵢ+b) = 1 (point is on the margin, is a support vector).</p>
+<pre><code class="language-python">import numpy as np
+from scipy.optimize import minimize
+from sklearn.svm import SVC
+from sklearn.datasets import make_blobs
+
+# Generate linearly separable data
+np.random.seed(42)
+X, y_raw = make_blobs(n_samples=30, centers=2, random_state=0)
+y = 2 * y_raw - 1  # convert to {-1, +1}
+n = len(y)
+
+# SVM dual: maximize Σαᵢ - ½Σᵢⱼ αᵢαⱼyᵢyⱼxᵢᵀxⱼ
+K = (y[:, None] * X) @ (y[:, None] * X).T  # Gram matrix with labels
+def neg_dual(alpha): return 0.5 * alpha @ K @ alpha - alpha.sum()
+def neg_dual_grad(alpha): return K @ alpha - np.ones(n)
+
+result = minimize(
+    neg_dual, x0=np.zeros(n), jac=neg_dual_grad, method='SLSQP',
+    bounds=[(0, None)] * n,
+    constraints={'type': 'eq', 'fun': lambda a: (a * y).sum()}
+)
+alpha = result.x
+w = (alpha * y) @ X
+sv_mask = alpha &gt; 1e-4
+print(f&quot;Support vectors: {sv_mask.sum()} / {n}&quot;)
+print(&quot;w (dual):&quot;, w.round(4))
+sklearn_svm = SVC(kernel='linear', C=1e6)
+sklearn_svm.fit(X, y_raw)
+print(&quot;w (sklearn):&quot;, sklearn_svm.coef_.round(4))
+print(&quot;Complementary slackness check:&quot;)
+margins = y * (X @ w)
+print(&quot;  α=0 points on margin?&quot;, all(margins[~sv_mask] &gt;= 0.99))
+</code></pre>
+<h2>ML Connections: Constrained RL and Fair ML</h2>
+<p>KKT conditions and the Lagrangian framework appear in modern ML beyond SVM. In reinforcement learning: PPO (Proximal Policy Optimization) enforces a trust region via a KL penalty (soft constraint); CPO (Constrained Policy Optimization, Achiam et al. 2017) formulates safety RL as minimize −E[reward] subject to E[cost] ≤ d, solved via KKT with the Lagrange multiplier updated by dual gradient ascent: λ ← max(0, λ + α(E[cost] − d)). The multiplier λ becomes the safety penalty coefficient, automatically adapting to constraint violations. In fair ML: demographic parity constraints require equal accuracy across groups, formulated as minimize L(θ) subject to |acc_group1 − acc_group2| ≤ ε; solved via augmented Lagrangian or projected gradient descent. LASSO as a constrained problem: the standard Lagrangian formulation minimize ‖Xβ−y‖² + λ‖β‖₁ corresponds exactly to minimize ‖Xβ−y‖² subject to ‖β‖₁ ≤ t, where the multiplier λ is the dual variable for the L1 budget constraint t. Different values of λ trace the LASSO regularization path.</p>
+<pre><code class="language-python">import numpy as np
+
+def dual_gradient_ascent(f_primal, grad_f, constraint, grad_constraint,
+                          x0, lr_primal=0.01, lr_dual=0.1, steps=200):
+    &quot;&quot;&quot;Primal-dual optimization: min f(x) s.t. c(x) &lt;= 0.&quot;&quot;&quot;
+    x = x0.copy()
+    lam = 0.0  # dual variable (multiplier)
+    history = []
+    for step in range(steps):
+        # Primal step: gradient descent on Lagrangian L = f(x) + lambda * c(x)
+        L_grad = grad_f(x) + lam * grad_constraint(x)
+        x = x - lr_primal * L_grad
+        # Dual step: gradient ascent on dual (maximize over lambda &gt;= 0)
+        constraint_val = constraint(x)
+        lam = max(0.0, lam + lr_dual * constraint_val)
+        history.append({'step': step, 'f': f_primal(x),
+                        'c': constraint_val, 'lambda': lam})
+    return x, lam, history
+
+# Example: minimize x^2 + y^2 subject to x + y &gt;= 2 (rewritten as 2-x-y &lt;= 0)
+f = lambda xy: xy[0]**2 + xy[1]**2
+grad_f = lambda xy: 2 * xy
+c = lambda xy: 2 - xy[0] - xy[1]   # constraint: 2 - x - y &lt;= 0
+grad_c = lambda xy: np.array([-1.0, -1.0])
+
+np.random.seed(0)
+x_sol, lam_sol, hist = dual_gradient_ascent(
+    f, grad_f, c, grad_c, x0=np.array([0.1, 0.1]))
+print(f&quot;Primal solution x*: {x_sol.round(4)} (expected [1, 1])&quot;)
+print(f&quot;Lambda* = {lam_sol:.4f} (expected 2.0, marginal cost of constraint)&quot;)
+print(f&quot;Constraint satisfied: {c(x_sol):.4f} &lt;= 0&quot;)
+print(f&quot;Final objective: {f(x_sol):.4f} (expected 2.0)&quot;)
+</code></pre>
+<h2>Implementation Pitfalls</h2>
+<p>Critical pitfalls in constrained optimization for ML. First, confusing necessary and sufficient conditions: KKT conditions are necessary for local minima under constraint qualifications (like LICQ: Linear Independence Constraint Qualification) but only sufficient for convex problems. For non-convex problems (deep RL constraints, non-linear fairness constraints), a KKT point may be a saddle of the Lagrangian rather than a minimum. Second, the dual gradient ascent step size (lr_dual) must be chosen carefully: too large causes oscillations in the multiplier λ without convergence; too small converges extremely slowly to the feasible region. The dual step size is typically set 10-100× smaller than the primal step size. Third, for equality constraints, multipliers are unconstrained (can be positive or negative); for inequality constraints, multipliers must be non-negative — enforcing this via max(0, λ + α·c(x)) is the projected dual update. Forgetting the projection gives incorrect multipliers and invalid constraint handling.</p>
+<h2>Practical Guidance</h2>
+<p>Practical guidelines for constrained optimization in ML. For convex problems (SVM, L1 regression, linear fairness constraints): use established solvers (scipy.optimize.minimize with SLSQP, CVXPY, or specialized QP solvers) — they implement interior-point methods with proven convergence. For constrained RL (safety constraints, KL trust regions): use dual gradient ascent with a separate dual learning rate, clip the dual variable to prevent it from growing unboundedly (max_lambda hyperparameter), and monitor both the primal objective and constraint violation separately in training logs. For LASSO and group-sparse regularization: use the Lagrangian form with λ as a hyperparameter (equivalent to the constrained form by strong duality) rather than the constrained form, as coordinate descent and proximal algorithms are more efficient for L1. Always verify Slater's condition before assuming strong duality: check that a strictly feasible point exists; if the constraint is an equality (hⱼ = 0), Slater does not apply and additional conditions are needed.</p>
+<blockquote>
+<p><strong>Warning</strong>: KKT conditions are necessary but NOT sufficient for non-convex problems. For a non-convex objective with constraints, a point satisfying KKT could be a saddle point of the Lagrangian, a local minimum that is not global, or even a local maximum of the Lagrangian. Always verify second-order sufficiency conditions: the Lagrangian Hessian ∇²L must be positive semidefinite on the tangent space of active constraints. For RL and fairness constraints (typically non-convex), treat dual gradient ascent as a heuristic and monitor constraint satisfaction empirically rather than relying on theoretical guarantees.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Handles Equality</th>
+<th>Handles Inequality</th>
+<th>Convergence</th>
+<th>ML Use Case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Lagrange multipliers</td>
+<td>Yes</td>
+<td>No</td>
+<td>Newton rate (local)</td>
+<td>SVM, physics constraints</td>
+</tr>
+<tr>
+<td>KKT + Newton</td>
+<td>Yes</td>
+<td>Yes</td>
+<td>Quadratic (local)</td>
+<td>Small QPs, SVM</td>
+</tr>
+<tr>
+<td>Projected GD</td>
+<td>Via projection</td>
+<td>Yes (simple sets)</td>
+<td>O(1/t)</td>
+<td>L2-ball constraints, simplex</td>
+</tr>
+<tr>
+<td>Augmented Lagrangian</td>
+<td>Yes</td>
+<td>Yes</td>
+<td>Superlinear</td>
+<td>Fairness ML, ADMM</td>
+</tr>
+<tr>
+<td>Interior point</td>
+<td>Yes</td>
+<td>Yes (strict ineq)</td>
+<td>Polynomial</td>
+<td>Large-scale QP (SVM with soft margin)</td>
+</tr>
+<tr>
+<td>Penalty method</td>
+<td>Yes (approx)</td>
+<td>Yes (approx)</td>
+<td>Depends on penalty</td>
+<td>Quick prototypes, PPO KL penalty</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>Key Takeaways</h2>
+<ul>
+<li>Lagrange multipliers convert equality-constrained problems to unconstrained ones; the optimality condition ∇f = −λ∇g captures gradient alignment at the constrained optimum.</li>
+<li>KKT conditions generalize Lagrange multipliers to inequality constraints: stationarity, primal feasibility, dual feasibility (μⱼ ≥ 0), and complementary slackness (μⱼhⱼ = 0).</li>
+<li>Complementary slackness means only active constraints (hⱼ = 0) have nonzero multipliers — inactive constraints are irrelevant at the optimum.</li>
+<li>Slater's condition (strict interior point exists) guarantees strong duality for convex problems: the dual objective equals the primal minimum, enabling dual solution methods.</li>
+<li>SVM dual replaces d-dimensional primal (minimize over weights) with n-dimensional dual (maximize over α per training sample), enabling the kernel trick via inner product replacement.</li>
+<li>Constrained RL (CPO, PPO) and fair ML both use dual gradient ascent to enforce inequality constraints: update multiplier by λ ← max(0, λ + α·c(x)) at each step.</li>
+<li>For non-convex problems, KKT conditions are necessary but not sufficient — always verify second-order conditions and monitor constraint satisfaction empirically.</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

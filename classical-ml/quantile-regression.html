@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Quantile Regression — Conditional Quantile Estimation | Notes Backup</title>
+  <meta name="description" content="Derive quantile regression via the pinball loss, estimate simultaneous prediction intervals at multiple quantiles, address the quantile crossing problem with isotonic regression, and apply conformal prediction for distribution-free coverage guarantees." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Quantile Regression — Conditional Quantile Estimation</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Derive quantile regression via the pinball loss, estimate simultaneous prediction intervals at multiple quantiles, address the quantile crossing problem with isotonic regression, and apply conformal prediction for distribution-free coverage guarantees.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Quantile Regression — Conditional Quantile Estimation</h1>
+<p>Ordinary least squares estimates the conditional mean E[Y|X=x]. Quantile regression estimates any conditional quantile Q_τ(Y|X=x) for τ ∈ (0,1) — for example, the 90th percentile of house prices given square footage, or the 5th percentile of daily returns for VaR. This provides a complete picture of the conditional distribution: how does the spread, skewness, and tail behaviour change with X? Applications include demand forecasting (upper quantile for inventory planning), risk management (Value-at-Risk), and uncertainty quantification for machine learning predictions.</p>
+<h2>The Pinball (Tilted L1) Loss</h2>
+<p>Quantile regression minimises the pinball loss: ρ_τ(u) = u·τ if u ≥ 0 (underprediction), u·(τ-1) if u &lt; 0 (overprediction). For τ=0.9, underprediction is penalised 9x more than overprediction — this asymmetry forces the optimal prediction to be the 90th percentile. At the optimum, exactly τ·n of the residuals are positive and (1-τ)·n are negative: exactly the definition of the τ-th sample quantile. For τ=0.5, the loss reduces to |u|/2, the L1 loss — so median regression is a special case. Unlike OLS, pinball loss is robust to outliers on the heavy tail.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.datasets import make_regression
+from sklearn.model_selection import train_test_split
+
+def pinball_loss(y_true, y_pred, tau):
+    residuals = y_true - y_pred
+    return np.where(residuals &gt;= 0, tau * residuals, (tau - 1) * residuals).mean()
+
+class QuantileRegressionGD:
+    &quot;&quot;&quot;Quantile regression via subgradient descent on pinball loss.&quot;&quot;&quot;
+    def __init__(self, tau=0.5, lr=0.01, n_iter=2000):
+        self.tau = tau
+        self.lr = lr
+        self.n_iter = n_iter
+
+    def fit(self, X, y):
+        n, p = X.shape
+        X_b = np.hstack([np.ones((n, 1)), X])
+        self.w_ = np.zeros(X_b.shape[1])
+        for _ in range(self.n_iter):
+            resid = y - X_b @ self.w_
+            subgrad = np.where(resid &gt;= 0, -self.tau, -(self.tau - 1))
+            self.w_ -= self.lr * (X_b.T @ subgrad) / n
+        return self
+
+    def predict(self, X):
+        X_b = np.hstack([np.ones((len(X), 1)), X])
+        return X_b @ self.w_
+
+np.random.seed(42)
+X, y = make_regression(n_samples=300, n_features=3, noise=20.0, random_state=42)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.25, random_state=42)
+
+for tau in [0.1, 0.5, 0.9]:
+    qr = QuantileRegressionGD(tau=tau, lr=0.005, n_iter=3000).fit(X_tr, y_tr)
+    pbl = pinball_loss(y_te, qr.predict(X_te), tau)
+    coverage = (y_te &lt; qr.predict(X_te)).mean()
+    print(f'tau={tau}: pinball_loss={pbl:.3f}, empirical_coverage={coverage:.3f} (target={tau})')
+</code></pre>
+<h2>Sklearn QuantileRegressor and Gradient Boosting Quantiles</h2>
+<p>sklearn's QuantileRegressor (added in 1.0) solves quantile regression exactly as a linear program using interior point methods — far more numerically stable than gradient descent. The alpha parameter adds L1 regularisation on the weights. For nonlinear quantile regression, GradientBoostingRegressor with loss='quantile', alpha=tau fits gradient boosted trees targeting the pinball loss, enabling flexible nonlinear conditional quantile estimation. Simultaneous quantile regression fits multiple τ values, often with a single shared model backbone, to produce consistent prediction intervals.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.linear_model import QuantileRegressor
+from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.model_selection import train_test_split
+
+np.random.seed(42)
+n = 500
+X_1d = np.random.uniform(0, 10, n).reshape(-1, 1)
+# Heteroscedastic: variance increases with X
+y = 2 * X_1d.ravel() + np.random.randn(n) * (0.5 + 0.3 * X_1d.ravel())
+X_tr, X_te, y_tr, y_te = train_test_split(X_1d, y, test_size=0.25, random_state=42)
+
+models = {}
+for tau in [0.1, 0.5, 0.9]:
+    qr = QuantileRegressor(quantile=tau, alpha=0.1, solver='highs')
+    qr.fit(X_tr, y_tr)
+    models[tau] = qr
+    coverage = (y_te &lt; qr.predict(X_te)).mean()
+    print(f'Linear QR  tau={tau}: coverage={coverage:.3f} (target {tau:.1f})')
+
+# Gradient boosting for nonlinear quantile estimation
+gb90 = GradientBoostingRegressor(loss='quantile', alpha=0.9, n_estimators=200, random_state=42)
+gb90.fit(X_tr, y_tr)
+print(f'GB QR  tau=0.9: coverage={(y_te &lt; gb90.predict(X_te)).mean():.3f}')
+
+lower = models[0.1].predict(X_te)
+upper = models[0.9].predict(X_te)
+print(f'80% PI coverage: {((y_te &gt;= lower) &amp; (y_te &lt;= upper)).mean():.3f} (target 0.80)')
+</code></pre>
+<h2>Quantile Crossing and Isotonic Regression Fix</h2>
+<p>When fitting quantile models at multiple τ values independently, their predictions can cross: the 90th percentile prediction can be lower than the 80th percentile for some x values. This is statistically incoherent — quantile functions Q_τ(Y|X=x) must be non-decreasing in τ for each x. The standard fix is isotonic regression: after obtaining raw predictions at all τ values for each test point, apply isotonic regression across τ to enforce monotonicity. This is a post-processing step with O(K log K) cost per sample where K is the number of quantile levels.</p>
+<blockquote>
+<p><strong>Quantile Crossing is a Silent Bug</strong>: Crossed quantiles (e.g., Q_90 &lt; Q_80 for some x) produce prediction intervals with negative width — a silent bug that invalidates all downstream calculations. Always check for crossings after fitting multiple quantiles independently. Apply isotonic regression or use non-crossing quantile regression variants (joint optimisation with ordering constraints). sklearn's QuantileRegressor is particularly prone to crossing for small datasets or high regularisation.</p>
+</blockquote>
+<pre><code class="language-python">import numpy as np
+from sklearn.linear_model import QuantileRegressor
+from sklearn.isotonic import IsotonicRegression
+from sklearn.model_selection import train_test_split
+
+np.random.seed(42)
+n = 300
+X = np.random.uniform(0, 10, n).reshape(-1, 1)
+y = 3 * X.ravel() + np.random.randn(n) * (1 + 0.5 * X.ravel())
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.3, random_state=42)
+
+taus = np.linspace(0.05, 0.95, 19)
+preds_raw = np.zeros((len(X_te), len(taus)))
+
+for j, tau in enumerate(taus):
+    qr = QuantileRegressor(quantile=tau, alpha=0.01, solver='highs')
+    qr.fit(X_tr, y_tr)
+    preds_raw[:, j] = qr.predict(X_te)
+
+crossings_before = np.sum(np.diff(preds_raw, axis=1) &lt; 0)
+print(f'Quantile crossings before isotonic: {crossings_before}')
+
+# Apply isotonic regression per sample to enforce tau-monotonicity
+preds_iso = np.zeros_like(preds_raw)
+iso = IsotonicRegression(increasing=True)
+for i in range(len(X_te)):
+    preds_iso[i] = iso.fit_transform(taus, preds_raw[i])
+
+crossings_after = np.sum(np.diff(preds_iso, axis=1) &lt; 0)
+print(f'Quantile crossings after isotonic:  {crossings_after}')
+</code></pre>
+<h2>Conformal Quantile Regression for Guaranteed Coverage</h2>
+<p>Standard quantile regression targets Q_τ(Y|X=x) but provides no finite-sample coverage guarantee — coverage is only approximate, especially with limited data or model misspecification. Conformal Quantile Regression (CQR, Romano et al. 2019) provides a distribution-free, finite-sample guarantee: the interval [ŷ_lo - q̂, ŷ_hi + q̂] covers the true y with probability exactly ≥ 1-α, regardless of the underlying model or distribution. The scalar q̂ is computed on a held-out calibration set as the (1-α)(1+1/n_cal)-th quantile of the non-conformity scores max(ŷ_lo - y, y - ŷ_hi).</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.linear_model import QuantileRegressor
+from sklearn.model_selection import train_test_split
+
+np.random.seed(42)
+n = 1000
+X = np.random.uniform(0, 10, n).reshape(-1, 1)
+y = 2 * X.ravel() + np.sin(X.ravel()) + np.random.randn(n) * (0.5 + 0.4 * X.ravel())
+
+X_tr, X_rest, y_tr, y_rest = train_test_split(X, y, test_size=0.4, random_state=42)
+X_cal, X_te, y_cal, y_te = train_test_split(X_rest, y_rest, test_size=0.5, random_state=42)
+
+alpha_level = 0.1  # target 90% coverage
+tau_lo, tau_hi = alpha_level / 2, 1 - alpha_level / 2
+
+qr_lo = QuantileRegressor(quantile=tau_lo, alpha=0.01, solver='highs').fit(X_tr, y_tr)
+qr_hi = QuantileRegressor(quantile=tau_hi, alpha=0.01, solver='highs').fit(X_tr, y_tr)
+
+# Non-conformity scores on calibration set
+scores = np.maximum(qr_lo.predict(X_cal) - y_cal,
+                     y_cal - qr_hi.predict(X_cal))
+
+# Conformal quantile threshold
+n_cal = len(y_cal)
+q_hat = np.quantile(scores, np.ceil((1-alpha_level)*(n_cal+1))/n_cal)
+
+# Test coverage with conformal adjustment
+y_lo = qr_lo.predict(X_te) - q_hat
+y_hi = qr_hi.predict(X_te) + q_hat
+coverage = ((y_te &gt;= y_lo) &amp; (y_te &lt;= y_hi)).mean()
+width    = (y_hi - y_lo).mean()
+print(f'Target coverage: {1-alpha_level:.2f}')
+print(f'CQR coverage:    {coverage:.4f}  (guaranteed &gt;= {1-alpha_level})')
+print(f'Mean PI width:   {width:.3f}')
+print(f'Conformal q_hat: {q_hat:.3f}')
+</code></pre>
+<h2>Applications and Practical Notes</h2>
+<p>Quantile regression is essential in demand forecasting: the 80th percentile prediction determines safety stock in inventory management. In financial risk management, the 5th percentile of portfolio return distribution is the Value-at-Risk (VaR). For LLM output uncertainty, quantile regression over token-level uncertainty scores produces calibrated prediction bands without a Bayesian prior. A key advantage over mean regression: quantile regression is robust to outliers and skewed distributions, since the pinball loss is bounded by the outlier's distance to the quantile level, not its squared distance.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Coverage Guarantee</th>
+<th>Computation</th>
+<th>Assumption</th>
+<th>Best Use Case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Quantile Regression (linear)</td>
+<td>Approximate (large n)</td>
+<td>LP solver, fast</td>
+<td>Linear conditional quantile</td>
+<td>Interpretable quantile estimates, feature effects</td>
+</tr>
+<tr>
+<td>GB Quantile Regression</td>
+<td>Approximate</td>
+<td>Moderate (boosting)</td>
+<td>Smooth conditional quantile</td>
+<td>Nonlinear heteroscedastic data</td>
+</tr>
+<tr>
+<td>Conformal QR (CQR)</td>
+<td>Exact finite-sample (marginal)</td>
+<td>Requires calibration set</td>
+<td>Exchangeable (iid) data</td>
+<td>When coverage guarantee is legally or practically required</td>
+</tr>
+<tr>
+<td>Bayesian prediction interval</td>
+<td>Approximate (posterior)</td>
+<td>MCMC or VI</td>
+<td>Prior + likelihood correct</td>
+<td>Full uncertainty decomposition, small data</td>
+</tr>
+<tr>
+<td>Bootstrap PI</td>
+<td>Approximate</td>
+<td>B model refits</td>
+<td>Asymptotic, iid</td>
+<td>Simple, model-agnostic uncertainty estimation</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>Check empirical coverage on a held-out set: if fraction below &lt; tau, the model underestimates that quantile.</li>
+<li>Use GradientBoostingRegressor(loss='quantile', alpha=tau) for nonlinear heteroscedastic data.</li>
+<li>Fit multiple quantiles and apply isotonic regression per sample to prevent crossing artifacts.</li>
+<li>Conformal QR gives the only distribution-free finite-sample coverage guarantee — use it when coverage is critical.</li>
+<li>tau=0.5 (median regression) is robust to outliers; prefer over OLS when heavy-tailed errors are expected.</li>
+<li>For time series quantile forecasting, use quantile regression forests or ARIMA-quantile models for temporal dependence.</li>
+</ul>
+<blockquote>
+<p><strong>Median Regression is Robust to Outliers</strong>: Quantile regression at tau=0.5 (median regression) is equivalent to L1 regression and is highly robust to outliers in y. While OLS minimises sum of squared residuals (giving outliers quadratic influence), median regression minimises sum of absolute residuals (linear influence). A single outlier with y approaching infinity will not shift the median regression line if it represents less than 50% of the data. Use median regression as a robust alternative to OLS when the response has heavy-tailed noise or measurement errors.</p>
+</blockquote>
+<p>Simultaneous quantile regression fits all quantile levels (e.g., tau in {0.05, 0.10, ..., 0.95}) using a single shared model — for example, a neural network with a multi-output head where each output corresponds to one tau value. This approach naturally reduces crossing artifacts because the model shares representations across quantile levels, and explicit non-crossing penalties can be added to the joint training loss. For gradient boosted trees, fit each tau separately with GradientBoostingRegressor(loss='quantile', alpha=tau) and apply isotonic regression post-hoc to enforce monotonicity.</p>
+<p>Quantile regression forests (Meinshausen 2006) extend random forests to conditional quantile estimation. Instead of averaging leaf predictions, quantile regression forests compute the empirical tau-th quantile of training labels reaching each leaf. For a query x, the forest routes x to a leaf in each tree, collects all training labels from those leaves, and returns the tau-th empirical quantile. This is distribution-free (no parametric form assumed for p(y|x)), naturally handles heteroscedasticity and multimodal conditional distributions, and is one of the most robust nonlinear quantile estimators available without requiring gradient boosted trees.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

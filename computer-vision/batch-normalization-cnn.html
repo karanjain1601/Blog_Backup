@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Batch Normalization in CNNs | Notes Backup</title>
+  <meta name="description" content="Batch normalization for convolutional layers — how it normalizes per-channel statistics across spatial locations, placement conventions, training vs eval mode differences, and layer norm alternatives." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Batch Normalization in CNNs</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Batch normalization for convolutional layers — how it normalizes per-channel statistics across spatial locations, placement conventions, training vs eval mode differences, and layer norm alternatives.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Batch Normalization in CNNs</h1>
+<h2>Overview</h2>
+<p>Batch normalization (BN) was introduced by Ioffe and Szegedy in 2015 and became a standard building block of CNNs. It normalizes activations within each mini-batch, stabilizing the distribution of inputs to each layer. This reduces internal covariate shift, enabling higher learning rates, reducing sensitivity to initialization, and providing mild regularization that reduces the need for dropout.</p>
+<p>In convolutional layers, BN operates per-channel: for each channel c, it computes the mean and variance across the batch dimension B and spatial dimensions H and W simultaneously. This is different from fully connected BN, which normalizes per-feature across the batch only. The spatial sharing makes BN for conv layers parameter-efficient: only 2 × C learnable parameters (γ and β) regardless of spatial size.</p>
+<h2>BN Math for Convolutional Layers</h2>
+<p>For a feature map x of shape [B, C, H, W], BN computes per-channel statistics: μ_c = mean over [B, H, W], σ²_c = variance over [B, H, W]. Normalized: x̂ = (x − μ_c) / √(σ²_c + ε). Output: y = γ_c · x̂ + β_c, where γ and β are learnable scalars per channel. During training, batch statistics are used. During inference, running exponential moving averages of μ and σ² are used instead.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+bn = nn.BatchNorm2d(num_features=64, eps=1e-5, momentum=0.1)
+print(&quot;Gamma (weight):&quot;, bn.weight.shape)  # [64]
+print(&quot;Beta  (bias):  &quot;, bn.bias.shape)    # [64]
+print(&quot;Running mean:  &quot;, bn.running_mean.shape)  # [64]
+print(&quot;Running var:   &quot;, bn.running_var.shape)   # [64]
+
+x = torch.randn(8, 64, 16, 16)  # [B, C, H, W]
+bn.train()
+train_out = bn(x)   # Uses batch stats, updates running stats
+bn.eval()
+eval_out = bn(x)    # Uses running stats
+print(&quot;Max diff train vs eval:&quot;, (train_out - eval_out).abs().max().item())
+</code></pre>
+<pre><code class="language-python">import torch
+
+def manual_bn_conv(x, gamma, beta, eps=1e-5):
+    &quot;&quot;&quot;Manual BN forward for [B, C, H, W] input.&quot;&quot;&quot;
+    # Compute per-channel mean and var over [B, H, W]
+    mean = x.mean(dim=(0, 2, 3), keepdim=True)  # [1, C, 1, 1]
+    var  = x.var(dim=(0, 2, 3), keepdim=True, unbiased=False)
+    x_hat = (x - mean) / (var + eps).sqrt()
+    return gamma.view(1, -1, 1, 1) * x_hat + beta.view(1, -1, 1, 1)
+
+C = 16
+x = torch.randn(4, C, 8, 8)
+gamma = torch.ones(C); beta = torch.zeros(C)
+out = manual_bn_conv(x, gamma, beta)
+print(&quot;Output shape:&quot;, out.shape)          # [4, 16, 8, 8]
+print(&quot;Channel mean ~0:&quot;, out.mean(dim=(0,2,3)).abs().max().item() &lt; 1e-5)
+</code></pre>
+<h2>Placement: Before or After Activation</h2>
+<p>The original BN paper placed normalization after the linear transform and before the activation: Conv → BN → ReLU. This is still the most common convention. An alternative, sometimes called 'pre-activation' (He et al., Identity Mappings in ResNets), places BN before the conv: BN → ReLU → Conv. Pre-activation BN can improve gradient flow in very deep networks and makes residual identity shortcuts cleaner, but is less universally adopted.</p>
+<h2>Train vs Eval Mode</h2>
+<p>The most important operational difference in BN is between training and evaluation. During training, BN uses mini-batch statistics (mean and variance computed from the current batch). This introduces stochasticity beneficial for generalization. During inference, batch statistics are unavailable or unreliable (batch size may be 1), so BN uses running exponential moving averages accumulated during training. Forgetting to switch modes is a very common bug.</p>
+<blockquote>
+<p><strong>warning</strong>: BatchNorm behaves differently in train vs eval mode — always call model.eval() at inference or BN will use batch statistics instead of running statistics, causing performance degradation.</p>
+</blockquote>
+<h2>Layer Norm and Group Norm Alternatives</h2>
+<p>BN's dependence on batch size makes it problematic for small batches (batch size 1–2 causes noisy statistics) and distributed training across GPUs. Alternatives: Group Normalization (GN) normalizes over groups of channels within a single sample, eliminating batch-size dependence. Layer Normalization normalizes over all channels and spatial dims for one sample. Instance Normalization normalizes per-sample per-channel. RMSNorm (used in transformers) omits the mean centering step.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+B, C, H, W = 4, 32, 16, 16
+x = torch.randn(B, C, H, W)
+
+# Group Norm: 8 groups of 4 channels each — no batch dependency
+gn = nn.GroupNorm(num_groups=8, num_channels=C)
+out_gn = gn(x)
+print(&quot;GroupNorm output:&quot;, out_gn.shape)  # [4, 32, 16, 16]
+
+# Batch Norm for comparison
+bn = nn.BatchNorm2d(C)
+out_bn = bn(x)
+print(&quot;BatchNorm output:&quot;, out_bn.shape)  # [4, 32, 16, 16]
+
+# At batch_size=1, GN is stable, BN is noisy
+x1 = torch.randn(1, C, H, W)
+print(&quot;GN at bs=1:&quot;, gn(x1).std().item())   # ~1.0, stable
+</code></pre>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+B, C, H, W = 4, 32, 8, 8
+x = torch.randn(B, C, H, W)
+
+# BN before ReLU (original placement)
+conv_bn_relu = nn.Sequential(
+    nn.Conv2d(C, C, 3, padding=1),
+    nn.BatchNorm2d(C),
+    nn.ReLU(inplace=True)
+)
+
+# BN after ReLU (pre-activation / He 2016 variant)
+conv_relu_bn = nn.Sequential(
+    nn.Conv2d(C, C, 3, padding=1),
+    nn.ReLU(inplace=True),
+    nn.BatchNorm2d(C)
+)
+
+out1 = conv_bn_relu(x)
+out2 = conv_relu_bn(x)
+print(&quot;BN-before: dead neurons&quot;, (out1 == 0).float().mean().item())
+print(&quot;BN-after:  dead neurons&quot;, (out2 == 0).float().mean().item())
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Norm Type</th>
+<th>Normalizes Over</th>
+<th>Batch-Size Sensitive</th>
+<th>Small Batch Works</th>
+<th>Use Case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>BatchNorm</td>
+<td>Batch B + spatial H×W per channel</td>
+<td>Yes</td>
+<td>No (bs&lt;8 unstable)</td>
+<td>Standard CNNs, large-batch vision training</td>
+</tr>
+<tr>
+<td>LayerNorm</td>
+<td>All channels + spatial per sample</td>
+<td>No</td>
+<td>Yes</td>
+<td>Transformers, ViT, NLP</td>
+</tr>
+<tr>
+<td>GroupNorm</td>
+<td>Channel groups per sample</td>
+<td>No</td>
+<td>Yes</td>
+<td>Object detection (bs=1–2), segmentation</td>
+</tr>
+<tr>
+<td>InstanceNorm</td>
+<td>Spatial H×W per channel per sample</td>
+<td>No</td>
+<td>Yes</td>
+<td>Style transfer, image synthesis</td>
+</tr>
+<tr>
+<td>RMSNorm</td>
+<td>All dims per sample (no mean)</td>
+<td>No</td>
+<td>Yes</td>
+<td>LLMs, modern transformers (Llama, Gemma)</td>
+</tr>
+</tbody>
+</table>
+<h2>Key Takeaways</h2>
+<p>BatchNorm is the default normalization for CNN classification backbones trained with large batch sizes. Always remember the train/eval mode distinction — failing to call model.eval() is one of the most common deployment bugs. The running mean and running variance buffers are not parameters (no gradients) but are part of the model state and must be included in checkpoint saves and loads.</p>
+<p>For detection and segmentation tasks where batch size is small (2–4 images, each with many crops), Group Normalization outperforms BatchNorm. For transformer-based vision models (ViT, Swin), Layer Normalization is preferred. The choice of normalization layer significantly affects training stability and final accuracy — treat it as a first-class architectural decision alongside the choice of activation function and optimizer.</p>
+    </article>
+  </main>
+</body>
+</html>

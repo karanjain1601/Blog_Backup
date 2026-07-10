@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Gradient Clipping — Norm Clipping and Value Clipping | Notes Backup</title>
+  <meta name="description" content="Analysis of exploding gradients in deep and recurrent networks, global norm clipping vs value clipping, why norm clipping preserves gradient direction, and gradient norm monitoring as a training health signal." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Gradient Clipping — Norm Clipping and Value Clipping</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Analysis of exploding gradients in deep and recurrent networks, global norm clipping vs value clipping, why norm clipping preserves gradient direction, and gradient norm monitoring as a training health signal.</li><li><strong>topic:</strong> math-foundations</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Gradient Clipping — Norm Clipping and Value Clipping</h1>
+<p>Exploding gradients are one of the most common training failures in deep networks, particularly in recurrent architectures that backpropagate through many time steps. When gradient norms grow exponentially with depth or sequence length, a single update step can move the parameters by an astronomically large amount, causing the loss to spike to NaN and destroying all prior training progress. Gradient clipping is the standard mitigation: before applying the optimizer update, rescale the gradient if its norm exceeds a threshold. This note covers the mathematical origin of exploding gradients in Jacobian products, the difference between global norm clipping (which preserves gradient direction) and value clipping (which does not), how to set the clipping threshold, and how gradient norms serve as a first-line diagnostic for training health.</p>
+<h2>The Exploding Gradient Problem</h2>
+<p>In backpropagation through time (BPTT) for RNNs, the gradient with respect to the hidden state at step t flows backward through L layers, accumulating a product of L Jacobian matrices: ∂h_L/∂h_0 = ∏ₜ Jₜ where Jₜ = Wᵀ diag(σ'(hₜ)) is the Jacobian of layer t. The spectral norm ‖Jₜ‖ ≤ ‖W‖ · max|σ'|. When the spectral radius ρ(W) &gt; 1 and max|σ'| &gt; 0, the product of L such matrices grows as (ρ·max|σ'|)^L — exponentially with depth. For a sequence of length L = 100 and ρ = 1.05, the gradient norm is multiplied by 1.05^100 ≈ 131 relative to the top layer. This causes: parameter updates larger than the parameter values themselves (effectively moving to a random point in weight space), NaN loss (floating point overflow), sudden spikes in training loss after apparently stable training. Vanishing gradients (ρ &lt; 1) are the symmetric problem: gradients shrink exponentially, causing early layers to learn nothing. Gradient clipping addresses only exploding gradients; vanishing gradients require architectural solutions (LSTM, residual connections, layer normalization).</p>
+<pre><code class="language-python">import numpy as np
+import torch
+import torch.nn as nn
+
+torch.manual_seed(42)
+
+def measure_gradient_norms_by_layer(model, X, y, loss_fn):
+    &quot;&quot;&quot;Measure gradient norm at each layer after backward pass.&quot;&quot;&quot;
+    output = model(X)
+    loss = loss_fn(output, y)
+    loss.backward()
+    norms = {}
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            norms[name] = param.grad.norm().item()
+    return norms, loss.item()
+
+# Very deep MLP to demonstrate exploding gradients without normalization
+depths = [5, 10, 20]
+for depth in depths:
+    layers = []
+    for i in range(depth):
+        layers += [nn.Linear(16, 16), nn.Tanh()]
+    layers.append(nn.Linear(16, 1))
+    model = nn.Sequential(*layers)
+    # Initialize with slightly large weights to trigger explosion
+    for p in model.parameters():
+        nn.init.normal_(p, std=1.5)
+    X = torch.randn(32, 16)
+    y = torch.randn(32, 1)
+    norms, loss = measure_gradient_norms_by_layer(model, X, y, nn.MSELoss())
+    max_norm = max(norms.values())
+    has_nan = any(np.isnan(v) for v in norms.values())
+    model.zero_grad()
+    print(f&quot;Depth={depth:2d}: max grad norm = {max_norm:.2e}, NaN = {has_nan}&quot;)
+</code></pre>
+<h2>Global Norm Clipping</h2>
+<p>Global norm clipping computes the total gradient norm across ALL parameters simultaneously: g_norm = sqrt(Σᵢ ‖∇<em>i L‖²) where the sum is over all parameter tensors. If g_norm exceeds max_norm, every gradient tensor is scaled by the same factor max_norm/g_norm. The critical property: because all gradients are multiplied by the same scalar, their DIRECTION (the vector in parameter space) is exactly preserved. Only the magnitude is capped. This means the optimizer update moves in the same direction as the true gradient — just by a bounded amount. In PyTorch: total_norm = torch.nn.utils.clip_grad_norm</em>(model.parameters(), max_norm=1.0). This function: (1) computes the global norm across all parameter gradients, (2) clips in-place if needed, and (3) returns the actual pre-clip norm (useful for logging). Crucially, clip_grad_norm_ must be called AFTER loss.backward() (gradients must exist) and BEFORE optimizer.step() (before the update is applied). The returned norm value should be logged at every training step as a health signal.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+torch.manual_seed(7)
+
+def global_norm_clip(params_list, max_norm):
+    &quot;&quot;&quot;Global norm clipping: preserves gradient direction.&quot;&quot;&quot;
+    total_norm = torch.sqrt(sum(p.grad.norm()**2 for p in params_list
+                               if p.grad is not None))
+    clip_coef = max_norm / (total_norm + 1e-6)
+    if clip_coef &lt; 1.0:
+        for p in params_list:
+            if p.grad is not None:
+                p.grad.mul_(clip_coef)
+    return total_norm.item()
+
+def value_clip(params_list, clip_val):
+    &quot;&quot;&quot;Value clipping: clips each element, CHANGES gradient direction.&quot;&quot;&quot;
+    for p in params_list:
+        if p.grad is not None:
+            p.grad.clamp_(-clip_val, clip_val)
+
+model = nn.Linear(10, 1)
+X = torch.randn(16, 10) * 10  # large inputs to create large gradients
+y = torch.randn(16, 1)
+loss = nn.MSELoss()(model(X), y)
+loss.backward()
+
+orig_grad = torch.cat([p.grad.flatten() for p in model.parameters()]).clone()
+norm_before = orig_grad.norm().item()
+
+params = list(model.parameters())
+norm_clipped = global_norm_clip(params, max_norm=1.0)
+clipped_grad = torch.cat([p.grad.flatten() for p in model.parameters()])
+
+cos_sim = (orig_grad @ clipped_grad) / (orig_grad.norm() * clipped_grad.norm())
+print(f&quot;Norm before clip: {norm_before:.4f}&quot;)
+print(f&quot;Norm after global clip: {clipped_grad.norm().item():.4f}&quot;)
+print(f&quot;Cosine similarity (direction preserved): {cos_sim.item():.6f}&quot;)
+print(f&quot;Direction perfectly preserved: {abs(cos_sim.item() - 1.0) &lt; 1e-5}&quot;)
+</code></pre>
+<h2>Value Clipping: Element-Wise Clipping</h2>
+<p>Value clipping clips each gradient component independently: ∂L/∂θᵢ ← clip(∂L/∂θᵢ, −c, c). Unlike global norm clipping, this CHANGES the gradient direction because components are clipped asymmetrically — if some components are positive and large, they are clipped to +c, while small components are untouched, distorting the ratio between dimensions. The resulting gradient vector no longer points in the direction of steepest descent of the loss function. Value clipping can be understood as performing gradient descent on a different, modified loss function — the relationship between the clipped gradient and the true loss is unclear. Despite this drawback, value clipping is used in specific contexts where its properties are either acceptable or intentional. The most important example is PPO's actor loss: clip(πθ(a|s)/π_old(a|s), 1−ε, 1+ε) clips the importance sampling ratio (not the gradient), preventing too-large policy changes without globally zeroing out the gradient. In practice, for training stability, global norm clipping is strongly preferred over value clipping for all standard architectures.</p>
+<h2>Setting the Clipping Threshold</h2>
+<p>Choosing max_norm requires profiling the gradient norm distribution early in training before any clipping. Run the first 100-500 steps with clipping disabled and log the gradient norm at every step. Set max_norm at approximately the 90th-95th percentile of this distribution — high enough that most steps are unclipped (normal training), low enough to catch the rare extreme gradients from bad batches or early instability. Standard values by architecture: transformers (GPT, BERT, LLaMA) use max_norm = 1.0; RNNs and LSTMs use max_norm = 5.0 (BPTT produces noisier, larger gradients); fine-tuning large pre-trained models uses max_norm = 0.1 to 0.5 for conservative updates that preserve pre-trained features. Training health signal from clipping frequency: if clipping activates more than 10-15% of steps throughout training (not just at the start), it is a signal that the learning rate is too high for the current loss landscape — reduce the LR rather than raising max_norm, because frequent clipping means you are consistently not following the true gradient direction, which slows convergence.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.optim as optim
+from collections import deque
+
+torch.manual_seed(0)
+
+class GradNormLogger:
+    &quot;&quot;&quot;Track gradient norms and clipping frequency.&quot;&quot;&quot;
+    def __init__(self, window=100):
+        self.norms = deque(maxlen=window)
+        self.clipped = deque(maxlen=window)
+
+    def update(self, pre_clip_norm, max_norm):
+        self.norms.append(pre_clip_norm)
+        self.clipped.append(pre_clip_norm &gt; max_norm)
+
+    def report(self):
+        norms = list(self.norms)
+        return {
+            'mean_norm': sum(norms) / len(norms),
+            'max_norm': max(norms),
+            'clip_freq': sum(self.clipped) / len(self.clipped)
+        }
+
+model = nn.Sequential(
+    nn.Linear(16, 64), nn.ReLU(),
+    nn.Linear(64, 64), nn.ReLU(),
+    nn.Linear(64, 1)
+)
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+logger = GradNormLogger(window=50)
+
+for step in range(100):
+    X = torch.randn(32, 16)
+    y = torch.randn(32, 1)
+    optimizer.zero_grad()
+    loss = nn.MSELoss()(model(X), y)
+    loss.backward()
+    pre_clip_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    logger.update(pre_clip_norm.item(), max_norm=1.0)
+    optimizer.step()
+
+report = logger.report()
+print(f&quot;Mean grad norm: {report['mean_norm']:.4f}&quot;)
+print(f&quot;Max grad norm:  {report['max_norm']:.4f}&quot;)
+print(f&quot;Clipping freq:  {report['clip_freq']:.1%} (healthy if &lt; 10%)&quot;)
+</code></pre>
+<h2>ML Connections: Gradient Clipping and Accumulation</h2>
+<p>Gradient clipping interacts with gradient accumulation in a non-obvious way. When accumulating over k micro-batches before an optimizer step, gradients from each micro-batch are added to the parameter gradient buffers. If each micro-batch has gradient norm approximately g, then after k micro-batches the accumulated gradient norm is approximately k·g (gradients add linearly when using loss.backward() without zeroing between micro-batches, or when dividing loss by k to keep gradient scale constant). If max_norm is set for single-batch gradients, then after k-step accumulation, clipping will activate almost every step at k times the expected rate — systematically distorting the gradient direction. The correct approach: divide the loss of each micro-batch by k before calling backward(), so accumulated gradients are on the same scale as single-batch gradients. For FP16 mixed-precision training with torch.cuda.amp.GradScaler: the scaler multiplies loss by a large scale factor to prevent underflow. Before clipping, always call scaler.unscale_(optimizer) to divide gradients by the scale factor; then clip_grad_norm_ works on the true gradient scale; then call scaler.step(optimizer) and scaler.update().</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.optim as optim
+
+torch.manual_seed(42)
+
+def training_step_with_accumulation(model, optimizer, batches,
+                                     accumulation_steps, max_norm):
+    &quot;&quot;&quot;Gradient accumulation + clipping done correctly.&quot;&quot;&quot;
+    optimizer.zero_grad()
+    loss_fn = nn.MSELoss()
+    total_loss = 0.0
+    for i, (X, y) in enumerate(batches):
+        # Divide loss by accumulation_steps so gradients are averaged, not summed
+        loss = loss_fn(model(X), y) / accumulation_steps
+        loss.backward()
+        total_loss += loss.item()
+    # Clip ONCE after all micro-batches, not after each micro-batch
+    pre_clip_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+    optimizer.step()
+    return total_loss, pre_clip_norm.item()
+
+model = nn.Sequential(nn.Linear(8, 16), nn.ReLU(), nn.Linear(16, 1))
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+acc_steps = 4
+batches = [(torch.randn(16, 8), torch.randn(16, 1)) for _ in range(acc_steps)]
+loss_val, norm = training_step_with_accumulation(
+    model, optimizer, batches, acc_steps, max_norm=1.0)
+print(f&quot;Loss: {loss_val:.4f}, Pre-clip norm: {norm:.4f}&quot;)
+
+# Demonstrate norm scaling with accumulation (incorrect approach)
+model2 = nn.Sequential(nn.Linear(8, 16), nn.ReLU(), nn.Linear(16, 1))
+optimizer2 = optim.Adam(model2.parameters(), lr=0.001)
+optimizer2.zero_grad()
+for X, y in batches:
+    (nn.MSELoss()(model2(X), y)).backward()  # no division — summed gradients
+norm_wrong = sum(p.grad.norm()**2 for p in model2.parameters() if p.grad is not None)**0.5
+print(f&quot;Norm WITHOUT /k: {norm_wrong:.4f} (approx {acc_steps}x larger — clipping distorts direction)&quot;)
+</code></pre>
+<h2>Gradient Norm as Training Health Signal</h2>
+<p>The gradient norm is one of the most informative and cheapest training metrics to log. Because clip_grad_norm_ returns the pre-clip norm as a side effect of its normal operation, logging it costs essentially zero additional compute. Patterns to recognize in the gradient norm curve over training: (1) Sudden spike in gradient norm at a specific step — bad batch (corrupted label, extreme data point, numerical instability); investigate the data loader or reduce LR. (2) Monotonically increasing norm over many steps — learning rate is too high, or batch normalization is failing; reduce LR or check normalization. (3) Monotonically decreasing norm — normal convergence behavior; the model is approaching a minimum. (4) Flat norm with no loss improvement — the model is near a saddle point or plateau; add LR warmup restart or reduce LR. (5) Different norms per layer (log per-layer norms separately) — early layers with much smaller norms than late layers indicate vanishing gradients; late layers with much larger norms indicate a problem in those layers. Logging per-layer gradient norms is cheap: iterate over model.named_parameters() after backward() and log each parameter's grad.norm() every 10-100 steps.</p>
+<h2>Implementation Pitfalls</h2>
+<p>Critical pitfalls when implementing gradient clipping in production training loops. First, incorrect ordering: clipping BEFORE loss.backward() has no effect (gradients do not exist yet). Clipping AFTER optimizer.step() modifies the gradient buffers for the NEXT step, not the step that just completed. The correct order is always: forward pass → backward pass → clip → optimizer step. Second, per-micro-batch clipping in gradient accumulation: if you clip after each micro-batch's backward() call, you change the gradient direction at each micro-batch individually, and the accumulated direction is unpredictably different from the true gradient direction. Clip only once per effective batch, after all micro-batches are accumulated. Third, for mixed-precision (fp16) training: forgetting to call scaler.unscale_(optimizer) before clipping causes clip_grad_norm_ to operate on scaled gradients (typically 1000-65000× larger than actual), making max_norm effectively much smaller than intended and causing near-constant clipping. The GradScaler documentation is explicit about this requirement. Fourth, using value clipping (torch.nn.utils.clip_grad_value_) when norm clipping is appropriate: value clipping is a last resort and should not be the default choice.</p>
+<h2>Practical Guidance</h2>
+<p>Production-ready gradient clipping protocol. Standard setup: use torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0) for transformers and 5.0 for RNNs, placed between loss.backward() and optimizer.step(). Log the returned pre-clip norm value to your metrics system at every step or every 10 steps for large models. Set up an alert if the mean gradient norm over 100 steps exceeds 2× max_norm — this signals the learning rate is too high. For gradient accumulation: divide each micro-batch's loss by the number of accumulation steps, and clip once after all micro-batches are accumulated. For FP16: always call scaler.unscale_(optimizer) before clip_grad_norm_, then scaler.step(optimizer) and scaler.update(). When experimenting with new architectures or datasets, run 100 steps with clipping disabled and plot the gradient norm distribution to choose an appropriate max_norm — setting it too tight (5th percentile) slows learning by constantly distorting gradients; setting it too loose (99th percentile) provides no protection against the extreme gradients that cause NaN loss.</p>
+<blockquote>
+<p><strong>Warning</strong>: Always clip AFTER loss.backward() and BEFORE optimizer.step() — any other order is wrong. With gradient accumulation, clip only ONCE per effective batch after all micro-batches are accumulated, not after each micro-batch. For FP16 training with GradScaler, call scaler.unscale_(optimizer) before clip_grad_norm_; otherwise you are clipping scaled gradients and the effective threshold is thousands of times smaller than intended, causing constant clipping and slow or failed training.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Preserves Direction</th>
+<th>Bounded Step Size</th>
+<th>PPO Compatible</th>
+<th>PyTorch API</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>No clipping</td>
+<td>Yes</td>
+<td>No</td>
+<td>N/A</td>
+<td>—</td>
+</tr>
+<tr>
+<td>Global norm clip</td>
+<td>Yes (exactly)</td>
+<td>Yes (L2 ball)</td>
+<td>Yes</td>
+<td>clip_grad_norm_()</td>
+</tr>
+<tr>
+<td>Value clip (element-wise)</td>
+<td>No</td>
+<td>Yes (∞-norm box)</td>
+<td>Yes (for ratio clip)</td>
+<td>clip_grad_value_()</td>
+</tr>
+<tr>
+<td>Layer-wise norm clip</td>
+<td>Per-layer yes</td>
+<td>Per-layer yes</td>
+<td>Yes</td>
+<td>Manual loop</td>
+</tr>
+<tr>
+<td>Adaptive clip (Adagrad-style)</td>
+<td>Approximately</td>
+<td>Yes (adaptive)</td>
+<td>No (rare)</td>
+<td>Custom implementation</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>Key Takeaways</h2>
+<ul>
+<li>Exploding gradients arise from Jacobian products: in RNNs and deep networks, ‖∏Jₜ‖ grows as ρ^L when the spectral radius ρ(W) &gt; 1, causing exponentially large gradients with depth/sequence length.</li>
+<li>Global norm clipping scales ALL gradients by max_norm/g_norm if g_norm &gt; max_norm — this preserves the gradient direction exactly while bounding the step magnitude.</li>
+<li>Value clipping clips each component independently, CHANGING the gradient direction — prefer global norm clipping except in specific use cases like PPO's importance ratio clipping.</li>
+<li>PyTorch API: call torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm) AFTER backward() and BEFORE optimizer.step(); it returns the pre-clip norm for logging.</li>
+<li>For gradient accumulation: divide each micro-batch loss by accumulation_steps before backward(), and clip once after all micro-batches — not after each micro-batch.</li>
+<li>For FP16 mixed-precision: call scaler.unscale_(optimizer) before clipping; otherwise GradScaler's loss scaling makes clip_grad_norm_ operate on inflated gradients.</li>
+<li>Monitor gradient norm as a training health signal: sudden spikes indicate bad batches, monotonically increasing norm indicates LR too high, flat norm with no improvement indicates saddle points.</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

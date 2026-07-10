@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Rejection Sampling Fine-Tuning — Generate Many, Keep Best for SFT | Notes Backup</title>
+  <meta name="description" content="Rejection sampling fine-tuning (ReST/RST-EM) generates N candidate completions per prompt from the current policy, scores them with a reward model, filters to the top-K by reward, and fine-tunes on the filtered dataset — an EM-style self-improvement loop simpler and more stable than PPO." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Rejection Sampling Fine-Tuning — Generate Many, Keep Best for SFT</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Rejection sampling fine-tuning (ReST/RST-EM) generates N candidate completions per prompt from the current policy, scores them with a reward model, filters to the top-K by reward, and fine-tunes on the filtered dataset — an EM-style self-improvement loop simpler and more stable than PPO.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Rejection Sampling Fine-Tuning — Generate Many, Keep Best for SFT</h1>
+<p>Rejection sampling fine-tuning (ReST, Gulcehre et al. 2023; RST-EM, Dong et al. 2023) is an alignment technique that frames policy improvement as an EM algorithm. In the E-step, the current policy generates N candidate completions per prompt and a reward model scores them. In the M-step, the top-K completions are kept and the policy is fine-tuned via standard SFT on these filtered (prompt, completion) pairs. The process repeats for multiple rounds, progressively moving the policy distribution toward higher-reward outputs without the complexity and instability of PPO.</p>
+<h2>The ReST Algorithm — EM for Alignment</h2>
+<p>The EM framing is natural: in the E-step, the policy acts as the proposal distribution to generate diverse candidate completions; in the M-step, supervised fine-tuning on filtered data moves the policy toward the high-reward region. Unlike PPO, which requires online rollouts, importance sampling corrections, and a value function, ReST only needs: (1) batch inference for generation, (2) a reward model for scoring, and (3) standard SFT training. This makes it significantly simpler to implement and more stable to train. LLaMA-2's final alignment stage uses rejection sampling, as does Gemini's RLHF pipeline.</p>
+<h2>E-Step — Generating Diverse Completions</h2>
+<p>Diversity in the E-step is critical: sampling at high temperature (0.8–1.0) spreads the distribution to explore the response space. The number of samples N per prompt (typically 10–100) controls the exploration-exploitation tradeoff. With N=1 there is no selection pressure; with N=100, the reward model can identify high-quality completions even if only 1% of samples are excellent. Batch generation is embarrassingly parallelizable across prompts, making large N computationally feasible with vLLM or other high-throughput inference engines.</p>
+<pre><code class="language-python">import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from typing import Optional
+
+def batch_generate_completions(
+    model: AutoModelForCausalLM,
+    tokenizer: AutoTokenizer,
+    prompts: list,
+    n_samples: int = 8,
+    temperature: float = 0.9,
+    max_new_tokens: int = 256,
+) -&gt; list:
+    # Generate N completions per prompt at high temperature for diversity
+    all_completions = []
+    for prompt in prompts:
+        inputs = tokenizer(prompt, return_tensors='pt').to(model.device)
+        completions = []
+        for _ in range(n_samples):
+            with torch.no_grad():
+                output_ids = model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=True,
+                    temperature=temperature,
+                    pad_token_id=tokenizer.eos_token_id,
+                )
+            gen_ids = output_ids[0][inputs['input_ids'].shape[1]:]
+            completions.append(tokenizer.decode(gen_ids, skip_special_tokens=True))
+        all_completions.append(completions)
+    return all_completions
+
+def score_completions(reward_model, tokenizer, prompts: list, completions_per_prompt: list) -&gt; list:
+    # Score each completion with reward model, return reward lists
+    scores = []
+    for prompt, completions in zip(prompts, completions_per_prompt):
+        prompt_scores = []
+        for completion in completions:
+            enc = tokenizer(prompt + completion, return_tensors='pt',
+                            truncation=True, max_length=512).to(reward_model.device)
+            with torch.no_grad():
+                reward = reward_model(**enc).logits.squeeze().item()
+            prompt_scores.append(reward)
+        scores.append(prompt_scores)
+    return scores
+
+print('ReST E-step: N=8 samples per prompt at temperature=0.9 for diversity')
+print('Score all completions with reward model, then keep top-K for M-step')
+</code></pre>
+<h2>M-Step — Top-K Selection and Fine-Tuning</h2>
+<p>The M-step filters completions to a high-reward subset and runs SFT on the result. Two selection strategies exist: top-K (keep the K highest-scoring completions per prompt) and threshold-based (keep all completions above a reward threshold). Top-K guarantees exactly K training examples per prompt, maintaining dataset balance. Threshold-based selection discards all completions if none exceed the threshold, producing sparser but higher-quality training data. A hybrid approach — top-K among completions above a minimum threshold — combines both benefits.</p>
+<pre><code class="language-python">import torch
+from datasets import Dataset
+from typing import Optional
+
+def select_top_k_completions(
+    prompts: list,
+    completions: list,
+    scores: list,
+    top_k: int = 2,
+    score_threshold: Optional[float] = None,
+) -&gt; tuple:
+    # Filter completions: keep top-K per prompt, optionally above threshold
+    selected_prompts, selected_completions = [], []
+    for prompt, comp_list, score_list in zip(prompts, completions, scores):
+        paired = sorted(zip(score_list, comp_list), reverse=True)
+        kept = [(s, c) for s, c in paired[:top_k]
+                if score_threshold is None or s &gt;= score_threshold]
+        for score, completion in kept:
+            selected_prompts.append(prompt)
+            selected_completions.append(completion)
+    return selected_prompts, selected_completions
+
+def build_sft_dataset(prompts: list, completions: list) -&gt; Dataset:
+    # Create HuggingFace dataset from filtered (prompt, completion) pairs
+    return Dataset.from_dict({
+        'prompt': prompts,
+        'completion': completions,
+        'text': [p + c for p, c in zip(prompts, completions)],
+    })
+
+# Example with mock data
+sample_prompts = ['Explain gradient descent:', 'What is attention in transformers:']
+sample_completions = [['Good A1', 'Poor A1', 'OK A1'], ['Great A2', 'Poor A2', 'Medium A2']]
+sample_scores = [[0.8, 0.3, 0.5], [0.9, 0.2, 0.6]]
+sel_p, sel_c = select_top_k_completions(sample_prompts, sample_completions, sample_scores, top_k=1)
+dataset = build_sft_dataset(sel_p, sel_c)
+print(f'Selected {len(dataset)} pairs from {sum(len(c) for c in sample_completions)} total')
+print('M-step: fine-tune policy on filtered SFT dataset for 1-3 epochs')
+</code></pre>
+<h2>Iterative Self-Improvement Loop</h2>
+<p>Running multiple rounds of ReST progressively improves the policy. Early rounds improve performance on easy prompts where the initial policy already generates near-correct outputs. Later rounds target harder prompts as the policy improves. The EM-like dynamics mean the process converges: once the policy consistently generates high-reward completions, the filtered dataset stops changing and further fine-tuning yields diminishing returns. Typical setups run 3–5 rounds with N decreasing across rounds (more exploration early, more exploitation later).</p>
+<pre><code class="language-python">from dataclasses import dataclass
+from typing import Callable
+
+@dataclass
+class ReSTConfig:
+    n_rounds: int = 3
+    n_samples_per_prompt: int = 16
+    top_k: int = 4
+    temperature: float = 0.9
+    reward_threshold: float = 0.5
+
+def rest_em_loop(
+    model,
+    tokenizer,
+    reward_model,
+    prompts: list,
+    config: ReSTConfig,
+    finetune_fn: Callable,
+) -&gt; list:
+    # Run full E-step / M-step loop for config.n_rounds
+    history = []
+    for round_idx in range(config.n_rounds):
+        print(f'Round {round_idx+1}/{config.n_rounds}: E-step — generating {config.n_samples_per_prompt} samples/prompt')
+        completions = batch_generate_completions(model, tokenizer, prompts,
+                                                 config.n_samples_per_prompt, config.temperature)
+        scores = score_completions(reward_model, tokenizer, prompts, completions)
+        sel_p, sel_c = select_top_k_completions(prompts, completions, scores,
+                                                 config.top_k, config.reward_threshold)
+        avg_reward = sum(sum(s)/len(s) for s in scores) / len(scores)
+        print(f'Round {round_idx+1}: M-step — fine-tuning on {len(sel_p)} pairs (avg reward={avg_reward:.3f})')
+        dataset = build_sft_dataset(sel_p, sel_c)
+        finetune_fn(model, dataset)
+        history.append({'round': round_idx+1, 'n_pairs': len(sel_p), 'avg_reward': avg_reward})
+    return history
+
+config = ReSTConfig(n_rounds=3, n_samples_per_prompt=16, top_k=4)
+print('ReST-EM converges when policy consistently generates high-reward completions')
+print('Round 1: easy prompts improve; Round 3+: hard prompts targeted by better policy')
+</code></pre>
+<h2>Best-of-N Compute Analysis</h2>
+<p>Best-of-N (BoN) sampling — generate N completions and return the highest-scoring one — is a simple baseline that provides useful compute-quality tradeoffs. The expected maximum reward of N i.i.d. Gaussian samples scales as μ + σ·Φ⁻¹(N/(N+1)), where Φ⁻¹ is the inverse CDF. BoN with N=64 often matches PPO-trained models at 1B parameter scale, but at the cost of N inference passes per prompt. ReST amortizes BoN's quality gain into the model weights so that inference cost remains 1 pass per prompt — the key practical advantage over pure BoN inference.</p>
+<pre><code class="language-python">import numpy as np
+from scipy.stats import norm
+
+def expected_max_reward(mu: float, sigma: float, n_values: list) -&gt; list:
+    # Expected maximum of N i.i.d. Gaussian rewards: mu + sigma * Phi^-1(N/(N+1))
+    return [mu + sigma * norm.ppf(n / (n + 1)) for n in n_values]
+
+def bon_vs_ppo_analysis(n_values: list, ppo_reward: float, mu=0.0, sigma=1.0) -&gt; None:
+    # Compare Best-of-N expected reward vs PPO baseline reward
+    bon_rewards = expected_max_reward(mu, sigma, n_values)
+    print(f'{&quot;N&quot;:&gt;6}  {&quot;BoN E[R]&quot;: &gt;12}  {&quot;vs PPO&quot;:&gt;10}  {&quot;Inference NFE&quot;:&gt;15}')
+    print('-' * 50)
+    for n, r in zip(n_values, bon_rewards):
+        delta = r - ppo_reward
+        sign = '+' if delta &gt;= 0 else ''
+        print(f'{n:&gt;6}  {r:&gt;12.4f}  {sign}{delta:&gt;9.4f}  {n:&gt;15}')
+
+n_values = [1, 4, 8, 16, 32, 64, 128]
+ppo_equivalent = 1.15  # typical PPO reward at convergence (std Gaussian scale)
+bon_vs_ppo_analysis(n_values, ppo_equivalent, mu=0.0, sigma=1.0)
+print()
+print('ReST amortizes BoN quality into weights: inference cost = 1 pass (not N)')
+print('PPO reaches similar quality but requires online RL infrastructure')
+</code></pre>
+<h2>Combining Rejection Sampling with DPO</h2>
+<p>The same N samples generated per prompt can be used to create (best, worst) DPO preference pairs rather than only keeping the best for SFT. This hybrid approach — sometimes called Rejection Sampling DPO — uses the highest-scoring completion as the chosen response and the lowest-scoring as the rejected response. Because both completions come from the current policy, the preference pairs are on-policy with respect to the current model's distribution, which is more informative than static human labels from the original SFT model. Combining rejection sampling with DPO provides the best of both: diverse exploration from sampling and contrastive preference learning from DPO.</p>
+<table>
+<thead>
+<tr>
+<th>Variant</th>
+<th>N Samples</th>
+<th>Selection Strategy</th>
+<th>Rounds</th>
+<th>Reward Model Type</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ReST (Gulcehre 2023)</td>
+<td>10–64</td>
+<td>Threshold: keep above R_min</td>
+<td>1–3</td>
+<td>Trained RM (LM-head on reward)</td>
+</tr>
+<tr>
+<td>RST-EM (Dong 2023)</td>
+<td>16–64</td>
+<td>Top-K per prompt</td>
+<td>3–5</td>
+<td>Trained RM or verifier</td>
+</tr>
+<tr>
+<td>LLaMA-2 RST</td>
+<td>20–100</td>
+<td>Top-1 (single best)</td>
+<td>1</td>
+<td>Human preference RM</td>
+</tr>
+<tr>
+<td>STaR (Zelikman 2022)</td>
+<td>Self-consistency majority vote</td>
+<td>Correct final answer filter</td>
+<td>Multiple</td>
+<td>Ground truth verifier</td>
+</tr>
+<tr>
+<td>Self-Play Fine-Tuning</td>
+<td>Variable</td>
+<td>Current vs previous model wins</td>
+<td>Iterative</td>
+<td>LM-as-judge or trained RM</td>
+</tr>
+</tbody>
+</table>
+<h2>Practical Considerations</h2>
+<p>Reward hacking is the primary failure mode: if the reward model has blind spots, the policy learns to exploit them rather than genuinely improve. Monitoring reward model correlation with human preferences across training rounds is essential. The reward threshold should increase across rounds as the policy improves — keeping an absolute threshold leads to all completions passing in later rounds, collapsing to standard SFT. Using a separate held-out set to track human eval win rate (not just RM score) catches reward hacking before it degrades human-perceived quality.</p>
+<ul>
+<li>Use temperature 0.8–1.0 for E-step generation — lower temperatures reduce diversity and limit selection pressure.</li>
+<li>N=16–32 is often sufficient; beyond N=64 the marginal improvement per additional sample diminishes sharply.</li>
+<li>Increase reward threshold across rounds to maintain selection pressure as the policy improves.</li>
+<li>Monitor RM score vs human win rate correlation — divergence signals reward hacking.</li>
+<li>Use vLLM or SGLang for E-step generation: batched sampling with N completions per prompt is memory-efficient.</li>
+</ul>
+<blockquote>
+<p><strong>Combining Rejection Sampling with DPO</strong>: Combining rejection sampling with DPO provides the best of both: use the same N samples to create (best, worst) DPO pairs — this generates diverse preference pairs aligned with the current policy's output distribution, which is more on-policy than static human labels and trains faster than PPO while maintaining DPO's simplicity.</p>
+</blockquote>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

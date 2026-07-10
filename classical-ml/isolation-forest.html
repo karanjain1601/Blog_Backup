@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Isolation Forest — Path Length and Random Partitioning | Notes Backup</title>
+  <meta name="description" content="Understand Isolation Forest&#x27;s path-length anomaly scoring, build an isolation tree from scratch, compare standard vs extended variants, and see why anomalies are isolated in fewer steps." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Isolation Forest — Path Length and Random Partitioning</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Understand Isolation Forest&#x27;s path-length anomaly scoring, build an isolation tree from scratch, compare standard vs extended variants, and see why anomalies are isolated in fewer steps.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Isolation Forest — Path Length and Random Partitioning</h1>
+<p>Isolation Forest exploits a key insight: anomalies are few and different — they are easier to isolate than normal points. By building an ensemble of random binary trees that recursively partition the feature space, anomalies require fewer splits to isolate (shorter path length) while normal points cluster together and need many splits. No distance or density computation is required, making it efficient in high dimensions and with large datasets.</p>
+<h2>Isolation Tree Algorithm</h2>
+<p>An isolation tree is built by: (1) randomly selecting a feature, (2) randomly selecting a split value between the feature's min and max, (3) partitioning the data and recursing on each branch until depth limit or a single point remains. The path length for a point x is the number of splits required to isolate it. The expected path length for a subtree of size n is c(n) = 2H(n−1) − 2(n−1)/n where H is the harmonic number. Using c(n) normalises for different subtree sizes.</p>
+<p>$$s(x, n) = 2^{-\frac{E[h(x)]}{c(n)}}, \quad c(n) = 2H(n-1) - \frac{2(n-1)}{n}, \quad H(i) \approx \ln i + 0.5772$$</p>
+<pre><code class="language-python">import numpy as np
+
+class IsolationTree:
+    def __init__(self, max_depth=8):
+        self.max_depth = max_depth
+
+    def fit(self, X, depth=0):
+        n, d = X.shape
+        if depth &gt;= self.max_depth or n &lt;= 1:
+            self.is_leaf, self.size = True, n
+            return self
+        self.is_leaf = False
+        self.feat = np.random.randint(d)
+        col = X[:, self.feat]
+        lo, hi = col.min(), col.max()
+        if lo == hi:
+            self.is_leaf, self.size = True, n
+            return self
+        self.split = np.random.uniform(lo, hi)
+        mask = col &lt; self.split
+        self.left  = IsolationTree(self.max_depth).fit(X[mask],  depth+1)
+        self.right = IsolationTree(self.max_depth).fit(X[~mask], depth+1)
+        return self
+
+    def _c(self, n):
+        if n &lt;= 1: return 0
+        return 2*(np.log(n-1)+0.5772156649) - 2*(n-1)/n
+
+    def path_length(self, x, depth=0):
+        if self.is_leaf:
+            return depth + self._c(self.size)
+        return (self.left if x[self.feat] &lt; self.split else self.right).path_length(x, depth+1)
+
+np.random.seed(42)
+X_tr = np.random.normal(0, 1, (100, 2))
+X_out = np.array([[5.0, 5.0], [-5.0, 4.0]])
+tree = IsolationTree(max_depth=8).fit(X_tr)
+cn = tree._c(len(X_tr))
+scores_n = [2**(-tree.path_length(x)/cn) for x in X_tr]
+scores_a = [2**(-tree.path_length(x)/cn) for x in X_out]
+print(f'Normal avg score: {np.mean(scores_n):.3f} (should be ~0.5)')
+print(f'Anomaly scores:   {[round(s,3) for s in scores_a]} (should be ~1.0)')
+</code></pre>
+<h2>sklearn IsolationForest</h2>
+<p>The sklearn implementation uses n_estimators trees (default 100), sub-sampling 256 points per tree. Sub-sampling reduces variance and limits the depth needed — with only 256 points, anomalies are almost always isolated before normal points. The contamination parameter sets the threshold for predict(): it determines what fraction of training data is labelled anomaly. The score_samples() method returns the raw anomaly score (more negative = more anomalous).</p>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.ensemble import IsolationForest
+
+np.random.seed(42)
+X_normal  = np.random.normal(0, 1, (300, 2))
+X_anomaly = np.random.uniform(-5, 5, (20, 2))
+X = np.vstack([X_normal, X_anomaly])
+
+clf = IsolationForest(n_estimators=100, contamination=0.06, random_state=42)
+clf.fit(X)
+scores = clf.score_samples(X)
+preds  = clf.predict(X)
+
+print(f'Anomalies detected: {(preds==-1).sum()}')
+print(f'Score range: [{scores.min():.3f}, {scores.max():.3f}]')
+
+xx, yy = np.meshgrid(np.linspace(-6, 6, 100), np.linspace(-6, 6, 100))
+Z = clf.score_samples(np.c_[xx.ravel(), yy.ravel()]).reshape(xx.shape)
+plt.contourf(xx, yy, Z, levels=20, cmap='RdYlGn')
+plt.scatter(X[preds==1,0],  X[preds==1,1],  c='steelblue', s=10, label='Normal')
+plt.scatter(X[preds==-1,0], X[preds==-1,1], c='red', s=40, marker='x', label='Anomaly')
+plt.legend()
+plt.title('Isolation Forest — Score Contours')
+plt.tight_layout()
+plt.savefig('isolation_forest.png', dpi=100)
+</code></pre>
+<h2>Extended Isolation Forest — Rotational Invariance</h2>
+<p>Standard Isolation Forest uses axis-aligned splits, which creates ghost anomalies near split boundaries along the axes. Extended Isolation Forest (EIF) uses random hyperplane splits — it selects a random normal vector n and a random intercept p, then splits on nᵀx ≤ nᵀp. This eliminates the axis-aligned bias and works better on data with diagonal correlation structure or rotated clusters. EIF requires the eif package or a custom implementation.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.ensemble import IsolationForest
+from sklearn.metrics import average_precision_score
+
+np.random.seed(42)
+cov = [[2.0, 1.8], [1.8, 2.0]]
+X_normal  = np.random.multivariate_normal([0,0], cov, 400)
+X_anomaly = np.random.uniform(-6, 6, (20, 2))
+X = np.vstack([X_normal, X_anomaly])
+y_true = np.array([0]*400 + [1]*20)
+
+std_if = IsolationForest(n_estimators=200, contamination=0.047, random_state=42)
+std_preds = std_if.fit_predict(X)
+std_scores = -std_if.score_samples(X)
+std_ap = average_precision_score(y_true, std_scores)
+
+# Approximate EIF via random projections
+rng = np.random.RandomState(42)
+proj_scores = np.zeros(len(X))
+for _ in range(200):
+    n_vec = rng.randn(2)
+    n_vec /= np.linalg.norm(n_vec)
+    X1d = (X @ n_vec).reshape(-1, 1)
+    clf1d = IsolationForest(n_estimators=1, contamination=0.047,
+                            random_state=rng.randint(10000)).fit(X1d)
+    proj_scores += -clf1d.score_samples(X1d)
+proj_ap = average_precision_score(y_true, proj_scores)
+
+print(f'Standard IF  AP: {std_ap:.3f} (axis-aligned splits, bias on rotated data)')
+print(f'Projected IF AP: {proj_ap:.3f} (random hyperplanes reduce axis bias)')
+</code></pre>
+<h2>Anomaly Score Distribution</h2>
+<p>Training the model on normal data only (unsupervised novelty detection) and scoring both normal and anomalous test points reveals the score separation. Anomalies cluster near score −0.5 and normal points cluster near −0.1 to 0 (sklearn convention: more negative = more anomalous). The overlap between the distributions determines the achievable precision-recall tradeoff at any given threshold.</p>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.ensemble import IsolationForest
+
+np.random.seed(0)
+X_train   = np.random.normal(0, 1, (500, 5))
+X_test_n  = np.random.normal(0, 1, (200, 5))
+X_test_a  = np.random.uniform(-4, 4, (50, 5))
+
+clf = IsolationForest(n_estimators=100, random_state=0)
+clf.fit(X_train)
+scores_n = clf.score_samples(X_test_n)
+scores_a = clf.score_samples(X_test_a)
+
+print(f'Normal  scores: mean={scores_n.mean():.3f}  std={scores_n.std():.3f}')
+print(f'Anomaly scores: mean={scores_a.mean():.3f}  std={scores_a.std():.3f}')
+print(f'Threshold used: {clf.threshold_:.3f}')
+
+fig, ax = plt.subplots(figsize=(9, 4))
+ax.hist(scores_n, bins=30, alpha=0.6, label='Normal test',  color='steelblue')
+ax.hist(scores_a, bins=20, alpha=0.6, label='Anomaly test', color='crimson')
+ax.axvline(clf.threshold_, color='black', linestyle='--', linewidth=2, label='Threshold')
+ax.set_xlabel('Isolation Forest Score')
+ax.legend()
+ax.set_title('Score Distribution: Normal vs Anomaly (5-dim)')
+plt.tight_layout()
+plt.savefig('if_score_dist.png', dpi=100)
+</code></pre>
+<h2>Comparison with Other Detectors</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Assumption</th>
+<th>High-dim</th>
+<th>Speed</th>
+<th>Interpretable</th>
+<th>Contamination param</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Isolation Forest</td>
+<td>Anomalies are few and different</td>
+<td>Excellent</td>
+<td>O(n log n)</td>
+<td>Partially (path length)</td>
+<td>Yes — contamination</td>
+</tr>
+<tr>
+<td>LOF</td>
+<td>Local density comparison</td>
+<td>Poor (distances converge)</td>
+<td>O(n² k)</td>
+<td>Yes (LOF score ratio)</td>
+<td>Implicit via k</td>
+</tr>
+<tr>
+<td>One-Class SVM</td>
+<td>Normal data on one side of hyperplane</td>
+<td>Poor (kernel cost)</td>
+<td>O(n² SV)</td>
+<td>Low (kernel boundary)</td>
+<td>Yes — nu</td>
+</tr>
+<tr>
+<td>Autoencoder</td>
+<td>Anomalies not on normal manifold</td>
+<td>Good</td>
+<td>Depends on arch</td>
+<td>Low</td>
+<td>Via threshold</td>
+</tr>
+</tbody>
+</table>
+<h2>Practical Guidance</h2>
+<p>Set n_estimators=100 as a baseline; 200-300 if precision matters. Sub-sample size of 256 (max_samples=256) works well for most datasets — increasing it rarely helps and slows training. When contamination is unknown, set contamination='auto' and use score_samples() with a threshold from a held-out validation set. For streaming anomaly detection, train on a rolling window and re-fit periodically.</p>
+<blockquote>
+<p><strong>When to Prefer Isolation Forest</strong>: Isolation Forest is the recommended first choice for anomaly detection in high-dimensional tabular data (d &gt; 10), when the dataset is large (n &gt; 10,000), or when no assumption about the normal distribution can be made. Its O(n log n) complexity and lack of pairwise distance computation make it far faster than LOF or One-Class SVM at scale.</p>
+</blockquote>
+<p>Sub-sampling is a key design choice: each tree is built on a random sample of max_samples points (default 256). Because anomalies are rare and isolated, 256 points is almost always enough to isolate them near the root. Increasing max_samples beyond 256 does not systematically improve detection and significantly slows training. If the dataset is very small (n &lt; 256), set max_samples=n to use all data.</p>
+<ul>
+<li>Use max_samples=256 (default) — increasing it rarely improves results</li>
+<li>Set contamination to the expected anomaly fraction, or tune on a labelled validation set</li>
+<li>Score with score_samples() for continuous ranking rather than binary predict()</li>
+<li>Consider Extended Isolation Forest when data has strong diagonal correlation structure</li>
+<li>For online/streaming data, fit a new model periodically on a recent window</li>
+</ul>
+<p>To evaluate performance without labelled data, use the anomaly score distribution: a well-trained Isolation Forest should show a clear bimodal distribution of scores when anomalies are present — a dense cluster near 0 (normal) and a sparse cluster near −0.5 and below (anomalous). If the distribution is unimodal, either contamination is very low or the anomalies are not isolated by random partitioning.</p>
+    </article>
+  </main>
+</body>
+</html>

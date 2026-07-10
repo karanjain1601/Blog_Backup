@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DDPM: Denoising Diffusion Probabilistic Models | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>DDPM: Denoising Diffusion Probabilistic Models</h1>
+      
+      <h1>DDPM: Denoising Diffusion Probabilistic Models</h1>
+<h2>Overview</h2>
+<p>Denoising Diffusion Probabilistic Models (DDPM) introduced a principled generative framework using a Markov chain that gradually corrupts data with Gaussian noise, then learns to reverse the process. Published by Ho et al. (2020), DDPM matched GAN image quality without adversarial training, establishing diffusion models as a viable generative paradigm.</p>
+<p>The model defines two processes: a fixed forward process q that destroys signal by adding noise over T steps, and a learned reverse process p_theta that reconstructs data from pure noise. A U-Net backbone conditioned on timestep embeddings serves as the denoising network, achieving FID 3.17 on CIFAR-10 and high-quality samples on CelebA-HQ.</p>
+<h2>Forward Noising Process</h2>
+<p>The forward process applies a fixed Markov chain with variance schedule beta_1,...,beta_T where beta_t in (0,1). Each step adds Gaussian noise: q(x_t|x_{t-1})=N(sqrt(1-beta_t)<em>x_{t-1}, beta_t</em>I). Defining alpha_bar_t as the cumulative product of (1-beta_s) gives the closed-form q(x_t|x_0)=N(sqrt(alpha_bar_t)<em>x_0, (1-alpha_bar_t)</em>I).</p>
+<pre><code>import torch\nT = 1000\nbetas = torch.linspace(1e-4, 0.02, T)\nalphas = 1.0 - betas\nalphas_bar = torch.cumprod(alphas, dim=0)\n\ndef forward_noise(x0, t, noise):\n    ab = alphas_bar[t].view(-1, 1, 1, 1)\n    return ab.sqrt() * x0 + (1 - ab).sqrt() * noise
+</code></pre>
+<p>The linear schedule ranges from beta=1e-4 to 0.02, ensuring x_T approximates N(0,I). A cosine schedule from iDDPM avoids abrupt noise increase early in the sequence, improving low-resolution generation quality. The reparameterization x_t = sqrt(alpha_bar_t)<em>x_0 + sqrt(1-alpha_bar_t)</em>eps enables efficient single-step sampling at any timestep.</p>
+<h2>Reverse Denoising Process</h2>
+<p>The reverse process p_theta(x_{t-1}|x_t) approximates the true posterior q(x_{t-1}|x_t,x_0), which is a Gaussian with tractable closed-form mean. Because the marginal posterior over x_0 is intractable, the model instead predicts noise eps_theta(x_t,t) and computes the denoised mean analytically. Variance is fixed to the forward schedule values.</p>
+<pre><code>def ddpm_step(model, x_t, t, betas, alphas_bar):\n    alpha_t = 1.0 - betas[t]\n    abar_t  = alphas_bar[t]\n    eps     = model(x_t, t)\n    mu = (x_t - betas[t] / (1 - abar_t).sqrt() * eps) / alpha_t.sqrt()\n    z  = torch.randn_like(x_t) if t &gt; 0 else torch.zeros_like(x_t)\n    return mu + betas[t].sqrt() * z
+</code></pre>
+<p>Noise z ~ N(0,I) is injected at every step except t=0, preserving the stochastic Markov structure. The intermediate estimate x0_pred = (x_t - sqrt(1-alpha_bar_t)*eps) / sqrt(alpha_bar_t) can be monitored during sampling. Full generation requires T=1000 sequential U-Net evaluations, making vanilla DDPM slow at inference time.</p>
+<h2>Training Objective</h2>
+<p>DDPM maximizes the ELBO on log p_theta(x_0), decomposing into a reconstruction term and T-1 KL divergences between forward and reverse posteriors at each step. Ho et al. found that a reweighted simplified objective — minimizing MSE between predicted and actual noise — significantly outperforms the full ELBO and x_0 prediction alternatives.</p>
+<pre><code>import torch.nn.functional as F\n\ndef training_step(model, x0, T, alphas_bar):\n    B = x0.shape[0]\n    t     = torch.randint(0, T, (B,), device=x0.device)\n    noise = torch.randn_like(x0)\n    x_t   = forward_noise(x0, t, noise)\n    loss  = F.mse_loss(model(x_t, t), noise)\n    return loss
+</code></pre>
+<p>Timestep t is sampled uniformly during training so the model learns denoising across all noise levels equally. The U-Net receives x_t and a sinusoidal embedding of t analogous to transformer positional encodings. Training follows AdamW at lr=2e-4 with no learning rate schedule, converging stably over millions of gradient steps without GAN-style instability.</p>
+<blockquote>
+<p><strong>info</strong>: DDPM's training objective simplifies to predicting the added noise (epsilon-parameterization), which is equivalent to maximizing the ELBO but much easier to optimize. This simplification was the key insight enabling stable training.</p>
+</blockquote>
+<h2>DDIM Accelerated Sampling</h2>
+<p>Denoising Diffusion Implicit Models (DDIM) by Song et al. redefine the reverse process using a non-Markovian family of distributions that share the same marginals as DDPM. This allows using any subset of timesteps without retraining, enabling 10-50x speedup at inference. DDIM uses the same trained checkpoint — no fine-tuning required.</p>
+<pre><code>def ddim_step(eps, x_t, t, t_prev, alphas_bar, eta=0.0):\n    ab_t    = alphas_bar[t]\n    ab_prev = alphas_bar[t_prev]\n    x0_pred = (x_t - (1 - ab_t).sqrt() * eps) / ab_t.sqrt()\n    sigma   = eta * ((1-ab_prev)/(1-ab_t)).sqrt() * (1 - ab_t/ab_prev).sqrt()\n    dir_xt  = (1 - ab_prev - sigma**2).sqrt() * eps\n    return ab_prev.sqrt() * x0_pred + dir_xt + sigma * torch.randn_like(x_t)
+</code></pre>
+<p>Setting eta=0 makes DDIM fully deterministic: identical initial noise always produces identical images, enabling meaningful latent space interpolation. Reducing from 1000 to 50 steps incurs only modest FID degradation. DPM-Solver and DEIS further improve efficiency by treating the reverse process as an ODE and applying higher-order numerical integration.</p>
+<table>
+<thead>
+<tr>
+<th>Sampler</th>
+<th>Steps</th>
+<th>FID (CIFAR-10)</th>
+<th>Speed</th>
+<th>Deterministic</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>DDPM</td>
+<td>1000</td>
+<td>3.17</td>
+<td>Baseline</td>
+<td>No</td>
+</tr>
+<tr>
+<td>DDPM</td>
+<td>100</td>
+<td>5.84</td>
+<td>10x faster</td>
+<td>No</td>
+</tr>
+<tr>
+<td>DDIM</td>
+<td>50</td>
+<td>4.67</td>
+<td>20x faster</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>DDIM</td>
+<td>20</td>
+<td>6.84</td>
+<td>50x faster</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>DPM-Solver</td>
+<td>20</td>
+<td>4.70</td>
+<td>50x faster</td>
+<td>Yes</td>
+</tr>
+</tbody>
+</table>
+<h2>Key Takeaways</h2>
+<p>DDPM unified score matching, variational inference, and Langevin dynamics under a single training objective. The epsilon-parameterization — predicting added noise rather than the original image — proved simpler, more stable, and higher quality than x_0 prediction or score-based objectives. This design choice is preserved in virtually every subsequent diffusion architecture.</p>
+<p>Unlike GANs, diffusion models train without adversarial instability or mode collapse. Unlike VAEs, they produce sharp samples without posterior collapse. The principal trade-off is inference cost: T sequential U-Net passes per sample. DDIM and ODE-based samplers have largely resolved this bottleneck, enabling real-time generation at industrial scale.</p>
+<p>DDPM's probabilistic framework extends naturally to conditional generation via classifier guidance, classifier-free guidance, and ControlNet structural conditioning. Every major text-to-image model — Stable Diffusion, DALL-E 2, Imagen, Flux — inherits DDPM's forward process and epsilon-prediction objective, making DDPM the essential starting point.</p>
+    </article>
+  </main>
+</body>
+</html>

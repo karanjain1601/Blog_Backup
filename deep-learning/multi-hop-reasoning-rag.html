@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Multi-Hop Reasoning in RAG | Notes Backup</title>
+  <meta name="description" content="Decomposing complex questions requiring multiple retrieval steps — question decomposition, iterative retrieval, and chain-of-thought over retrieved passages to answer queries needing 2–5 reasoning hops." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Multi-Hop Reasoning in RAG</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Decomposing complex questions requiring multiple retrieval steps — question decomposition, iterative retrieval, and chain-of-thought over retrieved passages to answer queries needing 2–5 reasoning hops.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Multi-Hop Reasoning in RAG</h1>
+<p>Multi-hop reasoning in retrieval-augmented generation refers to the class of techniques that answer questions requiring two or more retrieval steps, where the result of one retrieval informs the query for the next. A canonical multi-hop question is: 'Who is the CEO of the company that acquired DeepMind?' Answering it requires (1) retrieving which company acquired DeepMind, (2) retrieving who is the CEO of that company. Single-hop RAG — which retrieves once based on the original question and then generates an answer — cannot reliably answer such questions because no single passage is simultaneously about DeepMind's acquisition and the acquiring company's current CEO. Multi-hop RAG architectures decompose this reasoning chain into sequential or interleaved retrieval steps.</p>
+<h2>Overview</h2>
+<p>The challenge of multi-hop reasoning in RAG is twofold: decomposing the question into steps that can each be answered by a single retrieval call, and chaining the results of those retrievals into a coherent reasoning process that arrives at the final answer. Early approaches decomposed questions into sub-questions before any retrieval (decompose-then-retrieve), generating a fixed plan that may fail if early sub-questions are answered incorrectly. More robust approaches interleave generation and retrieval, generating one reasoning step, retrieving evidence for that step, and continuing — dynamically adapting the reasoning chain based on what is actually retrieved rather than following a pre-determined plan.</p>
+<p>Multi-hop RAG is evaluated primarily on three benchmarks: HotpotQA (Wikipedia-based 2-hop questions in bridge and comparison formats), 2WikiMultiHopQA (2-hop questions with explicit reasoning chains), and MuSiQue (up to 4-hop questions with deliberate hard negatives). On HotpotQA bridge questions, single-hop RAG achieves approximately 0.52 F1; state-of-the-art multi-hop methods reach 0.71–0.75 F1, a substantial gap of 19–23 points. The gap is even larger on MuSiQue (4-hop), where single-hop RAG scores near 0.21 and the best multi-hop methods reach 0.44–0.47. This demonstrates that multi-hop reasoning is not a marginal improvement — it is essential for complex question-answering in production retrieval systems.</p>
+<h2>Single-hop vs Multi-hop Questions</h2>
+<p>Single-hop questions are those for which a single retrieval step provides all the information needed to answer. Examples include 'What is the capital of France?' (a factual lookup), 'Who wrote Harry Potter?' (a single entity-attribute query), and 'What is the GDP of Germany?' (a numeric lookup). For these questions, single-hop RAG retrieves the relevant passage and the LLM extracts the answer directly. The retrievability of the answer from a single chunk is the defining characteristic. Even some apparently complex questions are single-hop if the answer is localized: 'What are the five main symptoms of COVID-19?' has a well-defined answer in medical literature that a single retrieved passage provides.</p>
+<p>Multi-hop questions require reasoning over two or more pieces of information that are not co-located in any single document chunk. Bridge questions link entities through intermediate steps: 'Where was the founder of SpaceX born?' requires finding that Elon Musk founded SpaceX, then finding that Elon Musk was born in Pretoria, South Africa — two facts that rarely co-occur in a single passage. Comparison questions compare attributes of multiple entities: 'Which company has more employees, OpenAI or Anthropic?' requires retrieving each company's employee count from separate sources and then comparing. Compositional questions involve applying one fact to another: 'What year did the company with the largest market cap in 1995 release its first smartphone?' The characteristic of all multi-hop questions is that the bridge entity (SpaceX's founder, each company's employee count) must be retrieved before the final retrieval query can be formed.</p>
+<h2>Decompose-then-Retrieve</h2>
+<p>The simplest multi-hop RAG architecture decomposes the question into a sequence of sub-questions before any retrieval. An LLM is prompted with the original question and asked to generate an ordered list of simpler sub-questions, each of which can be answered by a single retrieval call. The sub-questions are then executed sequentially: retrieve for sub-question 1, answer it, plug the answer into sub-question 2 (which may reference the result of sub-question 1), retrieve for sub-question 2, and so on. The results are concatenated as context for a final LLM call that synthesizes all retrieved evidence into the answer to the original question.</p>
+<p>The weakness of decompose-then-retrieve is the fragility of the up-front decomposition. If the LLM generates an incorrect or suboptimal decomposition — wrong sub-question ordering, missing a necessary step, or generating a sub-question that cannot be answered by the retrieval system — the entire pipeline fails. Because retrieval results are not consulted when generating the decomposition, the plan may be misaligned with what is actually retrievable. This is analogous to planning a route without a map: the plan may be logically coherent but practically impossible. Interleaved approaches that consult retrieved evidence while forming the plan are more robust, though at the cost of greater complexity and latency.</p>
+<pre><code class="language-python">import json
+import openai
+from typing import List, Callable
+
+def decompose_question(question: str, model: str = 'gpt-4o-mini') -&gt; List[str]:
+    # Break a multi-hop question into ordered sub-questions, each answerable by one retrieval.
+    prompt = (f'Break this into simpler sub-questions answerable by one retrieval each.\n'
+              f'Output JSON: {{&quot;sub_questions&quot;: [&quot;...&quot;, &quot;...&quot;]}}\n'
+              f'Question: {question}')
+    resp = openai.chat.completions.create(
+        model=model, max_tokens=256,
+        messages=[{'role': 'user', 'content': prompt}],
+    )
+    return json.loads(resp.choices[0].message.content).get('sub_questions', [question])
+
+def decompose_and_retrieve(question: str, retrieve_fn: Callable, llm_fn: Callable) -&gt; str:
+    sub_qs = decompose_question(question)
+    context_parts = []
+    for i, sq in enumerate(sub_qs):
+        docs = retrieve_fn(sq, top_k=3)
+        ctx = '\n'.join(docs)
+        ans = llm_fn(f'Context:\n{ctx}\nQuestion: {sq}\nAnswer:')
+        context_parts.append(f'Sub-Q {i+1}: {sq}\nAnswer: {ans}')
+        print(f'  [{i+1}] {sq} =&gt; {ans}')
+    combined = '\n\n'.join(context_parts)
+    return llm_fn(f'Reasoning steps:\n{combined}\n\nFinal question: {question}\nAnswer:')
+
+q = 'Who is the CEO of the company that acquired DeepMind?'
+result = decompose_and_retrieve(q, retrieve_fn=lambda q, top_k=3: [], llm_fn=lambda p: '')
+print(f'Final: {result}')
+</code></pre>
+<h2>Interleaved Retrieval and Reasoning</h2>
+<p>Interleaved approaches alternate between reasoning steps and retrieval steps, using evidence retrieved in one step to inform both the reasoning and the retrieval query for the next step. Rather than generating a complete plan before any retrieval, the model generates one reasoning step at a time, retrieves evidence relevant to that step, and then generates the next reasoning step conditioned on what was actually retrieved. This makes the reasoning chain adaptive: if the retrieval for step 1 returns unexpected information, the model can revise its approach in step 2 rather than following a predetermined but now-incorrect plan.</p>
+<p>The interleaving pattern fundamentally changes the error propagation dynamics compared to decompose-then-retrieve. In a sequential decomposition plan, an error in sub-question 2's answer propagates to sub-question 3 with no opportunity for correction. In an interleaved approach, each new retrieval brings fresh evidence that can either confirm the current reasoning path or provide corrective information. IRCoT (Interleaved Retrieval with Chain-of-Thought) formalizes this insight: each chain-of-thought sentence is both a reasoning step and a retrieval query, creating a tight feedback loop between the language model's reasoning process and the evidence base it draws from. ReAct extends this with a more explicit Thought/Action/Observation structure that separates the reasoning and retrieval phases.</p>
+<h2>IRCoT: Interleaving CoT and Retrieval</h2>
+<p>IRCoT (Trivedi et al., 2023) proposes a simple but powerful algorithm: alternate between (a) generating the next chain-of-thought sentence conditioned on all retrieved passages so far, and (b) using that sentence as the retrieval query for the next retrieval call. The reasoning chain grows one sentence at a time, and each new sentence potentially unlocks new relevant passages. The loop terminates when the model generates a sentence beginning with 'The answer is' or similar terminal marker, or when a maximum step budget is reached. Because each CoT sentence is typically a well-formed factual claim, it serves as an effective retrieval query for the next hop.</p>
+<p>IRCoT's key advantage over decompose-then-retrieve is that the retrieval queries are grounded in what the model has actually reasoned so far, rather than in an up-front prediction of what it will need. If the model's reasoning takes an unexpected turn — because a retrieved passage revealed a surprising intermediate fact — IRCoT naturally adjusts its retrieval queries to follow this new direction. In the original IRCoT paper, this interleaved approach improved exact match on HotpotQA from 0.49 (decompose-then-retrieve) to 0.71, and on 2WikiMultiHopQA from 0.43 to 0.65, demonstrating that evidence-grounded reasoning queries are substantially more effective than up-front planning.</p>
+<pre><code class="language-python">import openai
+from typing import List, Tuple
+
+def retrieve(query: str, top_k: int = 3) -&gt; List[str]:
+    return []  # replace with BM25 or dense retrieval
+
+def ircot_loop(question: str, model: str = 'gpt-4o-mini',
+               max_steps: int = 6) -&gt; Tuple[str, List[str]]:
+    # IRCoT: alternate between reasoning step and retrieval until answer is found.
+    retrieved: List[str] = []
+    chain = f'Question: {question}\nThinking step by step:\n'
+    for step in range(max_steps):
+        ctx = '\n'.join(retrieved[-5:])  # use last 5 retrieved passages as context
+        prompt = f'Passages:\n{ctx}\n\n{chain}\nNext reasoning step:'
+        resp = openai.chat.completions.create(
+            model=model, max_tokens=80, stop=['\n'],
+            messages=[{'role': 'user', 'content': prompt}],
+        )
+        reasoning = resp.choices[0].message.content.strip()
+        chain += f'\nStep {step+1}: {reasoning}'
+        if reasoning.lower().startswith('the answer is'):
+            answer = reasoning.split('the answer is', 1)[-1].strip(' .')
+            return answer, retrieved
+        new_docs = retrieve(reasoning, top_k=3)
+        retrieved.extend(new_docs)
+    return 'unknown', retrieved
+
+answer, docs = ircot_loop('Who invented the transformer architecture used in GPT models?')
+print(f'Answer: {answer}  |  Retrieved {len(docs)} passages')
+</code></pre>
+<h2>ReAct for Multi-Hop</h2>
+<p>ReAct (Yao et al., 2022) structures the generation as an explicit alternation between Thought steps (the model's internal reasoning) and Action steps (calls to external tools, in this context retrieval calls), with Observation steps (the tool's output) appended after each action. The model generates a Thought explaining what it plans to do, then an Action specifying the retrieval query, then receives an Observation containing the retrieved passages, then generates the next Thought, and so on until a finish action produces the final answer. This explicit separation of reasoning from retrieval makes the process more interpretable than IRCoT's implicit approach and enables human-in-the-loop oversight of each step.</p>
+<p>ReAct's structured format also makes it easier to handle failures: if a retrieval action returns unhelpful results, the next Thought can explicitly acknowledge this and try a different retrieval strategy. ReAct is also naturally extensible to multiple tools — beyond retrieval, the action space can include calculator calls, database lookups, API calls, or code execution. This makes ReAct the de facto standard for agentic RAG systems where the model must decide among multiple retrieval strategies or information sources. The primary weakness of ReAct compared to IRCoT is that the explicit format overhead adds tokens and latency; for pure retrieval tasks, IRCoT is more efficient.</p>
+<pre><code class="language-python">import re
+import openai
+from typing import List
+
+def retrieve(query: str, top_k: int = 3) -&gt; List[str]:
+    return []  # stub: replace with real retrieval
+
+def react_rag(question: str, model: str = 'gpt-4o-mini', max_steps: int = 8) -&gt; str:
+    # ReAct loop: Thought -&gt; Action[retrieve/finish] -&gt; Observation -&gt; repeat.
+    system = ('Use Thought/Action/Observation format.\n'
+              'Actions: retrieve[&lt;query&gt;] or finish[&lt;answer&gt;]')
+    history = f'Question: {question}\n'
+    for step in range(max_steps):
+        resp = openai.chat.completions.create(
+            model=model, max_tokens=120, stop=['Observation:'],
+            messages=[{'role': 'system', 'content': system},
+                      {'role': 'user', 'content': history}],
+        )
+        step_text = resp.choices[0].message.content.strip()
+        history += step_text + '\n'
+        match = re.search(r'Action:\s*(\w+)\[(.+?)\]', step_text)
+        if not match:
+            break
+        action, arg = match.group(1), match.group(2)
+        if action == 'finish':
+            return arg
+        if action == 'retrieve':
+            docs = retrieve(arg, top_k=3)
+            obs = '; '.join(docs) if docs else 'No relevant documents found.'
+            history += f'Observation: {obs}\n'
+    return 'Could not determine answer within step budget'
+
+print(react_rag('Who founded the organization that created the BERT language model?'))
+</code></pre>
+<h2>Evaluation: HotpotQA and 2WikiMultiHop</h2>
+<p>HotpotQA is the standard benchmark for 2-hop QA. It contains approximately 113,000 question-answer pairs, each requiring reasoning over two Wikipedia articles. The bridge subset (questions linking two entities through a shared attribute) is the most common evaluation target. The comparison subset (questions comparing attributes of two entities) tests a different kind of multi-hop reasoning. Evaluation metrics are exact match (EM) and token F1, where EM requires the predicted answer to exactly match the gold answer string after normalization, and F1 measures token overlap. A random baseline scores near zero; a strong single-hop retrieval baseline scores around 0.38 EM / 0.52 F1; state-of-the-art multi-hop methods reach 0.57–0.73 EM.</p>
+<p>2WikiMultiHopQA and MuSiQue are harder benchmarks. 2WikiMultiHopQA provides explicit reasoning chains alongside questions, enabling evaluation of whether the model's intermediate reasoning steps are correct in addition to whether the final answer is correct. MuSiQue includes up to 4-hop questions and deliberately includes hard negative passages (documents that are related to the question topic but do not contribute to the answer), testing whether models can avoid being misled by plausible-looking but incorrect evidence. On MuSiQue, even state-of-the-art multi-hop methods struggle: IRCoT reaches approximately 0.44 EM, and the best systems cap around 0.47 EM, leaving substantial room for improvement.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>HotpotQA F1</th>
+<th>2WikiMultiHop EM</th>
+<th>MuSiQue EM</th>
+<th>API calls</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Single-hop RAG</td>
+<td>0.52</td>
+<td>0.38</td>
+<td>0.21</td>
+<td>1</td>
+<td>One retrieval, misses intermediate hops</td>
+</tr>
+<tr>
+<td>QA decomposition</td>
+<td>0.61</td>
+<td>0.52</td>
+<td>0.34</td>
+<td>3–5</td>
+<td>Pre-plans sub-questions before retrieval</td>
+</tr>
+<tr>
+<td>IRCoT</td>
+<td>0.71</td>
+<td>0.65</td>
+<td>0.44</td>
+<td>5–7</td>
+<td>Best single strategy; evidence-grounded</td>
+</tr>
+<tr>
+<td>ReAct</td>
+<td>0.68</td>
+<td>0.61</td>
+<td>0.41</td>
+<td>5–9</td>
+<td>Flexible; supports multiple tool types</td>
+</tr>
+<tr>
+<td>Self-Ask</td>
+<td>0.64</td>
+<td>0.57</td>
+<td>0.38</td>
+<td>3–6</td>
+<td>Follow-up question driven; simple to implement</td>
+</tr>
+<tr>
+<td>DSP</td>
+<td>0.73</td>
+<td>0.68</td>
+<td>0.47</td>
+<td>6–10</td>
+<td>Optimized multi-step programs via DSPy</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-python">import time
+from collections import defaultdict
+from datasets import load_dataset
+from typing import Callable
+
+def normalize(s: str) -&gt; str:
+    return ' '.join(s.lower().strip().split())
+
+def token_f1(pred: str, gold: str) -&gt; float:
+    pt = set(pred.lower().split())
+    gt = set(gold.lower().split())
+    if not pt or not gt:
+        return 0.0
+    prec = len(pt &amp; gt) / len(pt)
+    rec  = len(pt &amp; gt) / len(gt)
+    return 2 * prec * rec / (prec + rec) if (prec + rec) &gt; 0 else 0.0
+
+def benchmark(questions, gold, method_fn: Callable, name: str) -&gt; dict:
+    em_scores, f1_scores, calls_list = [], [], []
+    for q, a in zip(questions, gold):
+        pred, calls = method_fn(q)
+        em_scores.append(int(normalize(pred) == normalize(a)))
+        f1_scores.append(token_f1(pred, a))
+        calls_list.append(calls)
+    n = len(questions)
+    result = {'em': sum(em_scores)/n, 'f1': sum(f1_scores)/n, 'avg_calls': sum(calls_list)/n}
+    print(f'[{name}] EM={result[&quot;em&quot;]:.3f}  F1={result[&quot;f1&quot;]:.3f}  calls={result[&quot;avg_calls&quot;]:.1f}')
+    return result
+
+ds = load_dataset('hotpot_qa', 'fullwiki', split='validation[:200]')
+qs, gold = [r['question'] for r in ds], [r['answer'] for r in ds]
+benchmark(qs, gold, lambda q: ('', 1), 'single_hop')
+benchmark(qs, gold, lambda q: ircot_loop(q), 'ircot')
+</code></pre>
+<blockquote>
+<p><strong>IRCoT Strategy</strong>: IRCoT (interleaved retrieval + chain-of-thought) is the best single multi-hop strategy: it uses retrieval evidence to guide each reasoning step rather than retrieving all at once, reducing the chance of following wrong reasoning paths. For most production multi-hop RAG use cases, IRCoT with 5–7 retrieval steps and a dense retrieval backend delivers the best balance of accuracy, cost, and implementation complexity.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<p>Multi-hop reasoning in RAG is a solved problem for 2-hop questions (where IRCoT reaches 0.71 F1 on HotpotQA) but remains an open challenge for 4+ hop questions and questions with hard negative passages (MuSiQue). The core architectural choice — decompose-then-retrieve versus interleaved retrieval — consistently favors interleaving: generating reasoning steps conditioned on retrieved evidence is more robust than planning all retrieval queries upfront. IRCoT is the recommended default for teams implementing multi-hop RAG, with ReAct as the preferred alternative when the system must support multiple tool types beyond retrieval. Evaluation on HotpotQA alone may be misleading; always evaluate on MuSiQue or a similar hard multi-hop benchmark to ensure robustness to hard negatives.</p>
+<ul>
+<li>Multi-hop RAG is necessary for any question where the answer depends on chaining two or more retrieved facts — single-hop RAG scores 19–30 points lower on standard multi-hop benchmarks</li>
+<li>IRCoT is the recommended default: interleaving CoT and retrieval outperforms both single-hop and decompose-then-retrieve on all standard benchmarks</li>
+<li>ReAct is preferred over IRCoT when you need multi-tool support (retrieval + calculator + database), or when you want explicit interpretable action logs</li>
+<li>Evaluate on MuSiQue (4-hop, hard negatives) in addition to HotpotQA — a system that performs well on HotpotQA may still fail on more complex compositional questions</li>
+<li>Set a step budget (5–8 retrieval calls) and always implement a fallback single-hop answer as a safety net when the budget is exhausted without a confident answer</li>
+<li>For 2-hop questions in production, a cascade approach — try single-hop first, only escalate to multi-hop if confidence is low — minimizes cost while preserving accuracy</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>1D, 2D, and 3D Convolutions — Applications for Each | Notes Backup</title>
+  <meta name="description" content="Compare 1D, 2D, and 3D convolutions across input shapes, parameter counts, and domains — from time-series and audio to images, video, and volumetric medical data." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>1D, 2D, and 3D Convolutions — Applications for Each</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Compare 1D, 2D, and 3D convolutions across input shapes, parameter counts, and domains — from time-series and audio to images, video, and volumetric medical data.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>1D, 2D, and 3D Convolutions — Applications for Each</h1>
+<p>Convolution generalises naturally across dimensionalities: 1D slides a kernel along a single axis (time or sequence length), 2D slides over a spatial plane (height × width), and 3D slides over a volume (depth × height × width or time × height × width). Choosing the right dimensionality is not arbitrary — it encodes a structural assumption about where local correlations exist in the data, and matching that assumption to the true data geometry is the first architectural decision for any CNN design.</p>
+<h2>1D Convolution — Sequences, Audio, and Time Series</h2>
+<p>nn.Conv1d takes input of shape (N, C, L) — batch, channels, length — and produces output (N, C_out, L_out). The kernel slides along the L dimension only. Applications: time-series classification (ECG, accelerometer), audio waveform modelling (WaveNet stacks dilated 1D convs to achieve receptive fields of thousands of samples), text classification (TextCNN applies multiple kernel sizes like 3, 4, 5 then max-pools), and position mixing in hybrid models. 1D conv is much faster than RNNs for fixed-context tasks and fully parallelisable during training. WaveNet achieved state-of-the-art text-to-speech by stacking 30 dilated 1D conv layers with dilation rates [1,2,4,...,512] repeated.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class ECGClassifier(nn.Module):
+    &quot;&quot;&quot;1D CNN for time-series (ECG) classification.&quot;&quot;&quot;
+    def __init__(self, n_classes=5):
+        super().__init__()
+        self.conv1 = nn.Conv1d(1, 32, kernel_size=7, padding=3)   # (N,32,L)
+        self.conv2 = nn.Conv1d(32, 64, kernel_size=5, padding=2)  # (N,64,L)
+        self.conv3 = nn.Conv1d(64, 128, kernel_size=3, padding=1) # (N,128,L)
+        self.pool  = nn.AdaptiveAvgPool1d(1)                       # (N,128,1)
+        self.fc    = nn.Linear(128, n_classes)
+
+    def forward(self, x):
+        x = F.relu(self.conv1(x))
+        x = F.max_pool1d(x, 2)          # halve sequence length
+        x = F.relu(self.conv2(x))
+        x = F.max_pool1d(x, 2)
+        x = F.relu(self.conv3(x))
+        x = self.pool(x).squeeze(-1)    # global avg pool -&gt; (N,128)
+        return self.fc(x)
+
+model = ECGClassifier()
+x = torch.randn(8, 1, 256)  # 8 ECG traces, single lead, 256 timesteps
+out = model(x)
+print(f'Input:  {tuple(x.shape)}')
+print(f'Output: {tuple(out.shape)}')
+params = sum(p.numel() for p in model.parameters())
+print(f'Total params: {params:,}')
+</code></pre>
+<h2>2D Convolution — Images and Spatial Feature Maps</h2>
+<p>nn.Conv2d takes input (N, C, H, W) and is the standard building block for image tasks. It slides the kernel over two spatial dimensions simultaneously, learning translation-equivariant feature detectors. Virtually all image classification, detection, and segmentation networks (VGG, ResNet, EfficientNet, YOLO, Mask R-CNN) are built on 2D conv. The key design choices are: how many channels (width), how deep to go (depth), where to downsample (stride or pool), and what kernel sizes to use. The trend since 2015 has been toward all-3×3 kernels (VGG insight: two 3×3 convs have the same RF as one 5×5 but fewer parameters), skip connections (ResNet), and depthwise separable convs (MobileNet).</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class SmallImageCNN(nn.Module):
+    &quot;&quot;&quot;Compact 2D CNN for CIFAR-10 (32x32 input).&quot;&quot;&quot;
+    def __init__(self, num_classes=10):
+        super().__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(3, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(),
+            nn.Conv2d(32, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU(),
+            nn.MaxPool2d(2),                 # 32-&gt;16
+            nn.Conv2d(64, 128, 3, padding=1), nn.BatchNorm2d(128), nn.ReLU(),
+            nn.Conv2d(128, 128, 3, padding=1), nn.BatchNorm2d(128), nn.ReLU(),
+            nn.MaxPool2d(2),                 # 16-&gt;8
+            nn.Conv2d(128, 256, 3, padding=1), nn.BatchNorm2d(256), nn.ReLU(),
+        )
+        self.head = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(256, num_classes)
+        )
+
+    def forward(self, x):
+        return self.head(self.features(x))
+
+model = SmallImageCNN()
+x = torch.randn(4, 3, 32, 32)
+out = model(x)
+print(f'Input: {tuple(x.shape)} -&gt; Output: {tuple(out.shape)}')
+print(f'Params: {sum(p.numel() for p in model.parameters()):,}')
+</code></pre>
+<h2>3D Convolution — Video and Volumetric Data</h2>
+<p>nn.Conv3d takes input (N, C, D, H, W) where D is depth (time frames for video, z-slices for medical imaging). It applies a 3D kernel that slides over all three spatial/temporal axes simultaneously, learning spatio-temporal features. C3D (Tran et al., 2015) used 3×3×3 kernels throughout for action recognition. I3D inflated ImageNet-pretrained 2D conv weights into 3D by repeating them along the temporal axis. For medical imaging (CT, MRI), 3D conv captures inter-slice relationships that 2D slice-by-slice processing misses.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class VideoClipCNN(nn.Module):
+    &quot;&quot;&quot;Minimal 3D CNN for short video clip classification.&quot;&quot;&quot;
+    def __init__(self, num_classes=101):
+        super().__init__()
+        # Input: (N, 3, T, H, W) e.g. (N, 3, 16, 112, 112)
+        self.conv1 = nn.Conv3d(3,  64, kernel_size=(3,3,3), padding=1)
+        self.conv2 = nn.Conv3d(64, 128, kernel_size=(3,3,3), padding=1)
+        self.conv3 = nn.Conv3d(128, 256, kernel_size=(3,3,3), padding=1)
+        self.pool  = nn.AdaptiveAvgPool3d(1)
+        self.fc    = nn.Linear(256, num_classes)
+
+    def forward(self, x):
+        x = F.relu(self.conv1(x))
+        x = F.max_pool3d(x, kernel_size=(1,2,2))  # only pool spatial
+        x = F.relu(self.conv2(x))
+        x = F.max_pool3d(x, kernel_size=(2,2,2))
+        x = F.relu(self.conv3(x))
+        x = self.pool(x).squeeze(-1).squeeze(-1).squeeze(-1)
+        return self.fc(x)
+
+model = VideoClipCNN()
+x = torch.randn(2, 3, 16, 112, 112)  # 2 clips, 16 frames, 112x112
+out = model(x)
+print(f'Input : {tuple(x.shape)}')
+print(f'Output: {tuple(out.shape)}')
+print(f'Params: {sum(p.numel() for p in model.parameters()):,}')
+</code></pre>
+<h2>Pseudo-3D Convolution — Factorising for Efficiency</h2>
+<p>Full 3D conv has k³ parameters per filter position. Pseudo-3D (P3D, Qiu et al. 2017) factorises a 3×3×3 conv into a spatial 3×3 (2D, no temporal mixing) followed by a temporal 1×1×3 (1D along time, no spatial mixing). This reduces parameters from k³×C_in×C_out to (k²+k)×C_in×C_out ≈ 3.4× fewer for k=3, with comparable accuracy on action recognition benchmarks. (2+1)D conv (R(2+1)D, Tran et al. 2018) adds a nonlinearity between the two factors, further improving expressivity. These factored designs make 3D-conv-based video understanding practical on standard GPU budgets.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import time
+
+class FullConv3D(nn.Module):
+    def __init__(self, C): super().__init__(); self.conv = nn.Conv3d(C, C, 3, padding=1)
+    def forward(self, x): return self.conv(x)
+
+class Pseudo3D(nn.Module):
+    &quot;&quot;&quot;Spatial 2D conv + temporal 1D conv.&quot;&quot;&quot;
+    def __init__(self, C):
+        super().__init__()
+        self.spatial  = nn.Conv3d(C, C, (1,3,3), padding=(0,1,1))
+        self.temporal = nn.Conv3d(C, C, (3,1,1), padding=(1,0,0))
+    def forward(self, x):
+        return self.temporal(self.spatial(x))
+
+C, T, H, W = 64, 8, 28, 28
+x = torch.randn(2, C, T, H, W)
+
+for name, model in [('Full 3D', FullConv3D(C)), ('Pseudo-3D', Pseudo3D(C))]:
+    params = sum(p.numel() for p in model.parameters())
+    t0 = time.time()
+    for _ in range(10): _ = model(x)
+    elapsed = (time.time() - t0) / 10 * 1000
+    print(f'{name:&lt;12}: params={params:,}  time={elapsed:.1f}ms')
+</code></pre>
+<blockquote>
+<p><strong>Conv2D + LSTM vs Conv3D for Video</strong>: Conv2D+LSTM (ConvLSTM) processes each frame with 2D conv and propagates temporal state through LSTM cells. This is better for long videos where temporal dependencies span many frames. Conv3D is better for short clips (8–32 frames) where local spatio-temporal patterns matter (e.g., detecting a hand gesture). For very long videos, consider ViT-based approaches with temporal attention, which have global receptive fields from the first layer.</p>
+</blockquote>
+<h2>When to Use Each Dimensionality</h2>
+<p>The choice of conv dimensionality should match where local structure exists in the data. 1D is best for ordered sequences with local temporal/positional patterns and no inherent 2D structure. 2D is the default for any grid-like data with two spatial axes. 3D is appropriate when a third dimension (time or depth) has local correlations with the spatial dimensions simultaneously, not just sequentially. Using 3D conv on data with sparse temporal structure (e.g., long videos with mostly static scenes) wastes parameters; per-frame 2D conv is more efficient. Using 1D conv on images would miss 2D spatial structure entirely.</p>
+<table>
+<thead>
+<tr>
+<th>Dimension</th>
+<th>Input Shape</th>
+<th>Kernel Shape</th>
+<th>Stride Dims</th>
+<th>Params (vs 2D)</th>
+<th>Main Applications</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Conv1D</td>
+<td>(N, C, L)</td>
+<td>(C_out, C_in, k)</td>
+<td>L only</td>
+<td>k/k² = 1/k</td>
+<td>Time series, audio, text, 1D signals</td>
+</tr>
+<tr>
+<td>Conv2D</td>
+<td>(N, C, H, W)</td>
+<td>(C_out, C_in, k, k)</td>
+<td>H, W</td>
+<td>1× (baseline)</td>
+<td>Images, spatial feature maps</td>
+</tr>
+<tr>
+<td>Conv3D</td>
+<td>(N, C, D, H, W)</td>
+<td>(C_out, C_in, k, k, k)</td>
+<td>D, H, W</td>
+<td>k× more</td>
+<td>Video clips, CT/MRI volumes</td>
+</tr>
+<tr>
+<td>Pseudo-3D</td>
+<td>(N, C, T, H, W)</td>
+<td>1×k×k then k×1×1</td>
+<td>H,W then T</td>
+<td>≈1/3 of 3D</td>
+<td>Efficient video understanding</td>
+</tr>
+<tr>
+<td>Depthwise 2D</td>
+<td>(N, C, H, W)</td>
+<td>C kernels of (1,k,k)</td>
+<td>H, W</td>
+<td>1/C_out</td>
+<td>Mobile, channel-independent features</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>nn.Conv1d input must be (N, C, L) — reshape (N, L, C) inputs with .permute(0,2,1) before passing.</li>
+<li>nn.Conv3d is memory-intensive: a 3D feature map (N,256,16,14,14) uses 3.2 GB at float32 batch=8.</li>
+<li>For medical imaging, nnU-Net auto-configures 2D vs 3D conv based on dataset anisotropy (z-spacing).</li>
+<li>WaveNet used causal dilated Conv1D (masked to prevent future leakage) for autoregressive audio synthesis.</li>
+<li>TextCNN (Kim 2014): three Conv1D with kernels [3,4,5], global max pool per kernel, concat → MLP.</li>
+</ul>
+<h2>Memory and Throughput Considerations</h2>
+<p>3D convolutions are memory-intensive because activations grow with D×H×W. A single layer with C=256, T=16, H=56, W=56 uses 256×16×56×56×4 bytes ≈ 1.6 GB at float32 for one sample. Gradient checkpointing (recomputing activations during backward pass) trades compute for memory — essential for training deep video networks. Mixed-precision (float16) halves activation memory with minimal accuracy loss. For inference on edge devices, reduce T (clip length) before C (channel width) since temporal dimension reduction costs fewer parameters.</p>
+<p>Batch size selection also differs by conv type: 1D conv networks can use large batches (e.g., 256) since sequence inputs are compact; 3D video conv networks often require batch size 2–8 even on high-end GPUs due to activation memory. Gradient accumulation over multiple small batches simulates larger effective batch sizes without exceeding GPU memory limits.</p>
+<ul>
+<li>Profile with torch.profiler to identify whether 3D conv is compute-bound or memory-bandwidth-bound.</li>
+<li>For 3D conv on video, consider temporal striding (stride=(2,1,1)) to reduce time dimension cheaply.</li>
+<li>Conv1d is equivalent to Conv2d with height=1 — you can implement 1D conv using 2D primitives if needed.</li>
+<li>TemporalShift Module (TSM): shifts a fraction of channels along the time axis — zero-parameter temporal modelling built on 2D conv.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

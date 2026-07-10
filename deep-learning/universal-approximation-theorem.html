@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Universal Approximation Theorem — Statements and Limitations | Notes Backup</title>
+  <meta name="description" content="Survey UAT variants from Cybenko to depth-separation results, empirically demonstrate width vs depth tradeoffs on function approximation tasks, and understand what UAT guarantees and critically what it does not." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Universal Approximation Theorem — Statements and Limitations</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Survey UAT variants from Cybenko to depth-separation results, empirically demonstrate width vs depth tradeoffs on function approximation tasks, and understand what UAT guarantees and critically what it does not.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Universal Approximation Theorem — Statements and Limitations</h1>
+<p>The Universal Approximation Theorem (UAT) is the theoretical foundation for why neural networks can, in principle, represent any function. Cybenko (1989) proved that a single hidden layer with sigmoid activations and enough neurons can approximate any continuous function on a compact subset of ℝⁿ to arbitrary accuracy. This result is comforting but dangerously easy to misinterpret — it is a pure existence result that says nothing about how to find the weights, how many neurons are required, or how many training examples are needed to generalize.</p>
+<p>The UAT has spawned a family of increasingly precise results: Hornik (1991) generalized to arbitrary squashing activations, Barron (1993) gave a constructive dimension-free bound, and Telgarsky (2016) proved exponential depth-separation results. Each addresses different aspects of what networks can represent and at what cost.</p>
+<h2>Cybenko 1989 and Hornik 1991</h2>
+<p>Cybenko's theorem: For any continuous f: [0,1]ⁿ → ℝ and any ε &gt; 0, there exist weights W, biases b, and output weights v such that |Σⱼ vⱼ σ(Wⱼᵀx + bⱼ) − f(x)| &lt; ε for all x ∈ [0,1]ⁿ, where σ is any continuous sigmoidal function. Hornik (1991) generalized to arbitrary squashing functions and multi-output networks. Leshno (1993) showed the result holds for any non-polynomial activation. All proofs are non-constructive.</p>
+<p>The key word is existence — the theorem proves such weights exist but provides no algorithm to find them. The required number of neurons may be exponential in the input dimension for some functions. The theorem also says nothing about the sample complexity of learning from finite data, nor about whether gradient descent will converge to the approximating weights.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+import torch.nn as nn
+from torch.optim import Adam
+
+def approximate_function(n_hidden, n_steps=3000, seed=0):
+    torch.manual_seed(seed)
+    X = torch.linspace(-np.pi, np.pi, 500).unsqueeze(1)
+    y = torch.sin(3*X.squeeze()) * torch.cos(X.squeeze()) + X.squeeze()**2 / 4
+    model = nn.Sequential(nn.Linear(1, n_hidden), nn.Sigmoid(), nn.Linear(n_hidden, 1))
+    opt = Adam(model.parameters(), lr=1e-2)
+    for _ in range(n_steps):
+        loss = ((model(X).squeeze() - y)**2).mean()
+        opt.zero_grad(); loss.backward(); opt.step()
+    with torch.no_grad():
+        return ((model(X).squeeze() - y)**2).mean().item()
+
+print(f'{&quot;Width&quot;:&gt;6} | {&quot;Final MSE&quot;:&gt;10}')
+for w in [2, 10, 50, 200, 1000]:
+    print(f'{w:&gt;6} | {approximate_function(w):&gt;10.6f}')
+</code></pre>
+<h2>Depth Advantage — Width vs Depth</h2>
+<p>The UAT guarantees a single hidden layer suffices, but may require exponentially many neurons. Depth separation results (Telgarsky 2016) show that functions representable by depth-k networks with O(n) neurons require Ω(2^n) neurons in a depth-(k−1) network. Practically: a deep narrow network often outperforms a wide shallow network at the same parameter count because depth enables composing simpler transformations.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from torch.optim import Adam
+import numpy as np
+
+def build_net(depth, width, d_in=1):
+    layers = [nn.Linear(d_in, width), nn.ReLU()]
+    for _ in range(depth - 1): layers += [nn.Linear(width, width), nn.ReLU()]
+    layers.append(nn.Linear(width, 1))
+    return nn.Sequential(*layers)
+
+def train_mse(model, X, y, steps=2000):
+    opt = Adam(model.parameters(), lr=1e-3)
+    for _ in range(steps):
+        loss = ((model(X).squeeze() - y)**2).mean()
+        opt.zero_grad(); loss.backward(); opt.step()
+    with torch.no_grad(): return ((model(X).squeeze()-y)**2).mean().item()
+
+torch.manual_seed(42)
+X = torch.linspace(0, 2*np.pi, 400).unsqueeze(1)
+y = torch.sin(5*X.squeeze()) * torch.cos(3*X.squeeze())
+X_tr, y_tr = X[:300], y[:300]
+print(f'{&quot;Config&quot;:22} | Params | Test MSE')
+for depth, width in [(1, 400), (3, 64), (6, 24)]:
+    model = build_net(depth, width)
+    params = sum(p.numel() for p in model.parameters())
+    mse = train_mse(model, X_tr, y_tr)
+    print(f'depth={depth} width={width:3d}       | {params:6d} | {mse:.6f}')
+</code></pre>
+<h2>UAT Does Not Guarantee Learning</h2>
+<p>UAT guarantees the existence of weights that approximate any target function, but gradient descent is not guaranteed to find them. For highly oscillatory functions, the loss landscape has exponentially many local minima and saddle points. Even with sufficient capacity, SGD may converge to a poor solution, not the approximating weights the theorem guarantees exist.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from torch.optim import Adam
+import numpy as np
+
+torch.manual_seed(99)
+X_tr = torch.linspace(0, 1, 200).unsqueeze(1)
+y_tr = torch.sin(50 * np.pi * X_tr.squeeze())
+
+print(f'{&quot;Width&quot;:&gt;6} | {&quot;LR&quot;:&gt;6} | MSE')
+for width, steps, lr in [
+    (1000, 5000, 1e-3),
+    (1000, 5000, 1e-2),
+    (2000, 5000, 5e-3),
+]:
+    torch.manual_seed(0)
+    model = nn.Sequential(nn.Linear(1, width), nn.ReLU(), nn.Linear(width, 1))
+    opt = Adam(model.parameters(), lr=lr)
+    for _ in range(steps):
+        loss = ((model(X_tr).squeeze() - y_tr)**2).mean()
+        opt.zero_grad(); loss.backward(); opt.step()
+    with torch.no_grad():
+        mse = ((model(X_tr).squeeze() - y_tr)**2).mean().item()
+    print(f'{width:&gt;6} | {lr:&gt;6} | {mse:.5f}')
+print('UAT guarantees existence; does not guarantee SGD finds those weights.')
+</code></pre>
+<h2>Barron's Theorem and Sample Complexity</h2>
+<p>Barron's theorem (1993) provides a constructive bound: for functions with bounded Fourier spectrum (∫‖ω‖²|F̂(ω)|dω &lt; C), a single hidden layer with n neurons achieves L2 error O(C²/n), independent of input dimension d. Classical polynomial approximation requires O(n^{−2/d}) error, suffering the curse of dimensionality. Barron's result is O(1/n) regardless of d — a dimension-free rate.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+import torch.nn as nn
+from torch.optim import Adam
+
+def barron_rate(n_hidden_list, d_in=2, n_steps=2000, seed=0):
+    torch.manual_seed(seed)
+    X = torch.randn(500, d_in)
+    y = torch.sin(X[:,0]) * torch.cos(X[:,1])
+    X_tr, y_tr = X[:400], y[:400]
+    X_te, y_te = X[400:], y[400:]
+    for n in n_hidden_list:
+        model = nn.Sequential(nn.Linear(d_in, n), nn.Sigmoid(), nn.Linear(n, 1))
+        opt = Adam(model.parameters(), lr=5e-3)
+        for _ in range(n_steps):
+            loss = ((model(X_tr).squeeze() - y_tr)**2).mean()
+            opt.zero_grad(); loss.backward(); opt.step()
+        with torch.no_grad():
+            te_mse = ((model(X_te).squeeze() - y_te)**2).mean().item()
+        print(f'  n_hidden={n:4d}: test MSE={te_mse:.5f}')
+
+print('Barron class (sin*cos): error decays as O(1/n):')
+barron_rate([10, 25, 50, 100, 200])
+</code></pre>
+<h2>Generalization and Practical Implications</h2>
+<p>UAT says nothing about generalization. A network that memorizes n training points using n neurons satisfies the UAT but generalizes to nothing. Statistical learning theory (PAC learning, Rademacher complexity) bounds generalization error as a function of hypothesis class complexity and number of samples. For ReLU networks, the VC dimension is O(W·L·log(W)) where W is the number of weights and L is depth.</p>
+<p>The practical implication: UAT justifies using neural networks as a model class but does not justify any specific architecture choice. The relevant questions for practice are: (1) Can gradient descent find good weights for this architecture on this data? (2) How many samples are needed to generalize? (3) Is the architecture computationally tractable? UAT answers none of these.</p>
+<blockquote>
+<p><strong>UAT Limitations in Practice</strong>: UAT says a network exists that approximates f to ε accuracy. It does not say: (1) how many neurons are needed — could be exponential; (2) that gradient descent will find those weights; (3) how many training examples are needed to generalize; (4) anything about computational efficiency. Never cite UAT as justification that a specific architecture will learn a specific function.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Theorem</th>
+<th>Function class</th>
+<th>Network class</th>
+<th>What it guarantees</th>
+<th>Key limitation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Cybenko 1989</td>
+<td>Continuous f on compact set</td>
+<td>Single hidden layer, sigmoid</td>
+<td>Existence of ε-approximation</td>
+<td>Non-constructive; width bound unknown</td>
+</tr>
+<tr>
+<td>Hornik 1991</td>
+<td>Continuous f, multi-output</td>
+<td>Single hidden layer, any squashing</td>
+<td>Same guarantee, broader activations</td>
+<td>Still non-constructive</td>
+</tr>
+<tr>
+<td>Barron 1993</td>
+<td>Bounded Fourier spectrum</td>
+<td>Single hidden layer, sigmoidal</td>
+<td>O(1/n) L2 error, dimension-free</td>
+<td>Requires Barron class membership</td>
+</tr>
+<tr>
+<td>Depth separation (Telgarsky)</td>
+<td>Oscillatory composable functions</td>
+<td>Depth-k vs depth-(k-1)</td>
+<td>Depth-k: O(n); depth-(k-1): Ω(2^n)</td>
+<td>Only for specific function families</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>UAT is an existence theorem — the approximating weights may not be findable by gradient descent.</li>
+<li>Width alone may require exponential neurons; depth trades width for expressivity exponentially more efficiently.</li>
+<li>Barron's theorem is dimension-free: its O(1/n) rate does not degrade in high dimensions.</li>
+<li>Generalization gap is not addressed by UAT — you can overfit perfectly and satisfy UAT simultaneously.</li>
+<li>For practice: use depth for compositionally structured functions; use width when depth causes training instability.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

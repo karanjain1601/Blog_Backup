@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Causal Language Modeling — Next-Token Prediction and Autoregressive Training | Notes Backup</title>
+  <meta name="description" content="CLM trains decoder-only transformers (GPT, LLaMA, Mistral) to predict the next token from all prior tokens using cross-entropy loss over every sequence position simultaneously, making it the foundation of modern generative language models." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Causal Language Modeling — Next-Token Prediction and Autoregressive Training</h1>
+      <ul class='note-meta'><li><strong>description:</strong> CLM trains decoder-only transformers (GPT, LLaMA, Mistral) to predict the next token from all prior tokens using cross-entropy loss over every sequence position simultaneously, making it the foundation of modern generative language models.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Causal Language Modeling — Next-Token Prediction and Autoregressive Training</h1>
+<p>Causal Language Modeling (CLM) is the pretraining objective underlying the GPT family, LLaMA, Mistral, and virtually every modern large generative model. The objective is deceptively simple: given a sequence of tokens x₁, x₂, …, xₙ, learn the probability P(xₜ | x₁, …, xₜ₋₁) for every position t simultaneously. A single forward pass through the network computes predictions for all N positions at once — each position t sees only the tokens to its left, enforced by a lower-triangular causal attention mask. The cross-entropy loss is averaged over all N positions, making CLM roughly 6.7× more sample-efficient per forward pass than Masked Language Modeling, which only supervises ~15% of positions.</p>
+<h2>Next-Token Prediction Objective</h2>
+<p>The training objective is to minimise the negative log-likelihood averaged over every token in the sequence: L = -(1/N) Σₜ log P(xₜ | x&lt;ₜ). This is equivalent to minimising cross-entropy between the model's predicted distribution and the one-hot true token at each position. Targets are simply the inputs shifted by one: given input [x₁, …, xₙ], the target is [x₂, …, xₙ₊₁]. Teacher forcing means the true context is always fed during training, not the model's own predictions — this stabilises training but creates an exposure bias at inference time where errors can compound autoregressively.</p>
+<pre><code class="language-python">import torch
+from torch.utils.data import Dataset
+from torch.nn.utils.rnn import pad_sequence
+from transformers import GPT2Tokenizer
+
+class CLMDataset(Dataset):
+    &quot;&quot;&quot;Dataset for CLM: tokenise text and create shifted input/target pairs.&quot;&quot;&quot;
+    def __init__(self, texts, tokenizer, max_length=512):
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.examples = []
+        for text in texts:
+            ids = tokenizer.encode(text, add_special_tokens=True)
+            for i in range(0, len(ids) - 1, max_length):
+                chunk = ids[i: i + max_length + 1]
+                if len(chunk) &gt;= 2:
+                    self.examples.append(chunk)
+
+    def __len__(self):
+        return len(self.examples)
+
+    def __getitem__(self, idx):
+        ids = self.examples[idx]
+        input_ids = torch.tensor(ids[:-1], dtype=torch.long)  # [x1, ..., xN]
+        labels    = torch.tensor(ids[1:],  dtype=torch.long)  # [x2, ..., xN+1]
+        return {&quot;input_ids&quot;: input_ids, &quot;labels&quot;: labels,
+                &quot;attention_mask&quot;: torch.ones_like(input_ids)}
+
+def clm_collate_fn(batch, pad_token_id=50256):
+    input_ids  = pad_sequence([b[&quot;input_ids&quot;]  for b in batch], batch_first=True, padding_value=pad_token_id)
+    labels     = pad_sequence([b[&quot;labels&quot;]     for b in batch], batch_first=True, padding_value=-100)
+    attn_masks = pad_sequence([b[&quot;attention_mask&quot;] for b in batch], batch_first=True, padding_value=0)
+    return {&quot;input_ids&quot;: input_ids, &quot;labels&quot;: labels, &quot;attention_mask&quot;: attn_masks}
+</code></pre>
+<h2>Causal Attention Mask and Decoder-Only Architecture</h2>
+<p>The causal (lower-triangular) attention mask is what makes CLM possible in a single forward pass. Position t may only attend to positions 1 … t. In PyTorch this is typically implemented as a boolean mask filled into the attention scores before softmax: positions that should be blocked receive -inf, collapsing to zero probability after softmax. Decoder-only transformers (GPT, LLaMA, Mistral) stack N such masked self-attention layers. There is no encoder — the model reads, reasons, and generates all in one stack, using the KV cache at inference time to avoid recomputing keys and values for the already-generated prefix.</p>
+<h2>Training with Teacher Forcing</h2>
+<p>During training the model always receives the true token xₜ₋₁ as input to predict xₜ, regardless of whether it would have predicted something different. This is called teacher forcing. It keeps training stable and fast — the loss gradients flow through every position in every batch. The downside is exposure bias: at inference time the model autoregressively feeds its own predictions back as input, so a single error early in generation can corrupt the rest of the sequence. Scheduled sampling and RLHF fine-tuning partially address this.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from transformers import GPT2LMHeadModel, GPT2Config
+
+def train_clm_epoch(model, dataloader, optimizer, scheduler, device, grad_clip=1.0):
+    &quot;&quot;&quot;One epoch of CLM training with teacher forcing and causal mask.&quot;&quot;&quot;
+    model.train()
+    total_loss, total_tokens = 0.0, 0
+    for batch in dataloader:
+        input_ids = batch[&quot;input_ids&quot;].to(device)
+        labels    = batch[&quot;labels&quot;].to(device)
+        attn_mask = batch[&quot;attention_mask&quot;].to(device)
+        # GPT2 applies causal mask internally; labels=-100 positions are ignored
+        outputs   = model(input_ids=input_ids, attention_mask=attn_mask, labels=labels)
+        loss      = outputs.loss
+        num_toks  = (labels != -100).sum().item()
+        optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        optimizer.step()
+        scheduler.step()
+        total_loss   += loss.item() * num_toks
+        total_tokens += num_toks
+    return total_loss / max(total_tokens, 1)
+
+config = GPT2Config(vocab_size=50257, n_layer=12, n_head=12, n_embd=768)
+model  = GPT2LMHeadModel(config)
+print(f&quot;GPT-2 small parameters: {sum(p.numel() for p in model.parameters()) / 1e6:.1f}M&quot;)
+print(&quot;CLM trains on every token position — N targets per sequence of length N.&quot;)
+</code></pre>
+<h2>Perplexity and Evaluation</h2>
+<p>Perplexity (PPL) is the standard CLM evaluation metric: PPL = exp(average NLL per token). A perplexity of 20 means the model is as surprised by each token as if it had to choose uniformly from 20 equally likely options. Lower perplexity indicates a better language model. For long documents, a sliding-window approach is used to avoid the model having no context at the beginning: a stride of half the context length ensures each token is eventually predicted with a full preceding context. GPT-2 achieves PPL ≈ 18.3 on WikiText-103; LLaMA-2 70B achieves PPL ≈ 3.3.</p>
+<pre><code class="language-python">import torch
+import math
+from transformers import GPT2LMHeadModel, GPT2Tokenizer
+
+def compute_perplexity(model, tokenizer, text, device, max_length=1024):
+    &quot;&quot;&quot;Sliding-window perplexity: exp(average NLL per token).&quot;&quot;&quot;
+    model.eval()
+    ids    = tokenizer.encode(text)
+    stride = max_length // 2
+    total_nll, total_tokens = 0.0, 0
+    for begin in range(0, len(ids), stride):
+        end   = min(begin + max_length, len(ids))
+        chunk = torch.tensor(ids[begin:end], dtype=torch.long).unsqueeze(0).to(device)
+        with torch.no_grad():
+            loss = model(chunk, labels=chunk).loss.item()
+        total_nll    += loss * chunk.size(1)
+        total_tokens += chunk.size(1)
+        if end == len(ids):
+            break
+    return math.exp(total_nll / total_tokens)
+
+model     = GPT2LMHeadModel.from_pretrained(&quot;gpt2&quot;)
+tokenizer = GPT2Tokenizer.from_pretrained(&quot;gpt2&quot;)
+device    = &quot;cuda&quot; if torch.cuda.is_available() else &quot;cpu&quot;
+model.to(device)
+sample    = &quot;Language models assign probability to sequences of tokens. &quot; * 10
+ppl       = compute_perplexity(model, tokenizer, sample, device)
+print(f&quot;Perplexity: {ppl:.2f}  (lower is better — exp(avg NLL per token))&quot;)
+</code></pre>
+<blockquote>
+<p><strong>CLM Sample Efficiency vs MLM</strong>: CLM trains on every token position simultaneously (not just masked positions like MLM), making it ~6.7x more sample-efficient per forward pass — one document generates N training examples for a sequence of length N. MLM with 15% masking yields only 0.15N supervised predictions per forward pass.</p>
+</blockquote>
+<h2>Autoregressive Inference and KV Cache</h2>
+<p>At inference time, generation is purely autoregressive: sample or argmax one token, append it to the context, and repeat. Greedy decoding picks the most probable token at each step; temperature sampling rescales logits before softmax; top-k and nucleus (top-p) sampling truncate the distribution to the most likely tokens. The KV cache stores key and value tensors from prior positions so that only the new token needs to be processed each step, reducing per-step compute from O(N²) to O(N) after the first forward pass.</p>
+<pre><code class="language-python">import torch
+from transformers import GPT2LMHeadModel, GPT2Tokenizer
+
+def generate_autoregressive(model, tokenizer, prompt, max_new_tokens=80,
+                             temperature=1.0, top_k=50, device=&quot;cpu&quot;):
+    &quot;&quot;&quot;Autoregressive generation with top-k sampling and temperature scaling.&quot;&quot;&quot;
+    model.eval()
+    input_ids = tokenizer.encode(prompt, return_tensors=&quot;pt&quot;).to(device)
+    with torch.no_grad():
+        for _ in range(max_new_tokens):
+            outputs = model(input_ids)
+            logits  = outputs.logits[:, -1, :] / temperature  # last position
+            if top_k &gt; 0:
+                values, _ = torch.topk(logits, top_k)
+                logits     = logits.masked_fill(logits &lt; values[:, -1:], float(&quot;-inf&quot;))
+            probs      = torch.softmax(logits, dim=-1)
+            next_token = torch.multinomial(probs, 1)
+            input_ids  = torch.cat([input_ids, next_token], dim=1)
+            if next_token.item() == tokenizer.eos_token_id:
+                break
+    prefix_len = len(tokenizer.encode(prompt))
+    return tokenizer.decode(input_ids[0, prefix_len:], skip_special_tokens=True)
+
+model     = GPT2LMHeadModel.from_pretrained(&quot;gpt2&quot;)
+tokenizer = GPT2Tokenizer.from_pretrained(&quot;gpt2&quot;)
+output    = generate_autoregressive(model, tokenizer, &quot;Causal language models&quot;, max_new_tokens=40)
+print(&quot;Generated:&quot;, output)
+</code></pre>
+<h2>CLM vs MLM vs Prefix LM</h2>
+<p>The three major pretraining paradigms differ in how much context each position can attend to and what fraction of positions are supervised. CLM (decoder-only) predicts every token from left context only — maximally sample-efficient but limited to one-directional attention. MLM (encoder-only) uses bidirectional attention but only supervises ~15% of tokens per pass. Prefix LM (encoder-decoder) uses bidirectional attention over a prefix and causal attention over the continuation, giving a middle ground suitable for conditional generation tasks.</p>
+<table>
+<thead>
+<tr>
+<th>Model Type</th>
+<th>Directionality</th>
+<th>Objective</th>
+<th>Architecture</th>
+<th>Sample Efficiency</th>
+<th>Primary Use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CLM</td>
+<td>Left-to-right (causal)</td>
+<td>Next-token prediction (all N positions)</td>
+<td>Decoder-only (GPT, LLaMA, Mistral)</td>
+<td>High — N targets per sequence</td>
+<td>Text generation, in-context learning</td>
+</tr>
+<tr>
+<td>MLM</td>
+<td>Bidirectional (full)</td>
+<td>Predict ~15% masked tokens</td>
+<td>Encoder-only (BERT, RoBERTa)</td>
+<td>Low — ~0.15N targets per sequence</td>
+<td>Classification, NER, understanding</td>
+</tr>
+<tr>
+<td>Prefix LM</td>
+<td>Bidir prefix + causal cont.</td>
+<td>Span prediction / text-to-text</td>
+<td>Encoder-decoder (T5, FLAN-T5)</td>
+<td>Medium — depends on mask rate</td>
+<td>Seq2seq, conditional generation</td>
+</tr>
+</tbody>
+</table>
+<h2>In-Context Learning and Multi-Task Formatting</h2>
+<p>One of the most surprising properties of large CLMs is in-context learning (ICL): the model can solve new tasks at inference time simply by prepending a few examples to the prompt — no gradient update required. ICL emerges naturally from CLM pretraining because the model has learned to continue any prefix coherently, including task demonstrations. Multi-task learning is equally natural: any task can be expressed as a text sequence (sentiment classification → 'Review: ... Sentiment: positive'), and a CLM trained on a mixture of such tasks generalises across all of them with no task-specific head.</p>
+<ul>
+<li>GPT-1 (117M, 2018): first CLM with transformer decoder, demonstrated transfer learning.</li>
+<li>GPT-2 (1.5B, 2019): zero-shot task performance via prompt engineering — text completion as the universal interface.</li>
+<li>GPT-3 (175B, 2020): few-shot in-context learning at scale; task examples in the prompt replace fine-tuning.</li>
+<li>LLaMA (7B–65B, 2023): open-weights CLM trained longer on more data — matches GPT-3 at a fraction of the size.</li>
+<li>Mistral 7B (2023): CLM with grouped-query attention and sliding-window attention — efficient long-context generation.</li>
+</ul>
+<h2>GPT Family and the Road to LLaMA</h2>
+<p>All models in the GPT lineage share the same CLM objective — the differences are scale, data quality, training duration, and architectural micro-choices. LLaMA introduced RMSNorm (instead of LayerNorm), rotary positional embeddings (RoPE, instead of learned absolute positions), SwiGLU activations (instead of GELU), and pre-norm order — all contributing to training stability at scale. Mistral added grouped-query attention (GQA) to reduce KV cache memory and sliding-window attention for efficient long contexts. Despite these changes, the loss function is identical: cross-entropy over every token position, every step.</p>
+    </article>
+  </main>
+</body>
+</html>

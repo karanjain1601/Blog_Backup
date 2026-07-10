@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Process Reward Models (PRMs) | Notes Backup</title>
+  <meta name="description" content="Training reward models to score individual reasoning steps rather than only final answers, enabling better credit assignment for RLHF on multi-step reasoning and step-level search guidance." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Process Reward Models (PRMs)</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Training reward models to score individual reasoning steps rather than only final answers, enabling better credit assignment for RLHF on multi-step reasoning and step-level search guidance.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Process Reward Models (PRMs)</h1>
+<h2>Overview</h2>
+<p>Process Reward Models (PRMs) are neural models trained to score individual reasoning steps within a multi-step solution, rather than evaluating the solution as a single unit. The key insight motivating PRMs is that for complex reasoning tasks spanning many intermediate steps, outcome-only reward signals provide very sparse credit assignment — the model receives a single +1 or -1 at the end of a 20-step solution without information about which steps were correct and which introduced errors. PRMs address this by annotating each step with a quality score — how likely is the reasoning, given this step and all preceding steps, to reach a correct final answer? With step-level scores, reinforcement learning training can propagate credit more precisely, and test-time search algorithms can prune bad paths early before they consume large token budgets. PRMs were introduced in the OpenAI Math-Shepherd paper and Process Reward Model (PRM800K) work, which established that step-level supervision substantially improves both RLHF training efficiency and best-of-N selection accuracy on MATH. Subsequent work — including DeepSeek-R1 ablations and systematic academic comparisons — has confirmed that PRMs outperform Outcome Reward Models (ORMs) for step-level search, while ORMs remain competitive for simple best-of-N selection when no structured search is performed.</p>
+<h2>Outcome vs Process Rewards</h2>
+<p>Outcome Reward Models (ORMs) assign a single scalar to a complete (problem, solution) pair, trained via contrastive pairs where correct solutions are preferred over incorrect ones. ORMs are conceptually simple, require only binary labels available from automatic verification, and train efficiently — but they provide no information about which intermediate steps contributed to success or failure. Process Reward Models (PRMs) assign a scalar to each reasoning step, enabling the reward signal to distinguish a solution that was correct-up-to-step-3-then-made-an-error from one that was wrong from step 1. This finer granularity has two principal benefits. First, in test-time search, a PRM can prune a beam path after a bad step, saving the computation that would have been wasted completing a doomed solution. Second, in RLHF training, the PRM provides a denser reward signal that reduces variance in policy gradient estimates and accelerates convergence. The principal cost of PRMs relative to ORMs is training data: step-level supervision requires either human annotators labelling each step as correct, incorrect, or uncertain (expensive and slow), or automated methods such as Monte Carlo rollouts that estimate step quality from downstream outcomes (cheaper but noisier). PRM800K, the dataset released alongside the OpenAI PRM paper, contains 800K step-level human annotations and took several months of annotation effort to construct.</p>
+<ul>
+<li>ORMs evaluate complete solutions; PRMs evaluate each reasoning step individually</li>
+<li>PRMs enable early pruning in search algorithms, saving compute on doomed solution paths</li>
+<li>PRM training requires step-level labels — either from human annotation or automated MC rollouts</li>
+<li>ORMs achieve 80-90% of PRM search quality at a fraction of the data collection cost for simple best-of-N</li>
+<li>PRMs + ORMs combined (PRM for search, ORM for final selection) is the state-of-the-art configuration</li>
+</ul>
+<h2>PRM Data Collection</h2>
+<p>Collecting training data for PRMs is the primary bottleneck limiting their adoption. The PRM800K dataset established human annotation as the gold standard: annotators are shown a math problem and a partial solution, then label the next step as correct, incorrect, or neutral (for steps that are valid but not necessarily the most efficient path). This annotation requires mathematical expertise and takes 2–5 minutes per step, making large-scale collection expensive. The Math-Shepherd paper introduced Monte Carlo step annotation as an alternative: for each intermediate step in an unannotated solution, generate N rollouts from that step forward, and estimate the step quality as the fraction of rollouts that reach the correct final answer. This requires no human annotators — the only cost is the inference compute for rollouts — enabling automatic generation of PRM training data at scale. The tradeoff is label quality: MC-annotated steps are noisier than human annotations, particularly for steps in the middle of solutions where the connection between step quality and eventual correctness is weak. Hybrid approaches — human annotation for high-difficulty steps and MC annotation for easier steps — reduce annotation cost by 60–70% while maintaining most of the label quality benefit. A practical consideration is the definition of a 'step': too fine-grained (individual sentences) produces noisy labels, while too coarse-grained (entire paragraphs) loses the step-level signal that distinguishes PRMs from ORMs.</p>
+<pre><code class="language-python">import json
+from dataclasses import dataclass, field
+from typing import List
+from enum import Enum
+class StepLabel(str, Enum):
+    CORRECT = &quot;correct&quot;; INCORRECT = &quot;incorrect&quot;; UNCERTAIN = &quot;uncertain&quot;
+@dataclass
+class AnnotatedStep:
+    content: str
+    label: StepLabel
+    reward: float = field(init=False)
+    def __post_init__(self):
+        self.reward = {&quot;correct&quot;: 1.0, &quot;uncertain&quot;: 0.0, &quot;incorrect&quot;: -1.0}[self.label]
+@dataclass
+class AnnotatedSolution:
+    problem: str
+    steps: List[AnnotatedStep]
+    final_answer: str
+    def to_prm_record(self) -&gt; dict:
+        return {&quot;problem&quot;: self.problem, &quot;answer&quot;: self.final_answer,
+                &quot;steps&quot;: [{&quot;text&quot;: s.content, &quot;reward&quot;: s.reward} for s in self.steps]}
+sol = AnnotatedSolution(
+    problem=&quot;Solve x^2 - 5x + 6 = 0&quot;,
+    steps=[
+        AnnotatedStep(&quot;Factor: (x-2)(x-3) = 0&quot;, StepLabel.CORRECT),
+        AnnotatedStep(&quot;Therefore x = 2 or x = 3&quot;, StepLabel.CORRECT),
+    ],
+    final_answer=&quot;x = 2, x = 3&quot;,
+)
+print(json.dumps(sol.to_prm_record(), indent=2))
+</code></pre>
+<h2>PRM Training</h2>
+<p>PRM training fine-tunes a language model backbone with an additional per-token classification head that outputs a scalar reward at designated step-boundary tokens. The standard architecture inserts a special [STEP] token at the end of each reasoning step, and trains the classification head to predict the step quality label only at those positions, using cross-entropy loss with class weights inversely proportional to label frequency (to handle the imbalance between correct steps, which dominate well-curated datasets, and incorrect steps). The backbone is typically initialised from the same pretrained language model used for generation, ensuring that the PRM shares the generation model's understanding of mathematical notation, problem structure, and reasoning conventions. Sharing the tokeniser and architecture also simplifies deployment: the PRM and generator can share compute infrastructure, and the PRM can be applied to generation model outputs without preprocessing. Training data is typically split 80/10/10 (train/val/test), with validation used for early stopping based on step-level classification accuracy. A well-trained PRM achieves 75–85% step-level accuracy on held-out annotated solutions from MATH, with the primary errors occurring on steps that are technically correct but lead to inefficient solution paths that the annotators marked as 'uncertain'.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from transformers import AutoTokenizer, AutoModel
+from typing import List, Tuple
+class PRMHead(nn.Module):
+    def __init__(self, hidden: int):
+        super().__init__(); self.cls = nn.Linear(hidden, 1)
+    def forward(self, h: torch.Tensor) -&gt; torch.Tensor:
+        return self.cls(h).squeeze(-1)
+def train_prm_step(
+    model: AutoModel, head: PRMHead, tokenizer: AutoTokenizer,
+    batch: List[Tuple[str, List[float]]], opt: torch.optim.Optimizer,
+) -&gt; float:
+    step_id = tokenizer.convert_tokens_to_ids(&quot;[STEP]&quot;)
+    loss_total = 0.0
+    for text, rewards in batch:
+        ids = tokenizer(text, return_tensors=&quot;pt&quot;)
+        hidden = model(**ids).last_hidden_state[0]
+        mask = ids[&quot;input_ids&quot;][0] == step_id
+        logits = head(hidden[mask])
+        targets = torch.tensor(rewards[:logits.size(0)])
+        loss = nn.BCEWithLogitsLoss()(logits, targets)
+        loss.backward(); loss_total += loss.item()
+    opt.step(); opt.zero_grad()
+    return loss_total / len(batch)
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Reward signal</th>
+<th>Credit assignment</th>
+<th>Data cost</th>
+<th>Search quality</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>No reward (greedy)</td>
+<td>None</td>
+<td>Zero</td>
+<td>Baseline</td>
+<td>Single best-guess answer, no selection</td>
+</tr>
+<tr>
+<td>Outcome RM (final only)</td>
+<td>Solution-level</td>
+<td>Low (auto-verify)</td>
+<td>Good (best-of-N)</td>
+<td>Standard ORM setup</td>
+</tr>
+<tr>
+<td>ORM per-sample (best-of-N)</td>
+<td>Solution-level</td>
+<td>Low (auto-verify)</td>
+<td>Strong</td>
+<td>Most practical approach today</td>
+</tr>
+<tr>
+<td>PRM per-step (MC labels)</td>
+<td>Step-level (noisy)</td>
+<td>Medium (rollout compute)</td>
+<td>Very strong</td>
+<td>Math-Shepherd approach</td>
+</tr>
+<tr>
+<td>PRM per-step (human labels)</td>
+<td>Step-level (high quality)</td>
+<td>High (expert annotation)</td>
+<td>Strongest</td>
+<td>PRM800K gold standard</td>
+</tr>
+<tr>
+<td>PRM + ORM combined</td>
+<td>Step + solution-level</td>
+<td>Medium-high</td>
+<td>State of the art</td>
+<td>PRM guides search, ORM filters final</td>
+</tr>
+</tbody>
+</table>
+<h2>Monte Carlo Step Annotation</h2>
+<p>Monte Carlo step annotation, introduced in Math-Shepherd (Wang et al., 2023), enables automatic generation of PRM training labels without human annotators. The algorithm works as follows: for a given problem and a partial solution up to step k, generate N completion rollouts from that partial solution using the current model at temperature T=0.8. Estimate the step quality as the fraction of rollouts that reach the correct final answer — this pass rate serves as a proxy for the probability that step k is on a correct solution path. Steps with high pass rates are labelled as correct, steps with low pass rates as incorrect, and steps with intermediate pass rates as uncertain. This MC estimation has a key property: it is unbiased in expectation (the true step quality IS the probability of reaching a correct answer from that point) but has high variance for small N. With N=16 rollouts, the variance is acceptable for steps with pass rates below 20% or above 80%, but noisy for near-50% steps. With N=64, variance drops sufficiently for most practical purposes at the cost of 4× the rollout compute. An important calibration detail: the rollout model should be the same as the policy model being trained, and labels should be refreshed periodically as the policy improves, since early MC estimates based on a weak policy are inaccurate for the current model's solution space.</p>
+<blockquote>
+<p><strong>Monte Carlo Annotation at Scale</strong>: Monte Carlo step annotation (the Math-Shepherd approach) generates PRM training data automatically — rollout 16 completions from each step, use pass rate as the step label, enabling PRM training without expensive human annotation. With N=16 rollouts per step and a pool of 50K problems, you can generate approximately 800K step-level labels (matching PRM800K scale) at a fraction of the human annotation cost, requiring only inference compute on an existing model.</p>
+</blockquote>
+<pre><code class="language-python">import anthropic
+from typing import List
+
+client = anthropic.Anthropic()
+
+def mc_rollout(prefix: str, n: int = 16, model: str = &quot;claude-haiku-4-5&quot;) -&gt; List[str]:
+    completions = []
+    for _ in range(n):
+        r = client.messages.create(
+            model=model, max_tokens=512, temperature=0.8,
+            messages=[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: prefix + &quot; Continue to the final answer:&quot;}],
+        )
+        completions.append(r.content[0].text)
+    return completions
+
+def annotate_steps_mc(
+    problem: str, steps: List[str], gold: str, n: int = 16
+) -&gt; List[float]:
+    labels = []
+    prefix = problem
+    for step in steps:
+        prefix = prefix + &quot; &quot; + step
+        rollouts = mc_rollout(prefix, n)
+        pass_rate = sum(1 for r in rollouts if gold.strip() in r) / len(rollouts)
+        labels.append(round(pass_rate, 3))
+        print(f&quot;step={step[:50]!r}  pass_rate={pass_rate:.3f}&quot;)
+    return labels
+</code></pre>
+<h2>PRMs for Search Guidance</h2>
+<p>The most impactful application of PRMs is guiding test-time search over multi-step solutions. In beam search with PRM guidance, the algorithm maintains B active solution prefixes (the beam), expands each by generating K candidate next steps, scores all B×K candidates using the PRM, and retains the top-B prefixes for the next step. This differs from outcome-reward-guided search in that pruning decisions are made step-by-step rather than waiting for a complete solution — dramatically reducing the compute wasted on solutions that are already doomed after an early bad step. The efficiency gains are substantial: beam search with B=4 and PRM guidance achieves comparable accuracy to best-of-N selection with N=64 on MATH, a 16× reduction in total solution tokens generated. The quality of PRM-guided search depends critically on PRM accuracy at early steps: an inaccurate PRM that prunes correct solution paths early wastes both compute (exploring inferior paths) and opportunity (eliminating the correct path). PRM calibration is more important than PRM accuracy: a PRM that ranks steps correctly (even if its absolute scores are miscalibrated) guides search effectively, while a PRM that is accurate in aggregate but produces incorrect rankings for specific step types can badly mislead search. Practical implementations add a diversity term to the beam selection criterion — rather than purely ranking by PRM score, they maintain beams with diverse reasoning strategies to avoid all beams converging to the same (potentially incorrect) approach.</p>
+<pre><code class="language-python">import anthropic
+import re
+from typing import List, Dict, Callable
+
+client = anthropic.Anthropic()
+
+def gen_steps(ctx: str, k: int, model: str = &quot;claude-haiku-4-5&quot;) -&gt; List[str]:
+    resps = [client.messages.create(model=model, max_tokens=200, temperature=0.8,
+             messages=[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: ctx + &quot; Next step:&quot;}]) for _ in range(k)]
+    return [r.content[0].text.strip() for r in resps]
+
+def beam_search_prm(
+    problem: str,
+    prm_score: Callable[[str, str], float],
+    beam_w: int = 4,
+    k_expand: int = 4,
+    max_steps: int = 6,
+) -&gt; List[Dict]:
+    beams: List[Dict] = [{&quot;path&quot;: [], &quot;score&quot;: 0.0}]
+    for s_idx in range(max_steps):
+        candidates = []
+        for b in beams:
+            ctx = problem + &quot; | &quot; + &quot; | &quot;.join(b[&quot;path&quot;])
+            for step in gen_steps(ctx, k_expand):
+                step_sc = prm_score(step, ctx)
+                candidates.append({&quot;path&quot;: b[&quot;path&quot;] + [step], &quot;score&quot;: b[&quot;score&quot;] + step_sc})
+        beams = sorted(candidates, key=lambda x: x[&quot;score&quot;], reverse=True)[:beam_w]
+        print(f&quot;step={s_idx+1}  best_score={beams[0]['score']:.3f}&quot;)
+    return beams
+</code></pre>
+<ol>
+<li>Initialise beam with the problem statement and an empty step list</li>
+<li>Expand each beam: generate K candidate next steps from the current prefix</li>
+<li>Score all B×K candidates with the PRM; assign cumulative score = parent score + step score</li>
+<li>Retain top-B candidates by cumulative score as the new beam</li>
+<li>Repeat expansion and pruning for max_steps iterations or until all beams reach a final answer</li>
+<li>Return the beam with the highest cumulative PRM score as the best solution</li>
+</ol>
+<h2>PRMs for RLHF Training</h2>
+<p>Beyond test-time search guidance, PRMs serve as reward models within RLHF training pipelines for multi-step reasoning. In standard RLHF with an ORM, the policy receives a single reward at the end of a complete solution, leading to high-variance policy gradient estimates because the gradient must propagate back through all steps to assign credit. Using a PRM as the reward model provides a dense reward signal — a scalar at each step — that dramatically reduces gradient variance and accelerates convergence. The PRM-as-reward approach requires solving the reward shaping problem: the per-step PRM scores must be combined into a single training signal without introducing shortcuts (reward hacking where the model learns to produce steps that fool the PRM without actually improving solution quality). The standard approach is to use the cumulative PRM score, discounted over steps, as the RL reward, with a KL penalty against the SFT baseline to prevent the policy from drifting to degenerate step sequences that maximise PRM score without producing sensible solutions. Empirically, RL training with PRM rewards converges 2–4× faster than with ORM rewards on MATH, with the primary benefit in the early training phase where sparse outcome rewards provide insufficient signal. In later training phases, the policy has learned to produce mostly correct solutions and the PRM's additional signal becomes less critical — suggesting that hybrid approaches (start with PRM rewards, switch to ORM as accuracy improves) may be optimal for training efficiency.</p>
+<h2>Key Takeaways</h2>
+<ul>
+<li>PRMs score individual reasoning steps rather than complete solutions, enabling finer-grained credit assignment and more efficient test-time search</li>
+<li>Monte Carlo step annotation generates PRM training labels automatically using rollout pass rates, eliminating the need for expensive human step annotation</li>
+<li>PRM-guided beam search achieves equivalent accuracy to best-of-N at 8-16x fewer total tokens generated, making it the most compute-efficient test-time scaling strategy</li>
+<li>PRMs as RLHF reward models converge 2-4x faster than ORM-based training by providing dense per-step gradients rather than sparse end-of-episode rewards</li>
+<li>PRM calibration (correct ranking) matters more than absolute accuracy — a well-calibrated PRM guides search effectively even with imperfect absolute scores</li>
+<li>The PRM + ORM combination (PRM for search guidance, ORM for final selection among completed beams) is the current state-of-the-art for test-time compute scaling on competition mathematics</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

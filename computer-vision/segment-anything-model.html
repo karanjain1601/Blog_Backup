@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Segment Anything Model (SAM) | Notes Backup</title>
+  <meta name="description" content="SAM&#x27;s promptable segmentation — image encoder (ViT-H), prompt encoder for points/boxes/text, lightweight mask decoder, and zero-shot transfer to novel segmentation tasks." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Segment Anything Model (SAM)</h1>
+      <ul class='note-meta'><li><strong>description:</strong> SAM&#x27;s promptable segmentation — image encoder (ViT-H), prompt encoder for points/boxes/text, lightweight mask decoder, and zero-shot transfer to novel segmentation tasks.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Segment Anything Model (SAM)</h1>
+<h2>Overview</h2>
+<p>Segment Anything Model (SAM), released by Meta AI in 2023, introduces a promptable segmentation foundation model. Given an image and a prompt — one or more points, a bounding box, a mask, or free-form text — SAM produces high-quality object masks in real time. Its general-purpose design enables zero-shot transfer to new domains without task-specific fine-tuning, covering medical imaging, satellite imagery, and video.</p>
+<blockquote>
+<p><strong>info</strong>: SAM was trained on SA-1B — 1 billion masks on 11 million images annotated with a data engine — making it the largest segmentation training effort to date.</p>
+</blockquote>
+<h2>SAM Architecture</h2>
+<p>SAM consists of three components: a heavyweight image encoder that runs once per image, a lightweight prompt encoder that processes user inputs, and a fast mask decoder that combines image and prompt embeddings to produce masks. The decoupled design is key to interactivity — the image embedding is precomputed, so each new prompt requires only a fast decoder forward pass taking under 50 ms on a GPU.</p>
+<p>The architecture is trained with a data engine that iterates between manual annotation, semi-automatic generation, and fully automatic mask generation. This three-stage process produced SA-1B with 1.1 billion masks. The training objective combines focal loss and dice loss applied to each predicted mask, with ambiguous prompts producing up to three candidate mask outputs with associated quality scores.</p>
+<h2>Image Encoder</h2>
+<p>SAM's image encoder is a Vision Transformer ViT-H with 632 million parameters, pretrained with Masked Autoencoding. It processes images resized to 1024x1024 pixels and produces a 64x64x256 image embedding. This embedding encodes rich spatial and semantic features across the entire image at once. The heavy encoder runs only once per image, making subsequent prompt evaluations computationally efficient.</p>
+<pre><code class="language-python">import torch
+from segment_anything import sam_model_registry
+from segment_anything.utils.transforms import ResizeLongestSide
+
+sam = sam_model_registry[&quot;vit_h&quot;](checkpoint=&quot;sam_vit_h_4b8939.pth&quot;)
+sam.eval()
+transform = ResizeLongestSide(1024)
+
+# image_np: H x W x 3 uint8
+img = transform.apply_image(image_np)
+img_t = torch.as_tensor(img).permute(2, 0, 1).unsqueeze(0).float()
+
+with torch.no_grad():
+    embedding = sam.image_encoder(img_t)
+print(embedding.shape)  # torch.Size([1, 256, 64, 64])
+</code></pre>
+<p>Window attention is used in most ViT-H layers to reduce quadratic attention cost, with global attention at evenly spaced layers to capture long-range dependencies. Relative positional embeddings are added to attention queries and keys. The final 64x64 embedding is the input to the mask decoder — each spatial position corresponds to a 16x16 pixel patch in the original 1024x1024 image.</p>
+<h2>Prompt Encoder and Mask Decoder</h2>
+<p>The prompt encoder converts sparse prompts such as points and boxes and dense prompts such as masks into prompt embeddings. Points are represented as learned positional encodings summed with foreground or background type embeddings. Bounding boxes are encoded as two corner points. Optional text prompts from CLIP are added. Dense mask prompts are downscaled and processed by a convolutional module.</p>
+<pre><code class="language-python">import numpy as np
+from segment_anything import SamPredictor, sam_model_registry
+
+sam = sam_model_registry[&quot;vit_h&quot;](checkpoint=&quot;sam_vit_h_4b8939.pth&quot;)
+predictor = SamPredictor(sam)
+predictor.set_image(image_np)    # precomputes 64x64 image embedding
+
+coords = np.array([[500, 375]])  # (x, y) foreground point
+labels = np.array([1])           # 1=foreground, 0=background
+
+masks, scores, logits = predictor.predict(
+    point_coords=coords,
+    point_labels=labels,
+    multimask_output=True        # returns 3 candidate masks + IoU scores
+)
+print(masks.shape, scores)       # (3, H, W) and [iou0, iou1, iou2]
+</code></pre>
+<p>The mask decoder is a lightweight transformer with two layers of token-to-image and image-to-token attention. It takes image embeddings, prompt embeddings, and learned output tokens as input, and produces three candidate masks with associated IoU confidence scores. Three masks handle ambiguous prompts — for a single point on a person, valid outputs include the whole person, the torso, or the face.</p>
+<pre><code class="language-python">import numpy as np
+from segment_anything import SamPredictor, sam_model_registry
+
+sam = sam_model_registry[&quot;vit_h&quot;](checkpoint=&quot;sam_vit_h_4b8939.pth&quot;)
+predictor = SamPredictor(sam)
+predictor.set_image(image_np)
+
+# Encode bounding box in xyxy format
+box = np.array([100, 200, 400, 600])  # x1, y1, x2, y2
+
+masks, scores, _ = predictor.predict(
+    point_coords=None,
+    point_labels=None,
+    box=box[None, :],                  # shape [1, 4]
+    multimask_output=False             # box prompt -&gt; single mask
+)
+print(f&quot;Mask shape: {masks.shape}, Score: {scores[0]:.4f}&quot;)
+</code></pre>
+<h2>Zero-Shot Segmentation</h2>
+<p>Zero-shot segmentation means SAM can segment object categories it never explicitly trained on. Given a point or box prompt specifying a region of interest, SAM segments the most salient object at that location without class labels. This enables rapid adaptation — point on a tumor in an MRI, click on an aerial road, annotate a retail product — all without retraining or fine-tuning the model.</p>
+<pre><code class="language-python">import numpy as np
+from segment_anything import sam_model_registry, SamAutomaticMaskGenerator
+
+sam = sam_model_registry[&quot;vit_h&quot;](checkpoint=&quot;sam_vit_h_4b8939.pth&quot;)
+sam.to(device=&quot;cuda&quot;)
+
+gen = SamAutomaticMaskGenerator(
+    model=sam,
+    points_per_side=32,
+    pred_iou_thresh=0.88,
+    stability_score_thresh=0.95,
+    min_mask_region_area=100
+)
+masks = gen.generate(image_np)
+print(f&quot;{len(masks)} segments found; top score={masks[0]['predicted_iou']:.3f}&quot;)
+</code></pre>
+<p>For automatic mask generation, SAM runs a regular grid of point prompts over the image and predicts masks for each point. Duplicate masks are filtered using NMS. Stability filtering removes low-confidence masks by checking whether the predicted mask changes significantly under small threshold perturbations. The result is a comprehensive set of plausible segment masks covering the entire image automatically.</p>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Encoder</th>
+<th>Params</th>
+<th>Throughput</th>
+<th>Zero-shot AP</th>
+<th>HuggingFace</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SAM ViT-B</td>
+<td>ViT-B</td>
+<td>91M</td>
+<td>47 FPS</td>
+<td>58.1</td>
+<td>facebook/sam-vit-base</td>
+</tr>
+<tr>
+<td>SAM ViT-L</td>
+<td>ViT-L</td>
+<td>308M</td>
+<td>18 FPS</td>
+<td>61.8</td>
+<td>facebook/sam-vit-large</td>
+</tr>
+<tr>
+<td>SAM ViT-H</td>
+<td>ViT-H</td>
+<td>632M</td>
+<td>8 FPS</td>
+<td>63.3</td>
+<td>facebook/sam-vit-huge</td>
+</tr>
+<tr>
+<td>SAM 2</td>
+<td>Hiera-L</td>
+<td>224M</td>
+<td>44 FPS</td>
+<td>66.2</td>
+<td>facebook/sam2-hiera-large</td>
+</tr>
+<tr>
+<td>MobileSAM</td>
+<td>TinyViT</td>
+<td>10M</td>
+<td>100 FPS</td>
+<td>54.9</td>
+<td>dhkim2offical/MobileSAM</td>
+</tr>
+<tr>
+<td>FastSAM</td>
+<td>YOLOv8-x</td>
+<td>68M</td>
+<td>40 FPS</td>
+<td>57.1</td>
+<td>CASIA-IVA-Lab/FastSAM</td>
+</tr>
+</tbody>
+</table>
+<h2>Key Takeaways</h2>
+<p>SAM demonstrates that promptable interfaces dramatically expand the utility of segmentation models. By separating heavy image encoding from lightweight prompt processing, SAM achieves interactive response times while maintaining high mask quality. This design pattern — encode once, decode many times — is now a standard approach in foundation model deployment for interactive vision tasks.</p>
+<p>The SA-1B dataset is SAM's most significant contribution beyond the model itself. Collecting 1 billion diverse masks through a model-in-the-loop annotation engine establishes a new scale for segmentation training data. Future models trained on SA-1B benefit from SAM's broad coverage across diverse image domains including satellite, medical, and natural imagery with extremely varied object categories.</p>
+<p>SAM 2 extends the original SAM to video by adding a memory module that propagates segmentation masks across frames. The memory encoder stores past predictions, and a memory attention mechanism conditions the mask decoder on temporal context. This enables tracking and segmenting objects through occlusions and appearance changes, expanding SAM's applicability to temporal vision tasks.</p>
+<p>MobileSAM and FastSAM show that SAM's quality can be approximated with far fewer parameters through distillation and alternative architectures. MobileSAM replaces ViT-H with TinyViT trained via encoder distillation, achieving comparable mask quality at 10x fewer parameters. The bottleneck in SAM deployment is the image encoder, not the mask decoder — lighter encoders unlock real-time mobile applications.</p>
+    </article>
+  </main>
+</body>
+</html>

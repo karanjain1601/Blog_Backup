@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RAG Evaluation: Retrieval and Generation Metrics | Notes Backup</title>
+  <meta name="description" content="Measuring RAG pipeline quality with retrieval metrics (Recall@k, MRR, NDCG), generation metrics (faithfulness, answer relevance, context precision), and end-to-end frameworks like RAGAS and TruLens." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>RAG Evaluation: Retrieval and Generation Metrics</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Measuring RAG pipeline quality with retrieval metrics (Recall@k, MRR, NDCG), generation metrics (faithfulness, answer relevance, context precision), and end-to-end frameworks like RAGAS and TruLens.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>RAG Evaluation: Retrieval and Generation Metrics</h1>
+<p>Retrieval-Augmented Generation (RAG) pipelines consist of two distinct stages — retrieval and generation — each of which can fail independently. A pipeline with excellent retrieval can still produce hallucinated answers; a faithful generator is useless if it receives irrelevant context. Evaluating RAG therefore requires separate metric families for each stage, plus end-to-end metrics that capture the combined system behaviour. This note covers the full evaluation stack: offline retrieval metrics (Recall@k, MRR, NDCG), generation quality metrics (faithfulness, answer relevancy, context precision and recall), automated evaluation frameworks (RAGAS and TruLens), human evaluation strategies, and a practical guide to building a regression test suite.</p>
+<h2>Overview</h2>
+<p>RAG evaluation can be decomposed into three layers. The first layer is retrieval quality: given a query, does the retriever surface the documents that contain the answer? Retrieval metrics are computed offline against a labelled dataset of (query, relevant_document_ids) pairs and require no LLM calls — they are fast and cheap. The second layer is generation quality: given retrieved context, does the generator produce an answer that is faithful to the context, relevant to the question, and correct? Generation metrics typically require either ground-truth answers or LLM-based judges. The third layer is end-to-end correctness: does the final answer match the reference answer by exact match or F1? RAGAS and TruLens provide integrated frameworks that compute all three layers in a single evaluation run. Building a regression suite means running these metrics automatically on every system change and failing the build when scores drop below defined thresholds.</p>
+<h2>Retrieval Quality Metrics</h2>
+<p>Retrieval metrics measure how well the retriever ranks relevant documents. Recall@k asks: of all relevant documents, what fraction appear in the top-k results? MRR@k (Mean Reciprocal Rank) asks: where does the first relevant document appear, on average? NDCG@k (Normalized Discounted Cumulative Gain) generalises MRR by rewarding relevant documents that appear earlier in the ranking and handling graded relevance. All three are computed per query and averaged over a test set. They require a labelled retrieval dataset with known relevant documents per query, but no LLM calls — making them the cheapest evaluation signal in the RAG stack. Typical targets: Recall@5 &gt; 0.85, MRR@10 &gt; 0.75, NDCG@10 &gt; 0.80 for a well-tuned retriever.</p>
+<pre><code class="language-python">import numpy as np
+from typing import List, Dict
+
+def recall_at_k(retrieved: List[str], relevant: List[str], k: int) -&gt; float:
+    &quot;&quot;&quot;Fraction of relevant docs found in top-k retrieved results.&quot;&quot;&quot;
+    top_k = set(retrieved[:k])
+    rel   = set(relevant)
+    return len(top_k &amp; rel) / max(len(rel), 1)
+
+def mrr_at_k(retrieved: List[str], relevant: List[str], k: int) -&gt; float:
+    &quot;&quot;&quot;Reciprocal rank of the first relevant doc in top-k results.&quot;&quot;&quot;
+    rel = set(relevant)
+    for rank, doc_id in enumerate(retrieved[:k], start=1):
+        if doc_id in rel:
+            return 1.0 / rank
+    return 0.0
+
+def ndcg_at_k(retrieved: List[str], relevant: List[str], k: int) -&gt; float:
+    &quot;&quot;&quot;Normalised discounted cumulative gain at k (binary relevance).&quot;&quot;&quot;
+    rel = set(relevant)
+    dcg  = sum(1.0 / np.log2(r + 2) for r, d in enumerate(retrieved[:k]) if d in rel)
+    idcg = sum(1.0 / np.log2(r + 2) for r in range(min(len(rel), k)))
+    return dcg / idcg if idcg &gt; 0 else 0.0
+
+def evaluate_retrieval(
+        queries: List[str],
+        retrieved_docs: List[List[str]],
+        relevant_docs: List[List[str]],
+        ks: List[int] = [1, 5, 10]) -&gt; Dict[str, float]:
+    &quot;&quot;&quot;Compute Recall@k, MRR@k, NDCG@k averaged over all queries.&quot;&quot;&quot;
+    results = {}
+    for k in ks:
+        results[f&quot;recall@{k}&quot;]  = np.mean([recall_at_k(r, g, k) for r, g in zip(retrieved_docs, relevant_docs)])
+        results[f&quot;mrr@{k}&quot;]     = np.mean([mrr_at_k(r, g, k)    for r, g in zip(retrieved_docs, relevant_docs)])
+        results[f&quot;ndcg@{k}&quot;]    = np.mean([ndcg_at_k(r, g, k)   for r, g in zip(retrieved_docs, relevant_docs)])
+    for metric, score in results.items():
+        print(f&quot;{metric:&lt;12} = {score:.4f}&quot;)
+    return results
+</code></pre>
+<p>Retrieval metrics have an important limitation: they only measure whether relevant documents are retrieved, not whether the generator uses them correctly. A system can achieve Recall@5=0.95 while still generating unfaithful answers if the generator ignores the retrieved context or over-generates beyond it. This is why generation metrics are equally important and must always be measured alongside retrieval metrics — never treat a high retrieval score as a proxy for overall RAG quality.</p>
+<h2>Generation Quality Metrics</h2>
+<p>Generation metrics assess the quality of the answer produced by the LLM given retrieved context. Faithfulness measures whether every claim in the generated answer is supported by the retrieved context — it catches hallucination. Answer relevancy measures whether the answer actually addresses the question — it catches vague or off-topic responses. Context precision measures whether the retrieved context is actually used (penalises irrelevant context that dilutes signal). Context recall measures whether all information in the ground-truth answer is present in the retrieved context (penalises incomplete retrieval that prevents correct answering). Exact match (EM) and F1 token overlap compare the answer directly to a reference answer and are best used when ground truth is available. LLM-based metrics (faithfulness, relevancy) do not require ground-truth answers but require LLM inference budget for the judge model.</p>
+<pre><code class="language-python">import re
+import json
+from typing import List
+from openai import OpenAI
+
+client = OpenAI()  # requires OPENAI_API_KEY env var
+
+FAITHFULNESS_PROMPT = &quot;&quot;&quot;You are a fact-checker. Given a context and a list of claims,
+decide for each claim whether it is fully supported by the context.
+Output a JSON list of booleans, one per claim.
+
+Context: {context}
+
+Claims: {claims_json}
+
+Output only the JSON list, e.g. [true, false, true].&quot;&quot;&quot;
+
+def extract_claims(answer: str) -&gt; List[str]:
+    &quot;&quot;&quot;Split answer into individual sentences as atomic claims.&quot;&quot;&quot;
+    return [s.strip() for s in re.split(r'(?&lt;=[.!?])\s+', answer) if len(s.strip()) &gt; 10]
+
+def score_faithfulness(context: str, answer: str, model: str = &quot;gpt-4o-mini&quot;) -&gt; float:
+    &quot;&quot;&quot;LLM-based faithfulness: fraction of answer claims supported by context.&quot;&quot;&quot;
+    claims = extract_claims(answer)
+    if not claims:
+        return 1.0
+    prompt = FAITHFULNESS_PROMPT.format(
+        context=context[:3000],
+        claims_json=json.dumps(claims)
+    )
+    response = client.chat.completions.create(
+        model=model,
+        messages=[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: prompt}],
+        temperature=0
+    )
+    raw = response.choices[0].message.content.strip()
+    try:
+        verdicts = json.loads(raw)
+        supported = sum(1 for v in verdicts if v is True)
+        score = supported / len(verdicts)
+    except (json.JSONDecodeError, TypeError):
+        score = 0.0
+    print(f&quot;Faithfulness: {score:.3f}  ({sum(1 for v in verdicts if v is True)}/{len(verdicts)} claims supported)&quot;)
+    return score
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Measures</th>
+<th>Requires ground truth?</th>
+<th>LLM-based?</th>
+<th>Correlates with human?</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Recall@5</td>
+<td>Fraction of relevant docs in top 5</td>
+<td>Yes (doc labels)</td>
+<td>No</td>
+<td>Moderate</td>
+</tr>
+<tr>
+<td>MRR@10</td>
+<td>Position of first relevant doc in top 10</td>
+<td>Yes (doc labels)</td>
+<td>No</td>
+<td>Moderate</td>
+</tr>
+<tr>
+<td>NDCG@10</td>
+<td>Graded relevance gain with position discount</td>
+<td>Yes (graded labels)</td>
+<td>No</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Faithfulness</td>
+<td>Claims in answer supported by context</td>
+<td>No</td>
+<td>Yes</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Answer relevancy</td>
+<td>Answer addresses the question</td>
+<td>No</td>
+<td>Yes</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Context precision</td>
+<td>Retrieved context is actually useful</td>
+<td>No</td>
+<td>Yes</td>
+<td>Moderate</td>
+</tr>
+<tr>
+<td>Context recall</td>
+<td>Ground-truth info present in context</td>
+<td>Yes (reference answer)</td>
+<td>Yes</td>
+<td>High</td>
+</tr>
+<tr>
+<td>EM / F1</td>
+<td>Token overlap with reference answer</td>
+<td>Yes (reference answer)</td>
+<td>No</td>
+<td>Moderate</td>
+</tr>
+</tbody>
+</table>
+<h2>RAGAS Framework</h2>
+<p>RAGAS (Retrieval Augmented Generation Assessment) is an open-source Python library that provides a standardised, automated evaluation pipeline for RAG systems. It implements faithfulness, answer relevancy, context precision, and context recall as LLM-based metrics and wraps them in a single <code>evaluate()</code> call. RAGAS expects a HuggingFace Dataset with columns: question, answer (generated), contexts (list of retrieved passages), and optionally ground_truth (reference answer for context recall). Each metric is computed by prompting a configurable judge LLM (default: OpenAI gpt-4o) and averaging across the dataset. RAGAS is the de-facto evaluation standard for RAG systems as of 2024–2025 and is widely used in production pipelines.</p>
+<pre><code class="language-python">from datasets import Dataset
+from ragas import evaluate
+from ragas.metrics import (
+    faithfulness,
+    answer_relevancy,
+    context_precision,
+    context_recall,
+)
+from ragas.llms import LangchainLLMWrapper
+from langchain_openai import ChatOpenAI
+
+# Sample RAG output dataset — replace with real pipeline outputs
+rag_outputs = [
+    {
+        &quot;question&quot;: &quot;What is retrieval augmented generation?&quot;,
+        &quot;answer&quot;: &quot;RAG combines a retriever with an LLM generator to ground answers in external documents.&quot;,
+        &quot;contexts&quot;: [&quot;Retrieval-augmented generation (RAG) is a technique that retrieves relevant documents from a corpus and passes them as context to a language model.&quot;],
+        &quot;ground_truth&quot;: &quot;RAG retrieves relevant documents and uses them to ground LLM-generated answers.&quot;
+    },
+    {
+        &quot;question&quot;: &quot;How does HNSW indexing work?&quot;,
+        &quot;answer&quot;: &quot;HNSW builds a hierarchical graph of approximate nearest neighbour connections for fast ANN search.&quot;,
+        &quot;contexts&quot;: [&quot;HNSW (Hierarchical Navigable Small World) creates a multi-layer graph where each layer is a subset of the previous, enabling logarithmic-time approximate nearest neighbour search.&quot;],
+        &quot;ground_truth&quot;: &quot;HNSW is a graph-based ANN index with hierarchical layers enabling fast approximate search.&quot;
+    }
+]
+
+dataset = Dataset.from_list(rag_outputs)
+judge_llm = LangchainLLMWrapper(ChatOpenAI(model=&quot;gpt-4o-mini&quot;, temperature=0))
+
+result = evaluate(
+    dataset=dataset,
+    metrics=[faithfulness, answer_relevancy, context_precision, context_recall],
+    llm=judge_llm,
+)
+print(result.to_pandas()[[&quot;faithfulness&quot;, &quot;answer_relevancy&quot;, &quot;context_precision&quot;, &quot;context_recall&quot;]])
+print(f&quot;Mean faithfulness     : {result['faithfulness']:.3f}&quot;)
+print(f&quot;Mean answer_relevancy : {result['answer_relevancy']:.3f}&quot;)
+</code></pre>
+<p>RAGAS metrics are computed per row and averaged. The library also provides <code>TestsetGenerator</code> for synthetically creating evaluation datasets from a document corpus — it generates question-answer pairs with positive context windows, enabling evaluation without manually labelled data. However, synthetic datasets can miss the distribution of real user questions. For production use, mix 20–30% synthetic questions with 70–80% sampled real queries. RAGAS scores above 0.85 for faithfulness and 0.80 for answer relevancy are considered strong for most RAG applications.</p>
+<h2>TruLens Triad</h2>
+<p>TruLens (from TruEra) is an alternative evaluation framework that defines the RAG Triad: answer relevance, context relevance, and groundedness. Answer relevance checks whether the generated answer is relevant to the input question. Context relevance checks whether each retrieved chunk is relevant to the question — penalising over-retrieval of noise. Groundedness is equivalent to RAGAS faithfulness: does the answer follow from the retrieved context? TruLens instruments the RAG application via wrappers (TruChain for LangChain, TruLlama for LlamaIndex) that automatically capture every retrieval and generation event at runtime, then compute the Triad metrics on a dashboard. This makes TruLens especially useful for continuous monitoring of live RAG systems, not just offline evaluation.</p>
+<blockquote>
+<p><strong>Retrieval Recall and Faithfulness Are Uncorrelated</strong>: Retrieval recall and generation faithfulness can be uncorrelated — a system with excellent retrieval (recall@5=0.9) can still produce unfaithful answers by ignoring retrieved context; always measure both components independently. High recall guarantees relevant documents are available to the generator, but not that the generator will use them faithfully. Conversely, a faithfulness score of 1.0 means every claim is grounded in context, but if that context was wrong or irrelevant, the answer is still incorrect. Measure all four RAGAS metrics together and treat any single metric in isolation as insufficient.</p>
+</blockquote>
+<h2>Human Evaluation vs Automated</h2>
+<p>Human evaluation remains the gold standard for RAG quality assessment. Annotators rate answers on dimensions including: correctness (does the answer match the factual truth?), completeness (does it cover all relevant aspects?), faithfulness (is every claim supported by the context shown?), and fluency (is the language natural?). Human evaluation is expensive (typically $2–10 per question for expert annotators) and slow (days to weeks for a large test set). Automated metrics using LLM judges correlate reasonably well with human judgements: GPT-4-based faithfulness achieves 0.85–0.90 Pearson correlation with human faithfulness ratings in controlled studies. The recommended practice is to run automated metrics continuously and do a human evaluation audit quarterly or after major system changes to calibrate whether automated scores still track human satisfaction.</p>
+<ul>
+<li>Human evaluation is the calibration anchor — run it quarterly to validate that automated metrics still correlate</li>
+<li>LLM-as-judge (GPT-4o) achieves 0.85–0.90 correlation with human faithfulness ratings</li>
+<li>LLM judges have positional bias (prefer first-listed answers) and verbosity bias (prefer longer answers) — mitigate with randomised ordering and length controls</li>
+<li>RAGAS synthetic testsets are cheap to generate but miss real user query distributions</li>
+<li>Mix 20–30% synthetic questions with 70–80% sampled real queries for a representative eval set</li>
+<li>Always evaluate at the query-level (per-row scores) not just aggregate means — bimodal score distributions hide failure modes</li>
+</ul>
+<h2>Building an Eval Suite</h2>
+<p>A production RAG eval suite is a set of golden question-answer pairs that runs automatically after every system change (retriever update, prompt change, model upgrade) and asserts that quality metrics do not degrade. The suite should contain 50–200 questions representative of real usage, cover edge cases (ambiguous questions, multi-hop reasoning, questions with no answer in the corpus), and define explicit pass/fail thresholds. Evaluation is gated in CI: if faithfulness drops below 0.85 or answer relevancy below 0.80 relative to the baseline run, the pipeline fails and the change is blocked. This prevents silent regressions — the most common failure mode when iterating on RAG components.</p>
+<pre><code class="language-python">import json
+import sys
+from pathlib import Path
+from datasets import Dataset
+from ragas import evaluate
+from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall
+from ragas.llms import LangchainLLMWrapper
+from langchain_openai import ChatOpenAI
+
+THRESHOLDS = {
+    &quot;faithfulness&quot;:       0.85,
+    &quot;answer_relevancy&quot;:   0.80,
+    &quot;context_precision&quot;:  0.75,
+    &quot;context_recall&quot;:     0.80,
+}
+
+def run_rag_pipeline(question: str) -&gt; dict:
+    &quot;&quot;&quot;Stub: replace with your real retriever + generator.&quot;&quot;&quot;
+    return {&quot;answer&quot;: &quot;placeholder&quot;, &quot;contexts&quot;: [&quot;placeholder context&quot;]}
+
+def load_golden_set(path: str) -&gt; list:
+    &quot;&quot;&quot;Load 50 golden Q&amp;A pairs from a JSON file.&quot;&quot;&quot;
+    return json.loads(Path(path).read_text())
+
+def run_regression_suite(golden_path: str = &quot;golden_set.json&quot;) -&gt; bool:
+    golden   = load_golden_set(golden_path)
+    rows     = []
+    for item in golden:
+        out = run_rag_pipeline(item[&quot;question&quot;])
+        rows.append({&quot;question&quot;: item[&quot;question&quot;], &quot;answer&quot;: out[&quot;answer&quot;],
+                     &quot;contexts&quot;: out[&quot;contexts&quot;], &quot;ground_truth&quot;: item[&quot;ground_truth&quot;]})
+    dataset  = Dataset.from_list(rows)
+    llm      = LangchainLLMWrapper(ChatOpenAI(model=&quot;gpt-4o-mini&quot;, temperature=0))
+    result   = evaluate(dataset, metrics=[faithfulness, answer_relevancy, context_precision, context_recall], llm=llm)
+    passed   = True
+    for metric, threshold in THRESHOLDS.items():
+        score = result[metric]
+        status = &quot;PASS&quot; if score &gt;= threshold else &quot;FAIL&quot;
+        print(f&quot;  {status}  {metric:&lt;22} {score:.3f}  (threshold &gt;= {threshold})&quot;)
+        if score &lt; threshold:
+            passed = False
+    if not passed:
+        print(&quot;\nREGRESSION DETECTED — blocking deployment&quot;)
+        sys.exit(1)
+    print(&quot;\nAll metrics passed.&quot;)
+    return True
+
+if __name__ == &quot;__main__&quot;:
+    run_regression_suite()
+</code></pre>
+<h2>Key Takeaways</h2>
+<p>RAG evaluation requires measuring both retrieval and generation stages independently. Retrieval metrics (Recall@k, MRR@k, NDCG@k) are fast and cheap but only measure document ranking, not answer quality. Generation metrics (faithfulness, answer relevancy, context precision, context recall) require LLM inference but directly measure what users care about. RAGAS provides the industry-standard implementation of generation metrics; TruLens is better suited for live monitoring. A production eval suite should combine 50–200 golden questions with automated threshold enforcement in CI, preventing silent regressions when any component of the RAG pipeline changes.</p>
+<ul>
+<li>Always measure retrieval and generation metrics separately — high retrieval recall does not guarantee faithful generation</li>
+<li>RAGAS evaluate() computes all four generation metrics in a single pass over a HuggingFace Dataset</li>
+<li>Use faithfulness &gt; 0.85 and answer_relevancy &gt; 0.80 as minimum deployment thresholds</li>
+<li>LLM-as-judge metrics correlate 0.85–0.90 with human judgement for faithfulness</li>
+<li>Run a regression suite in CI after every system change and fail the build on score degradation</li>
+<li>Calibrate automated metrics against human evaluation quarterly to detect metric drift</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>State Space Models and the Kalman Filter | Notes Backup</title>
+  <meta name="description" content="Formulate time series as state space models with latent state and observation equations, derive the Kalman filter predict-update cycle, implement the local level model, connect SSM to ARIMA, and extend to nonlinear systems via the Unscented Kalman Filter." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>State Space Models and the Kalman Filter</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Formulate time series as state space models with latent state and observation equations, derive the Kalman filter predict-update cycle, implement the local level model, connect SSM to ARIMA, and extend to nonlinear systems via the Unscented Kalman Filter.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>State Space Models and the Kalman Filter</h1>
+<p>State space models (SSMs) provide a general framework for time-series modelling by separating the observed measurements from an underlying latent state that evolves over time. Any ARIMA model can be written in state space form, but SSMs are strictly more general: they can incorporate time-varying parameters, multiple observation equations, missing data, and structural components (trend, seasonal, regression) that change smoothly over time. The Kalman filter gives the optimal linear update rule for tracking the latent state.</p>
+<h2>State Space Formulation</h2>
+<p>The linear Gaussian state space model consists of two equations. The state (transition) equation xₜ = Fxₜ₋₁ + Bwₜ describes how the hidden state xₜ ∈ ℝᵐ evolves with state transition matrix F ∈ ℝᵐˣᵐ and process noise wₜ ~ N(0, Q). The observation equation yₜ = Hxₜ + vₜ links the state to the observed measurement yₜ ∈ ℝⁿ via observation matrix H ∈ ℝⁿˣᵐ and observation noise vₜ ~ N(0, R). The matrices F, H, Q, R may be time-varying but are assumed known for filtering; they are estimated by MLE during training.</p>
+<ul>
+<li>State vector xₜ: encodes the latent quantities driving the observations (level, trend, seasonal factors, etc.).</li>
+<li>F (transition matrix): governs how the state evolves — identity for random walk, rotation matrix for seasonal cycle.</li>
+<li>Q (process noise covariance): controls how rapidly the state can change — large Q = rapidly evolving components.</li>
+<li>H (observation matrix): selects which components of the state are observed — often [1, 0, 0, …].</li>
+<li>R (observation noise covariance): represents measurement error or idiosyncratic noise in the observations.</li>
+<li>Initial conditions: x₀|₀ ~ N(m₀, P₀) — prior on the state before seeing any data.</li>
+</ul>
+<h2>The Kalman Filter — Predict and Update</h2>
+<p>The Kalman filter computes the optimal (minimum mean squared error) linear estimate of the state given all past observations. It alternates two steps. Predict: x̂ₜ|t₋₁ = Fx̂ₜ₋₁|t₋₁ (state prediction), Pₜ|t₋₁ = FPₜ₋₁|t₋₁Fᵀ + Q (uncertainty propagation). Update: innovation eₜ = yₜ − Hx̂ₜ|t₋₁, innovation covariance Sₜ = HPₜ|t₋₁Hᵀ + R, Kalman gain Kₜ = Pₜ|t₋₁HᵀSₜ⁻¹, state update x̂ₜ|t = x̂ₜ|t₋₁ + Kₜeₜ, covariance update Pₜ|t = (I − KₜH)Pₜ|t₋₁. The Kalman gain Kₜ balances trust between the state prediction and the new observation, weighting toward the observation when R is small relative to HPH'.</p>
+<pre><code class="language-python">import numpy as np
+
+def kalman_filter(y, F, H, Q, R, m0, P0):
+    &quot;&quot;&quot;Linear Kalman filter. Returns filtered means and covariances.&quot;&quot;&quot;
+    n = len(y)
+    m = F.shape[0]
+    x_filt = np.zeros((n, m))
+    P_filt = np.zeros((n, m, m))
+    log_lik = 0.0
+    x = m0.copy()
+    P = P0.copy()
+    for t in range(n):
+        # Predict
+        x_pred = F @ x
+        P_pred = F @ P @ F.T + Q
+        # Innovation
+        innov = y[t] - H @ x_pred
+        S     = H @ P_pred @ H.T + R
+        K     = P_pred @ H.T / S[0, 0]  # scalar obs: S is 1x1
+        # Update
+        x = x_pred + K * innov
+        P = (np.eye(m) - K[:, None] * H) @ P_pred
+        x_filt[t] = x
+        P_filt[t] = P
+        log_lik  -= 0.5 * (np.log(2 * np.pi * S[0, 0]) + innov**2 / S[0, 0])
+    return x_filt, P_filt, log_lik
+
+# Test on a simple AR(1) in state space form
+np.random.seed(0)
+n  = 100
+y  = np.zeros(n)
+for t in range(1, n):
+    y[t] = 0.8 * y[t-1] + np.random.randn()
+y += 0.5 * np.random.randn(n)  # observation noise
+
+F  = np.array([[0.8]])
+H  = np.array([[1.0]])
+Q  = np.array([[1.0]])
+R  = np.array([[0.25]])
+m0 = np.array([0.0])
+P0 = np.array([[1.0]])
+
+filt, _, ll = kalman_filter(y, F, H, Q, R, m0, P0)
+print(f&quot;Log-likelihood: {ll:.4f}&quot;)
+print(f&quot;Filter RMSE vs observations: {np.sqrt(np.mean((filt[:,0]-y)**2)):.4f}&quot;)
+</code></pre>
+<h2>Local Level Model — Trend Filtering</h2>
+<p>The local level model (LLM) is the simplest SSM: the state xₜ follows a random walk (xₜ = xₜ₋₁ + wₜ, wₜ ~ N(0, σ²_η)) and observations yₜ = xₜ + vₜ, vₜ ~ N(0, σ²_ε). In matrix form F = H = 1, Q = σ²_η, R = σ²_ε. The signal-to-noise ratio q = σ²_η/σ²_ε controls how rapidly the filtered trend tracks the observations: large q means the trend moves quickly (follows each observation), small q means the trend is smooth (ignores noise). The LLM is equivalent to exponential smoothing (EWMA) when the Kalman gain has converged.</p>
+<pre><code class="language-python">import numpy as np
+
+np.random.seed(42)
+n = 200
+
+# True slowly-evolving level
+level_true = np.cumsum(0.2 * np.random.randn(n))
+y = level_true + 3.0 * np.random.randn(n)  # high obs noise
+
+def llm_filter(y, sigma_eta, sigma_eps):
+    x, P = 0.0, 1.0
+    filtered = np.zeros(n)
+    for t in range(n):
+        # Predict
+        P_pred = P + sigma_eta**2
+        # Update
+        K = P_pred / (P_pred + sigma_eps**2)
+        x = x + K * (y[t] - x)
+        P = (1 - K) * P_pred
+        filtered[t] = x
+    return filtered
+
+print(f&quot;{'sigma_eta':&gt;10s}  {'sigma_eps':&gt;10s}  {'SNR q':&gt;8s}  {'RMSE (vs true level)':&gt;22s}&quot;)
+print(&quot;-&quot; * 58)
+for s_eta in [0.1, 0.5, 1.0, 2.0]:
+    filt = llm_filter(y, s_eta, 3.0)
+    rmse = np.sqrt(np.mean((filt - level_true)**2))
+    q    = s_eta**2 / 9.0
+    print(f&quot;{s_eta:10.2f}  {3.0:10.2f}  {q:8.4f}  {rmse:22.4f}&quot;)
+print(&quot;Small q -&gt; smooth trend; Large q -&gt; tracks observations closely&quot;)
+</code></pre>
+<h2>Connection to ARIMA and MLE Estimation</h2>
+<p>Parameter estimation in SSMs proceeds by maximising the Gaussian log-likelihood L = −½Σ[log(2π|Sₜ|) + eₜᵀSₜ⁻¹eₜ], where eₜ are the Kalman filter innovations and Sₜ their covariance matrices. Because the Kalman filter computes innovations sequentially, this expression is efficiently evaluated in O(n·m³) time. Gradient-based optimisation (L-BFGS, EM algorithm) then finds the MLE estimates of F, Q, H, R.</p>
+<p>Every ARIMA(p,d,q) model has an exact state space representation. The state vector encodes the lagged values needed to recursively compute the innovations. This is important for two reasons: the Kalman filter provides a computationally efficient O(n·m³) algorithm to evaluate the Gaussian log-likelihood of any ARIMA model, enabling gradient-based MLE; and the state space form handles missing data naturally — missing observations simply skip the update step (the predict step still runs), allowing estimation even with gaps in the series.</p>
+<h2>Structural Time Series with UnobservedComponents</h2>
+<pre><code class="language-python">import numpy as np
+from statsmodels.tsa.statespace.structural import UnobservedComponents
+
+np.random.seed(7)
+n = 200
+t = np.arange(n)
+
+# Generate: stochastic level + deterministic slope + seasonal + noise
+level   = np.cumsum(0.3 * np.random.randn(n))
+slope   = 0.1 * t
+season  = 5.0 * np.sin(2 * np.pi * t / 12)
+y = level + slope + season + np.random.randn(n)
+
+# Fit local linear trend + stochastic cycle model
+model = UnobservedComponents(
+    y,
+    level='local linear trend',
+    seasonal=12,
+    stochastic_seasonal=True
+)
+fit = model.fit(disp=False, method='lbfgs')
+
+print(&quot;UnobservedComponents (BSTS-like) fit:&quot;)
+print(f&quot;  Log-likelihood: {fit.llf:.4f}&quot;)
+print(f&quot;  AIC:            {fit.aic:.4f}&quot;)
+
+# Smoothed components
+smoothed = fit.smoother_results
+print(f&quot;  Level sigma^2:    {fit.params.get('sigma2.level', 'N/A')}&quot;)
+print(f&quot;  Seasonal sigma^2: {fit.params.get('sigma2.seasonal', 'N/A')}&quot;)
+fc = fit.get_forecast(12)
+print(f&quot;  12-step MAPE:     N/A (no test set; inspect conf_int for interval width)&quot;)
+print(fit.summary().tables[1])
+</code></pre>
+<h2>Unscented Kalman Filter for Nonlinear Systems</h2>
+<p>The standard Kalman filter is optimal only for linear Gaussian systems. When the state or observation equations are nonlinear — e.g., xₜ = f(xₜ₋₁) + noise, yₜ = h(xₜ) + noise — the Extended Kalman Filter (EKF) linearises f and h via Jacobians, but this can be inaccurate for highly nonlinear functions. The Unscented Kalman Filter (UKF) instead propagates a small set of deterministically chosen sigma points through the nonlinear functions, capturing the mean and covariance to third order (vs first order for EKF), without computing Jacobians.</p>
+<pre><code class="language-python">import numpy as np
+
+def ukf_1d(y, f, h, Q, R, x0, P0, alpha=1e-3, beta=2.0, kappa=0.0):
+    &quot;&quot;&quot;Minimal scalar-state UKF for demonstration.&quot;&quot;&quot;
+    n_x = 1
+    lam = alpha**2 * (n_x + kappa) - n_x
+    Wm  = np.array([lam/(n_x+lam), 0.5/(n_x+lam), 0.5/(n_x+lam)])
+    Wc  = Wm.copy()
+    Wc[0] += (1 - alpha**2 + beta)
+    x, P = x0, P0
+    filtered = np.zeros(len(y))
+    for t in range(len(y)):
+        # Sigma points
+        spread = np.sqrt((n_x + lam) * P)
+        sigmas = np.array([x, x + spread, x - spread])
+        # Predict
+        sigmas_f = np.array([f(s) for s in sigmas])
+        x_p = np.dot(Wm, sigmas_f)
+        P_p = np.dot(Wc, (sigmas_f - x_p)**2) + Q
+        # Observation sigma points
+        sigmas_p = np.array([x_p, x_p + np.sqrt((n_x+lam)*P_p), x_p - np.sqrt((n_x+lam)*P_p)])
+        sigmas_h = np.array([h(s) for s in sigmas_p])
+        y_p = np.dot(Wm, sigmas_h)
+        Pyy = np.dot(Wc, (sigmas_h - y_p)**2) + R
+        Pxy = np.dot(Wc, (sigmas_p - x_p) * (sigmas_h - y_p))
+        K   = Pxy / Pyy
+        x   = x_p + K * (y[t] - y_p)
+        P   = P_p - K**2 * Pyy
+        filtered[t] = x
+    return filtered
+
+np.random.seed(3)
+n = 100
+true_x = np.cumsum(0.1 * np.random.randn(n))
+y = true_x**2 + 0.5 * np.random.randn(n)  # nonlinear observation: h(x)=x^2
+
+filtered = ukf_1d(y, f=lambda x: x, h=lambda x: x**2, Q=0.01, R=0.25, x0=0.0, P0=1.0)
+rmse = np.sqrt(np.mean((filtered - true_x)**2))
+print(f&quot;UKF RMSE (state estimate vs true x): {rmse:.4f}&quot;)
+print(&quot;UKF handles nonlinear observation h(x)=x^2 without Jacobians&quot;)
+</code></pre>
+<blockquote>
+<p><strong>When to Use State Space vs ARIMA</strong>: ARIMA is sufficient when the data-generating process is stable, the series is univariate, and you need a fast, interpretable model. Choose a state space / structural model when you need: explicit separation of trend, seasonal, and regression components; time-varying parameters (e.g., seasonality that evolves); missing data handling; incorporation of exogenous regressors into the state; or a Bayesian treatment with prior distributions on variance components (BSTS).</p>
+</blockquote>
+<h2>SSM Component Reference</h2>
+<table>
+<thead>
+<tr>
+<th>Component</th>
+<th>Matrix / Equation</th>
+<th>Dimensions</th>
+<th>Interpretation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>State transition</td>
+<td>xₜ = Fxₜ₋₁ + Bwₜ</td>
+<td>F: m×m, x: m×1</td>
+<td>How the hidden state evolves across time steps</td>
+</tr>
+<tr>
+<td>Observation</td>
+<td>yₜ = Hxₜ + vₜ</td>
+<td>H: n×m, y: n×1</td>
+<td>Maps latent state to observed measurement</td>
+</tr>
+<tr>
+<td>Process noise cov</td>
+<td>Q = E[wₜwₜᵀ]</td>
+<td>Q: m×m positive semidefinite</td>
+<td>Uncertainty injected into the state each step</td>
+</tr>
+<tr>
+<td>Observation noise cov</td>
+<td>R = E[vₜvₜᵀ]</td>
+<td>R: n×n positive definite</td>
+<td>Measurement error variance</td>
+</tr>
+<tr>
+<td>Kalman gain</td>
+<td>Kₜ = Pₜ</td>
+<td>t₋₁Hᵀ(HPₜ</td>
+<td>t₋₁Hᵀ+R)⁻¹</td>
+</tr>
+<tr>
+<td>Innovation</td>
+<td>eₜ = yₜ − Hx̂ₜ</td>
+<td>t₋₁</td>
+<td>e: n×1</td>
+</tr>
+<tr>
+<td>State update</td>
+<td>x̂ₜ</td>
+<td>t = x̂ₜ</td>
+<td>t₋₁ + Kₜeₜ</td>
+</tr>
+</tbody>
+</table>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

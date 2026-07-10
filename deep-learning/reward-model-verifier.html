@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Reward Models and Verifiers for Test-Time Search | Notes Backup</title>
+  <meta name="description" content="ORMs, PRMs, and rule-based verifiers — how they score candidate solutions during best-of-N, beam search, and MCTS at test-time to improve reasoning accuracy." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Reward Models and Verifiers for Test-Time Search</h1>
+      <ul class='note-meta'><li><strong>description:</strong> ORMs, PRMs, and rule-based verifiers — how they score candidate solutions during best-of-N, beam search, and MCTS at test-time to improve reasoning accuracy.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Reward Models and Verifiers for Test-Time Search</h1>
+<p>Reward models and verifiers unlock test-time compute scaling: given N candidate solutions sampled from an LLM, a scoring function ranks them and returns the best. This simple idea — best-of-N — dramatically improves accuracy on math and coding benchmarks, with gains compounding as N grows. The scoring function can be a trained neural reward model (ORM or PRM) or a deterministic rule-based verifier.</p>
+<h2>Outcome Reward Models (ORM)</h2>
+<p>An Outcome Reward Model (ORM) takes the complete (prompt, response) pair and outputs a scalar reward. ORMs are trained on human preference pairs or binary correctness labels. During best-of-N, all N candidates are scored and the highest-scoring one is returned. Training is simpler than for PRMs but ORMs provide no signal about which intermediate reasoning steps were incorrect or misleading.</p>
+<pre><code class="language-python">from transformers import AutoTokenizer, AutoModelForSequenceClassification\nimport torch\n\ndef best_of_n_orm(prompt, candidates, model_name=&quot;orm-checkpoint&quot;):\n    tok = AutoTokenizer.from_pretrained(model_name)\n    model = AutoModelForSequenceClassification.from_pretrained(model_name)\n    model.eval()\n    scores = []\n    for solution in candidates:\n        inp = tok(prompt + solution, return_tensors=&quot;pt&quot;, truncation=True, max_length=2048)\n        with torch.no_grad():\n            score = model(**inp).logits[0, 0].item()\n        scores.append(score)\n    best_idx = max(range(len(scores)), key=lambda i: scores[i])\n    return candidates[best_idx], scores
+</code></pre>
+<p>ORM training typically uses a ranking loss such as Bradley-Terry or pairwise cross-entropy. A common recipe: fine-tune a pretrained language model with a scalar head on chosen/rejected pairs from RLHF pipelines. For math tasks, synthetic correctness labels — comparing parsed answers to ground truth — offer cheap, scalable supervision without requiring expensive human annotators for every solution pair.</p>
+<h2>Process Reward Models (PRM)</h2>
+<p>A Process Reward Model (PRM) scores each intermediate reasoning step rather than only the final answer. Step-level rewards provide a richer training signal and enable tree-search algorithms like MCTS and beam search to prune unpromising branches early. PRMs correlate more strongly with mathematical correctness than ORMs, but collecting step-level human annotations is expensive and time-consuming.</p>
+<pre><code class="language-python">from math import prod\nimport torch\n\ndef score_with_prm(prompt, solution, prm, tok):\n    steps = [s for s in solution.strip().splitlines() if s.strip()]\n    step_scores = []\n    context = prompt\n    for step in steps:\n        inp = tok(context + &quot; &quot; + step, return_tensors=&quot;pt&quot;, truncation=True, max_length=2048)\n        with torch.no_grad():\n            score = prm(**inp).logits[0, 0].sigmoid().item()\n        step_scores.append(score)\n        context += &quot; &quot; + step\n    overall = prod(step_scores) if step_scores else 0.0\n    return overall, step_scores
+</code></pre>
+<p>PRM800K (Lightman et al., 2023) is the foundational dataset: human annotators labeled each step of GPT-4 math solutions as positive, neutral, or negative. A PRM trained on this data significantly outperformed an ORM at equivalent test-time compute. The key insight: detecting a flawed step early avoids wasting compute on continuations of an already-incorrect reasoning chain.</p>
+<h2>Rule-Based Verifiers</h2>
+<p>For domains with closed-form correct answers — arithmetic, algebra, competitive programming — rule-based verifiers provide perfect signal with zero training cost. A math verifier parses the model boxed answer and checks symbolic equality with a CAS. A code verifier runs unit tests. These deterministic oracles cannot be gamed by a policy model tuning outputs to fool a learned scorer.</p>
+<pre><code class="language-python">from sympy import simplify, sympify\nimport re\n\ndef math_verifier(output: str, truth: str) -&gt; int:\n    # Return 1 if model answer matches truth, 0 otherwise\n    if &quot;boxed{&quot; not in output:\n        return 0\n    try:\n        # pull content from boxed{...} tag\n        ans = output.split(&quot;boxed{&quot;)[1].split(&quot;}&quot;)[0].strip()\n        a = sympify(ans)\n        b = sympify(truth)\n        return int(simplify(a - b) == 0)\n    except Exception:\n        return 0
+</code></pre>
+<p>Rule-based verifiers are the backbone of modern RL training loops for reasoning models. DeepSeek-R1 and related systems combine format rewards (did the model use the expected output tags?) with accuracy rewards (is the parsed answer correct?). This hybrid signal trains models to reason in a structured, parseable format without requiring any neural reward model at inference time.</p>
+<h2>Best-of-N Sampling</h2>
+<p>Best-of-N sampling is the simplest test-time search strategy: sample N solutions independently with temperature &gt; 0, score each with a verifier or reward model, and return the highest-scoring one. Accuracy scales as 1-(1-p)^N where p is per-sample pass rate. The strategy is embarrassingly parallel — all candidates can be generated and scored simultaneously — making it straightforward to scale.</p>
+<pre><code class="language-python">def best_of_n(prompt, model, tokenizer, reward_fn, n=16, temp=0.8):\n    inputs = tokenizer(prompt, return_tensors=&quot;pt&quot;)\n    candidates = []\n    for _ in range(n):\n        out = model.generate(\n            **inputs, do_sample=True, temperature=temp, max_new_tokens=512\n        )\n        text = tokenizer.decode(out[0], skip_special_tokens=True)\n        candidates.append(text[len(prompt):])\n    scores = [reward_fn(prompt, c) for c in candidates]\n    ranked = sorted(zip(scores, candidates), reverse=True)\n    best_score, best_sol = ranked[0]\n    print(f&quot;Scores: min={ranked[-1][0]:.3f} max={best_score:.3f}&quot;)\n    return best_sol
+</code></pre>
+<h2>Beam Search with PRM</h2>
+<p>Beam search with a PRM maintains a fixed-width beam of partial solutions. At each reasoning step, K continuations are sampled per beam element, scored by the PRM, and only the top-B partial solutions survive. This focuses compute on the most promising reasoning paths rather than sampling complete solutions independently, achieving higher accuracy per unit of compute for long multi-step problems.</p>
+<blockquote>
+<p><strong>warning</strong>: ORMs are susceptible to reward hacking — a model can produce a plausible-looking final answer with flawed reasoning steps. PRMs mitigate this but require expensive step-level human annotations to train.</p>
+</blockquote>
+<p>In practice, tree search with a PRM pays off most when reasoning chains are long and N is large. For short problems or small N, best-of-N with a strong ORM is simpler and nearly as effective. MCTS-style approaches — maintaining visit counts and value estimates per node — further improve quality but add significant engineering complexity and remain sensitive to PRM score calibration.</p>
+<table>
+<thead>
+<tr>
+<th>Verifier Type</th>
+<th>Trains On</th>
+<th>Signal Granularity</th>
+<th>Reward Hacking Risk</th>
+<th>Best For</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ORM</td>
+<td>Preference pairs or correctness labels</td>
+<td>Final answer only</td>
+<td>High</td>
+<td>Ranking diverse candidate solutions</td>
+</tr>
+<tr>
+<td>PRM</td>
+<td>Step-level human annotations</td>
+<td>Per reasoning step</td>
+<td>Medium</td>
+<td>Long multi-step reasoning and tree search</td>
+</tr>
+<tr>
+<td>Rule-based</td>
+<td>No training required</td>
+<td>Final answer</td>
+<td>None</td>
+<td>Math and code with ground-truth answers</td>
+</tr>
+<tr>
+<td>LLM-as-judge</td>
+<td>No training required</td>
+<td>Flexible rubric</td>
+<td>Medium-High</td>
+<td>Open-ended generation tasks</td>
+</tr>
+<tr>
+<td>Human labeler</td>
+<td>N/A (is the oracle)</td>
+<td>Any granularity</td>
+<td>None</td>
+<td>Collecting ground-truth training data</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>Key Takeaways</h2>
+<ul>
+<li>ORMs score final (prompt, response) pairs and are cheap to train but susceptible to reward hacking when used for RL fine-tuning or repeated sampling.</li>
+<li>PRMs assign per-step rewards, enabling beam search and MCTS; PRM800K showed that step-level supervision strongly predicts mathematical problem-solving accuracy.</li>
+<li>Rule-based verifiers (symbolic math checks, unit test runners) provide zero-cost, unhackable reward signal for domains with deterministic correct answers.</li>
+<li>Best-of-N accuracy follows 1-(1-p)^N; gains are consistent but diminishing — use a strong verifier to maximize the value of each sampled candidate.</li>
+<li>Beam search with a PRM achieves better accuracy per unit compute than best-of-N for long reasoning chains by pruning low-probability paths early in the generation process.</li>
+<li>Choose the verifier to match the task: rule-based for math and code, ORM for short-form candidate ranking, PRM for long-chain reasoning, LLM-as-judge for open-ended quality assessment.</li>
+</ul>
+<p>Start with a rule-based verifier if your task allows it — zero training cost and no reward hacking. For broader generalization, train an ORM on correctness labels first; add a PRM only if ORM-based search plateaus. Reserve LLM-as-judge for open-ended tasks where symbolic verification is impossible, and cross-validate judge scores against human labels before deploying at scale.</p>
+    </article>
+  </main>
+</body>
+</html>

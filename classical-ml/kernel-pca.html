@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Kernel PCA — Nonlinear Dimensionality Reduction | Notes Backup</title>
+  <meta name="description" content="How kernel PCA implicitly maps data to a high-dimensional feature space, centers the kernel matrix, and projects onto nonlinear principal components — covering RBF, polynomial kernels, Swiss roll unfolding, and the Nyström approximation." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Kernel PCA — Nonlinear Dimensionality Reduction</h1>
+      <ul class='note-meta'><li><strong>description:</strong> How kernel PCA implicitly maps data to a high-dimensional feature space, centers the kernel matrix, and projects onto nonlinear principal components — covering RBF, polynomial kernels, Swiss roll unfolding, and the Nyström approximation.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Kernel PCA — Nonlinear Dimensionality Reduction</h1>
+<p>Standard PCA finds linear directions of maximum variance. When data lives on a nonlinear manifold — a Swiss roll, concentric circles, or an S-curve — linear PCA fails to separate classes that are linearly entangled. Kernel PCA extends PCA to nonlinear structure by implicitly mapping data to a high-dimensional (possibly infinite-dimensional) feature space via the kernel trick.</p>
+<h2>The Kernel Trick</h2>
+<p>Instead of explicitly computing the feature map φ(x), kernel PCA works with the kernel matrix Kᵢⱼ = k(xᵢ, xⱼ) = φ(xᵢ)ᵀφ(xⱼ). PCA in feature space requires computing the covariance Σ_φ = (1/n)Σφ(xᵢ)φ(xᵢ)ᵀ and its eigenvectors. It turns out the eigenvectors can be expressed as linear combinations of the feature maps, and the projection scores are given directly by the kernel matrix — no explicit φ needed.</p>
+<h2>Centering in Feature Space</h2>
+<p>The kernel matrix must be centered in feature space (not in input space). The centering operation is: K̃ = K - 1ₙK - K1ₙ + 1ₙK1ₙ, where 1ₙ is the n×n matrix with all entries 1/n. Eigendecomposing K̃ = QΛQᵀ gives scores: the projection onto the p-th component is K̃αₚ/√λₚ, where αₚ = qₚ/√λₚ (normalised eigenvector).</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.datasets import make_moons
+
+# Generate nonlinear data
+X, y = make_moons(n_samples=200, noise=0.05, random_state=42)
+n = len(X)
+
+# RBF kernel: K[i,j] = exp(-gamma * ||x_i - x_j||^2)
+def rbf_kernel(X, gamma=1.0):
+    sq_dists = (np.sum(X**2, axis=1, keepdims=True)
+                + np.sum(X**2, axis=1)
+                - 2 * X @ X.T)
+    return np.exp(-gamma * sq_dists)
+
+K = rbf_kernel(X, gamma=1.0)
+
+# Center in feature space
+one_n = np.ones((n, n)) / n
+K_c = K - one_n @ K - K @ one_n + one_n @ K @ one_n
+
+# Eigendecompose centered kernel
+vals, vecs = np.linalg.eigh(K_c)
+idx = np.argsort(vals)[::-1]  # descending
+vals, vecs = vals[idx], vecs[:, idx]
+
+# Projection onto top 2 kernel PCs
+k_comp = 2
+X_kpca = vecs[:, :k_comp] * np.sqrt(np.maximum(vals[:k_comp], 0))
+print(f'kPCA projection shape: {X_kpca.shape}')
+print(f'Top eigenvalues: {vals[:5].round(2)}')
+</code></pre>
+<h2>Common Kernels</h2>
+<ul>
+<li>RBF / Gaussian: k(x,z) = exp(-γ‖x-z‖²) — universal approximator, most commonly used</li>
+<li>Polynomial: k(x,z) = (γxᵀz + r)ᵈ — captures feature interactions up to degree d</li>
+<li>Sigmoid: k(x,z) = tanh(γxᵀz + r) — mimics neural network activations</li>
+<li>Linear: k(x,z) = xᵀz — equivalent to standard PCA (useful as a baseline)</li>
+<li>Laplacian: k(x,z) = exp(-γ‖x-z‖) — heavier tail than RBF, robust to outliers</li>
+</ul>
+<h2>sklearn KernelPCA: Linear vs RBF vs Polynomial</h2>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.datasets import make_moons, make_circles
+from sklearn.decomposition import KernelPCA, PCA
+
+datasets = [
+    ('Moons', *make_moons(n_samples=300, noise=0.05, random_state=42)),
+    ('Circles', *make_circles(n_samples=300, noise=0.05, factor=0.4, random_state=42))
+]
+kernels = ['linear', 'rbf', 'poly']
+fig, axes = plt.subplots(len(datasets), len(kernels) + 1, figsize=(16, 8))
+
+for row, (name, X, y) in enumerate(datasets):
+    X_pca = PCA(n_components=2).fit_transform(X)
+    axes[row, 0].scatter(X_pca[:, 0], X_pca[:, 1], c=y, cmap='bwr', s=10)
+    axes[row, 0].set_title(f'{name}: Linear PCA')
+
+    for col, kernel in enumerate(kernels):
+        kpca = KernelPCA(n_components=2, kernel=kernel, gamma=5.0, random_state=42)
+        X_k = kpca.fit_transform(X)
+        axes[row, col + 1].scatter(X_k[:, 0], X_k[:, 1], c=y, cmap='bwr', s=10)
+        axes[row, col + 1].set_title(f'{name}: {kernel}')
+
+plt.suptitle('Kernel PCA on Nonlinear Datasets', fontsize=13)
+plt.tight_layout()
+plt.show()
+</code></pre>
+<blockquote>
+<p><strong>Kernel Selection</strong>: Start with the RBF kernel and tune γ via cross-validation or reconstruction error on held-out data. Polynomial kernels work well when you know features interact multiplicatively. The linear kernel serves as a sanity check — if it performs as well as RBF, your data is approximately linearly separable.</p>
+</blockquote>
+<h2>Unfolding Nonlinear Manifolds</h2>
+<p>A classic demonstration is the Swiss roll: a 2D sheet rolled up in 3D space. Linear PCA projects it flat but preserves the rolled structure. Kernel PCA with an appropriate RBF bandwidth can 'unroll' the manifold, recovering the original 2D sheet.</p>
+<pre><code class="language-python">import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.datasets import make_swiss_roll
+from sklearn.decomposition import KernelPCA, PCA
+
+X, color = make_swiss_roll(n_samples=1000, noise=0.1, random_state=42)
+
+fig = plt.figure(figsize=(14, 4))
+
+# 3D original
+ax = fig.add_subplot(131, projection='3d')
+ax.scatter(X[:, 0], X[:, 1], X[:, 2], c=color, cmap='Spectral', s=5)
+ax.set_title('Swiss Roll (3D)')
+
+# Standard PCA — fails to unroll
+X_pca = PCA(n_components=2).fit_transform(X)
+ax2 = fig.add_subplot(132)
+ax2.scatter(X_pca[:, 0], X_pca[:, 1], c=color, cmap='Spectral', s=5)
+ax2.set_title('PCA 2D — fails')
+
+# Kernel PCA with RBF — unrolls the manifold
+kpca = KernelPCA(n_components=2, kernel='rbf', gamma=0.04,
+                  random_state=42, fit_inverse_transform=True)
+X_kpca = kpca.fit_transform(X)
+ax3 = fig.add_subplot(133)
+ax3.scatter(X_kpca[:, 0], X_kpca[:, 1], c=color, cmap='Spectral', s=5)
+ax3.set_title('Kernel PCA — unrolled')
+
+plt.tight_layout()
+plt.show()
+print(f'kPCA output shape: {X_kpca.shape}')
+</code></pre>
+<h2>Scalability and the Nyström Approximation</h2>
+<p>Computing the full kernel matrix costs O(n²d) memory and O(n³) for the eigendecomposition. For n=10,000 that is 100M entries — feasible. For n=100,000 it becomes impractical. The Nyström approximation selects m ≪ n landmark points, computes a rank-m approximation K ≈ K_nm K_mm⁻¹ K_mn, and applies PCA on the resulting m-dimensional feature map — reducing cost to O(nmd).</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.datasets import make_classification
+from sklearn.kernel_approximation import Nystroem
+from sklearn.decomposition import PCA
+from sklearn.pipeline import Pipeline
+from sklearn.svm import LinearSVC
+from sklearn.model_selection import cross_val_score
+import time
+
+X, y = make_classification(n_samples=10000, n_features=50,
+                            n_informative=20, random_state=42)
+
+# Nyström: m=300 landmarks approximate the full RBF kernel
+m = 300
+nystrom = Nystroem(kernel='rbf', gamma=0.01, n_components=m, random_state=42)
+
+t0 = time.time()
+X_approx = nystrom.fit_transform(X)
+print(f'Nystroem time: {time.time() - t0:.2f}s, shape: {X_approx.shape}')
+
+# PCA on the approximate feature map
+pca = PCA(n_components=50)
+X_final = pca.fit_transform(X_approx)
+print(f'Explained var (Nystroem+PCA): {pca.explained_variance_ratio_.sum():.3f}')
+
+# End-to-end pipeline for classification
+pipe = Pipeline([
+    ('nystrom', Nystroem(kernel='rbf', gamma=0.01, n_components=200, random_state=42)),
+    ('clf', LinearSVC(max_iter=1000, random_state=42))
+])
+scores = cross_val_score(pipe, X, y, cv=3, scoring='accuracy')
+print(f'Nystroem+LinearSVC accuracy: {scores.mean():.3f} +/- {scores.std():.3f}')
+</code></pre>
+<h2>Hyperparameter Tuning</h2>
+<p>For the RBF kernel, γ = 1/(2σ²) controls the radius of influence of each training point. Small γ → wide Gaussian, smooth boundaries; large γ → tight influence, risk of overfitting. A practical starting point: γ = 1/d_features (the default in sklearn). For polynomial kernels, degree d=2 or d=3 with coef0=1 is a common choice. Tune γ via cross-validated reconstruction error or downstream classification accuracy, not by visual inspection of the embedding alone.</p>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>PCA</th>
+<th>Kernel PCA</th>
+<th>t-SNE</th>
+<th>UMAP</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Linear</td>
+<td>Yes</td>
+<td>No (nonlinear)</td>
+<td>No</td>
+<td>No</td>
+</tr>
+<tr>
+<td>Preserves global structure</td>
+<td>Yes</td>
+<td>Partial</td>
+<td>No</td>
+<td>Better than t-SNE</td>
+</tr>
+<tr>
+<td>Scalable to large n</td>
+<td>Yes (TruncatedSVD)</td>
+<td>No (O(n³))</td>
+<td>No (O(n²))</td>
+<td>Yes (O(n^1.14))</td>
+</tr>
+<tr>
+<td>Deterministic</td>
+<td>Yes</td>
+<td>Yes</td>
+<td>No</td>
+<td>Yes (fixed seed)</td>
+</tr>
+<tr>
+<td>New point projection</td>
+<td>Yes</td>
+<td>Approx (Nystroem)</td>
+<td>No</td>
+<td>Yes</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<p>Kernel PCA is the principled extension of PCA to nonlinear data. Its key limitation is computational cost: O(n²) memory and O(n³) eigendecomposition. For large datasets, the Nyström approximation or UMAP (which has better scalability) are more practical choices. When the data structure is well-understood and a specific kernel captures it, Kernel PCA provides cleaner theoretical guarantees than manifold methods like t-SNE or UMAP.</p>
+    </article>
+  </main>
+</body>
+</html>

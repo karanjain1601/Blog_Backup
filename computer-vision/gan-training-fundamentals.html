@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GAN Training Fundamentals: Minimax Objective and Stability | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>GAN Training Fundamentals: Minimax Objective and Stability</h1>
+      
+      <h1>GAN Training Fundamentals: Minimax Objective and Stability</h1>
+<p>Generative Adversarial Networks pit two neural networks against each other: a generator that synthesizes fake samples and a discriminator that tries to tell real from fake. The interplay between them drives both networks to improve, ultimately producing a generator capable of creating highly realistic images indistinguishable from real data.</p>
+<p>GANs have become a cornerstone of generative vision research, enabling tasks like image synthesis, style transfer, super-resolution, and data augmentation. Understanding the minimax objective and training dynamics is essential before working with any GAN variant in practice.</p>
+<p>The GAN objective is a minimax game: the discriminator D maximizes its ability to distinguish real from fake, while the generator G minimizes the discriminator's success. Formally, min_G max_D E[log D(x)] + E[log(1 - D(G(z)))], where x is real data and z is random noise.</p>
+<pre><code>import torch
+import torch.nn.functional as F
+
+def gan_losses(D, G, real, z):
+    ones  = torch.ones(real.size(0), 1, device=real.device)
+    zeros = torch.zeros(real.size(0), 1, device=real.device)
+    fake  = G(z).detach()
+    D_loss = F.binary_cross_entropy(D(real), ones) \
+           + F.binary_cross_entropy(D(fake), zeros)
+    G_loss = F.binary_cross_entropy(D(G(z)), ones)
+    return D_loss, G_loss
+</code></pre>
+<p>The Nash equilibrium of this game is reached when the generator perfectly replicates the real distribution and the discriminator outputs 0.5 everywhere. In practice, training rarely reaches this ideal equilibrium and oscillates or diverges, which motivates the many stability improvements developed over the years.</p>
+<p>In DCGAN, the generator uses a series of transposed convolutions (strided upsampling) to grow a spatial feature map from a 4x4 seed up to the full output resolution. Batch normalization and ReLU activations are applied after each layer, with a final Tanh to bound output pixel values to [-1, 1].</p>
+<pre><code>import torch.nn as nn
+
+class DCGANGenerator(nn.Module):
+    def __init__(self, nz=100, ngf=64, nc=3):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.ConvTranspose2d(nz,  ngf*16, 4, 1, 0, bias=False), nn.BatchNorm2d(ngf*16), nn.ReLU(True),
+            nn.ConvTranspose2d(ngf*16, ngf*8, 4, 2, 1, bias=False), nn.BatchNorm2d(ngf*8),  nn.ReLU(True),
+            nn.ConvTranspose2d(ngf*8,  ngf*4, 4, 2, 1, bias=False), nn.BatchNorm2d(ngf*4),  nn.ReLU(True),
+            nn.ConvTranspose2d(ngf*4,  ngf*2, 4, 2, 1, bias=False), nn.BatchNorm2d(ngf*2),  nn.ReLU(True),
+            nn.ConvTranspose2d(ngf*2,  ngf,   4, 2, 1, bias=False), nn.BatchNorm2d(ngf),    nn.ReLU(True),
+            nn.ConvTranspose2d(ngf,    nc,    4, 2, 1, bias=False), nn.Tanh()
+        )
+    def forward(self, z): return self.net(z.view(z.size(0), -1, 1, 1))
+</code></pre>
+<p>The discriminator mirrors this structure with regular convolutions and Leaky ReLU activations, progressively halving the spatial dimensions. Batch normalization is omitted in the first layer of D, and spectral normalization can replace batch norm to enforce a Lipschitz constraint without batch statistics.</p>
+<p>Standard GAN training alternates: update D on a batch of real and fake samples, then update G using the updated D. The ratio of D to G updates (often 1:1 or 5:1 for WGAN) matters. When D gets too strong too fast, G receives vanishing gradients and stops learning.</p>
+<blockquote>
+<p><strong>warning</strong>: Mode collapse is the GAN pathology where the generator maps all noise vectors to a handful of modes. Symptoms: low sample diversity, discriminator loss → 0. Fix: use WGAN-GP or spectral normalization on D.</p>
+</blockquote>
+<pre><code>import torch
+import torch.nn.functional as F
+
+@torch.no_grad()
+def detect_mode_collapse(G, z_dim, n=64, threshold=0.9, device='cuda'):
+    G.eval()
+    z = torch.randn(n, z_dim, device=device)
+    samples = G(z).flatten(1)                          # (n, d)
+    norms   = samples / (samples.norm(dim=1, keepdim=True) + 1e-8)
+    sim_mat = norms @ norms.T                          # (n, n) cosine sims
+    mask    = ~torch.eye(n, dtype=torch.bool, device=device)
+    mean_sim = sim_mat[mask].mean().item()
+    collapsed = mean_sim &gt; threshold
+    return collapsed, mean_sim
+</code></pre>
+<p>WGAN replaces the BCE loss with the Wasserstein-1 distance, which provides smoother gradients and a meaningful loss metric correlated with sample quality. The discriminator (called critic in WGAN) is no longer constrained to [0,1]; instead its outputs are unbounded real scores.</p>
+<pre><code>def wgan_gp_penalty(D, real, fake, lam=10, device='cuda'):
+    B = real.size(0)
+    alpha = torch.rand(B, 1, 1, 1, device=device)
+    interp = (alpha * real + (1 - alpha) * fake).requires_grad_(True)
+    d_interp = D(interp)
+    grads = torch.autograd.grad(
+        outputs=d_interp, inputs=interp,
+        grad_outputs=torch.ones_like(d_interp),
+        create_graph=True, retain_graph=True
+    )[0]
+    grad_norm = grads.flatten(1).norm(2, dim=1)
+    penalty = lam * ((grad_norm - 1) ** 2).mean()
+    return penalty
+</code></pre>
+<p>Additional stability tricks include: two-timescale update rules (TTUR) with different learning rates for G and D; label smoothing for the discriminator targets; adding Gaussian noise to real images; spectral normalization of D weights; and exponential moving average of G weights for inference.</p>
+<table>
+<thead>
+<tr>
+<th>GAN Variant</th>
+<th>Loss</th>
+<th>Gradient Penalty</th>
+<th>Training Stability</th>
+<th>Sample Quality</th>
+<th>Mode Collapse Risk</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Vanilla GAN</td>
+<td>BCE</td>
+<td>No</td>
+<td>Low</td>
+<td>Low</td>
+<td>High</td>
+</tr>
+<tr>
+<td>DCGAN</td>
+<td>BCE</td>
+<td>No</td>
+<td>Medium</td>
+<td>Medium</td>
+<td>Medium</td>
+</tr>
+<tr>
+<td>WGAN</td>
+<td>Wasserstein</td>
+<td>Weight clipping</td>
+<td>Medium-High</td>
+<td>Medium-High</td>
+<td>Low-Medium</td>
+</tr>
+<tr>
+<td>WGAN-GP</td>
+<td>Wasserstein</td>
+<td>GP (interpolated)</td>
+<td>High</td>
+<td>High</td>
+<td>Low</td>
+</tr>
+<tr>
+<td>SNGAN</td>
+<td>Hinge</td>
+<td>Spectral Norm</td>
+<td>High</td>
+<td>High</td>
+<td>Low</td>
+</tr>
+</tbody>
+</table>
+<p>The minimax objective creates a delicate saddle-point optimization. Vanilla GANs suffer from vanishing gradients and mode collapse. WGAN-GP and spectral normalization are the most reliable fixes for modern GAN training pipelines.</p>
+<p>DCGAN's architectural guidelines (strided convolutions, batch norm, LeakyReLU in D, ReLU in G, Tanh output) remain sound starting points. When building a custom GAN, start with WGAN-GP loss, spectral norm on D, and gradient clipping on G to minimize instability.</p>
+<p>Monitor both D and G losses together: if D_loss → 0 and G_loss spikes, mode collapse or training instability is occurring. Use the pairwise cosine similarity diagnostic on generated samples as a quick quantitative check for diversity collapse during training runs.</p>
+    </article>
+  </main>
+</body>
+</html>

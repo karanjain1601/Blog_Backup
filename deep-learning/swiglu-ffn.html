@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SwiGLU — Gated Linear Units and LLaMA FFN | Notes Backup</title>
+  <meta name="description" content="SwiGLU and the GLU family of gated FFN activations — how SiLU gates improve Transformer FFN quality, parameter equivalence with the 3-matrix design, and full LLaMA block integration." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>SwiGLU — Gated Linear Units and LLaMA FFN</h1>
+      <ul class='note-meta'><li><strong>description:</strong> SwiGLU and the GLU family of gated FFN activations — how SiLU gates improve Transformer FFN quality, parameter equivalence with the 3-matrix design, and full LLaMA block integration.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>SwiGLU — Gated Linear Units and LLaMA FFN</h1>
+<p>The feed-forward sub-layer has been a quiet source of consistent improvement in Transformer design. Noam Shazeer's 2020 paper 'GLU Variants Improve Transformers' introduced a family of gated feed-forward layers where one linear projection acts as a multiplicative gate on another. SwiGLU — the variant using the SiLU (Swish) activation as the gate — has become the standard FFN in most frontier LLMs, including LLaMA 1/2/3, Mistral, PaLM, and Gemma.</p>
+<h2>Gated Linear Units — The GLU Family</h2>
+<p>A Gated Linear Unit (GLU), introduced by Dauphin et al. (2017), splits a linear projection into two halves and multiplies them element-wise: GLU(x, W, V, b, c) = σ(xW + b) ⊙ (xV + c). The sigmoid-gated branch acts as an information gate — it controls how much of the value branch passes through to the next layer. Shazeer (2020) explored replacing the sigmoid gate with other non-linearities, finding that smooth activations (GELU, SiLU) consistently outperformed both GLU and ReLU.</p>
+<ul>
+<li>GLU (Dauphin 2017): σ(xW) ⊙ xV — sigmoid gate, splits projection in two</li>
+<li>ReGLU (Shazeer 2020): ReLU(xW) ⊙ xV — ReLU gate, competitive with GELU</li>
+<li>GEGLU (Shazeer 2020): GELU(xW) ⊙ xV — strong across benchmarks</li>
+<li>SwiGLU (Shazeer 2020): SiLU(xW) ⊙ xV — best reported; SiLU = x·σ(x)</li>
+<li>All gated variants use a third down-projection matrix W3 to return to d_model</li>
+</ul>
+<blockquote>
+<p><strong>Why Gating Improves Quality</strong>: The gate provides dynamic feature selection: it allows the network to suppress irrelevant dimensions token-by-token, similar to LSTM forget gates. SiLU is smooth, non-saturating for positive values, and has a small negative region — these properties combine to give richer gradients than ReLU and lower variance than sigmoid gates. Empirically GEGLU and SwiGLU improve perplexity by 1-3% at the same FLOPs budget.</p>
+</blockquote>
+<h2>SwiGLU — SiLU Gate with Parameter Adjustment</h2>
+<p>SwiGLU is defined as FFN_SwiGLU(x) = (SiLU(xW₁) ⊙ xW₂) W₃ where SiLU(x) = x · σ(x). Three weight matrices replace the standard two, so the hidden dimension must be reduced to preserve the parameter budget: instead of d_ff = 4·d_model with two matrices (2·d·d_ff = 8d²), SwiGLU uses d_ff = 8d/3 with three matrices (3·d·(8d/3) = 8d²). LLaMA rounds 8/3 to the nearest multiple of 256 for hardware efficiency, typically d_ff ≈ 11,008 for d_model = 4,096.</p>
+<h2>Why Gates Improve FFN Quality</h2>
+<p>Standard FFN activations (ReLU, GELU) apply a fixed non-linearity to every neuron independently of the input value. Gated variants make the effective activation <em>input-dependent</em>: SiLU(xW₁) ⊙ xW₂ means different tokens activate different subsets of features. This dynamic selection allows the FFN to specialise different neurons for different input patterns, increasing expressivity without increasing FLOPs. The gate also provides a natural mechanism for the model to route information — features with low gate activation are effectively zeroed out.</p>
+<h2>Code 1 — SwiGLU FFN from Scratch</h2>
+<p>A clean SwiGLU implementation with the 8/3 hidden dimension scaling. Confirms output shape and parameter count relative to a standard 2-matrix FFN.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class SwiGLU(nn.Module):
+    &quot;&quot;&quot;SwiGLU from 'GLU Variants Improve Transformers' (Shazeer, 2020).
+    FFN(x) = (SiLU(x @ W_gate) * (x @ W_up)) @ W_down
+    Hidden dim = 8/3 * d_model to keep param count equal to 2-matrix FFN.
+    &quot;&quot;&quot;
+    def __init__(self, d_model: int, factor: float = 8/3):
+        super().__init__()
+        d_hidden       = int(d_model * factor)
+        self.gate_proj = nn.Linear(d_model, d_hidden, bias=False)
+        self.up_proj   = nn.Linear(d_model, d_hidden, bias=False)
+        self.down_proj = nn.Linear(d_hidden, d_model, bias=False)
+
+    def forward(self, x: torch.Tensor) -&gt; torch.Tensor:
+        gate = F.silu(self.gate_proj(x))   # SiLU(xW_gate)
+        up   = self.up_proj(x)             # xW_up (no activation)
+        return self.down_proj(gate * up)   # (gate ⊙ up) @ W_down
+
+torch.manual_seed(0)
+d_model = 512
+ffn     = SwiGLU(d_model)
+x       = torch.randn(2, 10, d_model)
+out     = ffn(x)
+p_swi   = sum(p.numel() for p in ffn.parameters())
+p_std   = 2 * d_model * (4 * d_model)    # standard 2-matrix param count
+print(f'SwiGLU output: {out.shape}')
+print(f'SwiGLU params: {p_swi:,}')
+print(f'Standard params (d_ff=4d): {p_std:,}')
+print(f'Ratio: {p_swi/p_std:.4f}  (should be ~1.0 — param-equivalent)')
+</code></pre>
+<h2>Code 2 — GLU Variants Side by Side</h2>
+<p>A unified implementation of the GLU family using a split-projection approach, making it easy to swap gate activations and compare outputs on the same input.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class GatedFFN(nn.Module):
+    &quot;&quot;&quot;Unified GLU-family FFN: gate activation is configurable.&quot;&quot;&quot;
+    GATES = {
+        'glu':    torch.sigmoid,
+        'reglu':  F.relu,
+        'geglu':  F.gelu,
+        'swiglu': F.silu,
+    }
+
+    def __init__(self, d_model: int, d_ff: int, variant: str = 'swiglu'):
+        super().__init__()
+        if variant not in self.GATES:
+            raise ValueError(f'Unknown variant: {variant}. Choose: {list(self.GATES)}')
+        self.variant = variant
+        self.gate_fn  = self.GATES[variant]
+        self.up   = nn.Linear(d_model, d_ff * 2, bias=False)  # gate + value
+        self.down = nn.Linear(d_ff,   d_model,   bias=False)
+
+    def forward(self, x: torch.Tensor) -&gt; torch.Tensor:
+        gate, value = self.up(x).chunk(2, dim=-1)
+        return self.down(self.gate_fn(gate) * value)
+
+# Compare all variants on identical weights and input
+d_model, d_ff = 256, 512
+x = torch.randn(2, 8, d_model)
+for variant in ('glu', 'reglu', 'geglu', 'swiglu'):
+    torch.manual_seed(0)
+    ffn    = GatedFFN(d_model, d_ff, variant)
+    out    = ffn(x)
+    params = sum(p.numel() for p in ffn.parameters())
+    print(f'{variant.upper():8}: out={tuple(out.shape)}, params={params:,}')
+</code></pre>
+<h2>Code 3 — Parameter Equivalence Verification</h2>
+<p>Proving that a SwiGLU FFN with d_ff = 2d/3 × original has the same parameter count as a standard 2-matrix FFN with d_ff = 4 × d_model.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class StandardFFN(nn.Module):
+    &quot;&quot;&quot;Two-matrix FFN: 2 * d_model * d_ff parameters.&quot;&quot;&quot;
+    def __init__(self, d, d_ff):
+        super().__init__()
+        self.fc1 = nn.Linear(d, d_ff,  bias=False)
+        self.fc2 = nn.Linear(d_ff, d,  bias=False)
+    def forward(self, x): return self.fc2(F.gelu(self.fc1(x)))
+
+class SwiGLUFFN(nn.Module):
+    &quot;&quot;&quot;Three-matrix SwiGLU: 3 * d_model * d_hidden parameters.&quot;&quot;&quot;
+    def __init__(self, d, d_hidden):
+        super().__init__()
+        self.W1 = nn.Linear(d, d_hidden,   bias=False)
+        self.W2 = nn.Linear(d, d_hidden,   bias=False)
+        self.W3 = nn.Linear(d_hidden, d,   bias=False)
+    def forward(self, x): return self.W3(F.silu(self.W1(x)) * self.W2(x))
+
+d_model   = 512
+d_std_ff  = 4 * d_model          # standard d_ff = 2048
+d_swi_ff  = int(d_std_ff * 2/3)  # SwiGLU d_ff = 1365
+
+std = StandardFFN(d_model, d_std_ff)
+swi = SwiGLUFFN(d_model, d_swi_ff)
+p_std = sum(p.numel() for p in std.parameters())
+p_swi = sum(p.numel() for p in swi.parameters())
+
+print(f'Standard FFN  (2 mats, d_ff={d_std_ff}): {p_std:,} params')
+print(f'SwiGLU FFN    (3 mats, d_ff={d_swi_ff}): {p_swi:,} params')
+print(f'Ratio: {p_swi/p_std:.4f}  (close to 1.000 — parameter-equivalent)')
+print(f'Formula check — 3 mats: 3*{d_model}*{d_swi_ff} = {3*d_model*d_swi_ff:,}')
+print(f'Formula check — 2 mats: 2*{d_model}*{d_std_ff} = {2*d_model*d_std_ff:,}')
+</code></pre>
+<h2>Code 4 — SwiGLU in a Full LLaMA-Style Block</h2>
+<p>A complete LLaMA-style decoder block using RMSNorm (instead of LayerNorm), SwiGLU FFN, and pre-norm layout — the building block used in LLaMA 1/2/3 and Mistral.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class RMSNorm(nn.Module):
+    &quot;&quot;&quot;Root Mean Square Layer Normalisation (LLaMA, Mistral).&quot;&quot;&quot;
+    def __init__(self, d: int, eps: float = 1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(d))
+        self.eps    = eps
+    def forward(self, x: torch.Tensor) -&gt; torch.Tensor:
+        rms = x.pow(2).mean(-1, keepdim=True).add(self.eps).sqrt()
+        return self.weight * x / rms
+
+class SwiGLUFFN(nn.Module):
+    def __init__(self, d: int, d_ff: int):
+        super().__init__()
+        self.gate = nn.Linear(d, d_ff, bias=False)
+        self.up   = nn.Linear(d, d_ff, bias=False)
+        self.down = nn.Linear(d_ff, d, bias=False)
+    def forward(self, x): return self.down(F.silu(self.gate(x)) * self.up(x))
+
+class LLaMABlock(nn.Module):
+    &quot;&quot;&quot;LLaMA-style block: RMSNorm + MHA + SwiGLU, pre-norm layout.&quot;&quot;&quot;
+    def __init__(self, d_model: int = 256, n_heads: int = 8, d_ff: int = None):
+        super().__init__()
+        d_ff           = d_ff or int(d_model * 8 / 3)
+        self.attn_norm = RMSNorm(d_model)
+        self.ffn_norm  = RMSNorm(d_model)
+        self.attn = nn.MultiheadAttention(d_model, n_heads, batch_first=True, bias=False)
+        self.ffn  = SwiGLUFFN(d_model, d_ff)
+
+    def forward(self, x: torch.Tensor) -&gt; torch.Tensor:
+        n = self.attn_norm(x)
+        x = x + self.attn(n, n, n)[0]      # pre-norm attention
+        x = x + self.ffn(self.ffn_norm(x)) # pre-norm SwiGLU FFN
+        return x
+
+block  = LLaMABlock(d_model=256, n_heads=8)
+x      = torch.randn(2, 16, 256)
+out    = block(x)
+params = sum(p.numel() for p in block.parameters())
+print(f'LLaMA block output: {out.shape}')
+print(f'Parameters: {params:,}')
+</code></pre>
+<h2>FFN Activation Variants Compared</h2>
+<table>
+<thead>
+<tr>
+<th>Variant</th>
+<th>Gate Activation</th>
+<th>Formula (simplified)</th>
+<th>Used In</th>
+<th>Quality Rank</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Standard ReLU</td>
+<td>None</td>
+<td>ReLU(xW1) @ W2</td>
+<td>Original Transformer, BERT</td>
+<td>Baseline</td>
+</tr>
+<tr>
+<td>Standard GELU</td>
+<td>None</td>
+<td>GELU(xW1) @ W2</td>
+<td>GPT-2, RoBERTa, DistilBERT</td>
+<td>Better than ReLU</td>
+</tr>
+<tr>
+<td>GLU (sigmoid)</td>
+<td>Sigmoid σ</td>
+<td>(σ(xW) ⊙ xV) @ W2</td>
+<td>Dauphin et al. (2017), LM tasks</td>
+<td>Moderate gain</td>
+</tr>
+<tr>
+<td>ReGLU</td>
+<td>ReLU</td>
+<td>(ReLU(xW) ⊙ xV) @ W2</td>
+<td>Shazeer 2020 ablations</td>
+<td>Competitive</td>
+</tr>
+<tr>
+<td>GEGLU</td>
+<td>GELU</td>
+<td>(GELU(xW) ⊙ xV) @ W2</td>
+<td>T5 variants, some BERT models</td>
+<td>Strong</td>
+</tr>
+<tr>
+<td>SwiGLU</td>
+<td>SiLU (Swish)</td>
+<td>(SiLU(xW) ⊙ xV) @ W2</td>
+<td>LLaMA 1/2/3, Mistral, PaLM, Gemma</td>
+<td>Best reported</td>
+</tr>
+</tbody>
+</table>
+<p>SwiGLU represents one of the clearest wins in modern LLM design: a one-line change to the FFN activation that consistently improves perplexity at identical compute. The 3-matrix design with the 2/3 hidden-dimension adjustment keeps FLOP and parameter counts equivalent to a standard FFN, so there is no cost to switching. For any new Transformer project using LLaMA-family architecture as a reference, SwiGLU with RMSNorm should be the starting point for the FFN sub-layer.</p>
+    </article>
+  </main>
+</body>
+</html>

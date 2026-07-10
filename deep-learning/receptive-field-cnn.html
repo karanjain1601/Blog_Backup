@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Receptive Field — Theoretical vs Effective, Depth and Dilation | Notes Backup</title>
+  <meta name="description" content="Compute theoretical receptive fields layer by layer, understand why the effective RF is Gaussian-shaped, and compare RF expansion strategies across architectures." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Receptive Field — Theoretical vs Effective, Depth and Dilation</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Compute theoretical receptive fields layer by layer, understand why the effective RF is Gaussian-shaped, and compare RF expansion strategies across architectures.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Receptive Field — Theoretical vs Effective, Depth and Dilation</h1>
+<p>The receptive field (RF) of a neuron in a CNN is the region of the input image that can influence its activation. RF size determines what the network can 'see' — too small and it misses global context needed for object recognition; too large and it processes irrelevant background. Understanding how RF grows with depth, stride, dilation, and kernel size lets architects make deliberate design decisions rather than treating the RF as an afterthought. A key insight from Luo et al. (2017): the effective RF — the region that actually influences the output in proportion to gradient magnitude — is much smaller and Gaussian-shaped, not the full theoretical square.</p>
+<h2>Theoretical Receptive Field Formula</h2>
+<p>For a network with L layers, the theoretical RF can be computed recursively. Let RF₀ = 1 (single input pixel). After layer l with kernel size kₗ and stride sₗ: RF_l = RF_{l-1} + (kₗ - 1) · Πᵢ₌₁ˡ⁻¹ sᵢ. Equivalently, RF_l = RF_{l-1} + (kₗ - 1) · jump_{l-1}, where jump_{l-1} = Πᵢ&lt;l sᵢ is the stride accumulated up to layer l-1. For n stacked 3×3 convs with stride 1: RF = 2n+1. For n stacked 3×3 convs with stride 2: RF grows exponentially. Pooling layers count as convolutions with stride equal to the pool size. A 1×1 conv does not increase the RF.</p>
+<pre><code class="language-python">def compute_rf(layers):
+    &quot;&quot;&quot;
+    Compute theoretical receptive field layer-by-layer.
+    layers: list of dicts with keys 'name', 'kernel', 'stride', 'dilation'.
+    Returns list of (name, rf, jump, dilation_eff_kernel).
+    &quot;&quot;&quot;
+    rf, jump = 1, 1
+    results = []
+    for l in layers:
+        k = l.get('kernel', 1)
+        s = l.get('stride', 1)
+        d = l.get('dilation', 1)
+        eff_k = (k - 1) * d + 1  # effective kernel size with dilation
+        rf = rf + (eff_k - 1) * jump
+        jump = jump * s
+        results.append((l['name'], rf, jump))
+    return results
+
+# VGG-style: five blocks of 3x3 convs + max-pool
+vgg_layers = [
+    *[{'name': f'block1_conv{i}', 'kernel': 3, 'stride': 1} for i in range(1,3)],
+    {'name': 'pool1', 'kernel': 2, 'stride': 2},
+    *[{'name': f'block2_conv{i}', 'kernel': 3, 'stride': 1} for i in range(1,3)],
+    {'name': 'pool2', 'kernel': 2, 'stride': 2},
+    *[{'name': f'block3_conv{i}', 'kernel': 3, 'stride': 1} for i in range(1,3)],
+    {'name': 'pool3', 'kernel': 2, 'stride': 2},
+]
+print(f'{'Layer':&lt;18} {'Theor. RF':&gt;10} {'Jump':&gt;6}')
+for name, rf, jump in compute_rf(vgg_layers):
+    print(f'{name:&lt;18} {rf:&gt;10} {jump:&gt;6}')
+</code></pre>
+<h2>Effective Receptive Field</h2>
+<p>Luo et al. (2017) showed that the effective RF — measured as the gradient of the centre output unit with respect to all input pixels — is approximately Gaussian, not uniform over the theoretical RF square. Central pixels contribute exponentially more than peripheral ones due to the multiplicative path-count effect: a pixel at the centre of the RF passes through more overlapping kernel windows than one at the edge. The effective RF typically spans about √(theoretical RF) in practice. This means a ResNet-50 with a theoretical RF of 483×483 on ImageNet has an effective RF of roughly 100×100. Increasing depth beyond a certain point gives diminishing returns on effective context.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+def estimate_effective_rf(model, input_size=(1, 3, 224, 224)):
+    &quot;&quot;&quot;Gradient-based effective receptive field estimation.&quot;&quot;&quot;
+    x = torch.zeros(input_size, requires_grad=True)
+    # Forward pass
+    out = model(x)
+    # Gradient of centre output w.r.t. input
+    centre = out[0, 0, out.shape[2]//2, out.shape[3]//2]
+    centre.backward()
+    grad = x.grad[0].abs().mean(dim=0).detach().numpy()  # (H, W)
+    # Normalise
+    grad = grad / grad.max()
+    # Estimate effective RF as region with grad &gt; threshold
+    threshold = 0.1
+    mask = (grad &gt; threshold)
+    rows = np.any(mask, axis=1)
+    cols = np.any(mask, axis=0)
+    h_eff = rows.sum()
+    w_eff = cols.sum()
+    return grad, h_eff, w_eff
+
+# Use a small custom network for demonstration
+net = nn.Sequential(
+    nn.Conv2d(3, 32, 3, padding=1), nn.ReLU(),
+    nn.Conv2d(32, 32, 3, padding=1), nn.ReLU(),
+    nn.Conv2d(32, 32, 3, padding=1), nn.ReLU(),
+    nn.Conv2d(32, 1, 3, padding=1),
+)
+grad, h_eff, w_eff = estimate_effective_rf(net, (1, 3, 32, 32))
+theor_rf = 2 * 4 + 1  # 4 layers of k=3, s=1
+print(f'Theoretical RF: {theor_rf}x{theor_rf}')
+print(f'Effective RF (grad&gt;0.1): {h_eff}x{w_eff}')
+print(f'Gradient is Gaussian-shaped, not uniform rectangular.')
+</code></pre>
+<h2>RF Growth with Dilation</h2>
+<p>Dilated convolutions expand the RF without increasing parameters or reducing spatial resolution. A 3×3 conv with dilation d has effective kernel size (3-1)·d+1. Stacking three 3×3 dilated convs with rates d=[1,2,4]: RF contributions are 3, 5, 9 (effective kernel sizes). With stride=1, the total RF = 1 + (3-1) + (5-1)·1 + (9-1)·1 = 15 vs 7 for standard (three d=1 convs). WaveNet used exponentially growing dilation [1,2,4,...,512] in each block, achieving an RF of 1024 samples at 16kHz = 64ms context. DeepLabV3 uses dilations [6,12,18] in ASPP for multi-scale context in segmentation.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def rf_with_dilation(dilations, k=3):
+    &quot;&quot;&quot;Compare RF for stacked dilated 3x3 convs vs standard.&quot;&quot;&quot;
+    rf_std = 1 + len(dilations) * (k - 1)  # all dilation=1
+    rf_dil = 1
+    for d in dilations:
+        eff_k = (k - 1) * d + 1
+        rf_dil += eff_k - 1
+    return rf_std, rf_dil
+
+print(f'{'Dilations':&lt;30} {'Std RF':&gt;8} {'Dilated RF':&gt;12} {'Gain':&gt;8}')
+for dilations in [
+    [1, 1, 1],
+    [1, 2, 4],
+    [1, 2, 4, 8],
+    [1, 2, 4, 8, 16],
+    [1, 2, 4, 8, 16, 32],
+    [6, 12, 18],         # DeepLab ASPP
+    [1, 2, 5],           # Hybrid dilated conv (HDC)
+]:
+    std, dil = rf_with_dilation(dilations)
+    print(f'{str(dilations):&lt;30} {std:&gt;8} {dil:&gt;12} {dil/std:&gt;7.1f}x')
+
+print('\nDilation multiplies RF with no extra parameters.')
+print('HDC [1,2,5]: avoids gridding artifact (all positions covered).')
+</code></pre>
+<blockquote>
+<p><strong>Transformer Global RF from Layer 1</strong>: Vision Transformers (ViT) divide the image into patches and apply self-attention across all patch tokens. Every token attends to every other token from the very first layer — the receptive field is global immediately. CNNs build up their RF incrementally through depth. This is why ViTs excel at tasks requiring long-range dependencies (e.g., detecting relationships between distant image regions), while CNNs with local inductive bias often need fewer data to converge on spatially local tasks.</p>
+</blockquote>
+<h2>Architecture RF Comparison</h2>
+<p>Different architectures achieve large RFs through different strategies. VGG-16 uses 13 conv layers of 3×3 with periodic 2×2 max-pooling, reaching a theoretical RF of 212×212 on the final conv layer. ResNet-50 uses bottleneck blocks with 1×1, 3×3, 1×1 convs and stride-2 for downsampling. The 1×1 convs do not grow the RF. DeepLab adds dilated convs to ResNet's later stages to prevent shrinking the RF while removing strides. ViT patches (16×16) give a fixed patch-level RF of 16 initially, then global through attention.</p>
+<pre><code class="language-python">import torchvision.models as models
+import torch
+
+def resnet50_rf():
+    &quot;&quot;&quot;Compute theoretical RF through ResNet-50 up to layer4.&quot;&quot;&quot;
+    layers = [
+        {'name': 'conv1 7x7 s2',  'kernel': 7, 'stride': 2},
+        {'name': 'maxpool 3x3 s2','kernel': 3, 'stride': 2},
+        # layer1: 3 bottleneck blocks, each has 1x1, 3x3, 1x1
+        *[{'name': f'l1.{i}.{n}', 'kernel': k, 'stride': 1}
+          for i in range(3) for k, n in [(1,'pw1'),(3,'conv'),(1,'pw2')]],
+        # layer2: stride-2 on first block's 3x3
+        {'name': 'l2.0.pw1', 'kernel': 1, 'stride': 1},
+        {'name': 'l2.0.conv', 'kernel': 3, 'stride': 2},
+        {'name': 'l2.0.pw2', 'kernel': 1, 'stride': 1},
+        *[{'name': f'l2.{i}.{n}', 'kernel': k, 'stride': 1}
+          for i in range(1,4) for k, n in [(1,'pw1'),(3,'conv'),(1,'pw2')]],
+    ]
+    rf, jump = 1, 1
+    for l in layers:
+        k, s = l['kernel'], l['stride']
+        rf = rf + (k - 1) * jump
+        jump *= s
+    return rf, jump
+
+rf, jump = resnet50_rf()
+print(f'ResNet-50 theoretical RF after layer2: {rf}x{rf}')
+print(f'Total stride (jump): {jump}')
+print('ResNet-50 full theoretical RF at output: ~483x483')
+print('Effective RF typically ~100x100 (Gaussian centre-weighted)')
+</code></pre>
+<h2>RF Design Guidelines</h2>
+<p>Practical RF design follows a few guiding principles. For image classification, the RF should cover most of the input by the final conv layer — a 224×224 image needs an RF of at least 100–150 effective pixels. For object detection, the RF should match the object scale at each detection head — FPN (Feature Pyramid Network) uses multiple scales explicitly. For segmentation without downsampling (e.g., medical images), dilated conv is preferred to maintain resolution while expanding RF. For audio (e.g., WaveNet), exponentially growing dilation gives logarithmic RF growth — efficient for long-range temporal dependencies.</p>
+<table>
+<thead>
+<tr>
+<th>RF Growth Strategy</th>
+<th>RF Per Layer</th>
+<th>Extra Params</th>
+<th>Extra FLOPs</th>
+<th>Spatial Resolution</th>
+<th>Use Case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Stack 3×3 (s=1)</td>
+<td>+2 per layer (linear)</td>
+<td>None</td>
+<td>None</td>
+<td>Preserved</td>
+<td>Depth-first, cheap local growth</td>
+</tr>
+<tr>
+<td>Dilation d</td>
+<td>+(2d) per layer</td>
+<td>None</td>
+<td>None</td>
+<td>Preserved</td>
+<td>Segmentation, audio (DeepLab, WaveNet)</td>
+</tr>
+<tr>
+<td>Stride 2 / Pool</td>
+<td>×2 multiplier</td>
+<td>None</td>
+<td>None</td>
+<td>Halved</td>
+<td>Classification, detection backbone</td>
+</tr>
+<tr>
+<td>Larger kernel k</td>
+<td>+k-1 per layer</td>
+<td>×(k/3)²</td>
+<td>×(k/3)²</td>
+<td>Preserved</td>
+<td>Rare; two 3×3 preferred over one 5×5</td>
+</tr>
+<tr>
+<td>Global attention</td>
+<td>Full image (1 layer)</td>
+<td>O(n²) QKV</td>
+<td>O(n²·d)</td>
+<td>Preserved</td>
+<td>ViT, SASA, non-local networks</td>
+</tr>
+</tbody>
+</table>
+<h2>Effective RF and Feature Importance</h2>
+<p>Because the effective RF is Gaussian-shaped and much smaller than the theoretical RF, architectural choices that seem to provide sufficient context may not in practice. Attention mechanisms (CBAM, SE blocks, Transformer layers) complement CNNs by providing a bypass route for long-range dependency modelling that the Gaussian-shaped ERF suppresses. Class Activation Mapping (CAM) and Grad-CAM exploit the spatial RF structure to visualise which input regions drive a classification decision, serving as a diagnostic tool for checking whether the network's attended regions match human intuition.</p>
+<p>Deformable convolutions (Dai et al. 2017) learn spatial offsets for each kernel sampling location so the RF adapts dynamically to object shape rather than remaining a fixed grid. This improves detection of objects with irregular shapes and large aspect ratios. Deformable DETR uses deformable attention for multi-scale feature aggregation with adaptive RF. Dilated Residual Networks (DRN) remove strides in ResNet's last two stages and compensate with increasing dilation rates to maintain the full theoretical RF at higher spatial resolution.</p>
+<ul>
+<li>Grad-CAM uses the gradient of class score w.r.t. the last conv feature map for class-specific saliency maps.</li>
+<li>Local Attention (SASA) restricts self-attention to a local window — explicit RF control with O(n·w²) cost.</li>
+<li>torch.fx can trace a model graph and compute theoretical RF by tracking tensor shapes layer by layer.</li>
+<li>RF mismatch: if an object is larger than the network's ERF, accuracy collapses — a common failure mode on high-res inputs.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

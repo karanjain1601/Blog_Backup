@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ORPO — Odds Ratio Preference Optimization Without a Reference Model | Notes Backup</title>
+  <meta name="description" content="ORPO (Hong et al., 2024) eliminates the reference model entirely by combining supervised fine-tuning and preference alignment into a single training stage, using an odds ratio loss that directly contrasts chosen and rejected sequences through probability ratios rather than log-ratio differences." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>ORPO — Odds Ratio Preference Optimization Without a Reference Model</h1>
+      <ul class='note-meta'><li><strong>description:</strong> ORPO (Hong et al., 2024) eliminates the reference model entirely by combining supervised fine-tuning and preference alignment into a single training stage, using an odds ratio loss that directly contrasts chosen and rejected sequences through probability ratios rather than log-ratio differences.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>ORPO — Odds Ratio Preference Optimization Without a Reference Model</h1>
+<p>ORPO (Odds Ratio Preference Optimization, Hong et al. 2024) takes a fundamentally different approach to LLM alignment: it removes the reference model entirely and combines supervised fine-tuning (SFT) with preference learning into a single training stage. Previous methods — PPO, DPO, IPO — all require a frozen reference policy pi_ref to anchor the optimization via a KL divergence constraint. This reference model doubles (or quadruples, in PPO's case) the GPU memory requirement. ORPO's insight is that the SFT loss itself provides the reference signal: by jointly maximizing chosen response likelihood and the odds ratio between chosen and rejected responses, the model learns both task competence and preference alignment simultaneously.</p>
+<h2>Eliminating the Reference Model</h2>
+<p>DPO and IPO use the reference model pi_ref as a baseline: the policy is rewarded for increasing its probability ratio relative to what pi_ref assigns. This KL anchoring prevents the policy from diverging arbitrarily. ORPO replaces this external baseline with the SFT loss: by directly maximizing log pi_theta(y_w|x), the model is prevented from collapsing to degenerate behavior. The SFT component keeps the policy near a competent language model; the odds ratio component pushes it to prefer chosen over rejected sequences. Together, they provide the same alignment stability as a reference model without requiring one to be stored.</p>
+<h2>ORPO Loss: Combined SFT and Odds Ratio</h2>
+<p>The ORPO total loss is: L_ORPO = L_SFT + lambda * L_OR where L_SFT = -log pi_theta(y_w|x) (standard causal language model loss on chosen sequences) and L_OR = -log sigma(log [odds_theta(y_w|x) / odds_theta(y_l|x)]) where odds(y|x) = P(y|x)/(1-P(y|x)). The log odds ratio log[odds_w/odds_l] = log[P(y_w|x)/(1-P(y_w|x))] - log[P(y_l|x)/(1-P(y_l|x))]. In log space: log_odds(y|x) = log P(y|x) - log(1 - P(y|x)) = logp(y|x) - log1p(-exp(logp(y|x))). The hyperparameter lambda balances SFT and alignment; typical values are 0.1 to 1.0.</p>
+<p>The odds ratio is chosen over the probability ratio for a theoretical reason: for long sequences where P(y|x) is very small (which is typical — a 100-token sequence with per-token average log-prob -1.2 has total probability exp(-120) ~ 10^{-52}), the odds ratio and probability ratio are numerically equivalent. This means ORPO's L_OR is approximately equivalent to a log-probability ratio loss when applied to realistic language model outputs, while being more theoretically grounded and numerically stable.</p>
+<h2>ORPO Loss Implementation</h2>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def orpo_loss(policy_chosen_logps, policy_rejected_logps, lam=0.1):
+    # ORPO (Hong et al., 2024): L_SFT + lambda * L_OR, no reference model needed
+    sft_loss = -policy_chosen_logps.mean()
+    # log_odds(y|x) = logp - log(1 - exp(logp)); clamp for numerical stability
+    log_odds_c = policy_chosen_logps   - torch.log1p(-policy_chosen_logps.exp().clamp(max=0.9999))
+    log_odds_r = policy_rejected_logps - torch.log1p(-policy_rejected_logps.exp().clamp(max=0.9999))
+    log_odds_ratio = log_odds_c - log_odds_r
+    or_loss = -F.logsigmoid(log_odds_ratio).mean()
+    total = sft_loss + lam * or_loss
+    return total, sft_loss.detach(), or_loss.detach()
+
+bsz = 8
+chosen_logps   = torch.full((bsz,), -1.2) + torch.randn(bsz) * 0.1
+rejected_logps = torch.full((bsz,), -1.8) + torch.randn(bsz) * 0.1
+loss, sft, oratio = orpo_loss(chosen_logps, rejected_logps, lam=0.1)
+print(f'ORPO total: {loss:.4f}   SFT: {sft:.4f}   OR: {oratio:.4f}')
+print(f'Models in GPU: 1 (ORPO) vs 2 (DPO) vs 4 (PPO)')
+</code></pre>
+<h2>Odds Ratio vs Probability Ratio for Long Sequences</h2>
+<p>The equivalence of odds ratio and probability ratio in the small-probability regime is crucial for ORPO's practical validity. For a sequence of length L with per-token average log-prob mu, the sequence probability is exp(L*mu). For L=100 and mu=-1.0, P(y|x) = exp(-100) ≈ 3.7×10^{-44}. In this regime, odds(y|x) = P/(1-P) ≈ P since 1-P ≈ 1. Therefore the odds ratio ≈ probability ratio, and ORPO's L_OR ≈ -log sigma(log pi_theta(y_w|x)/pi_theta(y_l|x)), which is a contrastive loss without a reference model.</p>
+<pre><code class="language-python">import torch
+
+def odds_from_logp(logp):
+    # odds = P(y|x) / (1 - P(y|x))
+    p = logp.exp()
+    return p / (1.0 - p + 1e-15)
+
+# For realistic sequence probabilities (very small), odds ≈ probability
+logps  = torch.linspace(-8.0, -0.5, 10)
+probs  = logps.exp()
+odds   = odds_from_logp(logps)
+print(f'  logp     prob           odds           abs_diff')
+print('-' * 56)
+for lp, p, o in zip(logps, probs, odds):
+    diff = abs(p.item() - o.item())
+    print(f'  {lp:.2f}  {p.item():.8f}   {o.item():.8f}   {diff:.2e}')
+print()
+print('Conclusion: for logp &lt; -1.0 (typical sequences), odds ≈ prob to &lt;1% error')
+</code></pre>
+<h2>ORPO Single-Model Training Loop</h2>
+<p>ORPO's training loop is simpler than DPO's because there is no need to run a second forward pass through a frozen reference model. Both chosen and rejected sequences are processed through the same policy model in a single forward pass (or two forward passes through the same model). The gradient accumulates from both the SFT loss (over chosen tokens) and the odds ratio loss (comparing chosen vs rejected). This halves peak GPU memory compared to DPO and eliminates the need to synchronize two model copies.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+from torch.optim import AdamW
+
+def compute_mean_logp(model, input_ids, attention_mask):
+    # Forward pass and compute mean per-token log-probability
+    outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+    logits  = outputs.logits[:, :-1].contiguous()
+    labels  = input_ids[:, 1:].contiguous()
+    lp      = F.log_softmax(logits, dim=-1)
+    tok_lp  = lp.gather(2, labels.unsqueeze(-1)).squeeze(-1)
+    mask    = attention_mask[:, 1:].float()
+    return (tok_lp * mask).sum(dim=1) / (mask.sum(dim=1) + 1e-9)
+
+def orpo_train_step(model, optimizer, chosen_ids, rejected_ids, c_mask, r_mask, lam=0.1):
+    optimizer.zero_grad()
+    logp_c = compute_mean_logp(model, chosen_ids,   c_mask)
+    logp_r = compute_mean_logp(model, rejected_ids, r_mask)
+    sft_loss    = -logp_c.mean()
+    log_odds_c  = logp_c - torch.log1p(-logp_c.exp().clamp(max=0.9999))
+    log_odds_r  = logp_r - torch.log1p(-logp_r.exp().clamp(max=0.9999))
+    or_loss     = -F.logsigmoid(log_odds_c - log_odds_r).mean()
+    total_loss  = sft_loss + lam * or_loss
+    total_loss.backward()
+    optimizer.step()
+    return total_loss.item(), sft_loss.item(), or_loss.item()
+
+print('ORPO step: one model, two forward passes, no frozen reference, joint SFT+alignment')
+</code></pre>
+<h2>Memory Footprint Across Alignment Methods</h2>
+<pre><code class="language-python">import torch
+
+def model_memory_gb(params_B, bits=16):
+    # Weights only; optimizer states (Adam ~2x) not included
+    return params_B * 1e9 * (bits / 8) / 1e9
+
+sizes = [7.0, 13.0, 34.0, 70.0]
+print(f'  Size(B)   PPO(4 mdls)  DPO/IPO(2)  ORPO/SimPO(1)  Saving_vs_DPO')
+print('-' * 70)
+for s in sizes:
+    per  = model_memory_gb(s, 16)     # bfloat16
+    ppo  = per * 4
+    dpo  = per * 2
+    orpo = per * 1
+    save = (dpo - orpo) / dpo * 100
+    print(f'  {s:&gt;7.0f}   {ppo:&gt;8.1f} GB  {dpo:&gt;7.1f} GB   {orpo:&gt;8.1f} GB  {save:&gt;8.0f}%')
+print()
+print('Adam optimizer states add ~2x per trainable model (not shown above)')
+</code></pre>
+<h2>Reference Model Usage in Alignment Methods</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Reference Model</th>
+<th>Models in GPU</th>
+<th>SFT Separate</th>
+<th>Memory 7B bf16</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>PPO</td>
+<td>Yes (frozen)</td>
+<td>4 (policy, ref, reward, value)</td>
+<td>Yes</td>
+<td>~56 GB</td>
+<td>Full RL loop</td>
+</tr>
+<tr>
+<td>DPO</td>
+<td>Yes (frozen)</td>
+<td>2 (policy + ref)</td>
+<td>Yes</td>
+<td>~28 GB</td>
+<td>Offline, pairwise</td>
+</tr>
+<tr>
+<td>IPO</td>
+<td>Yes (frozen)</td>
+<td>2 (policy + ref)</td>
+<td>Yes</td>
+<td>~28 GB</td>
+<td>Quadratic loss</td>
+</tr>
+<tr>
+<td>ORPO</td>
+<td>No</td>
+<td>1 (policy only)</td>
+<td>No (joint)</td>
+<td>~14 GB</td>
+<td>SFT + alignment</td>
+</tr>
+<tr>
+<td>SimPO</td>
+<td>No</td>
+<td>1 (policy only)</td>
+<td>Yes</td>
+<td>~14 GB</td>
+<td>Length normalized</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>ORPO Memory Savings</strong>: ORPO's single-model design makes it ideal for resource-constrained fine-tuning — the eliminated reference model saves ~50% GPU memory compared to DPO, making 7B model alignment feasible on a single 80GB A100. Combined with LoRA (where only adapter weights are trained), ORPO can align a 7B model using less than 20 GB of GPU memory while maintaining competitive alignment quality.</p>
+</blockquote>
+<p>ORPO's limitations should be considered when choosing it over DPO or IPO: (1) the SFT and preference signals are entangled — it is harder to diagnose whether poor alignment comes from insufficient SFT quality or a miscalibrated lambda; (2) ablation studies show that removing L_SFT (using L_OR alone) dramatically hurts performance, confirming that the SFT loss is doing real work as a reference proxy, not merely a regularizer; (3) ORPO is less well-studied than DPO on very large models (70B+) where the SFT-alignment interaction may differ.</p>
+<p>When to use ORPO: (1) you have a single GPU or memory-constrained setup; (2) you want to combine instruction tuning and preference alignment in one stage; (3) your preference data is reliable and the lambda hyperparameter can be tuned on a small held-out set. For high-quality preference data where maximizing alignment is critical, DPO or IPO with a well-trained reference model may outperform ORPO despite the added memory cost.</p>
+<hr />
+<p>ORPO represents a practical engineering advance in LLM alignment — the elimination of the reference model is not merely a memory saving but a conceptual simplification that makes alignment more accessible. By combining SFT and preference learning into a single loss, ORPO reduces the number of training stages from two to one, lowers GPU requirements by 50% compared to DPO, and produces alignment quality competitive with reference-model-based methods on standard benchmarks. Understanding its odds ratio formulation and the conditions under which it approximates a probability ratio is essential for practitioners applying it to real-world alignment tasks.</p>
+    </article>
+  </main>
+</body>
+</html>

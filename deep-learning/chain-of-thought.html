@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Chain-of-Thought Prompting | Notes Backup</title>
+  <meta name="description" content="Improving LLM reasoning by eliciting step-by-step intermediate reasoning before the final answer, enabling correct solutions to multi-step arithmetic, commonsense, and symbolic reasoning tasks." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Chain-of-Thought Prompting</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Improving LLM reasoning by eliciting step-by-step intermediate reasoning before the final answer, enabling correct solutions to multi-step arithmetic, commonsense, and symbolic reasoning tasks.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Chain-of-Thought Prompting</h1>
+<p>Standard few-shot prompting provides labelled examples that anchor an LLM's output format and task distribution. But on multi-step arithmetic, commonsense reasoning, and symbolic manipulation tasks, even 8-shot prompting plateaus well below human performance — the model is asked to compress multi-step reasoning into a single token prediction. Chain-of-thought (CoT) prompting, introduced by Wei et al. (2022, "Chain-of-Thought Prompting Elicits Reasoning in Large Language Models"), extends few-shot prompting by augmenting each demonstration with a step-by-step reasoning trace that leads to the answer. When the model sees these annotated examples, it learns to generate its own reasoning chain before producing the final answer. This simple modification dramatically improves accuracy on reasoning tasks: from 18% to 57% on GSM8K (grade school math) for PaLM 540B, and from 35% to 83% on the AQuA-RAT math word problem benchmark. Chain-of-thought prompting does not require any weight updates — it is purely a prompting strategy — but its benefits are strongly model-scale dependent.</p>
+<h2>Overview</h2>
+<p>Chain-of-thought prompting augments the k demonstrations in a few-shot prompt with natural-language reasoning steps that explain how to derive the answer from the input. Each demonstration takes the form: question → reasoning chain → final answer. The model, having seen these annotated examples, learns to produce a reasoning chain for each new input before generating its final answer. The reasoning chain serves two purposes: it decomposes the problem into manageable sub-steps, and it allocates additional computational capacity (more tokens of generation) to the reasoning process. Wei et al. tested CoT prompting on GPT-3 (175B), LaMDA (137B), PaLM (540B), and UL2 (20B) and found that CoT only helps models with approximately 100 billion or more parameters — smaller models produce plausible-sounding but systematically incorrect reasoning chains, which can actually hurt accuracy relative to direct answering. This scale sensitivity is a critical constraint on when to apply CoT.</p>
+<h2>Few-Shot CoT Prompting</h2>
+<p>Few-shot CoT provides k example triplets of the form (question, reasoning steps, answer). The reasoning steps are written in natural language and explicitly decompose the problem: identifying relevant quantities, converting units, applying relationships, performing arithmetic, and verifying the result against the question. The format is critical: the reasoning must appear before the final answer, clearly delineated (typically by "The answer is:" or "Therefore:"). The final answer extraction must be consistent across all demonstrations — if some use "= N" and others use "The answer is N", the model's answer extraction becomes unreliable. On GSM8K, 8-shot CoT with 3–4 sentence reasoning chains per example raises PaLM 540B from 17.9% (direct) to 56.9% (CoT). This 39-point improvement is achieved purely through prompt engineering with no fine-tuning.</p>
+<pre><code class="language-python">import openai
+import re
+
+client = openai.OpenAI()
+
+COT_EXAMPLES = [
+    {&quot;q&quot;: &quot;Janet has 3 apples. She buys 5 more and gives 2 to her friend. How many does she have?&quot;,
+     &quot;r&quot;: &quot;Janet starts with 3 apples. She buys 5 more: 3 + 5 = 8. She gives 2 away: 8 - 2 = 6.&quot;,
+     &quot;a&quot;: &quot;6&quot;},
+    {&quot;q&quot;: &quot;A store sells pens for $1.50 each. Maria buys 4 pens and pays with a $10 bill. How much change?&quot;,
+     &quot;r&quot;: &quot;4 pens cost 4 x $1.50 = $6.00. Change from $10: $10.00 - $6.00 = $4.00.&quot;,
+     &quot;a&quot;: &quot;$4.00&quot;},
+]
+
+def build_cot_prompt(question, examples, use_cot=True):
+    msgs = [{&quot;role&quot;: &quot;system&quot;, &quot;content&quot;: &quot;Solve the math problem. Show your work then state the answer.&quot;}]
+    for ex in examples:
+        q_text = ex[&quot;q&quot;]
+        if use_cot:
+            a_text = ex[&quot;r&quot;] + f&quot; The answer is {ex['a']}.&quot;
+        else:
+            a_text = f&quot;The answer is {ex['a']}.&quot;
+        msgs += [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: q_text}, {&quot;role&quot;: &quot;assistant&quot;, &quot;content&quot;: a_text}]
+    msgs.append({&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: question})
+    return msgs
+
+def solve(question, examples, use_cot):
+    msgs = build_cot_prompt(question, examples, use_cot)
+    resp = client.chat.completions.create(model=&quot;gpt-4o-mini&quot;, messages=msgs, max_tokens=200)
+    return resp.choices[0].message.content.strip()
+
+Q = &quot;Tom has 24 cookies. He eats a third of them and shares half the rest with a friend. How many does he keep?&quot;
+print(&quot;Direct:&quot;, solve(Q, COT_EXAMPLES, use_cot=False))
+print(&quot;CoT:   &quot;, solve(Q, COT_EXAMPLES, use_cot=True))
+</code></pre>
+<p>The direct-answer prompt collapses the multi-step reasoning into a single prediction, which forces the model to perform arithmetic in one shot — a task it frequently gets wrong even when it can articulate the correct procedure given space. The CoT prompt allocates generation capacity to the reasoning steps, making each sub-computation explicit. The model's attention mechanism can attend to intermediate results it has already generated (e.g., "24/3 = 8 cookies eaten") when computing subsequent steps, effectively giving it a scratchpad. This is the core mechanism by which CoT works: it converts an implicit, one-shot reasoning task into a sequential decomposition where each step has its own prediction and can be conditioned on by subsequent steps.</p>
+<h2>Why CoT Works</h2>
+<p>Several complementary explanations account for CoT's effectiveness. First, the sequential token generation process provides a scratchpad for intermediate computations — the model can refer back to quantities it has already written when producing subsequent steps. Second, chain-of-thought reasoning allocates proportionally more tokens to complex problems, whereas direct answering gives every problem the same (zero) explicit reasoning budget. Third, CoT demonstrations teach the model problem-decomposition strategies that generalise to new problems: how to identify the relevant quantities, which operations to apply, and in what order. Fourth, the reasoning chain provides a natural location for error localisation: when the final answer is wrong, examining the chain often reveals exactly which step failed, making CoT prompts easier to debug and improve than black-box direct-answer prompts. The consistent finding that CoT helps large models but hurts small models is explained by the fact that small models lack sufficient capability to generate correct reasoning chains — their reasoning is plausible-sounding but wrong, which actively misleads the answer generation.</p>
+<pre><code class="language-python">import openai
+
+client = openai.OpenAI()
+
+WEAK_COT = &quot;&quot;&quot;Q: A train travels 60 mph for 2.5 hours. How far does it go?
+Reasoning: 60 x 2.5 = 150.
+Answer: 150 miles.&quot;&quot;&quot;
+
+STRONG_COT = &quot;&quot;&quot;Q: A train travels 60 mph for 2.5 hours. How far does it go?
+Reasoning: Identify the knowns: speed = 60 mph, time = 2.5 hours.
+Apply distance formula: distance = speed x time = 60 x 2.5.
+Compute: 60 x 2 = 120, 60 x 0.5 = 30, total = 120 + 30 = 150 miles.
+Unit check: mph x hours = miles. Answer is in miles as required.
+Answer: 150 miles.&quot;&quot;&quot;
+
+TARGET_Q = &quot;A cyclist travels at 15 mph for 40 minutes and then at 20 mph for 30 minutes. Total distance?&quot;
+
+def solve_with_style(question, cot_example, label):
+    msgs = [{&quot;role&quot;: &quot;system&quot;, &quot;content&quot;: &quot;Solve math problems step by step.&quot;},
+            {&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: cot_example.split('Q: ')[1].split('\nReasoning')[0]},
+            {&quot;role&quot;: &quot;assistant&quot;, &quot;content&quot;: &quot;Reasoning: &quot; + cot_example.split('Reasoning: ')[1]},
+            {&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: question}]
+    resp = client.chat.completions.create(model=&quot;gpt-4o-mini&quot;, messages=msgs, max_tokens=200)
+    result = resp.choices[0].message.content.strip()
+    print(f&quot;--- {label} CoT ---\n{result}\n&quot;)
+    return result
+
+solve_with_style(TARGET_Q, WEAK_COT, &quot;Weak&quot;)
+solve_with_style(TARGET_Q, STRONG_COT, &quot;Strong&quot;)
+</code></pre>
+<p>The contrast between weak and strong CoT examples is substantial. A weak CoT example shows only the final computation without decomposing the problem structure, teaching the model a shallow pattern-matching approach. A strong CoT example identifies the relevant knowns, states the applicable formula or principle, performs each sub-calculation explicitly with intermediate values, checks units, and arrives at the answer through a verifiable chain. Strong CoT examples transfer better to novel problems because they encode problem-solving strategy, not just problem-specific computation. The cost of writing strong CoT examples is higher, but each example used across many API calls makes the fixed annotation cost negligible.</p>
+<h2>Task Categories That Benefit</h2>
+<p>Chain-of-thought prompting does not universally improve performance — the benefit depends heavily on the task type and whether the task requires multi-step reasoning. On single-step tasks (simple fact lookup, direct classification with an unambiguous answer), CoT adds verbosity without improving accuracy and can slightly hurt performance by introducing opportunities for the model to reason itself into a wrong answer. On multi-step tasks (arithmetic word problems, multi-hop reasoning, symbolic manipulation), CoT provides large gains because the decomposition into intermediate steps aligns with the structure of the correct solution. Commonsense reasoning tasks occupy a middle ground — some questions require chain reasoning ("What would happen if..." counterfactuals) while others are effectively single-hop lookups. Code generation is a special case: chain-of-thought prompting naturally maps to pseudocode or algorithm decomposition before implementation, and models consistently produce better code when first asked to outline the approach.</p>
+<table>
+<thead>
+<tr>
+<th>Task type</th>
+<th>Direct accuracy</th>
+<th>CoT accuracy</th>
+<th>CoT gain</th>
+<th>Needs CoT?</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>2-digit arithmetic</td>
+<td>89%</td>
+<td>91%</td>
+<td>+2%</td>
+<td>No</td>
+<td>Model can compute in one step; CoT adds little</td>
+</tr>
+<tr>
+<td>Multi-step word problems</td>
+<td>22%</td>
+<td>57%</td>
+<td>+35%</td>
+<td>Yes</td>
+<td>Large gain from explicit decomposition</td>
+</tr>
+<tr>
+<td>Commonsense QA</td>
+<td>61%</td>
+<td>68%</td>
+<td>+7%</td>
+<td>Sometimes</td>
+<td>Helps for multi-hop commonsense; not single-hop</td>
+</tr>
+<tr>
+<td>Symbolic reasoning</td>
+<td>14%</td>
+<td>49%</td>
+<td>+35%</td>
+<td>Yes</td>
+<td>e.g., last-letter concatenation, coin flip sequences</td>
+</tr>
+<tr>
+<td>Single-hop lookup</td>
+<td>74%</td>
+<td>73%</td>
+<td>-1%</td>
+<td>No</td>
+<td>CoT can introduce unnecessary reasoning errors</td>
+</tr>
+</tbody>
+</table>
+<h2>Designing Effective CoT Examples</h2>
+<p>The quality of CoT demonstrations directly determines the ceiling of CoT prompting performance. High-quality CoT examples share several characteristics: they decompose the problem into the minimal number of clearly labelled sub-steps required to reach the answer; they track relevant units and quantities explicitly through each step; they include a brief check that the answer is plausible given the question constraints; and they use a consistent format for the final answer (a single number, a clearly delineated phrase, or a structured object). The number of reasoning steps should be proportional to the problem complexity — using a 6-step chain for a 2-step problem teaches the model to over-elaborate, while using a 2-step chain for a 6-step problem teaches it to skip critical intermediate calculations. Diversity across demonstrations is also important: if all 4-shot examples involve the same operation (e.g., multiplication), the model may apply that operation regardless of what the test problem actually requires.</p>
+<ul>
+<li>Decompose each example into the minimal number of steps required — do not add artificial intermediate steps</li>
+<li>Track units explicitly throughout ("$10.00 - $6.00 = $4.00", not just "10 - 6 = 4")</li>
+<li>Include a plausibility check in complex examples ("The answer 42 seconds is reasonable for a 100m sprint")</li>
+<li>Use a consistent final-answer format across all demonstrations to enable reliable answer extraction</li>
+<li>Ensure demonstrations cover diverse operations and problem structures to prevent operation-fixation bias</li>
+<li>Write reasoning from the perspective of an expert solving the problem, not from the perspective of what the answer is</li>
+</ul>
+<pre><code class="language-python">import openai
+import re
+
+client = openai.OpenAI()
+
+def check_cot_faithfulness(question, answer_key):
+    &quot;&quot;&quot;Generate a CoT trace and verify reasoning is consistent with the answer.&quot;&quot;&quot;
+    msgs = [{&quot;role&quot;: &quot;system&quot;, &quot;content&quot;: &quot;Solve step by step. End with: The answer is [number].&quot;},
+            {&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: question}]
+    resp = client.chat.completions.create(model=&quot;gpt-4o-mini&quot;, messages=msgs, max_tokens=300)
+    trace = resp.choices[0].message.content.strip()
+    match = re.search(r&quot;The answer is ([\d\.]+)&quot;, trace)
+    predicted = match.group(1) if match else &quot;NOT FOUND&quot;
+    correct = str(answer_key) in predicted
+    print(f&quot;Question: {question[:60]}...&quot;)
+    print(f&quot;Predicted: {predicted}  |  Expected: {answer_key}  |  Correct: {correct}&quot;)
+    print(f&quot;Trace excerpt: {trace[:120]}...\n&quot;)
+    return correct, trace
+
+PROBLEMS = [
+    (&quot;If a car travels 45 mph for 1.5 hours, how many miles does it cover?&quot;, 67.5),
+    (&quot;A recipe needs 2.5 cups of flour per batch. How much for 3 batches?&quot;, 7.5),
+    (&quot;Sam earns $18/hr and works 35 hours. Tax is 20%. What is take-home pay?&quot;, 504),
+]
+results = [check_cot_faithfulness(q, a) for q, a in PROBLEMS]
+accuracy = sum(r[0] for r in results) / len(results)
+print(f&quot;CoT accuracy on {len(PROBLEMS)} problems: {accuracy:.1%}&quot;)
+</code></pre>
+<h2>Limitations and Failure Modes</h2>
+<p>Chain-of-thought prompting has several important failure modes that practitioners must understand. Hallucinated reasoning occurs when the model produces a plausible-sounding but internally inconsistent chain that leads to the wrong answer while appearing correct at each step. Studies find that 15–25% of wrong-answer CoT traces contain individually correct-looking steps that collectively lead to incorrect conclusions, making automated verification essential. Calculation errors in multi-digit arithmetic persist even with CoT, since the model still must predict each digit without an actual arithmetic unit; tool-augmented CoT (calling a calculator at arithmetic steps) addresses this but adds implementation complexity. CoT does not help small models (below roughly 100B parameters) because these models cannot reliably generate valid reasoning chains. Finally, CoT prompts consume significantly more output tokens per call — a 3-sentence reasoning chain before each answer multiplies output token cost by 3–5x, which matters at scale.</p>
+<pre><code class="language-python">import openai
+
+client = openai.OpenAI()
+
+TASKS = [
+    (&quot;simple_arith&quot;, &quot;What is 847 + 293?&quot;, &quot;1140&quot;),
+    (&quot;word_problem&quot;, &quot;Lisa has 48 stickers. She gives a quarter to Maya and a third to Noah. How many left?&quot;, &quot;28&quot;),
+    (&quot;commonsense&quot;, &quot;Would a wooden boat float in mercury?&quot;, &quot;yes&quot;),
+    (&quot;lookup&quot;, &quot;What element has atomic number 6?&quot;, &quot;carbon&quot;),
+]
+
+def run_task(task_name, question, answer_key, use_cot):
+    suffix = &quot; Think step by step.&quot; if use_cot else &quot;&quot;
+    msgs = [{&quot;role&quot;: &quot;system&quot;, &quot;content&quot;: &quot;Answer concisely. &quot; + (&quot;Show reasoning then answer.&quot; if use_cot else &quot;&quot;)},
+            {&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: question + suffix}]
+    resp = client.chat.completions.create(model=&quot;gpt-4o-mini&quot;, messages=msgs, max_tokens=150)
+    reply = resp.choices[0].message.content.strip().lower()
+    correct = answer_key.lower() in reply
+    mode = &quot;CoT&quot; if use_cot else &quot;Direct&quot;
+    print(f&quot;{task_name:15s} {mode:8s}: correct={correct}  reply_len={len(reply)}&quot;)
+    return correct
+
+for name, q, ans in TASKS:
+    run_task(name, q, ans, use_cot=False)
+    run_task(name, q, ans, use_cot=True)
+    print()
+</code></pre>
+<blockquote>
+<p><strong>Scale Requirement for CoT</strong>: CoT only reliably helps models with approximately 100 billion or more parameters. Smaller models tend to produce confident but incorrect reasoning chains, which can actually hurt accuracy compared to direct answering. If you are working with a smaller model (7B–13B parameters), test whether CoT helps on your specific task — if the model's reasoning chains are frequently wrong, you may be better off with direct few-shot prompting or fine-tuning.</p>
+</blockquote>
+<h2>CoT vs Fine-Tuning</h2>
+<p>Chain-of-thought prompting and supervised fine-tuning are complementary approaches that occupy different positions on the performance-cost curve. CoT requires no labelled data and no compute beyond inference, but is bounded by the base model's capability and consumes additional output tokens. Fine-tuning on CoT-annotated data (question + reasoning chain + answer) yields models that produce correct reasoning chains more consistently, generalise better to out-of-distribution problems, and do not require the few-shot examples in the prompt (reducing input token cost). The recommended approach is: start with zero-shot or few-shot CoT during prototyping; if CoT achieves acceptable accuracy, use it in production; if it does not, collect 200–2000 CoT-annotated examples for your task and fine-tune. Fine-tuning on CoT annotations typically achieves better accuracy than pure CoT prompting at smaller model sizes, enabling the deployment of smaller, faster, cheaper models with fine-tuning instead of large models with costly CoT inference.</p>
+<ul>
+<li>CoT prompting: zero data cost, works immediately, bounded by base model capability and scale requirement</li>
+<li>Fine-tuning on CoT data: higher upfront cost, better generalisation, enables smaller models for deployment</li>
+<li>Hybrid: use CoT prompting on a large model to generate CoT annotations, then fine-tune a smaller model on them</li>
+<li>Output token cost: CoT multiplies output tokens by 3–8x; at scale this is significant — budget accordingly</li>
+<li>Debug advantage: CoT reasoning traces reveal exactly which step failed, making prompt improvement faster</li>
+<li>For classification tasks, CoT often exceeds fine-tuning performance when the model is large enough (100B+)</li>
+</ul>
+<h2>Key Takeaways</h2>
+<p>Chain-of-thought prompting is the most impactful zero-data technique for improving LLM performance on multi-step reasoning tasks. By augmenting few-shot demonstrations with step-by-step reasoning traces, CoT enables models to decompose complex problems, track intermediate computations, and allocate generation capacity proportionally to problem difficulty. The gain is largest on arithmetic word problems, symbolic reasoning, and multi-hop commonsense tasks, where CoT can provide 30–40 percentage point improvements over direct answering. The technique is constrained by model scale (requires roughly 100B parameters), increases output token cost, and does not help on single-step tasks. The quality of CoT demonstrations is crucial — strong examples that decompose problems with explicit unit tracking and plausibility checks transfer better than shallow computation chains.</p>
+<ul>
+<li>Augment each few-shot demonstration with a step-by-step reasoning trace that leads to the final answer</li>
+<li>Use 3–8 demonstrations; each must include: problem decomposition, intermediate results, unit tracking, final answer</li>
+<li>CoT is most effective on multi-step math, symbolic reasoning, and multi-hop commonsense — not single-step lookups</li>
+<li>Requires approximately 100B parameters; test on your model size before committing to a CoT prompting strategy</li>
+<li>Expect 3–8x more output tokens per call — budget for this in high-volume production systems</li>
+<li>Use CoT faithfulness checking: verify that reasoning steps are consistent with the stated final answer</li>
+<li>Consider fine-tuning on CoT annotations to get CoT-quality output from smaller, faster, cheaper models</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

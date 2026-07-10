@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Data Contamination — Benchmark Leakage and Decontamination in LLM Pretraining | Notes Backup</title>
+  <meta name="description" content="How benchmark test data leaks into LLM pretraining corpora, contamination detection via n-gram overlap and MinHash, decontamination pipelines, and strategies for unbiased evaluation." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Data Contamination — Benchmark Leakage and Decontamination in LLM Pretraining</h1>
+      <ul class='note-meta'><li><strong>description:</strong> How benchmark test data leaks into LLM pretraining corpora, contamination detection via n-gram overlap and MinHash, decontamination pipelines, and strategies for unbiased evaluation.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Data Contamination — Benchmark Leakage and Decontamination in LLM Pretraining</h1>
+<p>Data contamination occurs when test examples from evaluation benchmarks appear in the pretraining corpus, causing inflated benchmark scores that do not reflect genuine generalization. As LLMs are trained on increasingly large web crawls (trillions of tokens), the probability that any given public benchmark has at least some overlap with the training data approaches 1. Contamination undermines the scientific value of benchmarks and makes it difficult to compare models trained at different times or on different data. GPT-3 was the first major LLM to publish a contamination analysis; subsequent models have adopted varying levels of transparency about contamination rates.</p>
+<h2>Types of Benchmark Contamination</h2>
+<p>Contamination exists on a spectrum from verbatim reproduction to subtle thematic overlap. Exact contamination — where the test question and answer appear verbatim in training data — is the most severe and easiest to detect. Partial contamination covers cases where only the question or only the answer appears separately in training data. Near-contamination involves paraphrases within small edit distance that a model trained on them would still have an unfair advantage. Indirect contamination is the hardest to handle: training examples that are not from the benchmark but are so semantically similar that they provide the answer, such as the original source documents for multiple-choice questions.</p>
+<ul>
+<li>Exact: verbatim question + answer appear together in training data — maximum advantage</li>
+<li>Partial: question or answer alone in training data — moderate advantage, hard to prove impact</li>
+<li>Near: paraphrased version within small edit distance (Levenshtein &lt;20) — detectable via MinHash</li>
+<li>Indirect: original source material (e.g., Wikipedia articles underlying MMLU questions) — nearly undetectable</li>
+<li>Temporal: benchmark released before data cutoff, crawled later — common for newer benchmarks</li>
+</ul>
+<h2>N-gram Overlap Detection — The GPT-3 Approach</h2>
+<p>GPT-3 introduced a simple but effective contamination detection method: build a set of all 13-grams (contiguous sequences of 13 tokens) from every test example, then scan the training corpus for documents containing more than a threshold number of matching 13-grams. A document is flagged if it has 5 or more overlapping 13-grams with any benchmark example. 13 tokens is chosen because it is long enough to be a meaningful phrase that uniquely identifies a benchmark example, yet short enough to catch near-exact copies. The threshold of 5 reduces false positives from commonly occurring phrases.</p>
+<pre><code class="language-python">import re
+from collections import defaultdict
+
+def build_ngrams(text, n=13):
+    &quot;&quot;&quot;Build a set of n-gram tuples from whitespace-tokenized text.&quot;&quot;&quot;
+    tokens = re.sub(r'[^\w\s]', ' ', text.lower()).split()
+    return set(tuple(tokens[i:i+n]) for i in range(len(tokens) - n + 1))
+
+def scan_corpus_contamination(benchmark_examples, corpus_docs, n=13, threshold=5):
+    &quot;&quot;&quot;Flag training documents with &gt;= threshold overlapping n-grams with any benchmark example.&quot;&quot;&quot;
+    bench_ngrams = set()
+    for ex in benchmark_examples:
+        text = ex.get('question', '') + ' ' + ex.get('answer', '')
+        bench_ngrams.update(build_ngrams(text, n))
+
+    contaminated = []
+    for doc_id, doc_text in enumerate(corpus_docs):
+        doc_ngrams = build_ngrams(doc_text, n)
+        overlap    = len(doc_ngrams &amp; bench_ngrams)
+        if overlap &gt;= threshold:
+            contaminated.append({'doc_id': doc_id, 'overlap_count': overlap,
+                                 'preview': doc_text[:100]})
+    return contaminated
+
+# Minimal reproducible example
+benchmark = [
+    {'question': 'What neurotransmitter is primarily associated with reward pathways in the brain',
+     'answer': 'dopamine is associated with reward motivation and pleasure'},
+    {'question': 'Solve the recurrence relation T of n equals two T of n over two plus n',
+     'answer': 'By master theorem T of n is theta n log n'},
+]
+corpus = [
+    'dopamine is associated with reward motivation and pleasure in the ventral tegmental area nucleus accumbens',
+    'transformers use self-attention to process all tokens in parallel without sequential computation',
+    'By master theorem T of n is theta n log n for divide and conquer recurrences with balanced splits',
+]
+flagged = scan_corpus_contamination(benchmark, corpus, n=5, threshold=3)
+print(f&quot;Contaminated docs: {len(flagged)}/{len(corpus)}&quot;)
+for r in flagged:
+    print(f&quot;  Doc {r['doc_id']}: {r['overlap_count']} overlapping n-grams — {r['preview']!r:.60}&quot;)
+</code></pre>
+<h2>MinHash Near-Duplicate Decontamination</h2>
+<p>N-gram exact matching misses paraphrased contamination. MinHash provides approximate Jaccard similarity between documents without comparing all n-gram pairs. A MinHash signature of a document is a fixed-length vector of minimum hash values; the fraction of signature positions where two documents agree is an unbiased estimator of Jaccard similarity. Using 128 hash functions gives an estimation variance of ~0.01. Documents with estimated Jaccard similarity above 0.5 with any benchmark example are flagged as near-contaminated. In practice, locality-sensitive hashing (LSH) allows sub-linear lookup — essential when the training corpus has billions of documents.</p>
+<pre><code class="language-python">import re
+import random
+from typing import List
+
+def shingle_set(text, k=5):
+    &quot;&quot;&quot;Build word k-shingle (k-gram) set from text for Jaccard estimation.&quot;&quot;&quot;
+    tokens = re.sub(r'[^\w\s]', ' ', text.lower()).split()
+    return set(tuple(tokens[i:i+k]) for i in range(len(tokens)-k+1))
+
+def minhash_signature(shingles, num_hashes=128, seed=0):
+    &quot;&quot;&quot;Compute MinHash signature: vector of min hash values over shingles.&quot;&quot;&quot;
+    rng = random.Random(seed)
+    params = [(rng.randint(1, 2**31-1), rng.randint(0, 2**31-1)) for _ in range(num_hashes)]
+    sig = []
+    for a, b in params:
+        min_val = min(((a * hash(s) + b) % (2**31 - 1)) for s in shingles) if shingles else 0
+        sig.append(min_val)
+    return sig
+
+def jaccard_from_sigs(sig1, sig2):
+    return sum(a == b for a, b in zip(sig1, sig2)) / len(sig1)
+
+def minhash_decontaminate(benchmark_examples, train_docs, threshold=0.4, num_hashes=128, k=5):
+    test_sigs = [minhash_signature(shingle_set(ex.get('question','') + ' ' + ex.get('answer',''), k), num_hashes)
+                 for ex in benchmark_examples]
+    flagged = []
+    for i, doc in enumerate(train_docs):
+        doc_sig = minhash_signature(shingle_set(doc, k), num_hashes)
+        max_sim  = max(jaccard_from_sigs(doc_sig, ts) for ts in test_sigs)
+        if max_sim &gt;= threshold:
+            flagged.append({'train_idx': i, 'max_jaccard': round(max_sim, 3)})
+    return flagged
+
+test_set = [{'question': 'What is the boiling point of water at standard pressure', 'answer': '100 degrees Celsius at one atmosphere'}]
+train    = [
+    'The boiling point of water at standard pressure one atmosphere is 100 degrees Celsius or 212 Fahrenheit',
+    'Neural networks learn data representations through gradient descent and backpropagation',
+    'Water boils at 100 degrees Celsius at one atmosphere pressure standard conditions sea level',
+]
+results = minhash_decontaminate(test_set, train, threshold=0.3)
+print(f&quot;Flagged: {len(results)}/{len(train)} training docs&quot;)
+for r in results:
+    print(f&quot;  Train[{r['train_idx']}]: Jaccard={r['max_jaccard']}&quot;)
+</code></pre>
+<h2>Contamination Rate Reporting</h2>
+<p>Responsible contamination reporting requires running detection on every benchmark used in evaluation, reporting per-benchmark contamination rates, and showing that contaminated examples do not significantly change aggregate scores. The GPT-4 technical report ran contamination analysis across all major benchmarks and reported that contamination rates were low and did not substantially inflate scores. However, contamination analysis methodology varies widely — different n values, thresholds, and tokenization choices produce very different contamination rates for the same corpus and benchmark combination.</p>
+<pre><code class="language-python">import re
+
+def ngrams_set(text, n):
+    tokens = re.sub(r'[^\w\s]', ' ', text.lower()).split()
+    return set(tuple(tokens[i:i+n]) for i in range(len(tokens)-n+1))
+
+def contamination_rate(benchmark_examples, train_text, n=13, min_overlap=5):
+    &quot;&quot;&quot;Return fraction of benchmark examples with &gt;=min_overlap n-gram matches in train.&quot;&quot;&quot;
+    train_ngrams    = ngrams_set(train_text, n)
+    contaminated    = 0
+    details         = []
+    for ex in benchmark_examples:
+        text     = ex.get('question','') + ' ' + ex.get('answer','')
+        ex_ng    = ngrams_set(text, n)
+        overlap  = len(ex_ng &amp; train_ngrams)
+        is_cont  = overlap &gt;= min_overlap
+        contaminated += int(is_cont)
+        details.append({'contaminated': is_cont, 'overlap': overlap})
+    rate = contaminated / len(benchmark_examples) if benchmark_examples else 0.0
+    return {'total': len(benchmark_examples), 'contaminated': contaminated,
+            'rate': round(rate, 4), 'details': details}
+
+# Simulate for three benchmark subsets
+train_blob = ('dopamine is associated with reward motivation in nucleus accumbens '
+              'solve quadratic by completing the square x squared plus five x plus six '
+              'water boils at 100 degrees Celsius standard conditions sea level pressure')
+benchmarks = {
+    'MMLU':  [{'question': 'dopamine is associated with reward motivation in nucleus accumbens', 'answer': 'correct answer A'}],
+    'GSM8K': [{'question': 'solve quadratic by completing the square method', 'answer': 'x equals root values'}],
+    'ARC':   [{'question': 'what is the largest planet in the solar system', 'answer': 'Jupiter has largest mass'}],
+}
+for name, examples in benchmarks.items():
+    r = contamination_rate(examples, train_blob, n=4, min_overlap=2)
+    print(f&quot;{name}: {r['contaminated']}/{r['total']} contaminated ({r['rate']:.1%})&quot;)
+</code></pre>
+<blockquote>
+<p><strong>Info</strong>: Contamination detection with 13-gram matching has high false positive rate for common phrases — always manually review flagged examples before removal to avoid decontaminating unrelated documents that happen to share common phrases with benchmarks.</p>
+</blockquote>
+<h2>Decontamination Pipeline</h2>
+<p>A decontamination pipeline runs before the final data mix is frozen: collect all benchmark examples scheduled for evaluation, extract n-grams, scan the training corpus, remove flagged documents, and regenerate token count statistics. The order matters — decontamination should run after other filtering steps (quality filter, deduplication) but before training data tokenization. Re-running decontamination with the final benchmark set at the end of data preparation is essential because benchmark selection often changes during development.</p>
+<pre><code class="language-python">import re
+import json
+
+def ngrams_set(text, n):
+    tokens = re.sub(r'[^\w\s]', ' ', text.lower()).split()
+    return set(tuple(tokens[i:i+n]) for i in range(len(tokens)-n+1))
+
+def build_benchmark_ngrams(benchmark_files, n=13):
+    &quot;&quot;&quot;Load benchmark JSON files and build combined n-gram set from all examples.&quot;&quot;&quot;
+    all_ngrams = set()
+    for path in benchmark_files:
+        with open(path) as f:
+            examples = json.load(f)
+        for ex in examples:
+            text = ex.get('question','') + ' ' + ex.get('choices','') + ' ' + ex.get('answer','')
+            all_ngrams.update(ngrams_set(text, n))
+    return all_ngrams
+
+def decontaminate_corpus(train_docs, bench_ngrams, n=13, overlap_threshold=5):
+    &quot;&quot;&quot;Remove training documents with &gt;= overlap_threshold overlapping n-grams.&quot;&quot;&quot;
+    clean_docs, removed = [], []
+    for idx, doc in enumerate(train_docs):
+        doc_ng  = ngrams_set(doc['text'], n)
+        overlap = len(doc_ng &amp; bench_ngrams)
+        if overlap &lt; overlap_threshold:
+            clean_docs.append(doc)
+        else:
+            removed.append({'idx': idx, 'overlap': overlap, 'preview': doc['text'][:80]})
+    return clean_docs, removed
+
+# Simulate with in-memory benchmark n-grams
+bench_ngrams = ngrams_set('dopamine reward motivation nucleus accumbens ventral tegmental', n=4)
+train_corpus = [
+    {'id': 0, 'text': 'dopamine reward motivation nucleus accumbens ventral tegmental area basal ganglia'},
+    {'id': 1, 'text': 'transformer attention scales quadratically with sequence length in the worst case'},
+    {'id': 2, 'text': 'reward motivation nucleus accumbens is key to understanding addiction and behavior'},
+]
+clean, removed = decontaminate_corpus(train_corpus, bench_ngrams, n=4, overlap_threshold=3)
+print(f&quot;Original: {len(train_corpus)}  Removed: {len(removed)}  Clean: {len(clean)}&quot;)
+for r in removed:
+    print(f&quot;  Removed doc {r['idx']}: {r['overlap']} overlapping n-grams&quot;)
+</code></pre>
+<h2>Benchmark Contamination Rates in Major LLMs</h2>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>MMLU %</th>
+<th>HellaSwag %</th>
+<th>GSM8K %</th>
+<th>ARC %</th>
+<th>Detection Method</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GPT-3 175B</td>
+<td>~2.2%</td>
+<td>~3.1%</td>
+<td>N/A</td>
+<td>~2.8%</td>
+<td>13-gram overlap, threshold 5</td>
+</tr>
+<tr>
+<td>GPT-4</td>
+<td>&lt;1.0%</td>
+<td>&lt;1.5%</td>
+<td>~0.8%</td>
+<td>&lt;1.0%</td>
+<td>GPT-4 contamination analysis</td>
+</tr>
+<tr>
+<td>LLaMA-2 70B</td>
+<td>~2.4%</td>
+<td>~1.8%</td>
+<td>~3.2%</td>
+<td>~2.1%</td>
+<td>N-gram + manual review</td>
+</tr>
+<tr>
+<td>Mistral 7B</td>
+<td>~1.1%</td>
+<td>~0.9%</td>
+<td>~1.4%</td>
+<td>~0.7%</td>
+<td>Proprietary (undisclosed threshold)</td>
+</tr>
+<tr>
+<td>DeepSeek-V2</td>
+<td>&lt;0.5%</td>
+<td>&lt;0.5%</td>
+<td>~0.6%</td>
+<td>&lt;0.5%</td>
+<td>Substring match deduplication</td>
+</tr>
+</tbody>
+</table>
+<h2>True Evaluation — Avoiding Contamination</h2>
+<p>The cleanest solution to benchmark contamination is to evaluate on unpublished benchmarks that were never on the public internet. Several research groups maintain private evaluation sets released only after training data cutoff. Dynamic benchmarking — generating new problems at evaluation time via templates or LLM-generated variants — is another approach. BIG-Bench Hard, MATH, and GPQA were designed with harder problems that resist memorization even under contamination. At minimum, every evaluation report should include contamination rates per benchmark and ablation showing scores with contaminated examples removed.</p>
+<ul>
+<li>Maintain a private held-out evaluation suite never published to the web</li>
+<li>Use live code execution benchmarks (HumanEval, LiveCodeBench) — answers change with new problems</li>
+<li>Report delta between contaminated and decontaminated benchmark scores as an honesty metric</li>
+<li>For MMLU: check against the original source articles — contamination may come from Wikipedia not from the test itself</li>
+<li>Prefer few-shot evaluation with novel prompt templates to reduce surface-level memorization advantage</li>
+</ul>
+<h2>Contamination's Impact on Reported Scores</h2>
+<p>Empirical studies (Golchin et al. 2023, Xu et al. 2024) show that contamination inflates benchmark scores by 2–15 percentage points depending on contamination rate, benchmark difficulty, and model size. Larger models benefit more from contamination because they have greater memorization capacity. Harder benchmarks (MATH, GPQA) are less affected because memorizing an isolated problem-answer pair does not transfer to related problems that require genuine reasoning. The practical implication: MMLU scores above 85% should be interpreted cautiously for models trained on large web crawls without rigorous decontamination.</p>
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Deep SVDD — Deep One-Class Classification | Notes Backup</title>
+  <meta name="description" content="Implement Deep Support Vector Data Description for one-class anomaly detection: the hypersphere objective that clusters normal representations around a center, center initialization, collapse prevention, autoencoder pretraining, and comparison with OCSVM and reconstruction-based methods." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Deep SVDD — Deep One-Class Classification</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Implement Deep Support Vector Data Description for one-class anomaly detection: the hypersphere objective that clusters normal representations around a center, center initialization, collapse prevention, autoencoder pretraining, and comparison with OCSVM and reconstruction-based methods.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Deep SVDD — Deep One-Class Classification</h1>
+<p>Deep SVDD (Ruff et al., 2018) extends the classical Support Vector Data Description to deep networks. The idea is elegant: train a neural network φ(x;W) to map all normal training data to a compact hypersphere with center c in the latent space. At test time, points that map far from c are anomalies. Unlike autoencoders that detect anomalies via reconstruction error, Deep SVDD detects anomalies by their distance from the learned normal manifold in representation space.</p>
+<h2>From SVDD to Deep SVDD</h2>
+<p>Classical SVDD fits the minimum-volume hypersphere containing all training data in kernel feature space, with soft-boundary variant using slack variables. The kernel version is equivalent to one-class SVM. The limitation: the kernel is fixed and the representation is not learned from data. Deep SVDD addresses this by jointly optimising the mapping φ and the center c: min_{W,c} (1/n) Σᵢ ‖φ(xᵢ;W) − c‖². The network learns a representation where normal data is compact; anomalies, having a different structure, map to distant regions.</p>
+<ul>
+<li>Objective: minimise squared distances from latent codes to center c — forces normal data into a tight cluster.</li>
+<li>Center c: initialised as the mean of a forward pass on all training data; then fixed during training to prevent trivial solutions.</li>
+<li>Anomaly score: ‖φ(x;W)−c‖² — larger distance from center indicates higher anomaly likelihood.</li>
+<li>Collapse prevention: removing bias terms in the last layer and bounded activations prevents the network from mapping everything to c.</li>
+<li>Soft-boundary variant: add hypersphere radius R as a variable with penalty C·Σ max(0,‖φ(xᵢ)−c‖²−R²).</li>
+</ul>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+class DeepSVDD(nn.Module):
+    def __init__(self, d_in, d_lat=16):
+        super().__init__()
+        # No bias in final layer; no bounded activations — prevents collapse
+        self.net = nn.Sequential(
+            nn.Linear(d_in, 64, bias=True),  nn.ReLU(),
+            nn.Linear(64, 32, bias=True),    nn.ReLU(),
+            nn.Linear(32, d_lat, bias=False)  # no bias here
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+def init_center(model, X_train, eps=0.1):
+    '''Center = mean of encoder outputs on training data.'''
+    model.eval()
+    with torch.no_grad():
+        z = model(X_train)
+    c = z.mean(dim=0)
+    # Avoid near-zero center (would make collapse easier)
+    c[(c.abs() &lt; eps) &amp; (c &gt;= 0)] =  eps
+    c[(c.abs() &lt; eps) &amp; (c &lt; 0)]  = -eps
+    return c.detach()
+
+def svdd_loss(model, x, center):
+    z = model(x)
+    return ((z - center) ** 2).sum(dim=-1).mean()
+
+torch.manual_seed(0); np.random.seed(0)
+X_tr = torch.tensor(np.random.randn(600, 20), dtype=torch.float32)
+svdd = DeepSVDD(d_in=20, d_lat=16)
+center = init_center(svdd, X_tr)
+opt = torch.optim.Adam(svdd.parameters(), lr=1e-3)
+svdd.train()
+for ep in range(30):
+    loss = svdd_loss(svdd, X_tr, center)
+    opt.zero_grad(); loss.backward(); opt.step()
+    if (ep+1) % 10 == 0:
+        print(f'Epoch {ep+1:2d} | SVDD loss: {loss.item():.6f}')
+</code></pre>
+<h2>Hypersphere Objective and Center Initialization</h2>
+<p>The center c is computed as the mean of φ(xᵢ;W) on all training data using a forward pass before optimisation begins, then held fixed. This two-phase approach prevents the network from trivially satisfying the objective by rotating to place c at the origin. The objective min ‖φ(x)−c‖² is a form of deep clustering with a single centroid — related to k-means with k=1. The training dynamics pull all representations toward c: the network must learn a compact representation of the normal class to minimise the objective.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+from sklearn.metrics import roc_auc_score
+
+np.random.seed(1); torch.manual_seed(1)
+# One-class classification: class 0 = normal, everything else = anomaly
+X_norm = torch.tensor(np.random.randn(400, 20), dtype=torch.float32)
+X_anom = torch.tensor(np.random.randn(80, 20) * 0.3 + 3, dtype=torch.float32)
+
+svdd2 = DeepSVDD(d_in=20, d_lat=16)
+c2 = init_center(svdd2, X_norm)
+opt2 = torch.optim.Adam(svdd2.parameters(), lr=5e-4)
+svdd2.train()
+for ep in range(50):
+    loss2 = svdd_loss(svdd2, X_norm, c2)
+    opt2.zero_grad(); loss2.backward(); opt2.step()
+
+svdd2.eval()
+X_all = torch.cat([X_norm[:100], X_anom])
+y_all = np.array([0]*100 + [1]*80)
+with torch.no_grad():
+    z_all = svdd2(X_all)
+    scores = ((z_all - c2) ** 2).sum(dim=-1).numpy()
+auroc = roc_auc_score(y_all, scores)
+print(f'Deep SVDD AUROC: {auroc:.4f}')
+print(f'Normal mean distance from center: {scores[:100].mean():.4f}')
+print(f'Anomaly mean distance from center: {scores[100:].mean():.4f}')
+</code></pre>
+<h2>Collapse Prevention and Training Tricks</h2>
+<p>The hypersphere collapse problem occurs when the network maps everything to the center c by setting all weights to zero (trivial solution). Two architectural tricks prevent this: (1) Remove bias terms in the penultimate and final layers — the bias could shift representations to coincide with c regardless of input. (2) Avoid bounded activations like sigmoid or tanh in the network — they can saturate and produce a constant output. Batch normalisation can also cause collapse if the normalised mean equals c. Use layer normalisation or avoid normalisation in the last layer.</p>
+<blockquote>
+<p><strong>Collapse Risk</strong>: If your Deep SVDD loss goes to zero very quickly (within 5 epochs), suspect collapse. Diagnose by checking if all training embeddings are identical (std ≈ 0). Fix: (1) remove bias in the last linear layer, (2) replace sigmoid/tanh with ReLU, (3) disable batch norm in the final block. Also check that the center c is not near zero — a near-zero center makes collapse easier.</p>
+</blockquote>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+class Autoencoder(nn.Module):
+    def __init__(self, d_in, d_lat=16):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(d_in, 64), nn.ReLU(),
+            nn.Linear(64, 32), nn.ReLU(),
+            nn.Linear(32, d_lat))
+        self.decoder = nn.Sequential(
+            nn.Linear(d_lat, 32), nn.ReLU(),
+            nn.Linear(32, 64), nn.ReLU(),
+            nn.Linear(64, d_in))
+    def forward(self, x):
+        return self.decoder(self.encoder(x))
+
+np.random.seed(2); torch.manual_seed(2)
+X_tr_ae = torch.tensor(np.random.randn(500, 20), dtype=torch.float32)
+ae = Autoencoder(d_in=20, d_lat=16)
+opt_ae = torch.optim.Adam(ae.parameters(), lr=1e-3)
+for ep in range(30):
+    loss_ae = nn.functional.mse_loss(ae(X_tr_ae), X_tr_ae)
+    opt_ae.zero_grad(); loss_ae.backward(); opt_ae.step()
+    if (ep+1) % 10 == 0:
+        print(f'AE pretrain epoch {ep+1:2d} | recon loss: {loss_ae.item():.6f}')
+# Transfer encoder weights to Deep SVDD
+svdd3 = DeepSVDD(d_in=20, d_lat=16)
+with torch.no_grad():
+    for (n1, p1), (n2, p2) in zip(
+            ae.encoder.named_parameters(),
+            svdd3.net.named_parameters()):
+        if p1.shape == p2.shape:
+            p2.copy_(p1)
+print('Encoder weights transferred to SVDD network.')
+</code></pre>
+<p>Pretraining with an autoencoder gives the SVDD encoder a head start: the encoder already knows how to represent the normal data manifold before the hypersphere objective begins pulling representations toward c. Without pretraining, the random initialisation means the center c is initialised in an arbitrary region of the embedding space, and the SVDD objective may collapse or converge to a poor local minimum. With pretraining, the center initialisation (mean of encoder outputs) lands near the true data mean in a meaningful representation space, significantly improving final detection performance.</p>
+<h2>Soft-Boundary Deep SVDD</h2>
+<p>The hard-boundary variant minimises the mean squared distance to c, implicitly assuming all training data is normal. If training data is contaminated by a small fraction of anomalies, a soft-boundary formulation is more robust: min_{W,R,c} R² + C·(1/n)Σ max(0, ‖φ(xᵢ)−c‖²−R²). The radius R acts as a slack threshold: points outside the sphere of radius R incur a penalty scaled by C. Setting C=1/√n is a common rule of thumb. The resulting model is robust to ≤(1/Cn) fraction of training outliers.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+from sklearn.metrics import roc_auc_score
+
+def soft_svdd_loss(model, x, center, R, C=0.1):
+    '''Soft-boundary SVDD: optimise R jointly with network weights.'''
+    z = model(x)
+    dists = ((z - center) ** 2).sum(dim=-1)
+    violations = torch.clamp(dists - R ** 2, min=0.0)
+    return R ** 2 + C * violations.mean()
+
+np.random.seed(4); torch.manual_seed(4)
+# Contaminated training set: 5% anomalies mixed in
+X_clean = torch.tensor(np.random.randn(570, 20), dtype=torch.float32)
+X_contam = torch.tensor(np.random.randn(30, 20) * 0.1 + 4, dtype=torch.float32)
+X_mixed = torch.cat([X_clean, X_contam])
+
+svdd_soft = DeepSVDD(d_in=20, d_lat=16)
+c_soft = init_center(svdd_soft, X_clean)
+R_param = torch.nn.Parameter(torch.tensor(1.0))
+opt_soft = torch.optim.Adam(
+    list(svdd_soft.parameters()) + [R_param], lr=5e-4)
+for ep in range(40):
+    loss_s = soft_svdd_loss(svdd_soft, X_mixed, c_soft, R_param)
+    opt_soft.zero_grad(); loss_s.backward(); opt_soft.step()
+    if (ep+1) % 10 == 0:
+        print(f'Epoch {ep+1:2d} | loss={loss_s.item():.6f}  R={R_param.item():.4f}')
+</code></pre>
+<ul>
+<li>Set C=1/sqrt(n) as the initial contamination tolerance hyperparameter; tune up if false-alarm rate is too high.</li>
+<li>Initialise R as the median distance from center on training data — avoids starting with R=0 (collapses all points).</li>
+<li>Monitor R during training: if R grows unboundedly, increase C or reduce learning rate.</li>
+<li>Hard-boundary SVDD is a special case of soft-boundary with C→∞ and R fixed — useful when training data is clean.</li>
+<li>The fraction of training samples outside the sphere upper-bounds the contamination rate: use this as a sanity check.</li>
+</ul>
+<p>After training soft-boundary SVDD, the anomaly score remains ‖φ(x)−c‖² — the radius R affects training but not inference scoring. This means the same threshold-setting procedure applies: compute scores on clean validation data and flag test points above the (1−α) quantile. The soft-boundary model simply places the decision boundary more robustly when outliers are present during training.</p>
+<h2>Comparison with Related Methods</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Feature Learning</th>
+<th>Boundary Type</th>
+<th>Anomaly Score</th>
+<th>Collapse Risk</th>
+<th>Performance</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Deep SVDD</td>
+<td>Yes — joint encoder</td>
+<td>Hypersphere</td>
+<td>‖φ(x)−c‖²</td>
+<td>Yes — needs careful design</td>
+<td>Good with pretraining</td>
+</tr>
+<tr>
+<td>OC-SVM</td>
+<td>No — fixed kernel</td>
+<td>Kernel hyperplane</td>
+<td>Signed margin distance</td>
+<td>No</td>
+<td>Moderate, poor scaling</td>
+</tr>
+<tr>
+<td>AE Reconstruction</td>
+<td>Yes — autoencoder</td>
+<td>Implicit via recon error</td>
+<td>‖x−x̂‖²</td>
+<td>No</td>
+<td>Good baseline, flexible</td>
+</tr>
+<tr>
+<td>Deep SVDD + AE pretrain</td>
+<td>Yes — two phases</td>
+<td>Hypersphere</td>
+<td>‖φ(x)−c‖²</td>
+<td>Reduced</td>
+<td>Best overall</td>
+</tr>
+<tr>
+<td>Isolation Forest</td>
+<td>No</td>
+<td>Partition tree</td>
+<td>Mean path length</td>
+<td>No</td>
+<td>Fast, competitive</td>
+</tr>
+</tbody>
+</table>
+<p>Autoencoder pretraining followed by SVDD fine-tuning consistently outperforms either method alone. The autoencoder gives the encoder a meaningful initialisation that avoids collapse; the SVDD objective then compresses the normal class representation into a tight hypersphere. Use the soft-boundary variant when the training set may be contaminated, and tune C using a small labelled validation set if available.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

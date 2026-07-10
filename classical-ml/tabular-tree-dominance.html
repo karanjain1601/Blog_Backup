@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Why Tree Models Dominate Tabular Data | Notes Backup</title>
+  <meta name="description" content="Why gradient-boosted trees consistently outperform deep learning on tabular benchmarks — inductive biases, irregular functions, and scaling behavior." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Why Tree Models Dominate Tabular Data</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Why gradient-boosted trees consistently outperform deep learning on tabular benchmarks — inductive biases, irregular functions, and scaling behavior.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Why Tree Models Dominate Tabular Data</h1>
+<p>On virtually every tabular benchmark, gradient-boosted trees (XGBoost, LightGBM, CatBoost) outperform deep learning models. This is not a matter of insufficient tuning — the gap persists across dataset sizes, feature types, and HPO budgets. Understanding why trees win reveals the structural properties of tabular data that neural networks struggle to exploit.</p>
+<h2>The Empirical Finding</h2>
+<p>The landmark paper by Grinsztajn et al. (2022) benchmarked 45 tabular datasets across multiple NN architectures. Trees won on a majority of benchmarks, and the gap was largest on datasets with irregular target functions, rotational variance, and sparse informative features.</p>
+<ul>
+<li>Grinsztajn et al. 2022: trees win on 32/45 datasets vs best NN architecture</li>
+<li>Kadra et al. 2021: well-tuned MLPs (Regularization Cocktail) close the gap but rarely surpass trees</li>
+<li>Gorishniy et al. 2021: FT-Transformer competitive but not dominant overall</li>
+<li>Hollmann et al. 2022 (TabPFN): DL wins on very small n (&lt;1000) with proper priors</li>
+</ul>
+<h2>Inductive Biases That Fit Tabular Data</h2>
+<p>Trees have structural properties that happen to match common tabular data characteristics. Neural networks, designed primarily for vision and language, lack these properties and can actively hurt performance on tabular tasks.</p>
+<ul>
+<li>Non-smooth functions: trees produce piecewise-constant outputs naturally; NNs prefer smooth functions via implicit regularization (neural tangent kernel)</li>
+<li>Rotational variance: trees use axis-aligned splits, appropriate when features are independent; NNs treat all rotations of the feature space equivalently</li>
+<li>Irrelevant features: trees ignore them via greedy feature selection at each split; NNs propagate noise gradients from all features</li>
+<li>Automatic interactions: trees find them by design (split A then B = interaction); NNs need sufficient depth and data to discover the same interactions</li>
+<li>Small datasets: trees generalize from n=500; NNs require substantially more data to overcome parameter count</li>
+</ul>
+<h2>Benchmarking XGBoost vs Deep MLP</h2>
+<p>A direct five-fold cross-validation comparison demonstrates the consistent advantage of gradient boosting over a deep MLP across synthetic tabular data with mixed feature relevance.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.datasets import make_classification
+from sklearn.model_selection import cross_val_score
+from sklearn.neural_network import MLPClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+import xgboost as xgb
+
+# Tabular dataset: 30 features, only 10 informative
+X, y = make_classification(
+    n_samples=2000, n_features=30, n_informative=10,
+    n_redundant=5, n_clusters_per_class=3, random_state=42
+)
+
+# XGBoost — no scaling needed
+xgb_clf = xgb.XGBClassifier(
+    n_estimators=300, max_depth=6, learning_rate=0.05,
+    subsample=0.8, colsample_bytree=0.8,
+    random_state=42, eval_metric='logloss'
+)
+
+# Deep MLP — requires standardization
+mlp = Pipeline([
+    ('scaler', StandardScaler()),
+    ('net', MLPClassifier(
+        hidden_layer_sizes=(256, 128, 64),
+        max_iter=500, early_stopping=True, random_state=42
+    ))
+])
+
+for name, model in [('XGBoost', xgb_clf), ('Deep MLP', mlp)]:
+    scores = cross_val_score(model, X, y, cv=5, scoring='accuracy')
+    print(f'{name}: {scores.mean():.4f} +/- {scores.std():.4f}')
+</code></pre>
+<h2>Irregular Target Functions</h2>
+<p>Neural networks prefer smooth target functions because gradient descent with weight decay implicitly regularizes toward smooth solutions. Tabular data often has irregular, discontinuous functions — sharp decision boundaries, threshold effects — that trees handle naturally via piecewise-constant output.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.neural_network import MLPClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+
+rng = np.random.default_rng(42)
+n, d = 2000, 20
+X = rng.uniform(0, 1, (n, d))
+
+# Irregular target: random threshold per feature — non-smooth function
+thresholds = rng.uniform(0.2, 0.8, d)
+y = ((X &gt; thresholds).sum(axis=1) &gt; d // 2).astype(int)
+
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
+
+rf = RandomForestClassifier(n_estimators=200, random_state=42)
+mlp = MLPClassifier(hidden_layer_sizes=(256, 128), max_iter=500, random_state=42)
+
+rf.fit(X_tr, y_tr)
+mlp.fit(X_tr, y_tr)
+
+print(f'Random Forest (irregular target): {accuracy_score(y_te, rf.predict(X_te)):.4f}')
+print(f'MLP           (irregular target): {accuracy_score(y_te, mlp.predict(X_te)):.4f}')
+</code></pre>
+<h2>Sparse Informative Features</h2>
+<p>When only a few features carry signal and the rest are noise, trees isolate informative features via greedy splitting. Neural networks propagate gradients through all input weights, and without strong regularization they struggle to suppress the many noisy features.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.neural_network import MLPClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import cross_val_score
+
+rng = np.random.default_rng(0)
+n, d_total, d_info = 1500, 50, 3  # 3 informative out of 50 total features
+
+X_info = rng.standard_normal((n, d_info))
+X_noise = rng.standard_normal((n, d_total - d_info))
+X = np.hstack([X_info, X_noise])
+
+# True label depends only on first 3 features
+y = (X_info[:, 0] + 2 * X_info[:, 1] - X_info[:, 2] &gt; 0).astype(int)
+
+gbm = GradientBoostingClassifier(n_estimators=200, max_depth=4, random_state=42)
+mlp = Pipeline([
+    ('sc', StandardScaler()),
+    ('net', MLPClassifier(hidden_layer_sizes=(128, 64), max_iter=300, random_state=42))
+])
+
+for name, model in [('GBM (3/50 informative)', gbm), ('MLP (3/50 informative)', mlp)]:
+    s = cross_val_score(model, X, y, cv=5)
+    print(f'{name}: {s.mean():.4f} +/- {s.std():.4f}')
+</code></pre>
+<h2>Scaling Behavior: Trees vs Neural Networks</h2>
+<p>At small n, trees win decisively. Neural networks begin to close the gap as n grows into the hundreds of thousands. The crossover point depends on feature complexity, but practically, trees remain competitive even at n=100k.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.datasets import make_classification
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.neural_network import MLPClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import cross_val_score
+
+sizes = [200, 500, 1000, 5000, 10000]
+print(f'{&quot;n&quot;:&gt;8}  {&quot;GBM&quot;:&gt;8}  {&quot;MLP&quot;:&gt;8}')
+print('-' * 30)
+
+for n in sizes:
+    X, y = make_classification(
+        n_samples=n, n_features=20, n_informative=8, random_state=42
+    )
+    gbm = GradientBoostingClassifier(n_estimators=100, random_state=42)
+    mlp = Pipeline([
+        ('sc', StandardScaler()),
+        ('net', MLPClassifier(
+            hidden_layer_sizes=(128, 64), max_iter=300, random_state=42
+        ))
+    ])
+    cv = max(2, min(5, n // 100))
+    gbm_score = cross_val_score(gbm, X, y, cv=cv).mean()
+    mlp_score = cross_val_score(mlp, X, y, cv=cv).mean()
+    print(f'{n:&gt;8}  {gbm_score:&gt;8.3f}  {mlp_score:&gt;8.3f}')
+</code></pre>
+<hr />
+<h2>Conditions: Trees Win vs Deep Learning Wins</h2>
+<table>
+<thead>
+<tr>
+<th>Condition</th>
+<th>Tree-Based Models</th>
+<th>Deep Learning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Dataset size</td>
+<td>Any (especially n &lt; 10k)</td>
+<td>Large preferred (n &gt; 100k)</td>
+</tr>
+<tr>
+<td>Feature type</td>
+<td>Tabular numeric + categorical</td>
+<td>Images, text, audio, graphs</td>
+</tr>
+<tr>
+<td>Missing values</td>
+<td>Native support (XGBoost/LightGBM)</td>
+<td>Requires imputation step</td>
+</tr>
+<tr>
+<td>Categorical features</td>
+<td>Native (CatBoost, LightGBM)</td>
+<td>Needs encoding or learned embedding</td>
+</tr>
+<tr>
+<td>Target function</td>
+<td>Irregular, non-smooth, threshold-based</td>
+<td>Smooth, continuous</td>
+</tr>
+<tr>
+<td>Multi-modal inputs</td>
+<td>Not supported natively</td>
+<td>Yes — NN handles all modalities</td>
+</tr>
+<tr>
+<td>Online learning</td>
+<td>Difficult — full rebuild required</td>
+<td>Easy — SGD updates incrementally</td>
+</tr>
+<tr>
+<td>Transfer learning</td>
+<td>Not applicable</td>
+<td>Strong — pre-trained tabular transformers</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Grinsztajn et al. 2022 Key Experiment</strong>: Removing uninformative features and applying a random rotation to the data significantly reduces the tree advantage — confirming that rotational variance and irrelevant features are the primary structural drivers of tree dominance on tabular benchmarks, not dataset size alone.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<ul>
+<li>Always start with gradient-boosted trees (XGBoost or LightGBM) as the baseline for any tabular task</li>
+<li>Trees outperform NNs primarily because of inductive biases that match tabular data structure</li>
+<li>The gap is largest with irregular target functions, sparse informative features, and small n</li>
+<li>Neural networks (FT-Transformer, SAINT) compete on large, clean, low-cardinality tabular datasets</li>
+<li>For n &lt; 1000, consider TabPFN; for very large n where DL is needed, prefer FT-Transformer or TabNet</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

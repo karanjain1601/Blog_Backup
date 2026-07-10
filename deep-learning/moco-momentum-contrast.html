@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MoCo — Momentum Contrast and Dynamic Queue | Notes Backup</title>
+  <meta name="description" content="MoCo (He et al. 2020) achieves contrastive self-supervised learning without large batch sizes by maintaining a queue of consistent negative keys updated via an exponential moving average momentum encoder, decoupling the number of negatives from GPU memory." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>MoCo — Momentum Contrast and Dynamic Queue</h1>
+      <ul class='note-meta'><li><strong>description:</strong> MoCo (He et al. 2020) achieves contrastive self-supervised learning without large batch sizes by maintaining a queue of consistent negative keys updated via an exponential moving average momentum encoder, decoupling the number of negatives from GPU memory.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>MoCo — Momentum Contrast and Dynamic Queue</h1>
+<p>MoCo (Momentum Contrast, He et al. 2020) addresses the fundamental bottleneck of SimCLR: the requirement for enormous batch sizes to have enough negatives. MoCo decouples the number of negatives from the batch size by maintaining a dynamic queue of encoded keys from past mini-batches. A momentum encoder (updated by EMA, not gradient) ensures the keys in the queue remain consistent even as the model evolves during training.</p>
+<h2>Motivation — The Dictionary Perspective</h2>
+<p>Contrastive learning can be viewed as training a dynamic dictionary look-up. Each encoded query q must match its positive key k₊ (from the same image, different augmentation) and be dissimilar from all negative keys K = {k₁, k₂, …, kK}. To make the loss informative, K must be large (tens of thousands). But computing gradients through K encodings per step is prohibitively expensive. MoCo stores keys in a FIFO queue and only encodes the current mini-batch's keys with gradient; old keys in the queue are reused without re-encoding.</p>
+<h2>Momentum Encoder — EMA Update</h2>
+<p>The key encoder θ_k is not updated by gradient. Instead it tracks the query encoder θ_q via exponential moving average: θ_k ← m·θ_k + (1-m)·θ_q where m = 0.999 (very slow update). This ensures that the keys enqueued over the past few thousand steps were produced by an encoder that changed very slowly, so they are mutually consistent. If the key encoder were updated rapidly by gradient, older queue entries would be encoded by a very different model, making the negatives inconsistent and degrading the loss signal.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import copy
+
+def build_momentum_encoder(query_encoder, momentum=0.999):
+    &quot;&quot;&quot;Create key encoder as EMA copy of query encoder.&quot;&quot;&quot;
+    key_encoder = copy.deepcopy(query_encoder)
+    # Key encoder not updated by gradient
+    for p in key_encoder.parameters():
+        p.requires_grad_(False)
+    return key_encoder
+
+@torch.no_grad()
+def momentum_update(query_encoder, key_encoder, momentum=0.999):
+    &quot;&quot;&quot;EMA update: θ_k = m * θ_k + (1-m) * θ_q&quot;&quot;&quot;
+    for q_param, k_param in zip(query_encoder.parameters(),
+                                key_encoder.parameters()):
+        k_param.data = momentum * k_param.data + (1.0 - momentum) * q_param.data
+
+# Demo: show slow drift of key encoder
+import torch.nn.functional as F
+
+torch.manual_seed(0)
+q_enc = nn.Linear(64, 64)
+k_enc = build_momentum_encoder(q_enc)
+
+# Simulate one gradient step on query encoder
+optimizer = torch.optim.SGD(q_enc.parameters(), lr=0.1)
+loss = q_enc(torch.randn(8, 64)).mean()
+loss.backward()
+optimizer.step()
+
+# EMA update
+momentum_update(q_enc, k_enc, momentum=0.999)
+
+# Measure drift
+with torch.no_grad():
+    diff = sum((qp - kp).norm().item()
+               for qp, kp in zip(q_enc.parameters(), k_enc.parameters()))
+print(f'Parameter drift after 1 step (momentum=0.999): {diff:.6f}')
+</code></pre>
+<h2>Key Queue Management</h2>
+<p>The queue stores K encoded keys (K = 65536 by default). After each mini-batch of size N, N new keys are enqueued and the oldest N keys are dequeued (FIFO). Importantly, keys are enqueued as-is from the key encoder output; they are not backpropagated through. The queue is stored on GPU as a fixed-size buffer. Because queue keys come from many past mini-batches (with the slowly-drifting key encoder), they are diverse and consistent — unlike SimCLR's in-batch negatives, which vary mini-batch to mini-batch.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+class MoCoQueue:
+    &quot;&quot;&quot;FIFO queue of encoded keys for MoCo.&quot;&quot;&quot;
+    def __init__(self, feat_dim=128, queue_size=65536, device='cuda'):
+        self.queue_size = queue_size
+        # Initialise with random unit vectors
+        self.queue = F.normalize(
+            torch.randn(feat_dim, queue_size, device=device), dim=0
+        )
+        self.ptr = 0  # pointer to current write position
+
+    @torch.no_grad()
+    def enqueue_dequeue(self, keys):
+        &quot;&quot;&quot;Enqueue new keys and dequeue oldest. keys: (N, D) normalised.&quot;&quot;&quot;
+        N = keys.size(0)
+        assert self.queue_size % N == 0, 'queue_size must be divisible by batch size'
+        # Write new keys at current pointer position
+        self.queue[:, self.ptr:self.ptr + N] = keys.T  # (D, N)
+        self.ptr = (self.ptr + N) % self.queue_size
+
+    def get_keys(self):
+        &quot;&quot;&quot;Return all keys in queue as (D, K) tensor.&quot;&quot;&quot;
+        return self.queue.clone().detach()
+
+# Demo
+queue = MoCoQueue(feat_dim=128, queue_size=4096, device='cpu')
+print('Queue shape:', queue.get_keys().shape)
+batch_keys = F.normalize(torch.randn(64, 128), dim=1)
+queue.enqueue_dequeue(batch_keys)
+print('After enqueue (ptr should be 64):', queue.ptr)
+</code></pre>
+<h2>MoCo Training Loop and InfoNCE Loss</h2>
+<p>The InfoNCE loss for MoCo: L = -log[ exp(q·k₊/τ) / (exp(q·k₊/τ) + Σᵢ exp(q·kᵢ/τ)) ] where q is the query embedding (from the query encoder with gradient), k₊ is the positive key (from the key encoder, no gradient), and {kᵢ} are the negative keys from the queue. The loss reduces to a K+1-way softmax classification where the positive pair is the correct class. The query encoder is updated by gradient; the key encoder is updated by EMA after each step; the positive key is enqueued.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torchvision.models as models
+import copy
+
+class MoCo(nn.Module):
+    def __init__(self, base_encoder, feat_dim=128, queue_size=65536,
+                 momentum=0.999, temperature=0.07):
+        super().__init__()
+        self.m = momentum
+        self.T = temperature
+        # Query encoder
+        self.encoder_q = base_encoder(weights=None)
+        self.encoder_q.fc = nn.Linear(self.encoder_q.fc.in_features, feat_dim)
+        # Key encoder (EMA copy)
+        self.encoder_k = copy.deepcopy(self.encoder_q)
+        for p in self.encoder_k.parameters():
+            p.requires_grad_(False)
+        # Queue
+        self.register_buffer('queue',
+            F.normalize(torch.randn(feat_dim, queue_size), dim=0))
+        self.register_buffer('queue_ptr', torch.zeros(1, dtype=torch.long))
+        self.queue_size = queue_size
+
+    @torch.no_grad()
+    def _momentum_update(self):
+        for q, k in zip(self.encoder_q.parameters(), self.encoder_k.parameters()):
+            k.data = self.m * k.data + (1 - self.m) * q.data
+
+    @torch.no_grad()
+    def _dequeue_enqueue(self, keys):
+        N = keys.size(0)
+        ptr = int(self.queue_ptr)
+        self.queue[:, ptr:ptr + N] = keys.T
+        self.queue_ptr[0] = (ptr + N) % self.queue_size
+
+    def forward(self, x_q, x_k):
+        q = F.normalize(self.encoder_q(x_q), dim=1)        # (N, C)
+        with torch.no_grad():
+            self._momentum_update()
+            k = F.normalize(self.encoder_k(x_k), dim=1)    # (N, C)
+        l_pos = (q * k).sum(dim=1, keepdim=True) / self.T  # (N, 1)
+        l_neg = (q @ self.queue.clone()) / self.T           # (N, K)
+        logits = torch.cat([l_pos, l_neg], dim=1)           # (N, 1+K)
+        labels = torch.zeros(logits.size(0), dtype=torch.long, device=q.device)
+        self._dequeue_enqueue(k)
+        return F.cross_entropy(logits, labels)
+
+print('MoCo model defined. Positive is class 0 in (1+K)-way softmax.')
+</code></pre>
+<h2>MoCo v2 Improvements</h2>
+<p>MoCo v2 (Chen et al. 2020) is a simple but impactful update: (1) replace the linear projection head with a 2-layer MLP (like SimCLR), and (2) adopt stronger augmentation (Gaussian blur + stronger color jitter). These two changes, without any other modification to the queue or momentum mechanism, brought MoCo within ~1% of SimCLR v1 using a batch size of just 256 — 16× smaller. This demonstrated that the MoCo framework was not the bottleneck; the missing ingredients were the MLP head and augmentation.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torchvision.models as models
+from torchvision import transforms
+
+def build_moco_v2_encoder(feat_dim=128):
+    &quot;&quot;&quot;ResNet-50 with 2-layer MLP projection head (MoCo v2).&quot;&quot;&quot;
+    base = models.resnet50(weights=None)
+    hidden_dim = base.fc.in_features  # 2048
+    base.fc = nn.Sequential(
+        nn.Linear(hidden_dim, hidden_dim),
+        nn.ReLU(inplace=True),
+        nn.Linear(hidden_dim, feat_dim),
+    )
+    return base
+
+def moco_v2_augmentation(image_size=224):
+    &quot;&quot;&quot;Stronger augmentation matching SimCLR (MoCo v2).&quot;&quot;&quot;
+    return transforms.Compose([
+        transforms.RandomResizedCrop(image_size, scale=(0.2, 1.0)),
+        transforms.RandomApply([
+            transforms.ColorJitter(0.4, 0.4, 0.4, 0.1)
+        ], p=0.8),
+        transforms.RandomGrayscale(p=0.2),
+        transforms.RandomApply([
+            transforms.GaussianBlur(kernel_size=23)
+        ], p=0.5),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+    ])
+
+enc = build_moco_v2_encoder()
+params = sum(p.numel() for p in enc.parameters()) // 1_000_000
+print(f'MoCo v2 encoder parameters: {params}M')
+print('Key change: MLP head + Gaussian blur augmentation.')
+</code></pre>
+<blockquote>
+<p><strong>Why Momentum = 0.999 Is Critical</strong>: If momentum is too low (e.g. 0.9), the key encoder updates rapidly and older queue entries are encoded by a very different model, making the negatives inconsistent — the loss becomes noisy. If momentum is too high (close to 1), the key encoder barely learns from the query encoder, and convergence slows. Empirically m = 0.999 provides the best balance between key consistency and learning signal.</p>
+</blockquote>
+<h2>MoCo v3 and Vision Transformers</h2>
+<p>MoCo v3 (Chen et al. 2021) adapts the framework to Vision Transformers (ViT). The queue is abandoned: with ViT-B and a batch size of 4096, sufficient negatives exist in-batch (like SimCLR). A stop-gradient is added on the key path (similar to BYOL). The projection head becomes a 3-layer MLP. MoCo v3 with ViT-B/16 achieves 83.2% top-1 on ImageNet linear eval — surpassing supervised ResNet-50 (76.1%) without any labels.</p>
+<ul>
+<li>v1: ResNet + queue(65536) + momentum encoder + linear projection + InfoNCE.</li>
+<li>v2: v1 + MLP projection head + stronger augmentation — matches SimCLR at 256 batch.</li>
+<li>v3: ViT backbone + no queue + stop-gradient on key path + 3-layer MLP head.</li>
+<li>Momentum m = 0.999 (v1/v2), m = 0.99 (v3 with ViT — faster drift acceptable).</li>
+<li>v3 training trick: freeze patch projection layer for first few epochs to stabilise ViT.</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Version</th>
+<th>Queue</th>
+<th>Batch Size</th>
+<th>Backbone</th>
+<th>Augmentation</th>
+<th>Linear Eval Top-1</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MoCo v1</td>
+<td>65 536</td>
+<td>256</td>
+<td>ResNet-50</td>
+<td>Standard</td>
+<td>60.6%</td>
+</tr>
+<tr>
+<td>MoCo v2</td>
+<td>65 536</td>
+<td>256</td>
+<td>ResNet-50</td>
+<td>SimCLR-style</td>
+<td>71.1%</td>
+</tr>
+<tr>
+<td>MoCo v3</td>
+<td>None</td>
+<td>4096</td>
+<td>ViT-B/16</td>
+<td>SimCLR-style</td>
+<td>83.2%</td>
+</tr>
+<tr>
+<td>SimCLR v1 (ref)</td>
+<td>None</td>
+<td>4096</td>
+<td>ResNet-50</td>
+<td>SimCLR-style</td>
+<td>69.3%</td>
+</tr>
+</tbody>
+</table>
+<h2>Results and Downstream Evaluation</h2>
+<p>MoCo v1 achieves 60.6% top-1 linear evaluation on ImageNet with ResNet-50 — significantly below supervised (76.1%) but with zero labels. MoCo v2 closes the gap to 71.1% purely by adding MLP head and augmentation. For semi-supervised and fine-tuning tasks, MoCo representations transfer well: on PASCAL VOC detection, MoCo pre-training matches supervised pre-training within 0.5 AP. This demonstrates that queue-based contrastive learning produces broadly useful representations that transfer across tasks and domains without requiring the massive batch sizes of SimCLR.</p>
+    </article>
+  </main>
+</body>
+</html>

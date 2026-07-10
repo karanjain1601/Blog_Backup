@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SARIMA — Seasonal ARIMA and Period Selection | Notes Backup</title>
+  <meta name="description" content="Extend ARIMA with seasonal AR, I, and MA operators at period S, learn to identify seasonal orders from ACF/PACF spikes at seasonal lags, select S via periodogram and domain knowledge, and grid-search SARIMA orders by AIC." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>SARIMA — Seasonal ARIMA and Period Selection</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Extend ARIMA with seasonal AR, I, and MA operators at period S, learn to identify seasonal orders from ACF/PACF spikes at seasonal lags, select S via periodogram and domain knowledge, and grid-search SARIMA orders by AIC.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>SARIMA — Seasonal ARIMA and Period Selection</h1>
+<p>SARIMA — Seasonal ARIMA — extends the Box-Jenkins framework to series with periodic behaviour. Monthly retail sales, quarterly GDP, daily temperature, and weekly web traffic all exhibit regular patterns that repeat at a known period S. The SARIMA model adds seasonal AR, I (differencing), and MA operators that act at multiples of S, allowing the model to capture both the short-run autocorrelation structure and the long-run seasonal dependencies simultaneously.</p>
+<h2>SARIMA Notation and Backshift Operators</h2>
+<p>SARIMA(p,d,q)(P,D,Q)[S] is written in operator form as Φₚ(B)·φ_P(Bˢ)·(1−B)ᵈ·(1−Bˢ)ᴰ·yₜ = Θq(B)·θ_Q(Bˢ)·εₜ, where φ_P(Bˢ) = 1 − Φ₁Bˢ − … − Φ_PB^(PS) is the seasonal AR polynomial, θ_Q(Bˢ) is the seasonal MA polynomial, (1−Bˢ)ᴰ applies D seasonal differences, and (1−B)ᵈ applies d regular differences. The non-seasonal (p,d,q) part and the seasonal (P,D,Q)[S] part multiply together to form the full model — the total number of AR and MA parameters is p + P.</p>
+<p>A common practical model for monthly data is SARIMA(1,1,1)(1,1,1)[12] — the airline model — popularised by Box and Jenkins in their analysis of the international airline passenger dataset. It has: one regular AR lag, one seasonal AR lag at lag 12, one regular MA error, one seasonal MA error at lag 12, one regular difference, and one seasonal difference. Despite having only 4 free parameters plus sigma², it captures the dominant structure of many monthly economic series.</p>
+<ul>
+<li>The seasonal AR polynomial φ_P(Bˢ) = 1 − Φ₁Bˢ − … − Φ_PB^{PS} operates at multiples of S (lags S, 2S, …).</li>
+<li>The seasonal MA polynomial θ_Q(Bˢ) adds smoothing of past seasonal errors — same frequency structure as seasonal AR.</li>
+<li>Seasonal differencing (1 − Bˢ)ᴰ and regular differencing (1 − B)ᵈ are applied before the ARMA fitting.</li>
+<li>Total parameters: p + P AR coefficients, q + Q MA coefficients, plus sigma² — typically 4–8 parameters for common seasonal models.</li>
+<li>Stationarity requires all roots of φ_p(z)·φ_P(zˢ) to lie outside the unit circle; invertibility requires the same for θ_q(z)·θ_Q(zˢ).</li>
+</ul>
+<h2>Classic Example — Airline Passengers</h2>
+<pre><code class="language-python">import numpy as np
+import pandas as pd
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from statsmodels.datasets import get_rdataset
+
+# Load classic airline passengers dataset
+data = get_rdataset('AirPassengers', 'datasets')
+y = np.log(data.data['value'].values)  # log-transform for additive treatment
+n = len(y)
+train, test = y[:120], y[120:]  # 132 months: use 120 for training
+
+# Fit SARIMA(1,1,1)(1,1,1)[12] -- the classic airline model
+model = SARIMAX(train, order=(1, 1, 1), seasonal_order=(1, 1, 1, 12),
+                trend='n', enforce_stationarity=True, enforce_invertibility=True)
+fit = model.fit(disp=False)
+
+print(&quot;SARIMA(1,1,1)(1,1,1)[12] -- Airline Passengers (log scale)&quot;)
+print(f&quot;  AR phi1   = {fit.params['ar.L1']:.4f}&quot;)
+print(f&quot;  MA theta1 = {fit.params['ma.L1']:.4f}&quot;)
+print(f&quot;  SAR Phi1  = {fit.params['ar.S.L12']:.4f}&quot;)
+print(f&quot;  SMA Theta1= {fit.params['ma.S.L12']:.4f}&quot;)
+print(f&quot;  AIC       = {fit.aic:.2f}&quot;)
+
+# Forecast remaining 12 months
+fc = fit.get_forecast(steps=12)
+feat_exp = np.exp(fc.predicted_mean)
+test_exp  = np.exp(test)
+mape = np.mean(np.abs((test_exp - feat_exp) / test_exp)) * 100
+print(f&quot;  Test MAPE (last 12 months) = {mape:.2f}%&quot;)
+</code></pre>
+<h2>Seasonal Differencing and ACF Identification</h2>
+<p>Seasonal differencing ΔₛYₜ = Yₜ − Yₜ₋ₛ removes a seasonal unit root (a unit root at the seasonal frequency). After D = 1 seasonal difference, the seasonal spikes in the ACF should diminish. If they remain, consider D = 1 regular difference additionally. The seasonal ACF of the doubly-differenced series then shows the residual seasonal AR/MA structure. Overly aggressive differencing (D &gt; 1) is rarely justified and over-complicates the model.</p>
+<pre><code class="language-python">import numpy as np
+from statsmodels.tsa.stattools import acf
+from statsmodels.datasets import get_rdataset
+
+data = get_rdataset('AirPassengers', 'datasets')
+y_log = np.log(data.data['value'].values)
+
+# Regular difference
+y_d1 = np.diff(y_log)
+
+# Seasonal difference of regular-differenced series
+y_d1_D1 = np.diff(y_d1, n=12)
+
+ci = 1.96 / np.sqrt(len(y_d1_D1))
+acf_d1_D1 = acf(y_d1_D1, nlags=24)
+
+print(f&quot;After (1,1,1) differencing: n={len(y_d1_D1)}, CI=+/-{ci:.4f}&quot;)
+print()
+print(f&quot;{'Lag':&gt;4s}  {'ACF':&gt;7s}  {'Sig?':&gt;6s}&quot;)
+print(&quot;-&quot; * 24)
+for k in [1, 2, 3, 12, 13, 24]:
+    sig = &quot;YES&quot; if abs(acf_d1_D1[k]) &gt; ci else &quot;no&quot;
+    print(f&quot;{k:4d}  {acf_d1_D1[k]:7.4f}  {sig:&gt;6s}&quot;)
+print(&quot;\nSpike at lag 1 =&gt; MA(1); spike at lag 12 =&gt; SMA(1) -- consistent with airline model&quot;)
+</code></pre>
+<h2>Choosing the Seasonal Period S</h2>
+<p>The seasonal period S must be known or estimated before fitting SARIMA. In most cases S is determined by domain knowledge: monthly data → S = 12, quarterly → S = 4, weekly → S = 52, daily with weekly pattern → S = 7. When the period is uncertain, a periodogram (spectral density estimate) reveals peaks at the dominant frequencies, from which S = 1/frequency. STL decomposition with unknown period can also be estimated iteratively.</p>
+<ul>
+<li>Monthly data: S = 12 (annual cycle repeats every 12 months).</li>
+<li>Quarterly data: S = 4 (annual cycle in four quarters).</li>
+<li>Daily data with weekly seasonality: S = 7.</li>
+<li>Hourly data with daily seasonality: S = 24; with weekly: S = 168.</li>
+<li>Use the periodogram (scipy.signal.periodogram) to find dominant frequency peaks when period is unknown.</li>
+<li>Plot seasonal sub-series (all Januaries, all Februaries, etc.) to visually confirm S.</li>
+</ul>
+<h2>Grid Search for Best SARIMA Orders</h2>
+<pre><code class="language-python">import numpy as np
+import warnings
+from itertools import product
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from statsmodels.datasets import get_rdataset
+
+data = get_rdataset('AirPassengers', 'datasets')
+y = np.log(data.data['value'].values)[:120]  # training set
+
+best_aic, best_order, best_sorder = np.inf, None, None
+results = []
+
+for p, q, P, Q in product(range(3), range(3), range(2), range(2)):
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter(&quot;ignore&quot;)
+            mod = SARIMAX(y, order=(p,1,q), seasonal_order=(P,1,Q,12),
+                          trend='n', enforce_stationarity=True, enforce_invertibility=True)
+            fit = mod.fit(disp=False)
+        results.append((fit.aic, fit.bic, (p,1,q), (P,1,Q,12)))
+        if fit.aic &lt; best_aic:
+            best_aic, best_order, best_sorder = fit.aic, (p,1,q), (P,1,Q,12)
+    except Exception:
+        continue
+
+results.sort()
+print(f&quot;{'ARIMA':&gt;12s}  {'Seasonal':&gt;14s}  {'AIC':&gt;8s}  {'BIC':&gt;8s}&quot;)
+print(&quot;-&quot; * 50)
+for aic, bic, ordr, sordr in results[:6]:
+    print(f&quot;{str(ordr):&gt;12s}  {str(sordr):&gt;14s}  {aic:8.2f}  {bic:8.2f}&quot;)
+print(f&quot;\nBest: ARIMA{best_order} x {best_sorder}  AIC={best_aic:.2f}&quot;)
+</code></pre>
+<h2>SARIMA Forecast with Prediction Intervals</h2>
+<pre><code class="language-python">import numpy as np
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from statsmodels.datasets import get_rdataset
+
+data = get_rdataset('AirPassengers', 'datasets')
+y_log  = np.log(data.data['value'].values)
+train  = y_log[:120]
+test   = np.exp(y_log[120:])
+horizon = 12
+
+fit = SARIMAX(train, order=(1,1,1), seasonal_order=(1,1,1,12),
+              trend='n').fit(disp=False)
+
+fc = fit.get_forecast(steps=horizon)
+pred  = np.exp(fc.predicted_mean)
+ci    = np.exp(fc.conf_int(alpha=0.05))
+
+print(f&quot;{'Month':&gt;6s}  {'Actual':&gt;8s}  {'Forecast':&gt;9s}  {'95% Lo':&gt;8s}  {'95% Hi':&gt;8s}  {'APE%':&gt;6s}&quot;)
+print(&quot;-&quot; * 55)
+for i in range(horizon):
+    ape = abs(test.values[i] - pred.iloc[i]) / test.values[i] * 100
+    print(f&quot;{i+1:6d}  {test.values[i]:8.1f}  {pred.iloc[i]:9.1f}  {ci.iloc[i,0]:8.1f}  {ci.iloc[i,1]:8.1f}  {ape:6.2f}&quot;)
+print(f&quot;\nMAPE = {np.mean(np.abs((test.values - pred.values)/test.values))*100:.2f}%&quot;)
+</code></pre>
+<blockquote>
+<p><strong>Seasonal Differencing vs Seasonal AR</strong>: Use seasonal differencing (D=1) when the seasonal pattern is stochastic — it evolves randomly over time, as in most economic series. Use a seasonal AR (P=1, D=0) when the seasonal pattern is stable and deterministic. A quick diagnostic: if the seasonal ACF spikes at lags S, 2S, 3S do not decay and the KPSS test at the seasonal frequency rejects, set D=1. If the spikes decay geometrically, P=1 without seasonal differencing may be sufficient.</p>
+</blockquote>
+<h2>SARIMA Components Reference</h2>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Meaning</th>
+<th>Identification Method</th>
+<th>Typical Range</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>p</td>
+<td>Non-seasonal AR order</td>
+<td>PACF cuts off after lag p (on stationary series)</td>
+<td>0–3</td>
+</tr>
+<tr>
+<td>d</td>
+<td>Regular differences</td>
+<td>ADF/KPSS test on original series</td>
+<td>0–2 (usually 0 or 1)</td>
+</tr>
+<tr>
+<td>q</td>
+<td>Non-seasonal MA order</td>
+<td>ACF cuts off after lag q (on stationary series)</td>
+<td>0–3</td>
+</tr>
+<tr>
+<td>P</td>
+<td>Seasonal AR order</td>
+<td>PACF spike at lag S cuts off after P seasonal lags</td>
+<td>0–2</td>
+</tr>
+<tr>
+<td>D</td>
+<td>Seasonal differences</td>
+<td>ADF/KPSS at seasonal frequency; HEGY test</td>
+<td>0–1 (rarely 2)</td>
+</tr>
+<tr>
+<td>Q</td>
+<td>Seasonal MA order</td>
+<td>ACF spike at lag S cuts off after Q seasonal lags</td>
+<td>0–2</td>
+</tr>
+<tr>
+<td>S</td>
+<td>Seasonal period</td>
+<td>Domain knowledge, periodogram, or STL decomposition</td>
+<td>4, 7, 12, 24, 52</td>
+</tr>
+</tbody>
+</table>
+<p>A useful practical heuristic: start with SARIMA(1,1,1)(1,1,1)[S] (the airline model generalised to your period) and compare it against simpler alternatives (0,1,1)(0,1,1)[S] and (1,1,0)(1,1,0)[S]) via AIC. For quarterly GDP or monthly retail data this shortlist covers the winning model the majority of the time. Reserve grid search for series that are clearly mis-specified after residual diagnostics.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

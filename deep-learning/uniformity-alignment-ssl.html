@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Uniformity and Alignment — Geometric Theory of Contrastive Learning | Notes Backup</title>
+  <meta name="description" content="Wang and Isola (2020) decompose contrastive learning objectives into two geometric properties on the unit hypersphere: alignment (positive pairs attract) and uniformity (features spread evenly), providing a principled diagnostic framework for understanding and detecting representational collapse." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Uniformity and Alignment — Geometric Theory of Contrastive Learning</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Wang and Isola (2020) decompose contrastive learning objectives into two geometric properties on the unit hypersphere: alignment (positive pairs attract) and uniformity (features spread evenly), providing a principled diagnostic framework for understanding and detecting representational collapse.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Uniformity and Alignment — Geometric Theory of Contrastive Learning</h1>
+<p>Wang and Isola (2020) offered one of the clearest theoretical frameworks for understanding why contrastive learning works. They showed that contrastive loss on the unit hypersphere can be decomposed into two competing geometric properties: alignment (positive pairs should be close together) and uniformity (all features should be spread as uniformly as possible across the sphere). These two properties are not arbitrary — they correspond to an ideal representation that is maximally informative: positive pairs agree (alignment) and the entire feature space is used without collapse (uniformity).</p>
+<h2>Alignment — Attracting Positive Pairs</h2>
+<p>Alignment measures how well the encoder maps semantically similar inputs to nearby representations. For a distribution of positive pairs (x, x') drawn from the same image with different augmentations, the alignment loss is the expected squared Euclidean distance between their L2-normalised representations: L_align = E_{(x,x')~p_pos}[‖f(x) − f(x')‖²]. For unit-norm vectors, this equals 2(1 − cosine_similarity(f(x), f(x'))). Perfect alignment (L_align = 0) means the encoder is invariant to augmentation — both views map to the exact same point. This is the simplest form of representation learning: invariance to nuisance variation.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+
+def alignment_loss(z1: torch.Tensor, z2: torch.Tensor, alpha: float = 2.0) -&gt; torch.Tensor:
+    &quot;&quot;&quot;Alignment loss: expected ||f(x) - f(x')||^alpha for positive pairs.
+    z1, z2: (N, D) L2-normalised embeddings of two augmented views.
+    alpha=2 gives squared Euclidean distance on unit sphere.
+    &quot;&quot;&quot;
+    z1 = F.normalize(z1, dim=1)  # ensure unit norm
+    z2 = F.normalize(z2, dim=1)
+    return (z1 - z2).norm(dim=1).pow(alpha).mean()
+
+
+def alignment_via_cosine(z1: torch.Tensor, z2: torch.Tensor) -&gt; torch.Tensor:
+    &quot;&quot;&quot;Equivalent: L_align = 2 * (1 - mean cosine similarity).&quot;&quot;&quot;
+    z1 = F.normalize(z1, dim=1)
+    z2 = F.normalize(z2, dim=1)
+    cos_sim = (z1 * z2).sum(dim=1)   # (N,) cosine similarity per pair
+    return 2 * (1 - cos_sim.mean())
+
+
+# Demo: perfect alignment, random alignment, collapsed alignment
+torch.manual_seed(42)
+z = F.normalize(torch.randn(64, 128), dim=1)
+print('Perfect alignment (z1 == z2):  ', alignment_loss(z, z).item())          # 0.0
+
+z2_rand = F.normalize(torch.randn(64, 128), dim=1)
+print('Random alignment:               ', alignment_loss(z, z2_rand).item())   # ~2.0
+
+z2_noise = F.normalize(z + 0.05 * torch.randn_like(z), dim=1)
+print('Near-perfect alignment (noise):', alignment_loss(z, z2_noise).item())   # small
+</code></pre>
+<h2>Uniformity — Spreading Features on the Hypersphere</h2>
+<p>Uniformity measures how evenly the encoder's output distribution covers the unit hypersphere. A completely uniform distribution maximises entropy — every dimension is used and no information is wasted. The uniformity loss uses a Gaussian kernel to measure the average pairwise similarity: L_uniform = log E_{x,y~p_data}[e^{-2‖f(x)−f(y)‖²}]. The Gaussian kernel e^{-2‖u−v‖²} decays from 1 (when u = v) to 0 (when u and v are orthogonal). The log ensures the scale is additive. Minimising L_uniform pushes features apart — the optimal solution is a uniform distribution on the sphere (a perfectly spread packing).</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+
+def uniformity_loss(z: torch.Tensor, t: float = 2.0) -&gt; torch.Tensor:
+    &quot;&quot;&quot;Uniformity loss: log-average of Gaussian kernel over all pairs.
+    z: (N, D) L2-normalised embeddings.
+    t: Gaussian kernel bandwidth (default 2 gives e^{-2||u-v||^2}).
+    &quot;&quot;&quot;
+    z = F.normalize(z, dim=1)                        # (N, D)
+    # Pairwise squared distances: ||u-v||^2 = 2 - 2*u.v for unit vectors
+    sq_dists = 2 - 2 * (z @ z.T)                    # (N, N)
+    # Gaussian kernel; include all pairs (diagonal = self, contributes 1)
+    kernel   = torch.exp(-t * sq_dists)              # (N, N)
+    # Log average over all N^2 pairs
+    return kernel.mean().log()
+
+
+# Demo: collapsed (all same) vs uniform (random unit vectors)
+torch.manual_seed(0)
+N, D = 256, 128
+
+# Collapsed: all embeddings identical
+z_collapsed = F.normalize(torch.ones(N, D), dim=1)
+print('Uniformity (collapsed):', uniformity_loss(z_collapsed).item())   # near 0 (bad)
+
+# Random unit vectors approximate uniform distribution
+z_uniform = F.normalize(torch.randn(N, D), dim=1)
+print('Uniformity (random):   ', uniformity_loss(z_uniform).item())     # very negative (good)
+
+# Slight cluster structure
+z_mixed = F.normalize(torch.randn(N, D) * 0.5 + torch.randn(1, D), dim=1)
+print('Uniformity (clustered):', uniformity_loss(z_mixed).item())       # between
+</code></pre>
+<h2>NT-Xent as Alignment Plus Uniformity</h2>
+<p>Wang and Isola proved that the NT-Xent loss (used by SimCLR) asymptotically decomposes into the alignment and uniformity terms. The numerator of NT-Xent maximises the similarity of positive pairs — this is the alignment term. The denominator normalises against all pairs including negatives — this is the uniformity term (pushing features apart). As batch size → ∞, NT-Xent = −alignment_term + uniformity_constant. This decomposition shows that NT-Xent implicitly optimises both geometric properties simultaneously, explaining why it generalises beyond its original contrastive framing.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+
+def nt_xent_decomposed(z1: torch.Tensor, z2: torch.Tensor,
+                       temperature: float = 0.5) -&gt; dict:
+    &quot;&quot;&quot;Compute NT-Xent and its alignment + uniformity decomposition.
+    z1, z2: (N, D) L2-normalised embeddings.
+    Returns dict with total loss, alignment component, uniformity component.
+    &quot;&quot;&quot;
+    N = z1.size(0)
+    z1 = F.normalize(z1, dim=1)
+    z2 = F.normalize(z2, dim=1)
+    z  = torch.cat([z1, z2], dim=0)   # (2N, D)
+
+    # NT-Xent total loss
+    sim_mat = (z @ z.T) / temperature   # (2N, 2N)
+    mask    = torch.eye(2*N, dtype=torch.bool, device=z.device)
+    sim_mat.masked_fill_(mask, float('-inf'))
+    labels  = torch.cat([torch.arange(N, 2*N), torch.arange(N)]).to(z.device)
+    nt_xent = F.cross_entropy(sim_mat, labels)
+
+    # Alignment component (log numerator, normalised)
+    pos_sim = (z1 * z2).sum(dim=1) / temperature   # (N,)
+    align   = -pos_sim.mean()
+
+    # Uniformity component (log denominator, approximation)
+    uniform = uniformity_loss(z, t=2.0)
+
+    return {'nt_xent': nt_xent.item(), 'alignment': align.item(), 'uniformity': uniform.item()}
+
+
+torch.manual_seed(7)
+z1 = F.normalize(torch.randn(128, 64), dim=1)
+z2 = F.normalize(torch.randn(128, 64), dim=1)
+result = nt_xent_decomposed(z1, z2)
+for k, v in result.items():
+    print(f'{k:&gt;12}: {v:.4f}')
+</code></pre>
+<h2>Collapse Detection During Training</h2>
+<p>One of the most practical applications of the alignment/uniformity decomposition is early collapse detection. Representational collapse — where the encoder maps all inputs to the same point — produces perfect alignment (L_align ≈ 0) but maximally bad uniformity (L_uniform ≈ 0, since the Gaussian kernel for identical vectors is 1, and log(1) = 0). By tracking both metrics independently during training, practitioners can diagnose collapse before it fully sets in. Methods like BYOL that lack explicit negative terms are especially vulnerable to silent collapse — monitoring uniformity reveals this immediately.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+
+class CollapseMonitor:
+    &quot;&quot;&quot;Track alignment and uniformity across training to detect collapse.&quot;&quot;&quot;
+
+    def __init__(self, window: int = 50):
+        self.window = window
+        self.align_history   = []
+        self.uniform_history = []
+
+    def update(self, z1: torch.Tensor, z2: torch.Tensor):
+        with torch.no_grad():
+            z1n = F.normalize(z1.detach(), dim=1)
+            z2n = F.normalize(z2.detach(), dim=1)
+            align   = (z1n - z2n).norm(dim=1).pow(2).mean().item()
+            sq_dist = 2 - 2 * (z1n @ z1n.T)
+            uniform = torch.exp(-2 * sq_dist).mean().log().item()
+        self.align_history.append(align)
+        self.uniform_history.append(uniform)
+
+    def is_collapsing(self, align_thresh: float = 0.05,
+                      uniform_thresh: float = -0.5) -&gt; bool:
+        if len(self.align_history) &lt; self.window:
+            return False
+        recent_align   = sum(self.align_history[-self.window:]) / self.window
+        recent_uniform = sum(self.uniform_history[-self.window:]) / self.window
+        return recent_align &lt; align_thresh and recent_uniform &gt; uniform_thresh
+
+    def report(self):
+        if self.align_history:
+            print(f'Alignment:   {self.align_history[-1]:.4f} (lower=more aligned)')
+            print(f'Uniformity:  {self.uniform_history[-1]:.4f} (more negative=more uniform)')
+            print(f'Collapsing:  {self.is_collapsing()}')
+
+
+monitor = CollapseMonitor()
+torch.manual_seed(0)
+z1 = F.normalize(torch.randn(64, 128), dim=1)
+z2 = F.normalize(torch.randn(64, 128), dim=1)
+for _ in range(55):
+    monitor.update(z1, z2)
+monitor.report()
+</code></pre>
+<blockquote>
+<p><strong>Collapse Is Silent Without Uniformity Tracking</strong>: Methods without explicit negative terms (BYOL, SimSiam, JEPA) are at risk of representational collapse — all embeddings converge to the same point. The loss may appear to decrease even as collapse progresses because alignment improves. Monitoring the uniformity metric separately is the most reliable early warning. If uniformity rises toward 0 while alignment falls toward 0, collapse is imminent. Good training shows both metrics improving: alignment decreasing and uniformity becoming more negative.</p>
+</blockquote>
+<h2>Information-Theoretic Interpretation</h2>
+<p>Uniformity on the hypersphere is connected to differential entropy. The uniform distribution on the sphere has maximum entropy among all distributions with unit-norm support — it is the maximum-entropy distribution under the constraint that features are L2-normalised. Maximising uniformity is therefore equivalent to maximising the entropy of the feature distribution, which in turn maximises the mutual information between features and input — the information bottleneck perspective on representation learning. Alignment simultaneously minimises the entropy of the conditional feature distribution given the augmented view.</p>
+<ul>
+<li>Uniformity = maximum entropy principle on unit sphere = maximum information in feature distribution.</li>
+<li>Alignment = minimum entropy of conditional distribution p(f(x')|f(x)) — invariance to nuisance.</li>
+<li>Optimal representation: perfect alignment with maximum uniformity (zero redundancy, zero collapse).</li>
+<li>In practice: these two objectives compete — they must be balanced by the loss weighting.</li>
+<li>NT-Xent temperature τ: lower τ increases gradient on hard negatives, stronger uniformity push.</li>
+<li>Barlow Twins / VICReg achieve uniformity differently — via cross-correlation or variance penalties.</li>
+</ul>
+<h2>Comparison Across SSL Methods</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Alignment Mechanism</th>
+<th>Uniformity Mechanism</th>
+<th>Collapse Prevention</th>
+<th>Needs Negatives</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>SimCLR</td>
+<td>Positive pair similarity maximisation</td>
+<td>In-batch negatives repulsion</td>
+<td>Implicit (large batch)</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>BYOL</td>
+<td>Online → target network MSE</td>
+<td>None explicit</td>
+<td>EMA + predictor asymmetry</td>
+<td>No</td>
+</tr>
+<tr>
+<td>Barlow Twins</td>
+<td>Cross-correlation diagonal = 1</td>
+<td>Off-diagonal cross-correlation = 0</td>
+<td>Redundancy reduction</td>
+<td>No</td>
+</tr>
+<tr>
+<td>VICReg</td>
+<td>Positive pair MSE</td>
+<td>Variance regulariser per dim</td>
+<td>Explicit variance term</td>
+<td>No</td>
+</tr>
+<tr>
+<td>DINO</td>
+<td>CLS token cross-entropy match</td>
+<td>Centering + sharpening (Sinkhorn)</td>
+<td>Centering prevents collapse</td>
+<td>No</td>
+</tr>
+</tbody>
+</table>
+<p>The alignment/uniformity framework reveals that methods without negatives (BYOL, Barlow Twins, VICReg, DINO) are not avoiding the fundamental tradeoff — they are implementing uniformity through different mechanisms. BYOL relies on the EMA asymmetry to implicitly spread features; Barlow Twins uses cross-correlation off-diagonal penalty; VICReg adds an explicit variance term per embedding dimension. All are geometric regularisers on the hypersphere, achieveing the same purpose as explicit negatives but through architectural or loss engineering.</p>
+<h2>Practical Guidance for SSL Training</h2>
+<p>Log both alignment and uniformity every 100 steps during training. A healthy training run shows alignment decreasing from ~2.0 toward ~0.1 and uniformity becoming more negative (from near 0 toward -4.0 or lower) as features spread. If alignment decreases but uniformity stagnates, increase batch size or add stronger augmentation to provide more diverse negatives. If uniformity improves but alignment remains high, the augmentations may be too aggressive or the positive pairs are not consistently similar. Temperature τ is the primary knob for the uniformity–alignment tradeoff in contrastive methods: lower τ increases the uniformity gradient at the cost of harder positive alignment.</p>
+    </article>
+  </main>
+</body>
+</html>

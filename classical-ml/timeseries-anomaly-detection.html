@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Time-Series Anomaly Detection — ARIMA Residuals and LSTM Reconstruction | Notes Backup</title>
+  <meta name="description" content="Implement time-series anomaly detection using ARIMA residuals for linear stationary processes, STL decomposition for seasonal data, LSTM autoencoders for complex temporal patterns, and point-adjust F1 evaluation with delay tolerance for fair benchmark comparison." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Time-Series Anomaly Detection — ARIMA Residuals and LSTM Reconstruction</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Implement time-series anomaly detection using ARIMA residuals for linear stationary processes, STL decomposition for seasonal data, LSTM autoencoders for complex temporal patterns, and point-adjust F1 evaluation with delay tolerance for fair benchmark comparison.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Time-Series Anomaly Detection — ARIMA Residuals and LSTM Reconstruction</h1>
+<p>Time-series anomaly detection is harder than tabular anomaly detection because the temporal structure creates dependencies between observations. A value of 100 may be normal at noon but anomalous at 3am. Methods must model the expected temporal pattern and flag deviations — residual-based approaches (ARIMA, STL) for linear stationary data, and neural reconstruction methods (LSTM autoencoder) for complex non-linear patterns.</p>
+<h2>Types of Temporal Anomalies</h2>
+<p>Three fundamental anomaly types arise in time series: (1) Point anomalies — a single observation deviates from its neighbours; easiest to detect. (2) Contextual anomalies — a value is normal globally but anomalous in context (e.g., 15°C is normal in summer but anomalous in winter). (3) Collective anomalies — a subsequence is anomalous even though individual values appear normal (e.g., a machine vibrating at the wrong frequency for 10 minutes). Each type requires a different detection strategy.</p>
+<ul>
+<li>Point anomalies: use univariate residual thresholding (ARIMA, STL) or z-score on sliding windows.</li>
+<li>Contextual anomalies: condition on temporal context — ARIMA captures linear context; LSTM captures non-linear context.</li>
+<li>Collective anomalies: compare subsequences using shape-based distances (DTW) or reconstruction error over windows.</li>
+<li>Seasonal anomalies: STL decomposes trend + seasonality + residual; anomaly = large residual after seasonal removal.</li>
+<li>Streaming vs batch: ARIMA can be updated online; LSTM requires offline window processing.</li>
+</ul>
+<h2>ARIMA Residual-Based Detection</h2>
+<p>ARIMA(p,d,q) fits a linear model to stationary time series: the AR(p) component captures autocorrelation, the I(d) component handles non-stationarity via differencing, and the MA(q) component models the moving average of residuals. After fitting to normal data, the residual eₜ = xₜ − x̂ₜ should be white noise. Anomalies produce large |eₜ|. The threshold is set at μ±3σ of the residual distribution. This approach is fast, interpretable, and works well for stationary or mildly non-stationary univariate series.</p>
+<pre><code class="language-python">import numpy as np
+from statsmodels.tsa.arima.model import ARIMA
+from sklearn.metrics import roc_auc_score
+
+np.random.seed(42)
+# Synthetic time series: AR(1) with injected anomalies
+n = 300
+ts = np.zeros(n)
+ts[0] = 0.0
+for t in range(1, n):
+    ts[t] = 0.7 * ts[t-1] + np.random.randn()
+anom_idx = [80, 130, 200, 250]
+for idx in anom_idx:
+    ts[idx] += np.random.choice([-1, 1]) * 6.0
+
+# Fit ARIMA on first 200 points (normal training window)
+train, test = ts[:200], ts[200:]
+model = ARIMA(train, order=(1, 0, 1)).fit()
+resid_train = model.resid
+mu_r, sig_r = resid_train.mean(), resid_train.std()
+
+# Score test points via one-step-ahead forecast
+forecasts = model.forecast(steps=len(test))
+resid_test = np.abs(test - forecasts)
+thr = mu_r + 3 * sig_r
+alerts = resid_test &gt; thr
+y_true = np.zeros(len(test)); y_true[[0, 50]] = 1  # known anom indices
+print(f'ARIMA residual threshold (3sigma): {thr:.4f}')
+print(f'Alerts in test window: {alerts.sum()}')
+print(f'Residual mean: {resid_test.mean():.4f}, std: {resid_test.std():.4f}')
+</code></pre>
+<h2>STL Decomposition and Residual Thresholding</h2>
+<p>For seasonal time series, ARIMA residuals may be large merely due to seasonal patterns the model did not capture. STL (Seasonal and Trend decomposition using Loess) decomposes xₜ = Tₜ + Sₜ + Rₜ where Tₜ is the trend, Sₜ is the seasonal component, and Rₜ is the remainder. Anomalies appear as large Rₜ. STL is robust to outliers (uses locally weighted regression) and handles irregular seasonal patterns better than additive decomposition. After removing trend and seasonality, apply a rolling z-score or IQR-based threshold on Rₜ.</p>
+<h2>LSTM Autoencoder for Sequence Anomaly Detection</h2>
+<p>An LSTM autoencoder learns to compress and reconstruct normal time-series windows. The encoder LSTM maps a window of length W to a latent vector; the decoder LSTM reconstructs the original window. Trained exclusively on normal windows, the model learns temporal patterns specific to the normal regime. At test time, the reconstruction error ‖xₜ:ₜ₊W − x̂ₜ:ₜ₊W‖² is high for anomalous windows because the model fails to reconstruct unseen abnormal patterns.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+class LSTMAutoencoder(nn.Module):
+    def __init__(self, n_features=1, hidden=32, n_layers=1):
+        super().__init__()
+        self.encoder = nn.LSTM(n_features, hidden, n_layers, batch_first=True)
+        self.decoder = nn.LSTM(hidden, hidden, n_layers, batch_first=True)
+        self.out_proj = nn.Linear(hidden, n_features)
+
+    def forward(self, x):
+        # x: (batch, seq_len, features)
+        _, (h, c) = self.encoder(x)
+        # Repeat context vector for decoder
+        dec_input = h[-1].unsqueeze(1).repeat(1, x.size(1), 1)
+        dec_out, _ = self.decoder(dec_input)
+        return self.out_proj(dec_out)
+
+torch.manual_seed(0); np.random.seed(0)
+W = 30  # window size
+np.random.seed(0)
+ts_norm = np.sin(np.linspace(0, 20 * np.pi, 1000)) + 0.1 * np.random.randn(1000)
+windows = np.array([ts_norm[i:i+W] for i in range(len(ts_norm)-W)])
+X_win = torch.tensor(windows[:, :, None], dtype=torch.float32)
+
+ae_lstm = LSTMAutoencoder(n_features=1, hidden=32)
+opt_lstm = torch.optim.Adam(ae_lstm.parameters(), lr=1e-3)
+for ep in range(20):
+    pred = ae_lstm(X_win)
+    loss = nn.functional.mse_loss(pred, X_win)
+    opt_lstm.zero_grad(); loss.backward(); opt_lstm.step()
+    if (ep+1) % 5 == 0:
+        print(f'Epoch {ep+1:2d} | Recon MSE: {loss.item():.6f}')
+</code></pre>
+<h2>Rolling Window Reconstruction Error with Threshold</h2>
+<p>At test time, compute reconstruction error for every rolling window and assign the window's error to the final timestep in the window. This produces a scalar anomaly score for each time step. The threshold is the (1−α) quantile of reconstruction errors on normal windows. A practical refinement: smooth the score with a rolling median to reduce point-anomaly sensitivity and better capture collective anomalies. Visualising the score alongside the raw time series helps identify anomaly boundaries.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+from sklearn.metrics import roc_auc_score
+
+def rolling_recon_score(model, ts_raw, window=30):
+    model.eval()
+    scores = np.full(len(ts_raw), np.nan)
+    with torch.no_grad():
+        for i in range(len(ts_raw) - window):
+            win = torch.tensor(ts_raw[i:i+window][None, :, None], dtype=torch.float32)
+            pred = model(win)
+            err = ((win - pred) ** 2).mean().item()
+            scores[i + window - 1] = err
+    return scores
+
+np.random.seed(5)
+# Test series: mostly normal sine + 3 anomaly windows
+ts_test = np.sin(np.linspace(0, 10*np.pi, 400)) + 0.1*np.random.randn(400)
+ts_test[150:165] += 3.0  # collective anomaly
+ts_test[280]     += 5.0  # point anomaly
+ts_test[330:340] -= 2.5  # contextual dip
+
+scores = rolling_recon_score(ae_lstm, ts_test, window=30)
+valid = ~np.isnan(scores)
+thr = np.percentile(scores[valid][:100], 95)
+alerts = scores[valid] &gt; thr
+print(f'Threshold (95th pct on first 100 windows): {thr:.6f}')
+print(f'Total alerts: {alerts.sum()} of {valid.sum()} scored timesteps')
+print(f'Anomaly windows: 150-165, 280, 330-340')
+</code></pre>
+<h2>Anomaly Evaluation Metrics</h2>
+<p>Point-level precision/recall is misleading for time-series: a detector that fires one step late for every anomaly gets zero recall but has detected every event. Point-adjust F1 addresses this: if any alert falls within an anomaly segment, all timesteps in that segment are counted as detected. Formally: for each contiguous anomaly segment, if at least one prediction in the segment is 1, set all predictions in the segment to 1 before computing metrics. This metric aligns evaluation with operational requirements where detecting an event matters more than the exact timestamp.</p>
+<blockquote>
+<p><strong>Evaluation Protocol for Time-Series Anomaly Detection</strong>: Always report both point-level F1 and point-adjust F1. Point-adjust rewards event-level detection; point-level rewards precise timing. Use delay tolerance (maximum acceptable delay in samples) as a third metric when early detection is critical. For streaming systems, also report latency: the mean time from event onset to first alert.</p>
+</blockquote>
+<pre><code class="language-python">import numpy as np
+from sklearn.metrics import f1_score, roc_auc_score
+
+def point_adjust_f1(y_true, y_pred, delay_tolerance=5):
+    '''Point-adjust: if any alert within an anomaly segment, credit the whole segment.'''
+    y_adj = y_pred.copy().astype(int)
+    n = len(y_true)
+    i = 0
+    while i &lt; n:
+        if y_true[i] == 1:
+            # Find end of anomaly segment
+            j = i
+            while j &lt; n and y_true[j] == 1:
+                j += 1
+            # Check if any prediction in segment (with tolerance) is 1
+            start = max(0, i - delay_tolerance)
+            end   = min(n, j + delay_tolerance)
+            if y_pred[start:end].any():
+                y_adj[i:j] = 1  # credit entire segment
+            i = j
+        else:
+            i += 1
+    f1_pt  = f1_score(y_true, y_pred,  zero_division=0)
+    f1_adj = f1_score(y_true, y_adj, zero_division=0)
+    return f1_pt, f1_adj
+
+np.random.seed(8)
+y_true_ts = np.zeros(300, dtype=int)
+y_true_ts[80:95] = 1; y_true_ts[200:210] = 1  # two anomaly segments
+y_pred_ts = np.zeros(300, dtype=int)
+y_pred_ts[88] = 1  # late detection of first
+y_pred_ts[205] = 1  # detection inside second
+f1_p, f1_a = point_adjust_f1(y_true_ts, y_pred_ts)
+print(f'Point-level F1:  {f1_p:.4f}')
+print(f'Point-adjust F1: {f1_a:.4f}')
+print('Late detection credited by point-adjust but not point-level.')
+</code></pre>
+<h2>Time-Series Anomaly Method Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Assumption</th>
+<th>Streaming</th>
+<th>Labeled Data Needed</th>
+<th>Anomaly Types</th>
+<th>Training Cost</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>ARIMA residuals</td>
+<td>Linear, stationary process</td>
+<td>Yes (online update)</td>
+<td>No</td>
+<td>Point, contextual</td>
+<td>Very low — statsmodels</td>
+</tr>
+<tr>
+<td>STL + threshold</td>
+<td>Additive trend+season+noise</td>
+<td>No (batch)</td>
+<td>No</td>
+<td>Point, seasonal</td>
+<td>Low — Loess regression</td>
+</tr>
+<tr>
+<td>LSTM reconstruction</td>
+<td>Non-linear temporal patterns</td>
+<td>No (windowed)</td>
+<td>No (self-supervised)</td>
+<td>Point, collective</td>
+<td>High — GPU training</td>
+</tr>
+<tr>
+<td>One-class LSTM (prediction)</td>
+<td>Non-linear, predictable</td>
+<td>Yes (autoregressive)</td>
+<td>No</td>
+<td>Point, contextual</td>
+<td>High — GPU training</td>
+</tr>
+<tr>
+<td>Isolation Forest on windows</td>
+<td>IID within windows</td>
+<td>No</td>
+<td>No</td>
+<td>Point, collective</td>
+<td>Medium — tree ensemble</td>
+</tr>
+</tbody>
+</table>
+<p>For production time-series anomaly detection: use ARIMA as a fast baseline — it often handles KPI monitoring (CPU, latency) well because these series are nearly stationary within sliding windows. Use LSTM autoencoder when the series has complex non-linear patterns (sensor fusion, multi-variate) and you have enough clean training data (&gt;10K timesteps). Combine both: ARIMA for fast online scoring, LSTM for offline deep analysis of flagged windows.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sparse Attention — Local, Strided, and Longformer Patterns | Notes Backup</title>
+  <meta name="description" content="Implement sliding window, global+local, and BigBird sparse attention patterns from scratch, benchmark sparse vs dense attention memory at L=4096, and understand when sparse attention is the right tool." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Sparse Attention — Local, Strided, and Longformer Patterns</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Implement sliding window, global+local, and BigBird sparse attention patterns from scratch, benchmark sparse vs dense attention memory at L=4096, and understand when sparse attention is the right tool.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Sparse Attention — Local, Strided, and Longformer Patterns</h1>
+<p>Full self-attention computes O(L²) attention weights — for L=16K tokens that is 256 million pairs per head per layer. At 16 heads and 32 layers, a forward pass requires roughly 130 billion attention scores before softmax; storing them in float16 uses 260 GB. Sparse attention addresses this by computing attention only for a structured subset of (query, key) pairs, reducing complexity from O(L²) to O(L·k) where k ≪ L is the sparsity pattern width. The challenge is that irregular sparsity patterns cannot be implemented as a single dense matrix multiply and require custom GPU kernels or masked attention tricks.</p>
+<h2>Full Attention: O(L²) Complexity</h2>
+<p>Standard scaled dot-product attention computes scores S = QKᵀ/√d of shape (B, h, L, L). Memory for S is B × h × L² × 2 bytes (float16). For B=1, h=1, L=4096: 33 MB just for scores; for L=16384: 537 MB. Across 16 heads: ~8 GB per layer. FlashAttention avoids materialising the full matrix but still requires O(L²) compute. For tasks with L &gt; 4096 — long documents, genomics, audio, code repositories — the quadratic cost becomes the binding constraint, motivating sparse patterns that preserve essential attention paths while skipping irrelevant pairs.</p>
+<h2>Sliding Window Attention (Longformer)</h2>
+<p>The simplest sparse pattern: each token attends only to the w/2 tokens to its left and right (window size w). Complexity drops to O(L × w). Longformer (Beltagy et al. 2020) uses w=512 on sequences up to L=4096. The sliding window captures local context that dominates most NLP tasks — adjacent tokens, nearby sentences. The effective receptive field grows with depth: a token at layer l can indirectly attend to positions up to l × w/2 tokens away. For w=512 and 12 layers, the receptive field covers the full L=4096 document.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+import math
+
+def sliding_window_attention(Q, K, V, window):
+    &quot;&quot;&quot;Naive sliding window attention (Longformer-style local attention).
+    Q, K, V: (B, h, L, d). Each token attends to window//2 tokens on each side.
+    Returns: (B, h, L, d). O(L * window) attention pairs computed.
+    &quot;&quot;&quot;
+    B, h, L, d = Q.shape
+    half = window // 2
+    out = torch.zeros_like(Q)
+    for i in range(L):
+        lo = max(0, i - half)
+        hi = min(L, i + half + 1)
+        q_i = Q[:, :, i:i+1, :]          # (B, h, 1, d)
+        k_w = K[:, :, lo:hi, :]          # (B, h, win, d)
+        v_w = V[:, :, lo:hi, :]          # (B, h, win, d)
+        scores = q_i @ k_w.transpose(-2,-1) / math.sqrt(d)
+        out[:, :, i, :] = (F.softmax(scores, dim=-1) @ v_w).squeeze(2)
+    return out
+
+torch.manual_seed(0)
+B, h, L, d, W = 1, 2, 64, 16, 8
+Q = torch.randn(B, h, L, d)
+K = torch.randn(B, h, L, d)
+V = torch.randn(B, h, L, d)
+out = sliding_window_attention(Q, K, V, W)
+print(f'Sliding window attention: L={L}, window={W}')
+print(f'Output shape: {out.shape}')
+attended_pairs = sum(min(L, i+W//2+1) - max(0, i-W//2) for i in range(L))
+full_pairs = L * L
+print(f'Pairs computed: {attended_pairs} / {full_pairs} ({attended_pairs/full_pairs:.1%} of full)')
+print(f'Theoretical complexity: O(L*w)={L*W} vs O(L^2)={L*L}')
+</code></pre>
+<h2>Global + Local Attention (Longformer)</h2>
+<p>Pure local window attention cannot capture global context — a [CLS] token or a question token needs to attend to all positions. Longformer solves this with global tokens: a small set of positions (typically [CLS] for classification, or question tokens for QA) attend to all L positions and all positions attend back to global tokens. This adds O(L × g) pairs where g is the number of global tokens (typically g ≪ L). The pattern has three components: local window pairs, global-to-all pairs, and all-to-global pairs — keeping total complexity O(L × (w + g)).</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+import math
+
+def global_local_attention(Q, K, V, window, global_indices):
+    &quot;&quot;&quot;Global+local attention (Longformer pattern).
+    global_indices: list of token positions with global attention.
+    &quot;&quot;&quot;
+    B, h, L, d = Q.shape
+    scale = math.sqrt(d)
+    half = window // 2
+    # Start with local window attention for all tokens
+    out = torch.zeros_like(Q)
+    for i in range(L):
+        lo, hi = max(0, i - half), min(L, i + half + 1)
+        attend_to = list(range(lo, hi))
+        # All tokens also attend to global tokens
+        for g in global_indices:
+            if g not in attend_to:
+                attend_to.append(g)
+        attend_to = sorted(set(attend_to))
+        kw = K[:, :, attend_to, :]
+        vw = V[:, :, attend_to, :]
+        scores = Q[:, :, i:i+1, :] @ kw.transpose(-2,-1) / scale
+        out[:, :, i, :] = (F.softmax(scores, dim=-1) @ vw).squeeze(2)
+    # Global tokens also attend to ALL positions
+    for g in global_indices:
+        scores = Q[:, :, g:g+1, :] @ K.transpose(-2,-1) / scale
+        out[:, :, g, :] = (F.softmax(scores, dim=-1) @ V).squeeze(2)
+    return out
+
+B, h, L, d, W = 1, 1, 32, 8, 6
+globals_idx = [0, 1]  # e.g., [CLS] and [SEP] are global
+Q = torch.randn(B, h, L, d)
+K, V = torch.randn(B,h,L,d), torch.randn(B,h,L,d)
+out = global_local_attention(Q, K, V, W, globals_idx)
+print(f'Global+local attention: L={L}, window={W}, global_tokens={globals_idx}')
+print(f'Output: {out.shape}')
+print(f'Complexity: O(L*(w+g)) = O({L}*({W}+{len(globals_idx)})) = O({L*(W+len(globals_idx))})')
+</code></pre>
+<h2>BigBird: Local, Global, and Random Attention</h2>
+<p>BigBird (Zaheer et al. 2020) combines three attention components to prove that O(L) attention is a universal approximator of full attention: (1) local window of size w (same as Longformer), (2) g global tokens that attend to all positions, (3) r random keys per query — each query additionally attends to r randomly selected positions. The random component ensures that no two tokens are too many hops apart in the attention graph, enabling gradient flow and long-range information mixing. BigBird achieves O(L × (w + g + r)) complexity with strong empirical results on genomics (DNA sequences up to L=4096) and long-document tasks.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+import math
+
+def bigbird_attention(Q, K, V, window, global_indices, num_random):
+    &quot;&quot;&quot;BigBird attention: local + global + random attention pattern.&quot;&quot;&quot;
+    B, h, L, d = Q.shape
+    scale = math.sqrt(d)
+    half = window // 2
+    out = torch.zeros_like(Q)
+    torch.manual_seed(42)  # reproducible random pattern
+    # Precompute random attention pattern (same for all positions for simplicity)
+    random_keys = [torch.randperm(L)[:num_random].tolist() for _ in range(L)]
+    for i in range(L):
+        lo, hi = max(0, i-half), min(L, i+half+1)
+        local_idx = list(range(lo, hi))
+        all_idx = sorted(set(local_idx + list(global_indices) + random_keys[i]))
+        kw = K[:, :, all_idx, :]
+        vw = V[:, :, all_idx, :]
+        scores = Q[:, :, i:i+1, :] @ kw.transpose(-2,-1) / scale
+        out[:, :, i, :] = (F.softmax(scores, dim=-1) @ vw).squeeze(2)
+    for g in global_indices:
+        scores = Q[:, :, g:g+1, :] @ K.transpose(-2,-1) / scale
+        out[:, :, g, :] = (F.softmax(scores, dim=-1) @ V).squeeze(2)
+    return out
+
+B, h, L, d = 1, 1, 48, 8
+W, g_idx, r = 8, [0, 1], 4
+Q = torch.randn(B, h, L, d)
+K, V = torch.randn(B,h,L,d), torch.randn(B,h,L,d)
+out = bigbird_attention(Q, K, V, W, g_idx, r)
+print(f'BigBird: L={L}, window={W}, global={g_idx}, random={r}')
+print(f'Output: {out.shape}')
+eff_k = W + len(g_idx) + r
+print(f'Effective keys per query: ~{eff_k}, complexity: O({L}*{eff_k})={L*eff_k} vs O(L^2)={L*L}')
+</code></pre>
+<h2>Benchmarking Sparse vs Dense Attention</h2>
+<p>The quadratic memory of full attention becomes the bottleneck above L=2048 on a 16 GB GPU. Sparse attention allows L=16K or even L=128K within the same memory budget. However, naive Python implementations of sparse patterns are slower than dense attention for small L because they lack the highly optimised CUDA kernels that power F.scaled_dot_product_attention. Production sparse attention requires custom kernels (Longformer uses a dilated convolution trick; BigBird uses block-sparse CUDA operations). The benchmarks below measure the naive implementations to verify correctness and complexity scaling.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+import math
+import time
+
+def dense_attention(Q, K, V):
+    d = Q.shape[-1]
+    return F.softmax(Q @ K.transpose(-2,-1) / math.sqrt(d), dim=-1) @ V
+
+def measure_attn(fn, *args, n=10):
+    t0 = time.perf_counter()
+    for _ in range(n):
+        _ = fn(*args)
+    return (time.perf_counter() - t0) / n * 1000
+
+B, h, d = 1, 1, 32
+W, r = 16, 4
+print(f&quot;{'Method':&gt;20} {'L=256':&gt;10} {'L=512':&gt;10} {'L=1024':&gt;10} {'Complexity':&gt;14}&quot;)
+for L in [256, 512, 1024]:
+    Q = torch.randn(B, h, L, d)
+    K, V = torch.randn(B,h,L,d), torch.randn(B,h,L,d)
+    t_dense = measure_attn(dense_attention, Q, K, V)
+    row = f'{'Dense':&gt;20} {t_dense:&gt;9.1f}'
+    print(f&quot;Dense L={L}: {t_dense:.2f}ms | mem~{L*L*2/1024:.0f}KB&quot;)
+print('\nKey takeaway: sparse patterns reduce memory O(L^2)-&gt;O(L*w);')
+print('custom CUDA kernels needed for actual speed gains over dense at small L.')
+print(f'Dense at L=4096: mem~{4096*4096*2//1024//1024}MB | Sparse(w={W}): ~{4096*W*2//1024}KB')
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Complexity</th>
+<th>Memory at L=4K</th>
+<th>Quality vs Full</th>
+<th>Implementation</th>
+<th>Best Use Case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Full (dense)</td>
+<td>O(L²)</td>
+<td>~32 MB/head</td>
+<td>Baseline</td>
+<td>Single matmul — trivial</td>
+<td>L &lt; 2K, any task</td>
+</tr>
+<tr>
+<td>Sliding window</td>
+<td>O(L·w)</td>
+<td>~2 MB (w=256)</td>
+<td>Good for local tasks</td>
+<td>Loop or block-sparse kernel</td>
+<td>Long NLP, audio (L 2K–32K)</td>
+</tr>
+<tr>
+<td>Global+local</td>
+<td>O(L·(w+g))</td>
+<td>~2 MB (w=256, g=2)</td>
+<td>Strong — global tokens preserve semantics</td>
+<td>Longformer kernel</td>
+<td>Long-doc QA, classification</td>
+</tr>
+<tr>
+<td>BigBird</td>
+<td>O(L·(w+g+r))</td>
+<td>~3 MB (w=64,g=2,r=8)</td>
+<td>Near full attention quality</td>
+<td>Block-sparse CUDA</td>
+<td>Genomics, very long docs</td>
+</tr>
+<tr>
+<td>Linear attention</td>
+<td>O(L·d²)</td>
+<td>O(L) — no L² term</td>
+<td>Quality gap for long sequences</td>
+<td>Kernel trick — pure matmuls</td>
+<td>L &gt; 64K, approximate tasks</td>
+</tr>
+</tbody>
+</table>
+<h2>Practical Considerations</h2>
+<p>Choosing a sparse pattern requires understanding where attention is informative in your data. For text classification a few global tokens ([CLS]) are sufficient; for long-form generation a sliding window preserves fluency. Sparse attention patterns implemented naively in PyTorch are slower than dense attention for L &lt; 4096 because loop overhead dominates. For production use, specialised kernels are required: Longformer's Hugging Face implementation uses a carefully optimised chunk-based approach; BigBird and Sparse Transformer rely on block-sparse CUDA operations from libraries like triton or apex.</p>
+<blockquote>
+<p><strong>Sparse Attention Needs Custom Kernels</strong>: Never implement sparse attention with Python loops or masked dense attention (setting masked entries to -inf) in production — both are O(L²) in memory. Masked dense attention computes the full L×L matrix and zeroes entries after the fact; it gives the correct output but defeats the purpose. Real O(L·w) sparse attention requires custom CUDA kernels or block-sparse libraries. For quick prototyping, use the Longformer implementation in HuggingFace transformers.</p>
+</blockquote>
+<h2>When to Use Sparse Attention</h2>
+<p>Use sparse attention when sequence length exceeds ~2K tokens and the task structure justifies the pattern. Sliding window is appropriate when local context is sufficient (most token-level NLP tasks). Global+local (Longformer) suits document-level tasks where a few anchor tokens need full context. BigBird is best when you need near-full-attention quality at O(L) cost and can afford block-sparse kernel complexity. For sequences above L=64K where even O(L·w) is expensive, linear attention or state-space models (Mamba, S4) may be more appropriate.</p>
+<ul>
+<li>Sliding window (w=512): Longformer uses this for token classification on L=4096 documents.</li>
+<li>Global+local: add [CLS] as a global token for classification, question tokens for QA.</li>
+<li>BigBird: used for genomic sequence modelling (DNA, RNA) with L up to 4096.</li>
+<li>Sparse Transformer (OpenAI 2019): alternating local and strided patterns for autoregressive generation.</li>
+<li>Longformer-Encoder-Decoder (LED): applies sparse attention to encoder, full attention to cross-attention.</li>
+<li>All sparse patterns require causal masking for autoregressive generation — future positions must be excluded.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

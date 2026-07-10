@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Transfer Learning — Feature Extraction vs Fine-Tuning Strategies | Notes Backup</title>
+  <meta name="description" content="Transfer learning strategies for CNNs: feature extraction (frozen backbone) vs fine-tuning (unfrozen layers). Covers discriminative learning rates per layer group, progressive unfreezing, freezing BatchNorm statistics, and domain shift considerations for ImageNet-pretrained models." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Transfer Learning — Feature Extraction vs Fine-Tuning Strategies</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Transfer learning strategies for CNNs: feature extraction (frozen backbone) vs fine-tuning (unfrozen layers). Covers discriminative learning rates per layer group, progressive unfreezing, freezing BatchNorm statistics, and domain shift considerations for ImageNet-pretrained models.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Transfer Learning — Feature Extraction vs Fine-Tuning Strategies</h1>
+<p>Transfer learning is the practice of initializing a model with weights pretrained on a large dataset (typically ImageNet with 1.28M images and 1000 classes) and adapting it to a new task. Because early CNN layers learn universal low-level features (edges, textures, colors) and later layers learn increasingly task-specific features, pretrained weights provide a powerful starting point that dramatically reduces the data and compute required for the target task. The two primary transfer strategies — feature extraction and fine-tuning — differ in which layers are allowed to update during target training.</p>
+<h2>Feature Extraction — Frozen Backbone</h2>
+<p>In feature extraction, all convolutional layers are frozen (requires_grad=False) and only the classification head is trained. The backbone acts as a fixed feature extractor: each image is mapped to a feature vector (e.g., 2048-dim for ResNet-50 after global avg pool), and a new linear classifier is trained on top of these frozen features. This is fast (only head params are optimized), memory-efficient (no gradients through the backbone), and works well when the target domain is visually similar to ImageNet. Feature extraction is the right choice when training data is very small (&lt;1000 examples) or when the target task is similar to ImageNet classification.</p>
+<h2>Fine-Tuning — Unfreezing Layers</h2>
+<p>In fine-tuning, some or all pretrained layers are unfrozen and allowed to update during target training. The key hyperparameter is the learning rate: pretrained layers should use a much lower learning rate (1e-5 to 1e-4) than the new head (1e-3), to preserve the learned representations while allowing them to shift slightly toward the target domain. Fine-tuning provides higher accuracy than feature extraction on most tasks because the backbone can adapt its higher-level features to the target distribution. It requires more training data (typically &gt;5000 examples) and longer training to avoid overfitting.</p>
+<h2>When to Use Which Strategy</h2>
+<ul>
+<li>Very small dataset (&lt;1000 samples), similar domain (e.g., pets, flowers) -&gt; feature extraction only.</li>
+<li>Small dataset (1000-10000), similar domain -&gt; fine-tune top 1-2 layers + head.</li>
+<li>Medium dataset (10000+), similar domain -&gt; fine-tune all layers with small backbone LR.</li>
+<li>Large dataset (100000+), any domain -&gt; fine-tune all layers or train from scratch.</li>
+<li>Very different domain (e.g., medical imaging, satellite) -&gt; fine-tune all layers regardless of size.</li>
+<li>Low compute budget -&gt; feature extraction (no backbone gradients, faster per step).</li>
+</ul>
+<blockquote>
+<p><strong>Always Freeze BatchNorm During Fine-Tuning</strong>: BatchNorm layers maintain running statistics (mean and variance) estimated from training batches. When you call model.train() and fine-tune with small batches on a new domain, the running stats are updated to reflect the new distribution — destroying the statistics calibrated on ImageNet. Always call bn_module.eval() after model.train() to freeze the BN running stats. The affine parameters (gamma, beta) can still be updated. Forgetting this step often causes a significant accuracy drop, especially when the target batch size is small or the domain shift is large.</p>
+</blockquote>
+<h2>Discriminative Learning Rates</h2>
+<p>Discriminative learning rates (Howard &amp; Ruder, ULMFiT 2018) assign different learning rates to different layer groups: earlier layers (closer to the input) use lower learning rates, later layers use higher rates. The rationale: early layers contain more general, transferable features that should change little; later layers contain more task-specific features that need to adapt more. For ResNet-50, a typical schedule might be: layer1 LR = 1e-5, layer2 LR = 3e-5, layer3 LR = 1e-4, layer4 LR = 3e-4, fc LR = 1e-3 (a 10× step per group). This achieves better accuracy than a single LR for all layers.</p>
+<h2>Code Examples</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from torchvision import models
+
+def build_feature_extractor(num_classes: int):
+    &quot;&quot;&quot;Freeze all backbone params; only train the new classification head.&quot;&quot;&quot;
+    model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
+    # Freeze all parameters
+    for param in model.parameters():
+        param.requires_grad = False
+    # Replace final fully-connected layer
+    model.fc = nn.Linear(model.fc.in_features, num_classes)
+    # fc is newly created so requires_grad=True by default
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total     = sum(p.numel() for p in model.parameters())
+    print(f&quot;Trainable: {trainable:,} / {total:,} ({100*trainable/total:.3f}%)&quot;)
+    return model
+
+model = build_feature_extractor(num_classes=10)
+optimizer = torch.optim.Adam(
+    filter(lambda p: p.requires_grad, model.parameters()), lr=1e-3
+)
+criterion = nn.CrossEntropyLoss()
+print(f&quot;Optimizer params: {sum(p.numel() for g in optimizer.param_groups for p in g['params']):,}&quot;)
+print(&quot;Feature extraction: backbone is a fixed transform; only head params optimized&quot;)
+</code></pre>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from torchvision import models
+
+def make_discriminative_groups(model, base_lr=1e-5, lr_mult=3.0):
+    &quot;&quot;&quot;
+    Discriminative LRs: earlier layers get lower LR to preserve pretrained features.
+    Each deeper layer group uses lr_mult x higher LR than the previous.
+    &quot;&quot;&quot;
+    groups = [
+        {'params': model.layer1.parameters(), 'lr': base_lr},
+        {'params': model.layer2.parameters(), 'lr': base_lr * lr_mult},
+        {'params': model.layer3.parameters(), 'lr': base_lr * lr_mult**2},
+        {'params': model.layer4.parameters(), 'lr': base_lr * lr_mult**3},
+        {'params': model.fc.parameters(),     'lr': base_lr * lr_mult**4},
+    ]
+    return groups
+
+model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
+model.fc = nn.Linear(model.fc.in_features, 10)
+
+groups = make_discriminative_groups(model, base_lr=1e-5, lr_mult=3.0)
+optimizer = torch.optim.Adam(groups)
+
+names = ['layer1', 'layer2', 'layer3', 'layer4', 'fc']
+print('Discriminative learning rates:')
+for name, g in zip(names, groups):
+    n = sum(p.numel() for p in g['params'])
+    print(f&quot;  {name:&lt;10}: lr={g['lr']:.1e}  ({n:,} params)&quot;)
+print('Earlier layers use lower LR -- pretrained features preserved more strongly')
+</code></pre>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from torchvision import models
+
+def set_requires_grad_from(model, layer_name: str):
+    &quot;&quot;&quot;Freeze all layers before layer_name; unfreeze from layer_name onward.&quot;&quot;&quot;
+    unfreezing = False
+    for name, param in model.named_parameters():
+        if layer_name in name:
+            unfreezing = True
+        param.requires_grad = unfreezing
+    n = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f&quot;  Unfrozen from '{layer_name}': {n:,} trainable params&quot;)
+
+model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
+model.fc = nn.Linear(model.fc.in_features, 10)
+
+# Epoch 1-5: head only (feature extraction warmup)
+for p in model.parameters(): p.requires_grad = False
+for p in model.fc.parameters(): p.requires_grad = True
+print(&quot;Epoch 1-5 (head only):&quot;)
+print(f&quot;  Trainable: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}&quot;)
+
+# Epoch 6-10: unfreeze layer4 (deepest residual block)
+print(&quot;Epoch 6-10:&quot;)
+set_requires_grad_from(model, 'layer4')
+
+# Epoch 11-15: unfreeze layer3
+print(&quot;Epoch 11-15:&quot;)
+set_requires_grad_from(model, 'layer3')
+
+# Epoch 16+: full fine-tuning
+for p in model.parameters(): p.requires_grad = True
+print(&quot;Epoch 16+ (full):&quot;)
+print(f&quot;  Trainable: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}&quot;)
+</code></pre>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from torchvision import models
+
+def freeze_bn_stats(model: nn.Module):
+    &quot;&quot;&quot;
+    Keep BN layers in eval mode to freeze running_mean/running_var.
+    Affine params (weight=gamma, bias=beta) remain trainable.
+    Call this AFTER model.train() in each training iteration.
+    &quot;&quot;&quot;
+    for module in model.modules():
+        if isinstance(module, nn.BatchNorm2d):
+            module.eval()                        # freeze running stats
+            module.weight.requires_grad = True   # gamma still adapts
+            module.bias.requires_grad   = True   # beta still adapts
+
+model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
+model.fc = nn.Linear(model.fc.in_features, 5)
+
+bn_count = sum(1 for m in model.modules() if isinstance(m, nn.BatchNorm2d))
+print(f&quot;BN layers in ResNet-50: {bn_count}&quot;)
+
+# Simulate training loop step
+model.train()        # sets all layers to training mode (BN stats update)
+freeze_bn_stats(model)  # immediately freeze BN stats back to eval mode
+
+bn_frozen = sum(1 for m in model.modules()
+                if isinstance(m, nn.BatchNorm2d) and not m.training)
+print(f&quot;After freeze_bn_stats: {bn_frozen}/{bn_count} BN layers in eval mode&quot;)
+print(&quot;BN running_mean/var preserved; gamma/beta still fine-tuned&quot;)
+print(&quot;Without this: ImageNet BN stats are destroyed by target distribution&quot;)
+</code></pre>
+<h2>Domain Adaptation Considerations</h2>
+<p>When the source domain (ImageNet) and target domain differ significantly — e.g., grayscale medical images, satellite imagery, microscopy — pretrained features are less transferable. In these cases: (1) fine-tune all layers with a small learning rate (1e-5) for the backbone and a larger rate (1e-4) for the head; (2) use longer training (more epochs) to allow the backbone to adapt; (3) consider domain-specific pretraining if available (e.g., RadImageNet for medical imaging, GeoAI models for satellite data); (4) batch normalization statistics should definitely be frozen initially and then optionally fine-tuned in later epochs. For extreme domain shifts (e.g., RGB to depth images), training from scratch with a good random initialization (e.g., Kaiming) may outperform transfer learning.</p>
+<h2>Transfer Strategy Reference</h2>
+<table>
+<thead>
+<tr>
+<th>Strategy</th>
+<th>Frozen Layers</th>
+<th>Target Dataset Size</th>
+<th>Domain Similarity</th>
+<th>Training Speed</th>
+<th>Typical Accuracy</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Feature extraction</td>
+<td>All conv layers</td>
+<td>Very small (&lt;1K)</td>
+<td>High (similar to ImageNet)</td>
+<td>Fastest</td>
+<td>Moderate</td>
+</tr>
+<tr>
+<td>Fine-tune top block</td>
+<td>Layers 1–3</td>
+<td>Small (1K–10K)</td>
+<td>High</td>
+<td>Fast</td>
+<td>Good</td>
+</tr>
+<tr>
+<td>Progressive unfreeze</td>
+<td>Layer-by-layer from top</td>
+<td>Medium (10K–100K)</td>
+<td>Medium</td>
+<td>Moderate</td>
+<td>Very good</td>
+</tr>
+<tr>
+<td>Full fine-tuning</td>
+<td>None</td>
+<td>Large (&gt;100K)</td>
+<td>Any</td>
+<td>Slowest</td>
+<td>Best</td>
+</tr>
+<tr>
+<td>Train from scratch</td>
+<td>N/A (random init)</td>
+<td>Very large (&gt;500K)</td>
+<td>Low (very different)</td>
+<td>Slowest</td>
+<td>Best for extreme shift</td>
+</tr>
+</tbody>
+</table>
+<h2>Practical Guidelines</h2>
+<p>A reliable transfer learning workflow: (1) always start with feature extraction for a few epochs to stabilize the new head weights before unfreezing anything; (2) use cosine LR schedule rather than step decay — it pairs better with fine-tuning because it does not abruptly change the LR; (3) apply label smoothing (ε=0.1) and moderate weight decay (1e-4) to prevent overfitting on small target datasets; (4) monitor validation loss carefully — fine-tuning can overfit quickly when target data is small; (5) use mixed precision (torch.autocast) to fit larger batches, which stabilize BN statistics if you choose to unfreeze BN.</p>
+<ul>
+<li>Feature extraction: freeze backbone, train head only — fastest, works with &lt;1000 samples.</li>
+<li>Fine-tuning: lower LR for backbone (1e-5), higher for head (1e-3) — better accuracy.</li>
+<li>Progressive unfreezing: unfreeze top-&gt;bottom, one block per phase — most stable.</li>
+<li>Discriminative LRs: earlier layers get exponentially lower LR (3x steps per group).</li>
+<li>BatchNorm: always call bn.eval() after model.train() to preserve ImageNet stats.</li>
+<li>Domain shift: extreme shift (medical, satellite) often requires full fine-tuning or domain-specific pretraining.</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

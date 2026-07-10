@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FCOS: Anchor-Free Object Detection | Notes Backup</title>
+  <meta name="description" content="FCOS detects objects per pixel without anchors — predicting (l,r,t,b) distances to box edges, centerness scores to suppress off-center predictions, and multi-level features from FPN." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>FCOS: Anchor-Free Object Detection</h1>
+      <ul class='note-meta'><li><strong>description:</strong> FCOS detects objects per pixel without anchors — predicting (l,r,t,b) distances to box edges, centerness scores to suppress off-center predictions, and multi-level features from FPN.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>FCOS: Anchor-Free Object Detection</h1>
+<p>FCOS (Fully Convolutional One-Stage detector) eliminates the anchor hyperparameters that plague RetinaNet and Faster R-CNN. Each FPN location independently predicts whether it falls inside a ground-truth box and, if so, regresses the distances to all four box edges. This per-pixel formulation removes NMS sensitivity to anchor size and aspect ratio.</p>
+<p>The key insight is that any point inside a ground-truth bounding box is a valid positive sample. FCOS assigns each FPN level a size range so small objects are detected on high-resolution levels and large objects on low-resolution levels, preventing scale ambiguity across levels.</p>
+<p>For every spatial location (x, y) on an FPN feature map, FCOS regresses four distances: l (left), r (right), t (top), b (bottom) — the distance from the point to each edge of the assigned ground-truth box. The final box is recovered as (x−l, y−t, x+r, y+b), making the regression target always positive and bounded by object size.</p>
+<pre><code>import torch
+
+def compute_fcos_targets(locations, gt_boxes, size_range):
+    # locations: (N,2) x,y on FPN level
+    # gt_boxes: (M,4) x1,y1,x2,y2
+    xs, ys = locations[:, 0], locations[:, 1]
+    l = xs[:, None] - gt_boxes[None, :, 0]  # (N,M)
+    t = ys[:, None] - gt_boxes[None, :, 1]
+    r = gt_boxes[None, :, 2] - xs[:, None]
+    b = gt_boxes[None, :, 3] - ys[:, None]
+    ltrb = torch.stack([l, t, r, b], dim=-1)  # (N,M,4)
+    inside = ltrb.min(-1).values &gt; 0
+    max_reg = ltrb.max(-1).values
+    in_range = (max_reg &gt;= size_range[0]) &amp; (max_reg &lt;= size_range[1])
+    return ltrb, inside &amp; in_range
+</code></pre>
+<p>When a location falls inside multiple ground-truth boxes, FCOS assigns it to the smallest box by area. This heuristic handles crowded scenes reasonably well but is less principled than later methods like ATSS, which use statistical overlap to determine positive samples adaptively.</p>
+<p>A parallel branch predicts a centerness score for each positive location. Centerness is 1 at the box center and falls off toward edges, acting as soft suppression of low-quality predictions without requiring additional NMS tuning. At inference, classification confidence is multiplied by centerness to rank proposals.</p>
+<pre><code>import torch
+
+def centerness_target(ltrb):
+    &quot;&quot;&quot;
+    ltrb: (N, 4) tensor of (l, t, r, b) distances
+    Returns centerness in [0, 1], peaks at box center.
+    &quot;&quot;&quot;
+    l, t, r, b = ltrb.unbind(-1)
+    centerness = torch.sqrt(
+        (torch.minimum(l, r) / torch.maximum(l, r).clamp(min=1e-6)) *
+        (torch.minimum(t, b) / torch.maximum(t, b).clamp(min=1e-6))
+    )
+    return centerness  # 1.0 at center, 0 at corners
+</code></pre>
+<p>Centerness ranges from 0 to 1. At the exact center of a box, min(l,r)=max(l,r) and min(t,b)=max(t,b), so both ratios equal 1 and centerness equals 1. Near corners, ratios approach 0. This elegant formulation requires no additional hyperparameters and generalises across object shapes.</p>
+<p>FCOS assigns FPN levels by object size: P3 handles objects with max(l,r,t,b) in [0,64], P4 in [64,128], P5 in [128,256], P6 in [256,512], P7 in [512,∞]. Any location whose max regression target falls outside the level's range is treated as background. This hierarchical assignment separates scale sensitivity cleanly.</p>
+<table>
+<thead>
+<tr>
+<th>Detector</th>
+<th>Anchors</th>
+<th>Assignment strategy</th>
+<th>Ambiguity handling</th>
+<th>COCO mAP</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Faster R-CNN</td>
+<td>Multi-scale anchors</td>
+<td>IoU with anchors ≥ 0.7</td>
+<td>Suppressed by NMS</td>
+<td>37.9</td>
+</tr>
+<tr>
+<td>RetinaNet</td>
+<td>Multi-scale anchors</td>
+<td>IoU with anchors ≥ 0.5</td>
+<td>Focal loss</td>
+<td>39.1</td>
+</tr>
+<tr>
+<td>FCOS</td>
+<td>None</td>
+<td>Point-in-box + size range</td>
+<td>Centerness branch</td>
+<td>42.1</td>
+</tr>
+<tr>
+<td>ATSS</td>
+<td>One per location</td>
+<td>Adaptive topk by std(IoU)</td>
+<td>Centerness branch</td>
+<td>43.6</td>
+</tr>
+<tr>
+<td>GFL</td>
+<td>None</td>
+<td>ATSS-style adaptive</td>
+<td>Quality focal loss</td>
+<td>45.0</td>
+</tr>
+</tbody>
+</table>
+<p>FCOS optimises three losses jointly: focal loss on the classification branch (handles class imbalance without hard mining), IoU loss on the box regression branch (scale-invariant and directly optimises the final metric), and binary cross-entropy on the centerness branch. Only positive locations contribute to regression and centerness loss.</p>
+<pre><code>import torch
+import torch.nn.functional as F
+from torchvision.ops import sigmoid_focal_loss, box_iou
+
+def fcos_loss(cls_pred, reg_pred, ctr_pred, cls_tgt, ltrb_tgt, ctr_tgt, pos_mask):
+    # Classification: focal loss over all locations
+    cls_loss = sigmoid_focal_loss(cls_pred, cls_tgt, reduction='sum')
+    if pos_mask.sum() == 0:
+        return cls_loss, cls_pred.new_tensor(0.), cls_pred.new_tensor(0.)
+    # IoU loss on positives only
+    reg_loss = (1 - box_iou_from_ltrb(reg_pred[pos_mask], ltrb_tgt[pos_mask])).mean()
+    # Centerness BCE on positives
+    ctr_loss = F.binary_cross_entropy_with_logits(ctr_pred[pos_mask], ctr_tgt[pos_mask])
+    return cls_loss / pos_mask.sum(), reg_loss, ctr_loss
+</code></pre>
+<blockquote>
+<p>****: Centerness is the key trick: it down-weights predictions far from object centers, effectively acting like NMS suppression without requiring anchor design.</p>
+</blockquote>
+<pre><code>import torch
+
+def decode_fcos_output(centers, ltrb):
+    &quot;&quot;&quot;
+    Recover bounding boxes from FCOS outputs.
+    centers: (N, 2) — (cx, cy) pixel coords on original image
+    ltrb:    (N, 4) — predicted (l, t, r, b) distances
+    Returns: (N, 4) boxes as (x1, y1, x2, y2)
+    &quot;&quot;&quot;
+    cx, cy = centers[:, 0], centers[:, 1]
+    l, t, r, b = ltrb[:, 0], ltrb[:, 1], ltrb[:, 2], ltrb[:, 3]
+    x1 = cx - l
+    y1 = cy - t
+    x2 = cx + r
+    y2 = cy + b
+    return torch.stack([x1, y1, x2, y2], dim=-1)
+</code></pre>
+<p>FCOS showed that anchor-free detection matches or exceeds anchor-based methods with simpler implementation. Its per-point regression, FPN level assignment, and centerness trick became a template for subsequent detectors including ATSS and GFL, which refined the assignment strategy while retaining the anchor-free regression head.</p>
+<p>Practical tips: use GN (Group Norm) on the detection head rather than BN for stable training across varying batch sizes. Exponential activation on the regression output ensures positive distance predictions. Centerness-weighted IoU loss (multiply IoU loss by centerness target) provides a marginal but consistent improvement over plain IoU loss.</p>
+<p>FCOS is available in torchvision (torchvision.models.detection.fcos_resnet50_fpn) and in MMDetection. Both provide pretrained COCO weights. MMDetection's config allows swapping the backbone to Swin Transformer or ConvNeXt for higher accuracy at modest inference cost.</p>
+<p>The main weakness of vanilla FCOS is ambiguity when objects heavily overlap — two objects of different sizes sharing the same center pixel cannot both be positive on any single FPN level. ATSS addresses this by adaptive statistical thresholding rather than fixed size ranges, yielding +1-2 mAP without additional compute.</p>
+<p>For deployment, FCOS exports cleanly to ONNX and TensorRT. The three output heads (classification, regression, centerness) decode independently per location and are amenable to INT8 quantisation. Post-processing (centerness-weighted score + NMS) runs efficiently on CPU for batch size 1 inference pipelines.</p>
+<p>When fine-tuning FCOS on a custom dataset: freeze the FPN backbone for the first few epochs, use a warm-up LR schedule, and monitor centerness loss separately — if it diverges early it indicates the positive/negative assignment is misconfigured for your object sizes.</p>
+    </article>
+  </main>
+</body>
+</html>

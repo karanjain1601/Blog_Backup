@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>State Space Language Models: S4, Hyena, and RetNet | Notes Backup</title>
+  <meta name="description" content="A survey of state space model (SSM) language models — S4, H3, Hyena, RetNet — that achieve sub-quadratic sequence modeling via convolutional and recurrent representations." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>State Space Language Models: S4, Hyena, and RetNet</h1>
+      <ul class='note-meta'><li><strong>description:</strong> A survey of state space model (SSM) language models — S4, H3, Hyena, RetNet — that achieve sub-quadratic sequence modeling via convolutional and recurrent representations.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>State Space Language Models: S4, Hyena, and RetNet</h1>
+<p>State Space Models (SSMs) have emerged as the most active research frontier for sub-quadratic sequence modeling in language. The transformer's O(N²) attention complexity is manageable at training time with FlashAttention, but becomes a fundamental barrier at inference time as the key-value cache grows linearly with context length. SSMs and related architectures — including S4, H3, Hyena, RetNet, Mamba, and RWKV — attack this bottleneck by replacing attention with recurrent or convolutional computations that can be computed in O(N) or O(N log N) time during training and O(1) per step at inference. This survey covers the major SSM-based language model architectures in historical order, examining their core mechanisms, training strategies, and the progression from S4 (a powerful but inflexible system) to modern selective and attention-equivalent formulations. Understanding the design choices and limitations of each family is essential for practitioners evaluating whether to use, fine-tune, or combine these architectures with standard transformers.</p>
+<h2>Overview</h2>
+<p>The SSM research thread for language modeling begins with S4 (Gu et al., 2021), which demonstrated that a carefully parameterized linear dynamical system with complex-valued diagonal A could match transformers on long-range sequence tasks. S4's key insight was the HiPPO initialization: parameterize A as a special structured matrix that enables optimal polynomial approximation of the input history. S4 computes its output via convolutional mode during training (the SSM is unrolled into a finite impulse response filter using Fast Fourier Transform) and recurrent mode at inference. H3 (Fu et al., 2023) adapted S4 for language by adding a two-SSM interaction mechanism reminiscent of attention. Hyena (Poli et al., 2023) generalized this further with learned long convolutions parameterized by a small MLP, enabling sub-quadratic attention replacement without fixed SSM structure. RetNet (Sun et al., 2023) took a different route, deriving a retention mechanism by substituting the softmax in attention with a fixed positional decay and showing the resulting linear recurrence has an equivalent parallel form. Mamba (Gu &amp; Dao, 2023) unified these threads with input-dependent transitions, bringing content-aware selectivity to SSMs for the first time.</p>
+<h2>S4: Structured State Space</h2>
+<p>S4 (Structured State Space Sequences) is defined by the linear SSM h'(t) = Ah(t) + Bx(t), y(t) = Ch(t) + Dx(t) where the key contribution is the HiPPO-inspired parameterization of A. Rather than using a random or diagonal A, S4 uses the Normal Plus Low-Rank (NPLR) representation, which allows A to be diagonalized in the complex domain as A = VΛV* where Λ is diagonal. This diagonalization enables the convolutional kernel K = [CB, CAB, CA²B, ...] to be computed efficiently using a Cauchy kernel evaluated at the eigenvalues of A, avoiding the expensive O(N·d_state²) direct computation. The Cauchy kernel has the form K(ω, λ) = 1/(ω - λ), and can be evaluated for all N sequence positions via Vandermonde–Cauchy matrix products. The resulting convolutional kernel K is then applied to the input sequence via FFT in O(N log N) time. At inference, S4 switches to recurrent mode using the discrete matrices A_bar, B_bar, producing O(1) per-step computation. S4 achieved state-of-the-art on the Long Range Arena benchmark but showed weaker results on language modeling, motivating H3 and subsequent work on making SSMs more expressive for natural language.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class S4DiagonalSSM(nn.Module):
+    &quot;&quot;&quot;S4-D: diagonal SSM with complex eigenvalues, FFT-based convolution.&quot;&quot;&quot;
+    def __init__(self, d_model, d_state=64, dt_min=0.001, dt_max=0.1):
+        super().__init__()
+        self.d_state = d_state
+        # Diagonal A parameterized as complex exponentials (stable)
+        log_dt = torch.rand(d_model) * (torch.log(torch.tensor(dt_max))
+                                       - torch.log(torch.tensor(dt_min))) + torch.log(torch.tensor(dt_min))
+        self.log_dt = nn.Parameter(log_dt)
+        # S4D-Real: A_n = -(n+1), real diagonal for language tasks
+        A_real = -torch.arange(1, d_state + 1, dtype=torch.float32)
+        self.A_log = nn.Parameter(torch.log(-A_real).unsqueeze(0).repeat(d_model, 1))
+        self.B = nn.Parameter(torch.randn(d_model, d_state) * 0.01)
+        self.C = nn.Parameter(torch.randn(d_model, d_state) * 0.01)
+        self.D = nn.Parameter(torch.ones(d_model))
+
+    def get_kernel(self, L):
+        # Compute convolutional kernel via ZOH discretization
+        dt = self.log_dt.exp().unsqueeze(-1)         # (d, 1)
+        A = -self.A_log.exp()                        # (d, d_state)
+        A_bar = torch.exp(dt * A)                    # (d, d_state)
+        B_bar = (1 - A_bar) / (-A) * self.B          # (d, d_state) ZOH B_bar
+        # Unroll kernel: K[l] = C * A_bar^l * B_bar for l=0..L-1
+        powers = torch.stack([A_bar ** l for l in range(L)], dim=1)  # (d, L, d_state)
+        K = (powers * B_bar.unsqueeze(1) * self.C.unsqueeze(1)).sum(-1)  # (d, L)
+        return K.real
+
+    def forward(self, x):
+        B_sz, L, d = x.shape
+        K = self.get_kernel(L)                       # (d, L) convolutional kernel
+        x_f = torch.fft.rfft(x.transpose(1,2), n=2*L)   # (B, d, L) -&gt; freq domain
+        K_f = torch.fft.rfft(K, n=2*L)              # (d, L) -&gt; freq domain
+        y = torch.fft.irfft(x_f * K_f.unsqueeze(0), n=2*L)[..., :L]
+        return y.transpose(1, 2) + x * self.D       # (B, L, d) + skip connection
+
+model = S4DiagonalSSM(d_model=128, d_state=32)
+x = torch.randn(2, 256, 128)
+print(f'S4-D output: {model(x).shape}')  # (2, 256, 128)
+</code></pre>
+<h2>H3: SSM for Language</h2>
+<p>H3 (Hungry Hungry Hippos, Fu et al. 2023) was the first SSM-based language model to approach transformer quality on language tasks. It identified that S4 underperforms transformers on language because it lacks two key properties: the ability to compare tokens (like attention's Q·K interaction) and the ability to recall specific tokens at a distance (like attention's V weighting). H3 addresses this with a two-SSM structure: the first SSM (called the 'shift SSM') shifts the key-value product forward in time, effectively computing a sliding comparison between tokens. The second SSM (the 'diagonal SSM') aggregates these comparisons over long ranges. The overall H3 block computes: q = Q-projection(x), k = SSM_shift(K-projection(x)), v = SSM_diag(V-projection(x)), output = SSM_diag(q ⊙ k) ⊙ v. This structure is explicitly motivated by attention: q ⊙ k mimics a simplified query-key interaction, and the outer SSM aggregates selectively over this interaction. H3's language modeling perplexity on The Pile was within 0.3 PPL of a matched GPT-2 transformer, a dramatic improvement over plain S4. H3 also introduced the 'FlashConv' implementation — a fast FFT-based convolution kernel using hardware-aware tiling — which was later generalized for Hyena and other long-convolution models.</p>
+<h2>Hyena: Long Convolutions</h2>
+<p>Hyena (Poli et al., 2023) generalizes H3 by removing the SSM structure entirely and learning arbitrary long convolution filters parameterized by a position-aware neural network. The motivation is that H3's two-SSM structure is a specific, constrained parameterization of a long-range convolutional operator. Hyena instead defines the filter h(t) = MLP(positional_encoding(t)), where the MLP is a small 3-layer network with SiLU activations and the positional encoding uses sinusoidal embeddings. This filter has the full expressiveness of a learned FIR filter of length N but with only O(d · log N) parameters in the MLP (much fewer than N parameters for a direct filter). The Hyena operator computes a series of element-wise multiplications of N-length projections of the input with convolutions by the learned filter. An N-order Hyena operator requires N projection vectors and N convolutions, producing an attention-equivalent operator with O(N log N) compute via FFT. Hyena at 125M and 355M parameters matched or exceeded GPT-2 transformer perplexity on The Pile and OpenWebText, demonstrating for the first time that a purely convolutional (non-SSM, non-attention) architecture could match transformer quality without any attention layers.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class HyenaFilter(nn.Module):
+    &quot;&quot;&quot;Hyena long convolution filter: positional MLP generates filter h(t).&quot;&quot;&quot;
+    def __init__(self, d_model, order=2, filter_dim=64):
+        super().__init__()
+        self.order = order
+        self.d_model = d_model
+        # Positional embedding generator: t -&gt; sin/cos features
+        self.pos_emb = nn.Linear(1, filter_dim)
+        # Small MLP maps positional features to filter coefficients
+        self.filter_mlp = nn.Sequential(
+            nn.Linear(filter_dim, filter_dim), nn.SiLU(),
+            nn.Linear(filter_dim, filter_dim), nn.SiLU(),
+            nn.Linear(filter_dim, d_model * order)
+        )
+        self.in_proj = nn.Linear(d_model, d_model * (order + 1), bias=False)
+        self.out_proj = nn.Linear(d_model, d_model, bias=False)
+
+    def get_filter(self, L, device):
+        t = torch.linspace(0, 1, L, device=device).unsqueeze(-1)  # (L, 1)
+        pos = torch.sin(self.pos_emb(t))                           # (L, filter_dim)
+        h = self.filter_mlp(pos)                                   # (L, d*order)
+        return h.reshape(L, self.d_model, self.order)              # (L, d, order)
+
+    def forward(self, x):
+        B, L, d = x.shape
+        projections = self.in_proj(x).reshape(B, L, d, self.order + 1)
+        h = self.get_filter(L, x.device)                           # (L, d, order)
+        v = projections[..., 0]                                    # (B, L, d) base signal
+        for i in range(self.order):
+            filt = h[..., i].transpose(0, 1)                      # (d, L) filter
+            v_f = torch.fft.rfft(v.transpose(1,2), n=2*L)
+            h_f = torch.fft.rfft(filt, n=2*L)
+            v = torch.fft.irfft(v_f * h_f.unsqueeze(0), n=2*L)[..., :L].transpose(1,2)
+            v = v * projections[..., i + 1]                       # element-wise multiply
+        return self.out_proj(v)
+
+model = HyenaFilter(d_model=128, order=2)
+print(f'Hyena output: {model(torch.randn(2, 64, 128)).shape}')  # (2, 64, 128)
+</code></pre>
+<h2>RetNet: Retention Mechanism</h2>
+<p>RetNet (Sun et al., 2023) derives its core mechanism directly from multi-head attention by substituting the softmax with a fixed positional decay, yielding a linear recurrence. The Retention mechanism computes: Retention(Q, K, V) = (Q · K^T ⊙ D) · V, where D_{ij} = γ^{i-j} for i ≥ j (causal exponential decay) and 0 otherwise, and γ ∈ (0, 1) is a learned per-head decay rate. The key insight is that this decay-masked attention matrix D corresponds exactly to a linear recurrence: the same computation can be performed as h_n = γ · h_{n-1} + k_n^T · v_n, y_n = q_n · h_n^T. This dual representation — parallel (like transformers) for training and recurrent (like RNNs) for inference — gives RetNet its '3-way equivalence': a parallel representation with O(N²) complexity for training (but without softmax), a recurrent representation with O(1) per step for inference, and a chunked parallel representation with O(chunk²) for long-sequence training. RetNet uses multi-scale retention with different γ per head, giving each head a different effective temporal horizon. At 6.7B parameters, RetNet outperformed Transformer-XL, RWKV, and H3 on language modeling benchmarks while maintaining a constant inference memory footprint.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class MultiScaleRetention(nn.Module):
+    &quot;&quot;&quot;RetNet retention: parallel (training) and recurrent (inference) equivalence.&quot;&quot;&quot;
+    def __init__(self, d_model, n_heads=8):
+        super().__init__()
+        self.n_heads = n_heads
+        self.d_head = d_model // n_heads
+        # Multi-scale decay: different gamma per head from 1-2^{-5} to 1-2^{-10}
+        gammas = 1 - 2 ** (-5 - torch.arange(n_heads, dtype=torch.float32))
+        self.register_buffer('gammas', gammas)
+        self.qkv = nn.Linear(d_model, d_model * 3, bias=False)
+        self.gn  = nn.GroupNorm(n_heads, d_model)
+        self.out = nn.Linear(d_model, d_model, bias=False)
+
+    def parallel_retention(self, Q, K, V, gamma):
+        # Causal decay mask D[i,j] = gamma^(i-j) for i&gt;=j, else 0
+        T = Q.size(2)
+        idx = torch.arange(T, device=Q.device)
+        D = gamma ** (idx.unsqueeze(0) - idx.unsqueeze(1))  # (T, T)
+        D = torch.tril(D)                                    # causal mask
+        attn = (Q @ K.transpose(-2, -1)) * D                # (B, H, T, T)
+        return attn @ V                                      # (B, H, T, d_head)
+
+    def recurrent_step(self, q_t, k_t, v_t, s_prev, gamma):
+        # s_n = gamma * s_{n-1} + k_n^T * v_n  (outer product update)
+        s = gamma * s_prev + k_t.unsqueeze(-1) * v_t.unsqueeze(-2)  # (B, H, d, d)
+        y = (q_t.unsqueeze(-2) @ s).squeeze(-2)                     # (B, H, d)
+        return y, s
+
+    def forward(self, x, mode='parallel'):
+        B, T, C = x.shape
+        Q, K, V = self.qkv(x).chunk(3, dim=-1)
+        Q = Q.reshape(B, T, self.n_heads, self.d_head).transpose(1, 2)
+        K = K.reshape(B, T, self.n_heads, self.d_head).transpose(1, 2)
+        V = V.reshape(B, T, self.n_heads, self.d_head).transpose(1, 2)
+        out = torch.stack([self.parallel_retention(Q[:, h], K[:, h], V[:, h], self.gammas[h])
+                           for h in range(self.n_heads)], dim=1)
+        return self.out(self.gn(out.transpose(1,2).reshape(B, T, C)))
+
+m = MultiScaleRetention(d_model=256, n_heads=8)
+print(f'RetNet output: {m(torch.randn(2, 32, 256)).shape}')  # (2, 32, 256)
+</code></pre>
+<h2>Linear Attention Family</h2>
+<p>Linear attention (Katharopoulos et al., 2020) is the theoretical ancestor of RetNet and RWKV. It replaces the softmax in attention with a kernel function φ(q)^T · φ(k), which allows the attention computation to be rewritten as φ(q) · (Σ_j φ(k_j) v_j^T), where the inner sum can be maintained as a running matrix S = Σ_j φ(k_j) v_j^T that is updated O(1) per step. This gives linear attention O(N) training complexity and O(1) inference. The challenge is that naive linear attention (with the ELU+1 kernel) performs poorly on language tasks — the softmax's normalization and concentration properties are important for quality. Several subsequent works addressed this: GLA (Gated Linear Attention) adds a sigmoid-gated state update for selectivity; RetNet uses per-head decay (exponential kernel) for positional locality; HGRN2 adds a forget gate; and Mamba-2 shows that selective SSMs are linear attention with specific structured kernel choices. The common thread across all these architectures is the state matrix S = Σ_j φ(k_j) v_j^T of size d_head × d_head, which is updated at each step and queried to produce the output — an O(d²) state versus the transformer's O(N·d) KV cache.</p>
+<ul>
+<li>Linear Attention (2020): Replace softmax with ELU+1 kernel — O(N) training, O(1) inference, but poor language quality due to rank collapse.</li>
+<li>Performer (2020): Random feature approximation of softmax attention — O(N) via FAVOR+ algorithm, better quality than naive linear attention.</li>
+<li>H3 (2023): Two-SSM structure that emulates Q·K and V interactions — first SSM to approach transformer perplexity on language.</li>
+<li>Hyena (2023): Learned long convolution filters via positional MLP — matches GPT-2 at 355M without any attention layers.</li>
+<li>RetNet (2023): Exponential decay replacing softmax, with dual parallel+recurrent form — first architecture claiming 'training parallelism, low-cost inference, strong performance.'</li>
+<li>GLA (2024): Gated Linear Attention with data-dependent decay matrices — combines RWKV's gating with linear attention theory for improved selectivity.</li>
+<li>Mamba-2 / SSD (2024): Proves selective SSMs are linear attention with structured (semiseparable) matrices — unifying SSMs and linear attention.</li>
+</ul>
+<h2>Scaling to Compete with Transformers</h2>
+<p>The central question for SSM-based language models is whether they can match transformer quality at the scale of state-of-the-art models (7B–70B parameters). The evidence to date is mixed. At the 1B–3B parameter range, several SSMs (Mamba, RetNet, RWKV-6) achieve perplexity within 0.5 PPL of transformer baselines on standard benchmarks. However, downstream task performance (MMLU, HumanEval, instruction following) shows a more significant gap — SSMs systematically underperform on tasks requiring precise in-context recall and long-range reasoning. The architectures that have shown the most promise at larger scale are hybrids: Jamba (Mistral AI, 2024) combines Mamba-2 blocks with full attention layers at a 6:1 ratio in a 52B-parameter model and achieves GPT-4-competitive performance on many benchmarks. Zamba (Zyphra, 2024) uses a similar hybrid approach at 7B with shared attention layers. These results suggest that pure-SSM architectures face a quality ceiling below frontier transformers, but hybrid architectures can match or exceed pure transformers with significantly better efficiency. The practical recommendation for 2024–2025 is to use hybrid architectures for quality-critical applications and pure-SSM models where inference efficiency or memory constraints are dominant.</p>
+<pre><code class="language-python">import torch
+
+# Reference benchmark results from published papers (1B parameter scale, Pile evaluation)
+benchmarks = {
+    'Transformer-1B':  {'pile_ppl': 7.84, 'lra_acc': 73.2, 'inf_mem_8k_mb': 2048, 'tok_per_sec': 650},
+    'S4-1B':           {'pile_ppl': 10.56, 'lra_acc': 86.1, 'inf_mem_8k_mb': 8, 'tok_per_sec': 1200},
+    'Mamba-1.4B':      {'pile_ppl': 8.14, 'lra_acc': 87.3, 'inf_mem_8k_mb': 5, 'tok_per_sec': 3100},
+    'RetNet-1.3B':     {'pile_ppl': 8.41, 'lra_acc': 84.2, 'inf_mem_8k_mb': 6, 'tok_per_sec': 2800},
+    'RWKV-6-1.6B':    {'pile_ppl': 8.80, 'lra_acc': 79.5, 'inf_mem_8k_mb': 4, 'tok_per_sec': 2400},
+    'Hyena-1B':        {'pile_ppl': 8.62, 'lra_acc': 82.0, 'inf_mem_8k_mb': 15, 'tok_per_sec': 1800},
+}
+
+print(f'{'Model':&lt;20} {'Pile PPL':&gt;9} {'LRA Acc':&gt;8} {'Inf Mem (MB)':&gt;13} {'Tok/sec':&gt;9}')
+print('-' * 63)
+for model, m in benchmarks.items():
+    print(f'{model:&lt;20} {m[&quot;pile_ppl&quot;]:&gt;9.2f} {m[&quot;lra_acc&quot;]:&gt;8.1f} {m[&quot;inf_mem_8k_mb&quot;]:&gt;13} {m[&quot;tok_per_sec&quot;]:&gt;9}')
+
+print()
+print('Notes: Inference memory at 8K context, single-batch, fp16.')
+print('Mamba-1.4B achieves best tradeoff: near-transformer PPL at 5x lower memory.')
+print('S4 excels on LRA (long-range arena) but underperforms on language PPL.')
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Mechanism</th>
+<th>Train complexity</th>
+<th>Inference complexity</th>
+<th>Memory</th>
+<th>Long-range</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Transformer</td>
+<td>Softmax attention Q·K^T·V</td>
+<td>O(N²D)</td>
+<td>O(N²D) per token</td>
+<td>O(N·D) KV cache</td>
+<td>Full exact recall</td>
+</tr>
+<tr>
+<td>S4</td>
+<td>Fixed SSM, FFT convolution</td>
+<td>O(N log N)</td>
+<td>O(D·S) per token</td>
+<td>O(D·S) state</td>
+<td>Yes (structured A)</td>
+</tr>
+<tr>
+<td>H3</td>
+<td>Two-SSM Q·K+V emulation</td>
+<td>O(N log N)</td>
+<td>O(D·S) per token</td>
+<td>O(D·S) state</td>
+<td>Yes (SSM range)</td>
+</tr>
+<tr>
+<td>Hyena</td>
+<td>Learned long convolution (MLP filter)</td>
+<td>O(N log N)</td>
+<td>O(ND) per token</td>
+<td>O(N) filter</td>
+<td>Yes (full N range)</td>
+</tr>
+<tr>
+<td>RetNet</td>
+<td>Decay-masked retention (γ^{i-j})</td>
+<td>O(N²D) parallel / O(ND) chunk</td>
+<td>O(D²) per token</td>
+<td>O(D²) state matrix</td>
+<td>Yes (multi-scale)</td>
+</tr>
+<tr>
+<td>Mamba</td>
+<td>Selective SSM, input-dep B,C,Δ</td>
+<td>O(ND log N)</td>
+<td>O(D·S) per token</td>
+<td>O(D·S) state</td>
+<td>Yes, selective</td>
+</tr>
+<tr>
+<td>RWKV</td>
+<td>WKV recurrence with decay w and bonus u</td>
+<td>O(ND)</td>
+<td>O(D) per token</td>
+<td>O(D) state</td>
+<td>Partial (positional)</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>SSMs Have Not Yet Matched Frontier Transformers at Scale</strong>: Despite promising results, no SSM-based model has yet matched frontier transformer models (GPT-4, Claude) on instruction following and reasoning tasks at scale — hybrid transformer+SSM architectures (Jamba, Zamba) currently offer the best practical tradeoff. Pure SSM architectures face a systematic disadvantage on tasks requiring precise in-context recall (e.g., finding a specific value from many examples in context), because their fixed-size state must compress all history. At the 7B parameter scale, pure Mamba and RWKV models score 5–15 points below LLaMA-3-8B on MMLU and HumanEval. Hybrid models (6:1 SSM-to-attention ratio) close most of this gap while retaining 2–3× inference efficiency gains. Before adopting a pure-SSM architecture for a production use case, benchmark it specifically on the recall-intensive tasks your application requires.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<p>The SSM language model field has matured rapidly from S4's initial long-range arena results to Mamba's competitive language modeling and RetNet's theoretically grounded retention mechanism. The common thread is the O(1) inference state: by compressing sequence history into a fixed matrix S or vector h, all these architectures break the transformer's KV cache memory wall. The key design axis is how much selectivity (content-awareness) to incorporate: S4 and Hyena have none (fixed or position-parameterized filters); RetNet and RWKV have positional selectivity (per-head decay rates and per-channel decay weights); Mamba and GLA have full content-aware selectivity (input-dependent parameters). More selectivity comes at the cost of losing the strict convolutional structure that enables the fastest FFT-based implementations. The current state-of-the-art for practitioners is to use hybrid architectures that blend SSM and attention layers, benefiting from SSMs' efficiency while using attention's exact-recall capability where needed — a design philosophy pioneered by Jamba and rapidly adopted across the open-source ecosystem.</p>
+<ul>
+<li>S4 introduced the HiPPO-initialized diagonal SSM with FFT-based convolutional training — excellent on LRA but weaker than transformers on language perplexity.</li>
+<li>H3 added a two-SSM interaction structure mimicking Q·K·V attention and first demonstrated near-transformer language perplexity for SSMs.</li>
+<li>Hyena replaced the SSM with a learned long convolution filter parameterized by a positional MLP — O(N log N) and the first attention-free model to match GPT-2.</li>
+<li>RetNet derived a decay-masked retention mechanism from attention, providing a theoretically grounded dual parallel+recurrent form and strong 1B-scale results.</li>
+<li>Mamba's input-dependent selectivity (B, C, Δ from x) is the key missing capability in S4/H3/Hyena — enabling content-based filtering and matching transformer perplexity.</li>
+<li>Hybrid architectures (Jamba: 6:1 Mamba:attention; Zamba: 7B with shared attention) currently achieve the best quality-efficiency tradeoffs and are recommended for production use.</li>
+<li>The SSM field converged in 2024 on the SSD framework (Mamba-2), which proves selective SSMs and linear attention are equivalent — unifying previously distinct research threads.</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

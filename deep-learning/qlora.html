@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>QLoRA — 4-bit NF4 Quantization with LoRA for Memory-Efficient Fine-Tuning | Notes Backup</title>
+  <meta name="description" content="Complete guide to QLoRA (Dettmers et al., 2023): NF4 information-theoretically optimal 4-bit quantization, double quantization of scaling constants, paged Adam optimizer, and how to fine-tune 70B+ LLMs on a single GPU using bitsandbytes and HuggingFace PEFT." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>QLoRA — 4-bit NF4 Quantization with LoRA for Memory-Efficient Fine-Tuning</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Complete guide to QLoRA (Dettmers et al., 2023): NF4 information-theoretically optimal 4-bit quantization, double quantization of scaling constants, paged Adam optimizer, and how to fine-tune 70B+ LLMs on a single GPU using bitsandbytes and HuggingFace PEFT.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>QLoRA — 4-bit NF4 Quantization with LoRA for Memory-Efficient Fine-Tuning</h1>
+<p>QLoRA (Dettmers et al., 2023) combines 4-bit NF4 (NormalFloat4) quantization of the frozen base model with full-precision LoRA adapters to achieve unprecedented memory efficiency for LLM fine-tuning. A 65B LLaMA model requires ~130GB in fp16 — requiring multiple A100 80GB GPUs. QLoRA reduces this to ~35GB by quantizing frozen base weights to 4-bit NF4, enabling single-GPU fine-tuning of 65B models on an A100 80GB and 7B fine-tuning on a consumer RTX 3090 24GB.</p>
+<h2>The Memory Wall in LLM Fine-Tuning</h2>
+<p>LLM fine-tuning memory consumption comes from four sources: model weights, gradient tensors (same size as weights), Adam optimizer states (momentum + variance, each fp32 = 2× weight size), and activation memory for backpropagation. For a 7B model in fp16: weights = 14GB, gradients = 14GB, Adam states = 56GB (fp32) — totaling ~84GB before activations. QLoRA's insight: the base weights only need high precision during the LoRA adapter computation, not for storage. Store in 4-bit, dequantize on-the-fly only for the forward and backward pass.</p>
+<ul>
+<li>fp32 full fine-tune: ~24 bytes/param — 168GB for 7B, 1.7TB for 70B</li>
+<li>fp16/bf16 full fine-tune: ~16 bytes/param — 112GB for 7B, 1.1TB for 70B</li>
+<li>LoRA (fp16 base): ~14GB weights + ~2GB adapter + ~4GB optimizer = ~20GB for 7B</li>
+<li>QLoRA (NF4 4-bit base): ~3.5GB weights + ~2GB adapter + ~4GB optimizer = ~9.5GB for 7B</li>
+<li>QLoRA with double quantization: ~3.25GB weights + adapters + optimizer ≈ 9GB for 7B</li>
+</ul>
+<h2>NF4 — Information-Theoretically Optimal 4-bit Quantization</h2>
+<p>Standard INT4 quantization places 16 quantization levels at equal intervals in [min, max], assuming weights are uniformly distributed. LLM weights are near-Gaussian N(0, σ²). NF4 (NormalFloat4) exploits this: quantization levels are placed at the quantiles of N(0,1), spacing them closer together where the density is highest (near zero) and further apart in the tails. This is information-theoretically optimal — each 4-bit codeword carries equal information under the Gaussian prior. The result is lower reconstruction error than INT4 at the same bit width.</p>
+<p>$$q_i = Q_{N(0,1)}!\left(\frac{i + 0.5}{2^k}\right),\quad i = 0, 1, \ldots, 2^k - 1,\quad k = 4$$</p>
+<h2>QLoRA Setup — 4-bit NF4 Model with LoRA Adapters</h2>
+<pre><code class="language-python">import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from peft import LoraConfig, get_peft_model, TaskType, prepare_model_for_kbit_training
+
+# Step 1: Configure 4-bit NF4 quantization with double quantization
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type=&quot;nf4&quot;,           # NF4 optimal for Gaussian weights
+    bnb_4bit_compute_dtype=torch.bfloat16,  # Dequantize to bf16 for matmul
+    bnb_4bit_use_double_quant=True,      # Quantize the scaling constants too
+)
+
+# Step 2: Load model quantized to 4-bit NF4
+model = AutoModelForCausalLM.from_pretrained(
+    &quot;meta-llama/Llama-2-7b-hf&quot;,
+    quantization_config=bnb_config,
+    device_map=&quot;auto&quot;,
+)
+tokenizer = AutoTokenizer.from_pretrained(&quot;meta-llama/Llama-2-7b-hf&quot;)
+tokenizer.pad_token = tokenizer.eos_token
+
+# Step 3: Prepare for k-bit training — enables gradient checkpointing
+model = prepare_model_for_kbit_training(model)
+
+# Step 4: Add LoRA adapters in bf16 on top of frozen 4-bit base
+lora_config = LoraConfig(
+    task_type=TaskType.CAUSAL_LM,
+    r=16, lora_alpha=32,
+    target_modules=[&quot;q_proj&quot;, &quot;v_proj&quot;, &quot;k_proj&quot;, &quot;o_proj&quot;],
+    lora_dropout=0.05, bias=&quot;none&quot;,
+)
+peft_model = get_peft_model(model, lora_config)
+peft_model.print_trainable_parameters()
+</code></pre>
+<p>During the forward pass, each 4-bit NF4 weight block is dequantized to bf16 on-the-fly, the matrix multiplication runs in bf16, and the dequantized values are immediately discarded. Only the 4-bit integers and their scaling constants remain in GPU memory for the base model. LoRA adapter weights stay in bf16/fp32 throughout training. Gradients flow only through the adapter parameters — the quantized base weights have no gradients.</p>
+<h2>NF4 Quantization Mechanics</h2>
+<pre><code class="language-python">import torch
+import numpy as np
+from scipy.stats import norm
+
+def compute_nf4_levels(num_bits: int = 4) -&gt; torch.Tensor:
+    &quot;&quot;&quot;Compute NF4 quantization levels: midpoints of equal-prob intervals of N(0,1).&quot;&quot;&quot;
+    num_levels = 2 ** num_bits  # 16 levels for 4-bit
+    quantile_pos = np.linspace(0, 1, num_levels + 1)
+    midpoints = (quantile_pos[:-1] + quantile_pos[1:]) / 2
+    levels = torch.tensor(norm.ppf(midpoints), dtype=torch.float32)
+    return levels / levels.abs().max()  # normalize to [-1, 1]
+
+def nf4_quantize(weight: torch.Tensor, block_size: int = 64) -&gt; tuple:
+    &quot;&quot;&quot;Quantize weight tensor to NF4 with per-block absmax scaling.&quot;&quot;&quot;
+    nf4_lvls = compute_nf4_levels(4).to(weight.device)
+    blocks = weight.reshape(-1, block_size)
+    scales = blocks.abs().max(dim=1, keepdim=True).values.clamp(min=1e-8)
+    normalized = blocks / scales
+    diffs = (normalized.unsqueeze(-1) - nf4_lvls).abs()
+    indices = diffs.argmin(dim=-1).to(torch.uint8)  # 4-bit indices (0-15)
+    return indices, scales
+
+def nf4_dequantize(indices: torch.Tensor,
+                   scales: torch.Tensor, block_size: int = 64) -&gt; torch.Tensor:
+    &quot;&quot;&quot;Reconstruct fp32 weights from NF4 indices and per-block scales.&quot;&quot;&quot;
+    nf4_lvls = compute_nf4_levels(4).to(scales.device)
+    reconstructed = nf4_lvls[indices.long()]
+    return (reconstructed * scales).reshape(-1)
+w = torch.randn(256, 256)
+nf4_lvls = compute_nf4_levels()
+print(f&quot;NF4 levels (central 8): {nf4_lvls[4:12].tolist()}&quot;)
+idx, sc = nf4_quantize(w)
+w_recon = nf4_dequantize(idx, sc).reshape(256, 256)
+rmse = (w - w_recon).pow(2).mean().sqrt().item()
+print(f&quot;NF4 RMSE: {rmse:.5f}  |  Compression: {w.numel()*32/(idx.numel()*4+sc.numel()*32):.1f}x&quot;)
+</code></pre>
+<p>NF4 allocates 8 of its 16 levels to the central region where most LLM weight mass resides, vs INT4 which allocates 4. For a weight distribution with σ=0.02, approximately 68% of values fall within ±σ of zero — NF4 covers this dense region with double the resolution of INT4. This density matching reduces reconstruction MSE by 25–30% compared to INT4 at the same bit width, which translates to measurable quality improvements for downstream task performance.</p>
+<h2>Double Quantization — Quantizing the Quantization Constants</h2>
+<pre><code class="language-python">import torch
+
+def double_quantize(weight: torch.Tensor,
+                    inner_block: int = 64,
+                    outer_block: int = 256) -&gt; dict:
+    &quot;&quot;&quot;
+    Two-level quantization: NF4 for weights (4 bits), INT8 for scales (8 bits).
+    Reduces per-weight scale overhead from 0.5 to 0.125 bits.
+    &quot;&quot;&quot;
+    # Level 1: per-inner-block fp32 scales for NF4 quantization
+    blocks = weight.reshape(-1, inner_block)
+    scales_fp32 = blocks.abs().max(dim=1).values       # [N] fp32, 32 bits each
+
+    # Level 2: quantize fp32 scales to INT8 per outer_block
+    n_groups = (scales_fp32.numel() + outer_block // inner_block - 1) // (outer_block // inner_block)
+    group_size = outer_block // inner_block
+    padded = torch.cat([scales_fp32, scales_fp32.new_zeros(n_groups * group_size - scales_fp32.numel())])
+    groups = padded.reshape(n_groups, group_size)
+    super_scales = groups.abs().max(dim=1, keepdim=True).values.clamp(1e-8)
+    scales_int8 = (groups / super_scales * 127).round().clamp(-127, 127).to(torch.int8)
+
+    # Bit-cost analysis
+    bits_fp32 = 32 / inner_block           # 0.500 bits/weight for fp32 scales
+    bits_int8 = 8 / inner_block            # 0.125 bits/weight for int8 scales
+    bits_super = 32 / outer_block          # 0.125 bits/weight for super-scales
+    print(f&quot;Scale overhead: fp32={bits_fp32:.3f} -&gt; int8={bits_int8:.3f} bits/weight&quot;)
+    print(f&quot;Total NF4 + double quant: {4 + bits_int8 + bits_super:.3f} bits/weight&quot;)
+    return {&quot;scales_int8&quot;: scales_int8, &quot;super_scales&quot;: super_scales}
+
+result = double_quantize(torch.randn(4096, 4096))
+</code></pre>
+<p>Double quantization reduces the storage overhead of quantization constants from 0.5 bits/weight (fp32 scale per 64 weights) to approximately 0.127 bits/weight (int8 scale per 64 + fp32 super-scale per 256). Combined with NF4's 4 bits per weight, the total is ~4.127 bits/weight. For a 70B model, double quantization saves approximately 3.5GB of GPU memory — enough to fit on a 40GB A100 that would otherwise require a 80GB variant.</p>
+<h2>Memory Profiling — fp16 vs LoRA vs QLoRA</h2>
+<pre><code class="language-python">import torch
+
+def estimate_training_memory_gb(n_params: float, mode: str,
+                                adapter_frac: float = 0.01) -&gt; float:
+    &quot;&quot;&quot;Estimate peak GPU training memory (GB) for a model by size and mode.&quot;&quot;&quot;
+    n = n_params * 1e9
+    if mode == &quot;fp16_full&quot;:
+        # Weights fp16 + grads fp16 + Adam fp32 momentum + Adam fp32 variance
+        return n * (2 + 2 + 4 + 4) / 1e9
+    elif mode == &quot;lora_fp16&quot;:
+        # Frozen fp16 base weights + adapter fp16 + Adam fp32 on adapter only
+        adapter_n = n * adapter_frac
+        return (n * 2 + adapter_n * 2 + adapter_n * (4 + 4)) / 1e9
+    elif mode == &quot;qlora_nf4&quot;:
+        # NF4 base (0.5 bytes/param) + adapter bf16 + Adam fp32 on adapter only
+        adapter_n = n * adapter_frac
+        return (n * 0.5 + adapter_n * 2 + adapter_n * (4 + 4)) / 1e9
+    return 0.0
+
+print(f&quot;{'Size':&lt;6} {'Mode':&lt;14} {'Peak GPU (GB)':&gt;14}&quot;)
+print(&quot;-&quot; * 36)
+for n_b, label in [(7, &quot;7B&quot;), (13, &quot;13B&quot;), (70, &quot;70B&quot;)]:
+    for mode in [&quot;fp16_full&quot;, &quot;lora_fp16&quot;, &quot;qlora_nf4&quot;]:
+        gb = estimate_training_memory_gb(n_b, mode)
+        print(f&quot;{label:&lt;6} {mode:&lt;14} {gb:&gt;14.1f}&quot;)
+</code></pre>
+<p>Estimated peak GPU memory on A100: 7B fp16 full = 84GB (needs 2× A100 80GB), 7B LoRA = 18GB, 7B QLoRA = 9GB. For 70B: fp16 full = 840GB (11× A100 80GB), LoRA = 154GB, QLoRA = 80GB (fits on a single A100 80GB with some room for activations). QLoRA throughput is approximately 70-75% of LoRA due to the overhead of on-the-fly dequantization during the forward pass.</p>
+<table>
+<thead>
+<tr>
+<th>Quantization</th>
+<th>Bits/Param</th>
+<th>Memory (7B)</th>
+<th>Quality vs fp16</th>
+<th>Speed vs fp16</th>
+<th>Max Model on 80GB A100</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>fp16 Full FT</td>
+<td>16</td>
+<td>~84 GB</td>
+<td>Baseline</td>
+<td>1.00×</td>
+<td>~5B</td>
+</tr>
+<tr>
+<td>LoRA fp16</td>
+<td>16 + adapter</td>
+<td>~18 GB</td>
+<td>≈99%</td>
+<td>0.95×</td>
+<td>~30B</td>
+</tr>
+<tr>
+<td>8-bit INT8</td>
+<td>8</td>
+<td>~14 GB</td>
+<td>~98-99%</td>
+<td>0.85×</td>
+<td>~45B</td>
+</tr>
+<tr>
+<td>4-bit INT4</td>
+<td>4</td>
+<td>~7 GB</td>
+<td>~94-96%</td>
+<td>0.80×</td>
+<td>~130B</td>
+</tr>
+<tr>
+<td>4-bit NF4 (QLoRA)</td>
+<td>~4.5</td>
+<td>~9 GB</td>
+<td>~98-99%</td>
+<td>0.75×</td>
+<td>~70B</td>
+</tr>
+<tr>
+<td>NF4 + Double Quant</td>
+<td>~4.13</td>
+<td>~8.5 GB</td>
+<td>~98-99%</td>
+<td>0.75×</td>
+<td>~75B</td>
+</tr>
+</tbody>
+</table>
+<h2>Paged Optimizer and Training Tips</h2>
+<p>The paged optimizer is a QLoRA-specific technique using NVIDIA unified memory to automatically page Adam optimizer states (momentum and variance tensors) from GPU VRAM to CPU RAM when the GPU runs out of memory, and page them back when needed for gradient updates. This prevents OOM crashes during long training runs without requiring manual memory management. Use paged_adamw_8bit from bitsandbytes for maximum savings; paged_adamw_32bit for training stability on sensitive tasks.</p>
+<ul>
+<li>Use paged_adamw_8bit for maximum GPU memory savings; paged_adamw_32bit for numerical stability</li>
+<li>Set bnb_4bit_compute_dtype=torch.bfloat16 (not float16) — bf16 has better dynamic range and avoids NaN instability</li>
+<li>Enable gradient checkpointing via prepare_model_for_kbit_training() — trades 30% throughput for large activation memory savings</li>
+<li>Set max_grad_norm=0.3 and warmup_ratio=0.03 for stable QLoRA training runs</li>
+<li>Use per_device_train_batch_size=1 or 2 with gradient_accumulation_steps=16 to maintain effective batch of 16-32</li>
+<li>LoRA adapters remain in bf16/fp32 throughout training — only the frozen base model is in 4-bit NF4</li>
+</ul>
+<blockquote>
+<p><strong>NF4 + Double Quantization Memory Math</strong>: QLoRA with NF4 + double quantization uses ~0.5 bits/parameter for the quantization constants (vs 0.125 bits for NF4 weights), bringing total memory to ~4.5 bits/param — allowing a 70B model to fit in a single 40GB A100 with 4-bit quantization. Specifically: 70B × 4.5 bits / 8 bits_per_byte = 39.4GB for weights, leaving room for activations and LoRA adapter states within 40GB VRAM.</p>
+</blockquote>
+<p>QLoRA democratized LLM fine-tuning by making it feasible on consumer hardware. A 7B model can be fine-tuned on an RTX 3090 24GB — a task that previously required multiple enterprise A100 GPUs. Combined with open datasets (Alpaca, FLAN, OpenAssistant) and the Guanaco training recipe from the QLoRA paper, this enabled a generation of competitive open-source fine-tuned models trained by individuals and small teams with modest GPU budgets.</p>
+    </article>
+  </main>
+</body>
+</html>

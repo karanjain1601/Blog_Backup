@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Relative Positional Encodings — T5 Bias and Shaw et al. | Notes Backup</title>
+  <meta name="description" content="Understand how relative positional encodings replace absolute position indices with inter-token distances: Shaw et al. (2018) query-relative embeddings modifying attention scores, T5 log-spaced bucket bias, DeBERTa disentangled attention, and empirical length generalisation beyond training sequence length." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Relative Positional Encodings — T5 Bias and Shaw et al.</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Understand how relative positional encodings replace absolute position indices with inter-token distances: Shaw et al. (2018) query-relative embeddings modifying attention scores, T5 log-spaced bucket bias, DeBERTa disentangled attention, and empirical length generalisation beyond training sequence length.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Relative Positional Encodings — T5 Bias and Shaw et al.</h1>
+<p>Absolute positional encodings (sinusoidal or learned) assign a unique vector to each absolute position 1, 2, …, L. This works well within the training length but fails to generalise: position 512 during training and position 512 at test time mean the same thing only if the sequence context is identical. Relative positional encodings take a different approach — they encode the distance between token pairs rather than their absolute indices. The key insight is that in language, what matters is often how far apart two tokens are (adjacent modifier, clause boundary, sentence end) rather than their absolute index in a document.</p>
+<h2>Absolute vs Relative Position — The Core Distinction</h2>
+<p>In standard attention, the score between query at position i and key at position j is: s_{ij} = q_i · k_j / sqrt(d_k). After adding absolute PE, q_i and k_j each carry their own position, but the score still conflates content and position in a fixed way. Relative PE approaches instead modify the score directly using the distance (j - i): s_{ij} = (q_i + r_{j-i}) · k_j where r_{j-i} is a learned or computed vector for the relative offset. This makes the score explicitly sensitive to the relationship between positions rather than each position's absolute index, enabling the model to generalise the pattern 'attend to the token 3 positions back' across any absolute location.</p>
+<p>Relative PE also enables better length generalisation: a model trained on sequences of length 128 can handle length 256 because the position signals it was trained on (distances 0, 1, 2, …, 127) still appear within the longer sequence. Absolute PE models must see position index 200 during training to handle it — relative models only need to have seen distance 200 between some pair of tokens.</p>
+<h2>Shaw et al. 2018 — Relative PE in Attention Scores</h2>
+<p>Shaw et al. (2018) introduced the first widely-used relative PE: modify each attention score by a learned embedding for the relative distance clipped to a maximum range. The score becomes a_{ij} = (q_i + r_{j-i}) · k_j / sqrt(d_k) where r_d is a learned d_model-dimensional vector for distance d. Distances beyond a threshold (e.g. ±16) share the boundary embedding — the assumption being that very distant positions carry limited additional sequential information. The value side can optionally be similarly augmented. This approach requires O(n) additional embeddings (not O(n²)) because distances are shared across all (i, j) pairs with the same offset.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class ShawRelativePE(nn.Module):
+    # Shaw et al. (2018): learned relative position embeddings in attention.
+    def __init__(self, d_model, max_relative=16):
+        super().__init__()
+        self.max_rel = max_relative
+        self.rel_k   = nn.Embedding(2 * max_relative + 1, d_model)
+
+    def _clip(self, dist):
+        return dist.clamp(-self.max_rel, self.max_rel) + self.max_rel
+
+    def forward(self, Q, K):
+        # Q, K: (batch, seq, d_model)
+        seq, dk = Q.shape[1], Q.shape[-1]
+        content = torch.bmm(Q, K.transpose(1, 2)) / dk ** 0.5
+        i = torch.arange(seq).unsqueeze(1)
+        j = torch.arange(seq).unsqueeze(0)
+        dist = self._clip(j - i)              # (seq, seq) clipped distances
+        R    = self.rel_k(dist)               # (seq, seq, d_model)
+        rel  = torch.einsum('bqd,qkd-&gt;bqk', Q, R) / dk ** 0.5
+        return F.softmax(content + rel, dim=-1)
+
+torch.manual_seed(7)
+model = ShawRelativePE(d_model=64, max_relative=8)
+Q = torch.randn(2, 12, 64)
+K = torch.randn(2, 12, 64)
+attn = model(Q, K)
+print('Attention shape:', attn.shape)
+print('Row sums (should be 1):', attn[0].sum(dim=-1).detach().round(decimals=3))
+print('Content score + relative embedding score = final logit.')
+print('Distances &gt;=' + str(model.max_rel) + ' share one embedding (clipped).')
+</code></pre>
+<h2>T5 Relative Bias — Log-Spaced Buckets</h2>
+<p>Raffel et al. (2020) introduced a simpler relative PE in T5: a learned scalar bias b_{j-i} added to each attention logit, shared across all position pairs with the same relative offset. Instead of a full d_model-dimensional vector per distance (Shaw et al.), T5 uses a single scalar per head per distance bucket. Distances are grouped into 32 buckets with log-spacing: many fine-grained buckets for small distances (where precise position matters) and few coarse buckets for large distances (where exact offset matters less). The bias table has shape (num_buckets, num_heads) = (32, num_heads) — a very small addition. Crucially, the bias is shared across all layers, dramatically reducing parameters compared to per-layer relative embeddings.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import math
+
+class T5RelativeBias(nn.Module):
+    def __init__(self, num_heads, num_buckets=32, max_distance=128):
+        super().__init__()
+        self.num_buckets  = num_buckets
+        self.max_distance = max_distance
+        self.bias = nn.Embedding(num_buckets, num_heads)
+
+    def _bucket(self, rel_pos):
+        half = self.num_buckets // 2
+        n    = rel_pos.abs()
+        is_small = n &lt; half
+        large_val = half + (
+            torch.log(n.float().clamp(min=1) / half) /
+            math.log(self.max_distance / half) * (self.num_buckets - half)
+        ).long().clamp(0, self.num_buckets - half - 1)
+        return torch.where(is_small, n, large_val)
+
+    def forward(self, seq_q, seq_k):
+        q_pos = torch.arange(seq_q).unsqueeze(1)
+        k_pos = torch.arange(seq_k).unsqueeze(0)
+        rel   = k_pos - q_pos                 # (seq_q, seq_k)
+        bkt   = self._bucket(rel)
+        bias  = self.bias(bkt)                # (seq_q, seq_k, num_heads)
+        return bias.permute(2, 0, 1)          # (num_heads, seq_q, seq_k)
+
+t5 = T5RelativeBias(num_heads=8)
+bias = t5(seq_q=12, seq_k=12)
+print('Bias shape:', bias.shape)
+print('Parameters:', sum(p.numel() for p in t5.parameters()))
+buckets = [t5._bucket(torch.tensor(d)).item() for d in range(10)]
+print('Buckets for distances 0-9:', buckets)
+print('Log-spacing: many buckets for small distances, fewer for large.')
+</code></pre>
+<blockquote>
+<p><strong>T5 Bias vs Shaw Embedding: Key Trade-offs</strong>: Shaw et al. use a full d_model-dimensional vector per distance (high expressiveness, high cost); T5 uses a single scalar per head per bucket (low cost, good generalisation). T5 buckets are log-spaced — 16 exact buckets for distances 0-15, then 16 log-spaced buckets for 16-128+. This choice reflects the linguistic prior that local context (nearby tokens) is more distance-sensitive than distant context. T5 relative bias is added to every attention layer's logits using the same shared weight table, not separate tables per layer.</p>
+</blockquote>
+<h2>DeBERTa — Disentangled Attention Mechanism</h2>
+<p>He et al. (2021) introduced DeBERTa with disentangled attention: each token is represented by two vectors — a content vector and a position vector — and the attention score is decomposed into three terms: content-to-content (standard dot product), content-to-position (query content attending to key positions), and position-to-content (query positions attending to key content). This richer interaction allows the model to separately learn what a token means and where it is. The position embeddings are relative: token at position i uses the embedding for distance (j - i) when computing its score against position j, making the scheme naturally relative and enabling length generalisation. DeBERTa omits the position-to-position term as empirically less useful.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class DisentangledAttention(nn.Module):
+    # DeBERTa (He et al. 2021): content-to-content + content-to-position.
+    def __init__(self, d_model, num_heads, max_rel=128):
+        super().__init__()
+        self.dk      = d_model // num_heads
+        self.h       = num_heads
+        self.Wq      = nn.Linear(d_model, d_model, bias=False)
+        self.Wk      = nn.Linear(d_model, d_model, bias=False)
+        self.Wp      = nn.Embedding(2 * max_rel + 1, d_model)
+        self.max_rel = max_rel
+
+    def forward(self, x):
+        b, n, d = x.shape
+        Q = self.Wq(x).view(b, n, self.h, self.dk).transpose(1, 2)
+        K = self.Wk(x).view(b, n, self.h, self.dk).transpose(1, 2)
+        c2c = Q @ K.transpose(-2, -1) / self.dk ** 0.5
+        i   = torch.arange(n).unsqueeze(1)
+        j   = torch.arange(n).unsqueeze(0)
+        idx = (j - i).clamp(-self.max_rel, self.max_rel) + self.max_rel
+        P   = self.Wp(idx)                         # (n, n, d_model)
+        P   = P.view(n, n, self.h, self.dk).permute(2, 0, 1, 3)
+        c2p = (Q.unsqueeze(-2) * P).sum(-1) / self.dk ** 0.5
+        return F.softmax(c2c + c2p, dim=-1)
+
+torch.manual_seed(3)
+da   = DisentangledAttention(d_model=64, num_heads=4, max_rel=16)
+x    = torch.randn(2, 8, 64)
+attn = da(x)
+print('Attention shape:', attn.shape)
+print('c2c = content-to-content; c2p = content-to-position.')
+print('DeBERTa uses only c2c + c2p (not p2c) in this simplified version.')
+</code></pre>
+<h2>Length Generalisation — Relative vs Absolute</h2>
+<p>Relative PE schemes generalise better to sequences longer than the training maximum because the distance vocabulary (0, 1, …, max_dist) appears throughout training regardless of absolute position. A model trained on 64-token sequences sees distances 0–63; testing on 128-token sequences introduces new distances (64–127) but the existing distances still operate correctly. In contrast, absolute PE models have no embedding for position 128 if they were trained with max_seq_len=64. The following code measures how consistently PE schemes distinguish consecutive positions across different test lengths.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import math
+
+def sinusoidal_pe(seq_len, d_model):
+    pe  = torch.zeros(seq_len, d_model)
+    pos = torch.arange(seq_len).float().unsqueeze(1)
+    div = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+    pe[:, 0::2] = torch.sin(pos * div)
+    pe[:, 1::2] = torch.cos(pos * div)
+    return pe
+
+def avg_consecutive_distance(pe):
+    return (pe[1:] - pe[:-1]).norm(dim=-1).mean().item()
+
+train_len, d_model = 64, 128
+sin_train = sinusoidal_pe(train_len, d_model)
+learned   = nn.Embedding(train_len, d_model)
+nn.init.normal_(learned.weight, std=0.02)
+
+print('Extrapolation comparison (train_len=64)')
+print('{:&gt;10} {:&gt;14} {:&gt;14}'.format('test_len', 'sinusoidal', 'learned'))
+for test_len in [32, 64, 96, 128, 192]:
+    sin_test = sinusoidal_pe(test_len, d_model)
+    sin_dist = avg_consecutive_distance(sin_test)
+    ids      = torch.arange(test_len).clamp(0, train_len - 1)
+    lrn_pe   = learned(ids).detach()
+    lrn_dist = avg_consecutive_distance(lrn_pe)
+    print('{:&gt;10} {:&gt;14.4f} {:&gt;14.4f}'.format(test_len, sin_dist, lrn_dist))
+print('Learned dist collapses at positions &gt; train_len; sinusoidal stays stable.')
+</code></pre>
+<h2>Transformer-XL and Segment Recurrence</h2>
+<p>Dai et al. (2019) introduced Transformer-XL with a relative PE variant designed for segment recurrence: during training, cached hidden states from previous segments are appended as additional keys and values. Absolute position embeddings break here because a token at absolute position 5 in segment t has a different positional relationship to segment t-1 tokens than to its own segment. Transformer-XL's relative PE directly computes sinusoidally-derived distance vectors at attention time, allowing the model to correctly encode 'this token is 150 positions before me in the context' even when the context spans multiple cached segments.</p>
+<ul>
+<li>Transformer-XL: sinusoidal-derived relative PE computed at attention time, enables recurrent memory</li>
+<li>Shaw et al.: learned vector r_{j-i} added to query in attention score, max distance clipped</li>
+<li>T5: scalar bias b_{j-i} per head, log-spaced buckets, shared across all layers</li>
+<li>DeBERTa: disentangled content + position vectors, c2c + c2p interaction terms</li>
+<li>All relative methods share a key property: the position signal depends on (j-i) not on j or i individually</li>
+</ul>
+<h2>Comparison and Practical Guidance</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Extrapolation</th>
+<th>Parameters</th>
+<th>Shared Weights</th>
+<th>Complexity</th>
+<th>Used In</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Absolute PE</td>
+<td>Poor — hard limit at max_seq_len</td>
+<td>max_len×d_model or 0</td>
+<td>N/A</td>
+<td>O(n)</td>
+<td>BERT, GPT-2 (historical)</td>
+</tr>
+<tr>
+<td>Shaw et al.</td>
+<td>Better — distances generalise</td>
+<td>(2×max_rel+1)×d_model</td>
+<td>Clipped distances share boundary</td>
+<td>O(n²d)</td>
+<td>Music Transformer, some BERT variants</td>
+</tr>
+<tr>
+<td>T5 Relative Bias</td>
+<td>Good — buckets cover large dist</td>
+<td>num_buckets×num_heads (tiny)</td>
+<td>Log-spaced buckets shared per layer</td>
+<td>O(n²)</td>
+<td>T5, UL2, Flan-T5</td>
+</tr>
+<tr>
+<td>DeBERTa</td>
+<td>Good — relative by design</td>
+<td>(2×max_rel+1)×d_model</td>
+<td>Position embeddings shared</td>
+<td>O(n²d)</td>
+<td>DeBERTa-v1/v2/v3, mDeBERTa</td>
+</tr>
+</tbody>
+</table>
+<p>For encoder-only models (classification, NLU) where sequences stay within a moderate length, T5-style relative bias offers an excellent cost-quality balance — minimal parameters and strong generalisation. For large autoregressive decoders, RoPE (not in this table) is the current standard because it operates on rotated query-key vectors with zero extra parameters. DeBERTa is the strongest performer for BERT-style pre-training at moderate sequence lengths. Shaw et al. is largely superseded by the simpler T5 bias and the more powerful DeBERTa approach.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

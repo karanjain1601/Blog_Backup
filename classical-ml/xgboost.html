@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>XGBoost — Second-Order Taylor Expansion and Regularization | Notes Backup</title>
+  <meta name="description" content="XGBoost&#x27;s principled objective function with L1/L2 regularization, second-order Taylor expansion for exact leaf weights, split gain formula, approximate histogram splits, and sparsity-aware training." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>XGBoost — Second-Order Taylor Expansion and Regularization</h1>
+      <ul class='note-meta'><li><strong>description:</strong> XGBoost&#x27;s principled objective function with L1/L2 regularization, second-order Taylor expansion for exact leaf weights, split gain formula, approximate histogram splits, and sparsity-aware training.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>XGBoost — Second-Order Taylor Expansion and Regularization</h1>
+<h2>XGBoost Objective Function</h2>
+<p>XGBoost (Chen &amp; Guestrin 2016) frames tree boosting as explicit regularised objective minimisation: Obj = Σᵢ l(yᵢ, ŷᵢ) + Σₖ Ω(fₖ) where Ω(f) = γT + (λ/2)Σⱼ wⱼ² penalises tree complexity. γ is a minimum gain threshold per new leaf (L1-style on tree structure); λ is L2 regularisation on leaf weights. This explicit penalty prevents overfitting and is key to XGBoost's superior generalisation over vanilla gradient boosting.</p>
+<h2>Second-Order Taylor Expansion</h2>
+<p>At step m, XGBoost approximates the loss using a second-order Taylor expansion around the current prediction F_{m-1}: L ≈ Σᵢ [gᵢ hₘ(xᵢ) + (1/2) hᵢ hₘ(xᵢ)²] + Ω(hₘ) where gᵢ = ∂l/∂F (first derivative) and hᵢ = ∂²l/∂F² (second derivative / Hessian). For a leaf j collecting instances I_j, the optimal leaf weight is wⱼ* = −Gⱼ/(Hⱼ+λ) where Gⱼ = Σᵢ∈I_j gᵢ and Hⱼ = Σᵢ∈I_j hᵢ. The second-order expansion enables faster, more accurate optimisation than the first-order approach used by vanilla GB.</p>
+<pre><code class="language-python">import xgboost as xgb
+import numpy as np
+from sklearn.datasets import make_regression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error
+
+# Custom objective: MSE — first derivative = pred - y, second = 1
+def mse_obj(y_pred, dtrain):
+    y_true = dtrain.get_label()
+    grad = y_pred - y_true           # g_i = first derivative of MSE
+    hess = np.ones_like(y_pred)      # h_i = second derivative = 1 (constant)
+    return grad, hess
+
+def rmse_eval(y_pred, dtrain):
+    y_true = dtrain.get_label()
+    return 'rmse', float(np.sqrt(mean_squared_error(y_true, y_pred)))
+
+X, y = make_regression(n_samples=1000, n_features=20, noise=15, random_state=42)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
+
+dtrain = xgb.DMatrix(X_tr, label=y_tr)
+dtest  = xgb.DMatrix(X_te, label=y_te)
+
+params = {'max_depth': 4, 'eta': 0.1, 'seed': 42, 'verbosity': 0}
+evals_result = {}
+model = xgb.train(params, dtrain, num_boost_round=150,
+                  obj=mse_obj, custom_metric=rmse_eval,
+                  evals=[(dtrain,'train'),(dtest,'test')],
+                  evals_result=evals_result, verbose_eval=30)
+preds = model.predict(dtest)
+print(f'Final RMSE: {np.sqrt(mean_squared_error(y_te, preds)):.4f}')
+</code></pre>
+<h2>Optimal Split Gain Formula</h2>
+<p>The gain from splitting node I into left I_L and right I_R is: Gain = (1/2)[G_L²/(H_L+λ) + G_R²/(H_R+λ) − (G_L+G_R)²/(H_L+H_R+λ)] − γ. The γ term means a split is only made if the gain exceeds the minimum threshold — this is XGBoost's built-in pruning. The Hessian in the denominator acts as a confidence weighting: instances with low curvature (high certainty) have less influence on the split. min_child_weight controls the minimum sum of Hessians allowed in a leaf.</p>
+<blockquote>
+<p><strong>Why Second-Order Matters</strong>: First-order methods (vanilla GB) treat each instance equally in the gradient. Second-order methods weight instances by their Hessian — instances near the decision boundary (high curvature, uncertain predictions) get higher weight than confidently-classified instances. This leads to faster convergence and better leaf weight estimates, especially with non-MSE losses.</p>
+</blockquote>
+<h2>XGBClassifier with Early Stopping</h2>
+<p>XGBoost's Python API supports early stopping: if the validation metric does not improve for early_stopping_rounds consecutive rounds, training halts and best_iteration is saved. This automatically finds the right n_estimators without grid search. The eval_metric parameter specifies the validation metric; logloss, auc, and error are common choices for classification.</p>
+<pre><code class="language-python">import xgboost as xgb
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+
+X, y = load_breast_cancer(return_X_y=True)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
+X_tr2, X_val, y_tr2, y_val = train_test_split(X_tr, y_tr, test_size=0.15, random_state=42)
+
+clf = xgb.XGBClassifier(
+    n_estimators=1000,
+    learning_rate=0.05,
+    max_depth=4,
+    min_child_weight=5,     # minimum sum of hessians per leaf
+    subsample=0.8,
+    colsample_bytree=0.8,
+    reg_alpha=0.1,          # L1 on leaf weights
+    reg_lambda=1.0,         # L2 on leaf weights
+    eval_metric='auc',
+    early_stopping_rounds=30,
+    random_state=42,
+    verbosity=0
+)
+clf.fit(X_tr2, y_tr2, eval_set=[(X_val, y_val)], verbose=False)
+print(f'Best iteration: {clf.best_iteration}')
+auc = roc_auc_score(y_te, clf.predict_proba(X_te)[:, 1])
+print(f'Test AUC: {auc:.4f}')
+</code></pre>
+<h2>SHAP Integration with XGBoost</h2>
+<p>XGBoost has native SHAP support via the TreeExplainer, computing exact Shapley values in O(TLD²) time. model.predict(dtest, pred_contribs=True) returns the SHAP contribution matrix directly from XGBoost without the separate shap package. Using the shap package on XGBoost models is also seamless and provides all standard visualisations.</p>
+<pre><code class="language-python">import xgboost as xgb
+import shap
+import numpy as np
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split
+
+data = load_breast_cancer()
+X, y = data.data, data.target
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
+
+model = xgb.XGBClassifier(
+    n_estimators=100, max_depth=4, learning_rate=0.1,
+    eval_metric='logloss', random_state=42, verbosity=0)
+model.fit(X_tr, y_tr)
+
+# SHAP via shap package
+explainer = shap.TreeExplainer(model)
+shap_values = explainer.shap_values(X_te)
+print('SHAP values shape:', shap_values.shape)
+
+mean_abs = np.abs(shap_values).mean(0)
+top5 = np.argsort(mean_abs)[::-1][:5]
+for i in top5:
+    print(f'  {data.feature_names[i]:&lt;35s} {mean_abs[i]:.4f}')
+
+shap.summary_plot(shap_values, X_te,
+                  feature_names=data.feature_names, plot_type='bar', show=True)
+</code></pre>
+<h2>Hyperparameter Tuning</h2>
+<p>XGBoost has many hyperparameters but most tuning effort yields diminishing returns. Fix learning_rate=0.05 and use early stopping to find n_estimators. Then tune max_depth and min_child_weight (control tree complexity), followed by subsample and colsample_bytree (add stochasticity). Finally fine-tune reg_alpha and reg_lambda. This sequential approach avoids the curse of dimensionality in grid search.</p>
+<table>
+<thead>
+<tr>
+<th>Hyperparameter</th>
+<th>Typical Range</th>
+<th>Effect</th>
+<th>When to Tune</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>learning_rate</td>
+<td>0.01–0.3</td>
+<td>Controls shrinkage — lower = more trees needed</td>
+<td>Always — set to 0.05 first</td>
+</tr>
+<tr>
+<td>max_depth</td>
+<td>3–8</td>
+<td>Tree complexity — deeper = more overfitting risk</td>
+<td>Early in tuning</td>
+</tr>
+<tr>
+<td>min_child_weight</td>
+<td>1–20</td>
+<td>Min Hessian sum per leaf — higher = more conservative</td>
+<td>After max_depth</td>
+</tr>
+<tr>
+<td>subsample</td>
+<td>0.5–1.0</td>
+<td>Fraction of rows sampled per tree (stochastic GB)</td>
+<td>After tree params</td>
+</tr>
+<tr>
+<td>colsample_bytree</td>
+<td>0.5–1.0</td>
+<td>Fraction of features sampled per tree</td>
+<td>After subsample</td>
+</tr>
+<tr>
+<td>reg_alpha (L1)</td>
+<td>0–1</td>
+<td>Sparsity in leaf weights — useful for high-dim data</td>
+<td>Fine-tuning stage</td>
+</tr>
+<tr>
+<td>reg_lambda (L2)</td>
+<td>0–5</td>
+<td>Smooth shrinkage of leaf weights</td>
+<td>Fine-tuning stage</td>
+</tr>
+<tr>
+<td>gamma</td>
+<td>0–5</td>
+<td>Minimum gain for a split — built-in pruning</td>
+<td>Fine-tuning stage</td>
+</tr>
+</tbody>
+</table>
+<pre><code class="language-python">import xgboost as xgb
+import numpy as np
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import RandomizedSearchCV, train_test_split
+from scipy.stats import randint, uniform
+
+X, y = load_breast_cancer(return_X_y=True)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
+
+param_dist = {
+    'max_depth':        randint(3, 8),
+    'min_child_weight': randint(1, 15),
+    'subsample':        uniform(0.5, 0.5),
+    'colsample_bytree': uniform(0.5, 0.5),
+    'reg_alpha':        uniform(0, 1),
+}
+
+base = xgb.XGBClassifier(
+    n_estimators=100, learning_rate=0.1,
+    eval_metric='logloss', random_state=42, verbosity=0)
+rs = RandomizedSearchCV(base, param_dist, n_iter=40, cv=5,
+                        scoring='roc_auc', n_jobs=-1, random_state=42)
+rs.fit(X_tr, y_tr)
+print('Best params:', rs.best_params_)
+print(f'CV AUC:   {rs.best_score_:.4f}')
+print(f'Test AUC: {rs.score(X_te, y_te):.4f}')
+</code></pre>
+<ul>
+<li>XGBoost's explicit regularisation (γ, λ) is key to its generalisation advantage over vanilla GB</li>
+<li>Second-order Taylor expansion gives more accurate leaf weights than first-order methods</li>
+<li>min_child_weight controls leaf confidence — high values = more conservative splits</li>
+<li>early_stopping_rounds automatically finds n_estimators — always use it in practice</li>
+<li>SHAP is natively integrated into XGBoost — use it for all production explanations</li>
+<li>Approximate split finding (histogram) enables training on datasets that don't fit in memory</li>
+</ul>
+<blockquote>
+<p><strong>XGBoost Quick-Start Configuration</strong>: Set learning_rate=0.05, max_depth=5, n_estimators=1000 with early_stopping_rounds=30 on a validation set. This single configuration beats most hand-tuned setups. Then improve further with subsample=0.8 and colsample_bytree=0.8.</p>
+</blockquote>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

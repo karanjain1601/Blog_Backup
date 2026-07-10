@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Barlow Twins — Cross-Correlation Matrix and Redundancy Reduction | Notes Backup</title>
+  <meta name="description" content="Barlow Twins (Zbontar et al. 2021) avoids representational collapse by enforcing the cross-correlation matrix between embeddings of two augmented views to be close to the identity matrix, simultaneously making features invariant and decorrelated." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Barlow Twins — Cross-Correlation Matrix and Redundancy Reduction</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Barlow Twins (Zbontar et al. 2021) avoids representational collapse by enforcing the cross-correlation matrix between embeddings of two augmented views to be close to the identity matrix, simultaneously making features invariant and decorrelated.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Barlow Twins — Cross-Correlation Matrix and Redundancy Reduction</h1>
+<p>Barlow Twins (Zbontar et al. 2021) takes a fundamentally different approach to self-supervised learning. Rather than using a contrastive loss over negative pairs or an asymmetric predictor, it directly regularises the statistics of the representations. The objective is to make the cross-correlation matrix C between embeddings of two augmented views as close as possible to the identity matrix — simultaneously maximising invariance to augmentations and minimising redundancy between embedding dimensions.</p>
+<h2>Redundancy Reduction Principle</h2>
+<p>The name references Horace Barlow's redundancy-reduction principle from neuroscience (1961): an efficient neural code should minimise statistical dependencies between neurons. In the context of representation learning, this means the dimensions of the embedding vector should be decorrelated. If two dimensions are highly correlated, they carry redundant information — the network is wasting capacity. Barlow Twins enforces decorrelation through the off-diagonal terms of the cross-correlation matrix.</p>
+<h2>Cross-Correlation Matrix and Loss</h2>
+<p>For a batch of N images producing normalised embeddings Z^A, Z^B ∈ ℝ^{N×D} (one per augmented view, normalised along the batch dimension), the cross-correlation matrix is C ∈ ℝ^{D×D} with Cᵢⱼ = Σₙ z^A_{n,i} z^B_{n,j} / N. The loss has two terms: invariance term Σᵢ(1-Cᵢᵢ)² forces diagonal to 1 (each feature invariant); redundancy reduction term λΣᵢΣⱼ≠ᵢ Cᵢⱼ² forces off-diagonal to 0 (features decorrelated). λ controls the trade-off (λ=0.005 in the paper).</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def barlow_twins_loss(z_a, z_b, lambda_coeff=0.005):
+    &quot;&quot;&quot;Barlow Twins loss.
+    z_a, z_b: (N, D) embeddings from two augmented views (NOT yet normalised).
+    lambda_coeff: weight for redundancy-reduction (off-diagonal) term.
+    &quot;&quot;&quot;
+    N, D = z_a.size()
+    # Normalise along batch dimension (not feature dimension)
+    z_a_norm = (z_a - z_a.mean(0)) / (z_a.std(0) + 1e-6)  # (N, D)
+    z_b_norm = (z_b - z_b.mean(0)) / (z_b.std(0) + 1e-6)
+    # Cross-correlation matrix: C = Z_a^T @ Z_b / N  →  (D, D)
+    C = z_a_norm.T @ z_b_norm / N
+    # Invariance loss: (diagonal → 1)
+    on_diag  = (1 - C.diagonal()).pow(2).sum()
+    # Redundancy-reduction loss: (off-diagonal → 0)
+    off_diag = off_diagonal(C).pow(2).sum()
+    return on_diag + lambda_coeff * off_diag
+
+def off_diagonal(C):
+    &quot;&quot;&quot;Return all off-diagonal elements of a square matrix as a 1D tensor.&quot;&quot;&quot;
+    n = C.size(0)
+    return C.flatten()[:-1].view(n-1, n+1)[:, 1:].flatten()
+
+# Test
+torch.manual_seed(0)
+z_a = torch.randn(256, 8192)
+z_b = torch.randn(256, 8192)
+loss = barlow_twins_loss(z_a, z_b)
+print(f'Barlow Twins loss (random embeddings, D=8192): {loss.item():.2f}')
+# With identical embeddings, diagonal=1 so on_diag=0; off-diag still penalised
+z_same = torch.randn(256, 8192)
+loss_same = barlow_twins_loss(z_same, z_same)
+print(f'Barlow Twins loss (identical views, D=8192): {loss_same.item():.4f}')
+</code></pre>
+<h2>Training Loop</h2>
+<p>The Barlow Twins training loop is symmetric: both views pass through the same encoder and projector, and the loss is computed once (not symmetrised over both orderings, because C and Cᵀ both appear implicitly). No stop-gradient is needed — the loss gradient naturally flows through both branches. The key design choice is the high-dimensional projection head: projecting to 8192 dimensions (vs 128 in SimCLR) is beneficial because the D×D cross-correlation matrix has more degrees of freedom to capture redundancy.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torchvision.models as models
+
+class BarlowTwins(nn.Module):
+    def __init__(self, backbone_fn=models.resnet50, proj_dim=8192, lambda_coeff=0.005):
+        super().__init__()
+        self.lambda_coeff = lambda_coeff
+        base = backbone_fn(weights=None)
+        feat_dim = base.fc.in_features  # 2048
+        self.encoder = nn.Sequential(*list(base.children())[:-1])
+        # Projector: 3-layer MLP to high-dimensional space
+        self.projector = nn.Sequential(
+            nn.Linear(feat_dim, 8192, bias=False), nn.BatchNorm1d(8192), nn.ReLU(),
+            nn.Linear(8192, 8192, bias=False), nn.BatchNorm1d(8192), nn.ReLU(),
+            nn.Linear(8192, proj_dim, bias=False),
+        )
+
+    def forward(self, x1, x2):
+        z1 = self.projector(self.encoder(x1).flatten(1))  # (N, 8192)
+        z2 = self.projector(self.encoder(x2).flatten(1))
+        loss = barlow_twins_loss(z1, z2, self.lambda_coeff)
+        return loss
+
+# Training step
+def train_step(model, batch, optimizer):
+    (view1, view2), _ = batch
+    view1, view2 = view1.cuda(), view2.cuda()
+    loss = model(view1, view2)
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    return loss.item()
+
+model = BarlowTwins()
+print('BarlowTwins parameters:', sum(p.numel() for p in model.parameters()) // 1_000_000, 'M')
+print('Projector output dim: 8192 — much larger than SimCLR (128)')
+</code></pre>
+<h2>Visualising the Cross-Correlation Matrix</h2>
+<p>A well-trained Barlow Twins model should produce a cross-correlation matrix that approaches the identity: diagonal entries near 1.0 and off-diagonal entries near 0.0. Monitoring this matrix during training gives insight into the quality of representations. If the diagonal entries are low, the invariance term is not satisfied — the encoder is not producing augmentation-invariant features. If the off-diagonal entries are high, the redundancy-reduction is failing.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+import numpy as np
+
+def compute_cross_correlation(z_a, z_b):
+    &quot;&quot;&quot;Compute cross-correlation matrix between two batches of embeddings.&quot;&quot;&quot;
+    N = z_a.size(0)
+    z_a_norm = (z_a - z_a.mean(0)) / (z_a.std(0) + 1e-6)
+    z_b_norm = (z_b - z_b.mean(0)) / (z_b.std(0) + 1e-6)
+    return (z_a_norm.T @ z_b_norm / N).detach().cpu()
+
+def analyse_cc_matrix(C):
+    &quot;&quot;&quot;Report statistics of a cross-correlation matrix.&quot;&quot;&quot;
+    D = C.size(0)
+    diag = C.diagonal()
+    mask = ~torch.eye(D, dtype=torch.bool)
+    off  = C[mask]
+    print(f'Diagonal  — mean: {diag.mean():.4f}, std: {diag.std():.4f}')
+    print(f'Off-diag  — mean: {off.mean():.4f},  std: {off.std():.4f}')
+    print(f'Frobenius distance to identity: {(C - torch.eye(D)).norm():.4f}')
+
+torch.manual_seed(42)
+D = 64
+# Simulate an untrained model (random embeddings)
+C_random = compute_cross_correlation(torch.randn(512, D), torch.randn(512, D))
+print('--- Untrained (random) ---')
+analyse_cc_matrix(C_random)
+
+# Simulate a well-trained model (same embeddings, decorrelated)
+z = torch.linalg.qr(torch.randn(512, D))[0] * (512 ** 0.5)  # orthonormal rows
+C_trained = compute_cross_correlation(z, z + 0.1 * torch.randn_like(z))
+print('--- Near-ideal model ---')
+analyse_cc_matrix(C_trained)
+</code></pre>
+<h2>High-Dimensional Projection Head</h2>
+<p>A surprising finding of Barlow Twins is that projecting to very high dimensions (8192 vs SimCLR's 128) significantly improves performance. The intuition is that the cross-correlation matrix C ∈ ℝ^{D×D} grows quadratically with D, providing D² constraints for the optimiser to work with. At D = 128, the matrix has only ~16K entries; at D = 8192, ~67M entries, providing a much richer signal. This is unlike SimCLR where higher projection dimension yields diminishing returns.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def build_barlow_projector(in_dim=2048, hidden_dim=8192, out_dim=8192):
+    &quot;&quot;&quot;High-dimensional 3-layer MLP projector for Barlow Twins.&quot;&quot;&quot;
+    return nn.Sequential(
+        nn.Linear(in_dim, hidden_dim, bias=False),
+        nn.BatchNorm1d(hidden_dim),
+        nn.ReLU(inplace=True),
+        nn.Linear(hidden_dim, hidden_dim, bias=False),
+        nn.BatchNorm1d(hidden_dim),
+        nn.ReLU(inplace=True),
+        nn.Linear(hidden_dim, out_dim, bias=False),
+        # No BN on final layer — raw outputs for cross-correlation normalisation
+    )
+
+# Compare parameter counts across projection dimensions
+for dim in [128, 512, 2048, 8192]:
+    proj = build_barlow_projector(out_dim=dim)
+    params = sum(p.numel() for p in proj.parameters()) // 1000
+    n_matrix_entries = dim * dim
+    print(f'  D={dim:5d}: proj_params={params:6d}K,  '
+          f'CC matrix entries={n_matrix_entries:9d},  '
+          f'off-diagonal constraints={n_matrix_entries - dim:9d}')
+</code></pre>
+<blockquote>
+<p><strong>λ Controls Invariance vs Redundancy Trade-off</strong>: The λ coefficient (default 0.005) weights the off-diagonal redundancy term relative to the diagonal invariance term. A small λ emphasises invariance (diagonal → 1) but allows correlated dimensions. A large λ aggressively decorrelates features but may sacrifice invariance. In practice, λ is sensitive to the projection dimensionality: larger D often needs smaller λ since the off-diagonal sum grows as O(D²) while the diagonal sum grows as O(D).</p>
+</blockquote>
+<h2>Connection to Information Theory</h2>
+<p>Barlow Twins has a direct connection to information-theoretic principles. Maximising the diagonal of C (invariance) maximises mutual information between the two views — the representations should carry the same content despite different augmentations. Minimising the off-diagonal (redundancy reduction) implements a whitening-like objective that spreads information evenly across dimensions. Together, these objectives resemble maximising the joint entropy of the embedding while constraining mutual information between dimensions.</p>
+<ul>
+<li>Barlow's redundancy-reduction: efficient neural codes decorrelate outputs (neuroscience, 1961).</li>
+<li>λ=0.005 works across scales; tune if D changes significantly from 8192.</li>
+<li>Training: LARS optimiser, batch 2048, lr=0.2, weight_decay=1.5e-6, 1000 epochs.</li>
+<li>Projection normalised along batch dim (not feature dim) — unlike SimCLR's L2 normalisation.</li>
+<li>No stop-gradient needed: the cross-correlation loss naturally prevents collapse.</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Loss Mechanism</th>
+<th>Negatives</th>
+<th>Proj Dim</th>
+<th>Linear Eval Top-1</th>
+<th>Key Innovation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Barlow Twins</td>
+<td>Cross-corr → identity</td>
+<td>No</td>
+<td>8192</td>
+<td>73.2%</td>
+<td>Redundancy reduction via off-diagonal penalty</td>
+</tr>
+<tr>
+<td>VICReg</td>
+<td>Var + Inv + Cov</td>
+<td>No</td>
+<td>8192</td>
+<td>73.2%</td>
+<td>Explicit variance term prevents collapse</td>
+</tr>
+<tr>
+<td>SimCLR v1</td>
+<td>NT-Xent contrastive</td>
+<td>Yes</td>
+<td>128</td>
+<td>69.3%</td>
+<td>Large batch in-batch negatives</td>
+</tr>
+<tr>
+<td>BYOL</td>
+<td>MSE (normalised)</td>
+<td>No</td>
+<td>256</td>
+<td>74.3%</td>
+<td>EMA target + predictor asymmetry</td>
+</tr>
+</tbody>
+</table>
+<h2>Practical Considerations and Tuning</h2>
+<p>Barlow Twins is straightforward to implement but has a few practical pitfalls. The cross-correlation matrix computation scales as O(N·D²) in memory for a D-dimensional embedding — at D=8192 and N=2048, the matrix itself is 8192×8192 = 67M float32 values (~256 MB). This is manageable on a single GPU but requires care. The off_diagonal helper function must correctly exclude the D diagonal elements. Batch normalisation in the projector (but not on the final output layer) is important for training stability; omitting it causes the cross-correlation matrix to be ill-conditioned.</p>
+    </article>
+  </main>
+</body>
+</html>

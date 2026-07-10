@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Deep vs Shallow Networks — Expressivity and Optimization | Notes Backup</title>
+  <meta name="description" content="Analyze expressivity and optimization tradeoffs between deep and shallow networks, covering depth-separation theorems, hierarchical feature learning in CNNs, loss surface geometry, and practical architecture selection rules." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Deep vs Shallow Networks — Expressivity and Optimization</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Analyze expressivity and optimization tradeoffs between deep and shallow networks, covering depth-separation theorems, hierarchical feature learning in CNNs, loss surface geometry, and practical architecture selection rules.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Deep vs Shallow Networks — Expressivity and Optimization</h1>
+<p>The question of depth vs width is not merely empirical — it has rigorous theoretical answers about expressivity and practical answers about optimization and inductive bias. Depth enables exponential representational efficiency for compositionally structured functions, while shallow wide networks pay a combinatorial cost. But depth introduces optimization challenges: vanishing gradients, saddle points, and initialization sensitivity. Modern architectures resolve both sides with residual connections and careful initialization.</p>
+<h2>Expressivity — Depth Separation Theorems</h2>
+<p>A depth-k network with n neurons per layer can represent functions that require Ω(2^n) neurons in a depth-(k−1) network. Telgarsky (2016) proved this with the triangle wave composed k times: a depth-k network represents it with O(k) neurons, while any depth-(k−1) network requires exponentially many. Polynomial composition: a depth-k network represents degree-2^k polynomials efficiently, while depth-1 requires exponentially many neurons.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from torch.optim import Adam
+import numpy as np
+
+def triangle_wave(x, k=5):
+    for _ in range(k):
+        x = 1 - 2 * torch.abs(x - 0.5)
+    return x
+
+def build_net(depth, width):
+    layers = [nn.Linear(1, width), nn.ReLU()]
+    for _ in range(depth - 1): layers += [nn.Linear(width, width), nn.ReLU()]
+    layers.append(nn.Linear(width, 1))
+    return nn.Sequential(*layers)
+
+def train_mse(model, X, y, steps=3000):
+    opt = Adam(model.parameters(), lr=1e-3)
+    for _ in range(steps):
+        loss = ((model(X).squeeze() - y)**2).mean()
+        opt.zero_grad(); loss.backward(); opt.step()
+    with torch.no_grad(): return ((model(X).squeeze()-y)**2).mean().item()
+
+torch.manual_seed(42)
+X = torch.linspace(0, 1, 500).unsqueeze(1)
+y = triangle_wave(X.squeeze(), k=5)
+for depth, width in [(1, 500), (3, 64), (6, 24), (10, 12)]:
+    params = sum(p.numel() for p in build_net(depth, width).parameters())
+    mse = train_mse(build_net(depth, width), X, y)
+    print(f'depth={depth} width={width}: {params} params, MSE={mse:.5f}')
+</code></pre>
+<h2>Optimization Landscape — Saddle Points and Overparameterization</h2>
+<p>Deep networks have complex non-convex loss surfaces. Dauphin et al. (2014) showed most critical points are saddle points (not local minima), and that the loss value at saddle points concentrates around the global minimum for large overparameterized networks. Local minima with high loss are rare for overparameterized models; gradient descent finds near-globally-optimal solutions despite non-convexity.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+from torch.optim import Adam
+
+def train_repeat(depth, width, n_runs=5, steps=2000):
+    losses = []
+    for seed in range(n_runs):
+        torch.manual_seed(seed)
+        layers = [nn.Linear(4, width), nn.ReLU()]
+        for _ in range(depth - 1): layers += [nn.Linear(width, width), nn.ReLU()]
+        layers.append(nn.Linear(width, 1))
+        model = nn.Sequential(*layers)
+        X = torch.randn(200, 4)
+        y = (X[:,0]**2 + torch.sin(X[:,1]) * X[:,2] - X[:,3]).unsqueeze(1)
+        opt = Adam(model.parameters(), lr=1e-3)
+        for _ in range(steps):
+            loss = ((model(X) - y)**2).mean()
+            opt.zero_grad(); loss.backward(); opt.step()
+        with torch.no_grad(): losses.append(((model(X)-y)**2).mean().item())
+    return np.mean(losses), np.std(losses)
+
+print(f'{&quot;Config&quot;:22} | Mean MSE | Std')
+for depth, width in [(1, 256), (2, 64), (4, 32), (8, 16)]:
+    m, s = train_repeat(depth, width)
+    print(f'depth={depth} width={width:3d}       | {m:.5f}  | {s:.5f}')
+</code></pre>
+<h2>Inductive Bias — Hierarchical Feature Learning</h2>
+<p>Deep CNNs learn hierarchical representations: early layers detect edges and Gabor-like filters, middle layers detect textures and object parts, late layers detect entire objects. This hierarchy emerges naturally from the compositional structure of images. Shallow networks must span all these levels in a single layer, requiring exponentially more parameters. The inductive bias of depth matches the compositional structure of natural data.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class LayerwiseCNN(nn.Module):
+    def __init__(self, n_layers):
+        super().__init__()
+        self.convs = nn.ModuleList()
+        in_ch = 1
+        for i in range(n_layers):
+            out_ch = 8 * (2 ** min(i, 3))
+            self.convs.append(nn.Conv2d(in_ch, out_ch, 3, padding=1))
+            in_ch = out_ch
+
+    def activation_norms(self, x):
+        norms = []
+        for conv in self.convs:
+            x = torch.relu(conv(x))
+            norms.append(x.detach().norm(dim=1).mean().item())
+        return norms
+
+torch.manual_seed(0)
+model = LayerwiseCNN(n_layers=5)
+img = torch.randn(4, 1, 32, 32)
+norms = model.activation_norms(img)
+print('Layer | Channels | Activation norm')
+in_ch = 1
+for i, n in enumerate(norms):
+    out_ch = 8 * (2 ** min(i, 3))
+    print(f'  {i+1}   | {out_ch:8d} | {n:.4f}')
+</code></pre>
+<h2>Measuring Depth Benefits Empirically</h2>
+<p>A direct way to measure depth benefit is to compare parameter-matched architectures: same total parameter count, varying depth and width. For compositionally structured tasks (hierarchical functions, images, text), deep narrow networks consistently outperform wide shallow ones at the same parameter budget. For flat tasks (tabular regression with no natural hierarchy), the advantage shrinks or disappears.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from torch.optim import Adam
+import numpy as np
+
+def approx_width_for_params(depth, target_params, d_in=4, d_out=1):
+    # rough: d_in*w + (depth-1)*w*w + w*d_out ~ target_params
+    # solve quadratic: (depth-1)*w^2 + (d_in+d_out)*w - target_params = 0
+    a = max(depth - 1, 1)
+    b = d_in + d_out
+    w = int((-b + (b**2 + 4*a*target_params)**0.5) / (2*a))
+    return max(w, 2)
+
+def build_and_train(depth, width, d_in=4, steps=1500, seed=0):
+    torch.manual_seed(seed)
+    layers = [nn.Linear(d_in, width), nn.ReLU()]
+    for _ in range(depth-1): layers += [nn.Linear(width, width), nn.ReLU()]
+    layers.append(nn.Linear(width, 1))
+    model = nn.Sequential(*layers)
+    X = torch.randn(300, d_in)
+    # Hierarchical target: composable function
+    y = torch.sin(X[:,0] * X[:,1]) + torch.cos(X[:,2] - X[:,3])
+    opt = Adam(model.parameters(), lr=5e-4)
+    for _ in range(steps):
+        loss = ((model(X).squeeze() - y)**2).mean()
+        opt.zero_grad(); loss.backward(); opt.step()
+    with torch.no_grad():
+        return sum(p.numel() for p in model.parameters()), ((model(X).squeeze()-y)**2).mean().item()
+
+print(f'{&quot;Depth&quot;:&gt;6} | {&quot;Width&quot;:&gt;6} | {&quot;Params&quot;:&gt;8} | MSE')
+for depth in [1, 2, 4, 8]:
+    w = approx_width_for_params(depth, 2000)
+    params, mse = build_and_train(depth, w)
+    print(f'{depth:&gt;6} | {w:&gt;6} | {params:&gt;8} | {mse:.5f}')
+</code></pre>
+<h2>Depth vs Width: Practical Recommendations</h2>
+<p>For tabular/structured data: depth rarely matters past 3–4 layers; width and regularization matter more. For images, text, and audio: depth is critical for hierarchical feature extraction. The law of diminishing returns sets in around 100+ layers for CNNs without residuals, and 48–96 layers for transformers depending on compute budget.</p>
+<p>Overparameterization is beneficial for optimization: more parameters means more saddle points with near-global-minimum loss, smoother loss surface, and better generalization via implicit regularization. Modern practice: err on the side of larger models, use regularization (dropout, weight decay) to prevent overfitting rather than reducing capacity.</p>
+<p>Feature reuse is a key advantage of depth. Intermediate representations in a deep network are shared across all outputs — the backbone is trained once and serves all classes or tasks. This is the foundation of transfer learning: a deep backbone pre-trained on ImageNet produces representations that transfer to medical imaging, satellite imagery, and other domains with minimal fine-tuning because the hierarchical features generalize across visual domains.</p>
+<h2>Architecture Selection Summary</h2>
+<blockquote>
+<p><strong>Law of Diminishing Returns for Depth</strong>: Without residuals, adding layers past ~15 hurts training due to vanishing gradients. With residuals, depth benefit continues but slows after ~100 layers. For transformers: 12–48 layers is the practical sweet spot. Beyond that, wider hidden dimensions (d_model) often yield more return per parameter than additional depth.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Shallow (1–3 layers)</th>
+<th>Deep (10+ layers)</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Expressivity</td>
+<td>Limited — exponential neuron cost</td>
+<td>High — polynomial via depth separation</td>
+<td>Proven for specific function classes</td>
+</tr>
+<tr>
+<td>Optimization</td>
+<td>Near-convex for linear models</td>
+<td>Non-convex, benign when overparameterized</td>
+<td>Overparameterization improves landscape</td>
+</tr>
+<tr>
+<td>Inductive bias</td>
+<td>Flat — no hierarchy assumed</td>
+<td>Hierarchical — features compose naturally</td>
+<td>Matches compositional structure of natural data</td>
+</tr>
+<tr>
+<td>Training difficulty</td>
+<td>Low — minimal vanishing risk</td>
+<td>High — requires residuals, He init, clipping</td>
+<td>Solved by modern architecture conventions</td>
+</tr>
+<tr>
+<td>Representation reuse</td>
+<td>None — single transformation</td>
+<td>High — shared intermediate features</td>
+<td>Foundation of transfer learning</td>
+</tr>
+</tbody>
+</table>
+<ul>
+<li>For tabular data: depth rarely matters past 3–4 layers; width and regularization matter more.</li>
+<li>For images, text, audio: depth is critical for hierarchical feature extraction.</li>
+<li>Depth separation results are worst-case theoretical bounds — practical gaps appear earlier.</li>
+<li>Overparameterized deep networks have benign optimization: local minima are rare and near-global.</li>
+<li>Always use residual connections for depth &gt;10 — without them, depth benefits are negated by vanishing gradients.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

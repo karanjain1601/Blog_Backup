@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Speculative Decoding | Notes Backup</title>
+  <meta name="description" content="Using a small draft model to propose multiple tokens that the large target model verifies in parallel, reducing wall-clock generation time without changing output distribution." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Speculative Decoding</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Using a small draft model to propose multiple tokens that the large target model verifies in parallel, reducing wall-clock generation time without changing output distribution.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Speculative Decoding</h1>
+<p>Speculative decoding (Chen et al., 2023; Leviathan et al., 2023) is a lossless inference acceleration technique that decouples token proposal from token verification. A small, fast draft model autoregressively generates k candidate tokens in sequence. The large target model then evaluates all k+1 positions in a single forward pass — producing its own probability distributions at each position. A rejection-sampling procedure accepts or rejects each draft token while provably preserving the target model's output distribution. The net effect: the target model processes multiple tokens per forward pass instead of one, reducing the total number of expensive target forward passes needed to generate a sequence.</p>
+<h2>Overview</h2>
+<p>Modern large language model inference is memory-bandwidth bound, not compute bound. At batch size 1, the GPU spends most of its time loading 70–140 GB of model weights from HBM to SRAM for each forward pass — the actual matrix multiplication is secondary. Speculative decoding exploits this asymmetry: since the target model's forward pass is latency-dominated by memory transfers rather than FLOPs, verifying k tokens in one pass takes only marginally more time than verifying 1. Meanwhile, the draft model is 10–100x smaller and can produce k proposals in a fraction of the time a single target forward pass takes. If the draft model's proposals are accepted at rate alpha, the expected tokens produced per target forward pass is (1 - alpha^(k+1)) / (1 - alpha), giving a theoretical speedup of that quantity divided by 1 (greedy baseline). At alpha=0.8 and k=5, this is roughly 3.5 tokens per target pass — a 3.5x throughput gain.</p>
+<h2>Draft-Verify Mechanism</h2>
+<p>The draft-verify loop proceeds as follows. Given input context x_{1:t}, the draft model generates k tokens autoregressively: for each step i in 1..k, it samples x_{t+i} ~ q(. | x_{1:t+i-1}) where q is the draft model's distribution. This produces a sequence of k draft tokens and their associated draft probabilities q_i = q(x_{t+i} | x_{1:t+i-1}). Next, the target model is called once with the full candidate sequence x_{1:t+k} and returns logits for all t+k positions simultaneously. The target probabilities at each draft position are p_i = p(x_{t+i} | x_{1:t+i-1}). The rejection sampling loop then iterates i from 1 to k: if p_i / q_i &gt;= 1, token i is always accepted; otherwise token i is accepted with probability p_i / q_i and rejected with probability 1 - p_i / q_i. On rejection, a corrected token is sampled from the residual distribution max(0, p_i - q_i) / Z.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+from transformers import AutoModelForCausalLM
+from typing import Tuple, List
+
+def speculative_decode(
+    target_model, draft_model, input_ids: torch.Tensor,
+    k: int = 5, temperature: float = 1.0
+) -&gt; Tuple[torch.Tensor, float]:
+    &quot;&quot;&quot;Draft proposes k tokens; target verifies all in one forward pass.&quot;&quot;&quot;
+    draft_input = input_ids.clone()
+    draft_tokens: List[torch.Tensor] = []
+    draft_probs: List[float] = []
+    for _ in range(k):
+        with torch.no_grad():
+            logits = draft_model(draft_input).logits[:, -1, :] / temperature
+            probs = F.softmax(logits, dim=-1)
+            tok = torch.multinomial(probs, 1)
+            draft_tokens.append(tok)
+            draft_probs.append(probs[0, tok.item()].item())
+            draft_input = torch.cat([draft_input, tok], dim=-1)
+    candidate_ids = torch.cat([input_ids] + draft_tokens, dim=-1)
+    with torch.no_grad():
+        target_logits = target_model(candidate_ids).logits
+    accepted: List[torch.Tensor] = []
+    n = len(input_ids[0])
+    for i, (tok, q_i) in enumerate(zip(draft_tokens, draft_probs)):
+        t_probs = F.softmax(target_logits[0, n - 1 + i] / temperature, dim=-1)
+        accept_prob = min(1.0, t_probs[tok.item()].item() / (q_i + 1e-9))
+        if torch.rand(1).item() &lt; accept_prob:
+            accepted.append(tok)
+        else:
+            # Sample from residual (corrected) distribution
+            q_dist = F.softmax(target_logits[0, n - 1 + i] / temperature, dim=-1)
+            adj = (t_probs - q_dist * q_i).clamp(min=0)
+            fallback = torch.multinomial(adj / (adj.sum() + 1e-9), 1).unsqueeze(0)
+            accepted.append(fallback)
+            break  # stop accepting after first rejection
+    return torch.cat([input_ids] + accepted, dim=-1), len(accepted) / k
+</code></pre>
+<h2>Acceptance Criterion</h2>
+<p>The acceptance probability for draft token x_{t+i} is min(1, p(x_{t+i} | context) / q(x_{t+i} | context)). This is the same criterion used in importance sampling and the Metropolis-Hastings algorithm. When the draft model is well-aligned with the target (i.e., q ≈ p), acceptance rate alpha approaches 1. When they diverge (e.g., draft predicts a different token distribution for technical content), alpha drops. The corrected distribution on rejection is the normalized positive part of (p - q): we subtract the draft's contribution and re-normalize. This ensures that the marginal distribution over accepted tokens exactly matches p — the guarantee that speculative decoding is lossless. Unlike quantization or knowledge distillation, there is zero accuracy tradeoff: the output distribution is identical to greedy or sampled decoding from the target alone.</p>
+<h2>Speculative Sampling Math</h2>
+<p>Let p(x|c) be the target distribution and q(x|c) be the draft distribution over the next token given context c. Define the acceptance probability a(x) = min(1, p(x|c) / q(x|c)). The expected number of tokens accepted per speculative step is E[accepted] = sum_x q(x) * a(x) = sum_x min(q(x), p(x)) = 1 - TV(p, q) where TV is total variation distance. When p = q exactly (perfect draft), all k tokens are always accepted. The expected speedup relative to greedy decoding (1 target call per token) is: speedup ≈ (1 - alpha^(k+1)) / ((1 - alpha) * C_draft) where alpha = E[a(x)] and C_draft is the relative cost of one draft forward pass as a fraction of the target cost. For a 68M draft against a 7B target, C_draft ≈ 0.01–0.05, making the draft overhead negligible.</p>
+<pre><code class="language-python">import torch
+import time
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+def benchmark_speculative_decoding(
+    target_name: str = &quot;meta-llama/Llama-2-7b-hf&quot;,
+    draft_name: str = &quot;JackFram/llama-68m&quot;,
+    n_prompts: int = 50,
+    max_new_tokens: int = 128,
+    k: int = 5
+) -&gt; dict:
+    &quot;&quot;&quot;Measure acceptance rate and wall-clock speedup vs greedy baseline.&quot;&quot;&quot;
+    tokenizer = AutoTokenizer.from_pretrained(target_name)
+    target = AutoModelForCausalLM.from_pretrained(
+        target_name, torch_dtype=torch.float16, device_map=&quot;auto&quot;)
+    draft = AutoModelForCausalLM.from_pretrained(
+        draft_name, torch_dtype=torch.float16, device_map=&quot;auto&quot;)
+    prompts = [&quot;Describe the architecture of a transformer model in detail.&quot;] * n_prompts
+    inputs = tokenizer(prompts[0], return_tensors=&quot;pt&quot;).to(&quot;cuda&quot;)
+    # Greedy baseline
+    t0 = time.perf_counter()
+    for _ in range(n_prompts):
+        target.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
+    greedy_time = time.perf_counter() - t0
+    # Speculative decoding
+    acceptance_rates = []
+    t0 = time.perf_counter()
+    for _ in range(n_prompts):
+        _, alpha = speculative_decode(target, draft, inputs.input_ids, k=k)
+        acceptance_rates.append(alpha)
+    spec_time = time.perf_counter() - t0
+    speedup = greedy_time / spec_time
+    mean_alpha = sum(acceptance_rates) / len(acceptance_rates)
+    print(f&quot;Greedy:      {greedy_time:.2f}s total&quot;)
+    print(f&quot;Speculative: {spec_time:.2f}s total  (speedup={speedup:.2f}x)&quot;)
+    print(f&quot;Mean acceptance rate alpha: {mean_alpha:.3f}&quot;)
+    print(f&quot;Expected speedup from formula: {(1 - mean_alpha**(k+1)) / (1 - mean_alpha + 1e-9):.2f}x&quot;)
+    return {&quot;speedup&quot;: speedup, &quot;alpha&quot;: mean_alpha}
+</code></pre>
+<h2>Choosing the Draft Model</h2>
+<p>The draft model must satisfy two competing requirements: it must be fast enough that its k forward passes cost less than the target pass it replaces, and it must be accurate enough that acceptance rate alpha stays high. The key practical constraint is that the draft and target must share the same tokenizer vocabulary — the tokens proposed by the draft must be valid tokens from the target's vocabulary for the rejection sampling math to work. The best draft models are smaller members of the same model family trained with the same data distribution: for LLaMA-2-70B, use LLaMA-2-7B or TinyLLaMA-1.1B as the draft. Draft models from unrelated families (e.g., GPT-2 as draft for LLaMA) tend to have poor alignment and low alpha. Self-drafting — using early exit layers of the target model itself — avoids this problem by sharing the full embedding space, but requires model surgery. Medusa adds multiple prediction heads to the target model itself, trained to predict positions 2, 3, ... k ahead simultaneously.</p>
+<table>
+<thead>
+<tr>
+<th>Draft Model</th>
+<th>Acceptance Rate (alpha)</th>
+<th>Effective Speedup</th>
+<th>Extra Memory (GB)</th>
+<th>Latency Reduction</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>LLaMA-68M</td>
+<td>0.65–0.70</td>
+<td>1.8–2.2x</td>
+<td>+0.1 GB</td>
+<td>40–50%</td>
+</tr>
+<tr>
+<td>LLaMA-160M</td>
+<td>0.70–0.75</td>
+<td>2.0–2.5x</td>
+<td>+0.3 GB</td>
+<td>45–55%</td>
+</tr>
+<tr>
+<td>LLaMA-1B</td>
+<td>0.78–0.83</td>
+<td>2.5–3.0x</td>
+<td>+2 GB</td>
+<td>55–65%</td>
+</tr>
+<tr>
+<td>LLaMA-3B</td>
+<td>0.82–0.87</td>
+<td>2.8–3.4x</td>
+<td>+6 GB</td>
+<td>60–70%</td>
+</tr>
+<tr>
+<td>Self-draft (Medusa)</td>
+<td>0.75–0.88</td>
+<td>2.2–3.5x</td>
+<td>+0.05 GB (heads only)</td>
+<td>55–70%</td>
+</tr>
+</tbody>
+</table>
+<h2>Self-Speculative and Medusa Variants</h2>
+<p>Medusa (Cai et al., 2024) attaches k additional LM heads to the final hidden state of the target model. Each Medusa head i predicts the token at position t+i+1 given the current hidden state — all heads run in parallel during one target forward pass. A tree-structured verification then accepts consistent candidate paths. Unlike standard speculative decoding, Medusa requires no separate draft model and adds only a small fraction of parameters (the extra heads). The tradeoff is that Medusa heads must be trained, whereas standard speculative decoding works out-of-the-box with any compatible draft model. EAGLE (Li et al., 2024) is a further refinement where the draft model is an auto-regressive model that operates on target hidden states rather than raw tokens, achieving acceptance rates of 0.85–0.90 by directly modeling the target's representation space.</p>
+<pre><code class="language-python">import torch
+import time
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+def hf_assisted_generation_benchmark(
+    target_name: str = &quot;meta-llama/Llama-2-7b-hf&quot;,
+    draft_name: str = &quot;JackFram/llama-68m&quot;,
+    max_new_tokens: int = 200
+) -&gt; float:
+    &quot;&quot;&quot;Use HuggingFace built-in assisted generation (speculative decoding).&quot;&quot;&quot;
+    tokenizer = AutoTokenizer.from_pretrained(target_name)
+    target = AutoModelForCausalLM.from_pretrained(
+        target_name, torch_dtype=torch.float16, device_map=&quot;auto&quot;)
+    draft = AutoModelForCausalLM.from_pretrained(
+        draft_name, torch_dtype=torch.float16, device_map=&quot;auto&quot;)
+    prompt = &quot;The fundamental theorem of calculus states that&quot;
+    inputs = tokenizer(prompt, return_tensors=&quot;pt&quot;).to(&quot;cuda&quot;)
+    # Greedy baseline
+    t0 = time.perf_counter()
+    out_greedy = target.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
+    t_base = time.perf_counter() - t0
+    # Assisted generation: HuggingFace runs speculative decoding internally
+    t0 = time.perf_counter()
+    out_spec = target.generate(**inputs, max_new_tokens=max_new_tokens,
+                                do_sample=False, assistant_model=draft)
+    t_spec = time.perf_counter() - t0
+    speedup = t_base / t_spec
+    print(f&quot;Greedy:    {t_base:.2f}s   Assisted: {t_spec:.2f}s   Speedup: {speedup:.2f}x&quot;)
+    # Verify identical outputs (speculative decoding is lossless)
+    assert out_greedy[0].tolist() == out_spec[0].tolist(), &quot;Output mismatch — bug!&quot;
+    print(&quot;Output distributions match: verified lossless.&quot;)
+    return speedup
+</code></pre>
+<h2>Throughput Gains in Practice</h2>
+<p>Real-world speedups depend heavily on task type and output length. Speculative decoding provides the largest gains on tasks where the output is predictable and the draft model aligns well: code completion (where token sequences follow strong syntactic patterns), summarization, and translation. It provides smaller gains on highly creative or stochastic tasks where the target model diverges frequently from the draft. In production deployments at batch size 1 (the latency-critical serving regime), speedups of 2–3x are typical with a well-matched draft model. At higher batch sizes, the target model becomes more compute-bound (rather than bandwidth-bound), reducing the relative benefit of speculative decoding. Most production inference servers (TGI, vLLM, TensorRT-LLM) implement speculative decoding with automatic draft model loading and configurable k.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+from typing import Dict
+
+def sweep_k_for_optimal_acceptance(
+    target, draft, input_ids: torch.Tensor,
+    k_values=range(1, 11), n_runs: int = 30
+) -&gt; Dict[int, dict]:
+    &quot;&quot;&quot;Sweep draft steps k from 1 to 10; find optimal k for this draft/target pair.&quot;&quot;&quot;
+    results = {}
+    draft_cost_fraction = 0.04  # draft is ~4% cost of target forward pass
+    for k in k_values:
+        alphas = []
+        for _ in range(n_runs):
+            _, alpha = speculative_decode(target, draft, input_ids, k=k)
+            alphas.append(alpha)
+        mean_alpha = float(np.mean(alphas))
+        # Theoretical effective speedup formula
+        if mean_alpha &lt; 1.0:
+            eff_toks = (1 - mean_alpha ** (k + 1)) / (1 - mean_alpha)
+        else:
+            eff_toks = k + 1
+        eff_speedup = eff_toks / (1 + k * draft_cost_fraction)
+        results[k] = {&quot;alpha&quot;: mean_alpha, &quot;eff_tokens&quot;: eff_toks, &quot;speedup&quot;: eff_speedup}
+        print(f&quot;k={k:2d}: alpha={mean_alpha:.3f}  eff_tokens={eff_toks:.2f}  speedup={eff_speedup:.2f}x&quot;)
+    optimal_k = max(results, key=lambda x: results[x][&quot;speedup&quot;])
+    print(f&quot;\nOptimal k={optimal_k} -&gt; speedup={results[optimal_k]['speedup']:.2f}x&quot;)
+    return results
+</code></pre>
+<blockquote>
+<p><strong>Lossless Speedup Guarantee</strong>: Speculative decoding is mathematically guaranteed to produce the same output distribution as the target model alone — it is a pure speedup with no accuracy tradeoff, unlike quantization or pruning. The rejection sampling criterion ensures that the marginal distribution over every accepted token exactly equals the target's conditional distribution at that position.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<ul>
+<li>Speculative decoding exploits memory-bandwidth bottleneck: at batch size 1, the target model can verify k tokens in one pass for nearly the same cost as verifying 1.</li>
+<li>Draft model must share the same tokenizer as the target; same-family smaller models (e.g., LLaMA-68M for LLaMA-7B) yield the highest acceptance rates.</li>
+<li>Optimal k is typically 4–8; beyond k=8, rejection rate grows faster than the benefit of parallel verification for most draft/target pairs.</li>
+<li>Acceptance rate alpha of 0.75–0.85 is realistic for well-matched pairs on natural language tasks; code tasks often achieve 0.85–0.92.</li>
+<li>HuggingFace transformers supports assisted generation natively via assistant_model= parameter — zero code beyond model loading.</li>
+<li>Medusa and EAGLE variants eliminate the need for a separate draft model by attaching prediction heads to the target, at the cost of a brief training step.</li>
+<li>Speculative decoding is most impactful at batch size 1; for large batch serving, continuous batching and paged attention typically dominate.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

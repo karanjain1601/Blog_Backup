@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>KV Cache in Transformer Inference | Notes Backup</title>
+  <meta name="description" content="Caching key and value projections from previous tokens to avoid recomputation during autoregressive decoding, reducing complexity from O(n^2) per step to O(n)." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>KV Cache in Transformer Inference</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Caching key and value projections from previous tokens to avoid recomputation during autoregressive decoding, reducing complexity from O(n^2) per step to O(n).</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>KV Cache in Transformer Inference</h1>
+<p>The KV cache is the primary optimization that makes autoregressive transformer inference practical at scale. During the prefill phase, the model computes key (K) and value (V) projections for every input token in one parallel forward pass. Without caching, each subsequent decode step would recompute these projections for all previous tokens — an O(n) operation per step repeated n times, giving O(n^2) total work over an n-token generation. By storing the K and V tensors after prefill and reusing them in all subsequent decode steps, the model reduces each decode step to computing only one new pair of K, V projections for the newly generated token, then concatenating them with the cache. This drops per-step attention from O(n^2) to O(n) in sequence length.</p>
+<h2>Overview</h2>
+<p>Transformer attention computes Attention(Q, K, V) = softmax(QK^T / sqrt(d_k)) V. In autoregressive decoding, each generated token t must attend to all t-1 previous tokens plus itself. Without caching, generating token t requires computing K_i and V_i for every prior token i, which is wasteful since K_i and V_i are deterministic functions of fixed previous input tokens and never change. The KV cache stores K_i and V_i after their first computation and reuses them indefinitely. At each decode step, only the new token's Q, K, V are computed from the new token embedding; the new K and V are appended to the cache, and attention runs against the full cached sequence. This is a pure algorithmic optimization — correctness is identical to the uncached version, with no approximation.</p>
+<h2>Prefill vs Decode Phase</h2>
+<p>LLM inference has two computationally distinct phases. The prefill phase processes the entire prompt in a single parallel forward pass. All token positions are known, so attention can be computed as a dense matrix multiplication across all positions simultaneously. Prefill is compute-bound: arithmetic intensity (FLOPs per byte of memory bandwidth) is high, and modern GPUs achieve close to peak FLOP utilization. The decode phase generates tokens one at a time autoregressively. Each step is memory-bandwidth-bound: the GPU must read the full model weights and the full KV cache from HBM (High-Bandwidth Memory) to compute a single output token. On an A100 80GB GPU with 2 TB/s memory bandwidth, reading a 70B parameter model in bfloat16 (~140 GB) plus a 32 GB KV cache takes ~86ms per step — setting a hard floor on token generation latency. This fundamental asymmetry motivates separate optimization strategies: maximize batch size during prefill (higher arithmetic intensity), minimize KV cache size and maximize batch size during decode (higher bandwidth utilization).</p>
+<h2>KV Cache Mechanics</h2>
+<p>At each transformer layer, the KV cache maintains two tensors: K_cache and V_cache, each of shape (batch_size, n_kv_heads, seq_len, head_dim). At decode step t, the new token embedding passes through the Q, K, V projection matrices to produce q_t, k_t, v_t, each of shape (bsz, n_kv_heads, 1, head_dim). k_t and v_t are appended to the cache: K_full = cat([K_cache, k_t], dim=2). Attention then runs against K_full and V_full with the query q_t, producing output of shape (bsz, n_heads, 1, head_dim). This output is projected and added to the residual stream. The updated cache, now containing seq_len + 1 entries, is passed to the next decode step. Across all L layers, this means the model maintains 2 * L KV cache tensors simultaneously. The total memory is proportional to L * n_kv_heads * head_dim * batch_size * seq_len * 2 * dtype_bytes.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+import math
+import time
+
+def decode_step_with_cache(q_new, k_new, v_new, kv_cache=None):
+    &quot;&quot;&quot;
+    Single autoregressive decode step using a KV cache dict.
+    q_new, k_new, v_new: (bsz, 1, head_dim) tensors for the new token.
+    kv_cache: dict {'k': (bsz, past_len, d), 'v': (bsz, past_len, d)} or None.
+    Returns (output, updated_kv_cache). Cache grows by 1 position each step.
+    Complexity: O(n) per step with cache vs O(n^2) total without.
+    &quot;&quot;&quot;
+    if kv_cache is not None:
+        k = torch.cat([kv_cache['k'], k_new], dim=1)  # (bsz, past+1, head_dim)
+        v = torch.cat([kv_cache['v'], v_new], dim=1)
+    else:
+        k, v = k_new, v_new
+    new_cache = {'k': k, 'v': v}
+    scale = math.sqrt(q_new.shape[-1])
+    scores = torch.bmm(q_new, k.transpose(1, 2)) / scale  # (bsz, 1, seq_len)
+    attn = F.softmax(scores, dim=-1)
+    output = torch.bmm(attn, v)                            # (bsz, 1, head_dim)
+    return output, new_cache
+
+# Benchmark 200-step decode with KV cache
+bsz, head_dim, n_steps = 1, 64, 200
+cache = None
+t0 = time.perf_counter()
+for step in range(n_steps):
+    q = torch.randn(bsz, 1, head_dim)
+    out, cache = decode_step_with_cache(q, q.clone(), q.clone(), cache)
+elapsed = (time.perf_counter() - t0) * 1000
+print(f&quot;Decoded {n_steps} tokens with cache in {elapsed:.1f}ms&quot;)
+print(f&quot;Final KV cache shape: {cache['k'].shape}&quot;)  # (1, 200, 64)
+print(&quot;KV cache: O(n) per step -- eliminates redundant K,V recomputation.&quot;)
+</code></pre>
+<h2>Memory Footprint</h2>
+<p>KV cache memory is the product of six factors: 2 (K and V) × layers × KV_heads × head_dim × batch_size × seq_len × dtype_bytes. For LLaMA-3-8B (32 layers, 8 GQA heads, head_dim=128) in bfloat16 at batch=1, seq=4096: 2 × 32 × 8 × 128 × 1 × 4096 × 2 = 536 MB. At batch=32, seq=8192: 2 × 32 × 8 × 128 × 32 × 8192 × 2 = 34.4 GB. For LLaMA-3-70B (80 layers, 8 GQA heads, head_dim=128) at batch=32, seq=8192: 86 GB — more than the model weights on a single A100. KV cache allocation must be planned as part of GPU memory budgeting: a typical deployment allocates model weights first, then reserves remaining GPU memory for KV cache. The KV cache size determines the maximum achievable batch size and sequence length simultaneously — engineers must choose carefully based on expected workload.</p>
+<pre><code class="language-python">import torch
+from typing import Dict, Tuple
+
+def compute_kv_cache_bytes(
+    n_layers: int,
+    n_kv_heads: int,
+    head_dim: int,
+    batch_size: int,
+    seq_len: int,
+    dtype_bytes: int = 2,  # 2 = bfloat16/float16, 4 = float32
+) -&gt; int:
+    &quot;&quot;&quot;
+    Total KV cache memory in bytes.
+    Formula: 2 (K+V) * layers * kv_heads * head_dim * batch * seq * dtype_bytes.
+    &quot;&quot;&quot;
+    return 2 * n_layers * n_kv_heads * head_dim * batch_size * seq_len * dtype_bytes
+
+# Model configs (GQA reduces n_kv_heads far below n_query_heads)
+configs = {
+    &quot;LLaMA-3-8B  (GQA-8)&quot;:  dict(n_layers=32, n_kv_heads=8,  head_dim=128),
+    &quot;LLaMA-3-70B (GQA-8)&quot;:  dict(n_layers=80, n_kv_heads=8,  head_dim=128),
+    &quot;Mistral-7B  (GQA-8)&quot;:  dict(n_layers=32, n_kv_heads=8,  head_dim=128),
+    &quot;GPT-2 Large (MHA-16)&quot;: dict(n_layers=36, n_kv_heads=16, head_dim=64),
+}
+weight_bytes = {&quot;LLaMA-3-8B  (GQA-8)&quot;: 8e9*2, &quot;LLaMA-3-70B (GQA-8)&quot;: 70e9*2,
+                &quot;Mistral-7B  (GQA-8)&quot;: 7e9*2, &quot;GPT-2 Large (MHA-16)&quot;: 0.77e9*4}
+
+print(f&quot;{'Model':&lt;26} {'bsz':&gt;4} {'seq':&gt;6} {'KV GB':&gt;8} {'% of weights':&gt;14}&quot;)
+print(&quot;-&quot; * 64)
+for name, cfg in configs.items():
+    for bsz, seq in [(1, 4096), (8, 4096), (32, 8192)]:
+        kv = compute_kv_cache_bytes(**cfg, batch_size=bsz, seq_len=seq)
+        pct = kv / weight_bytes[name] * 100
+        print(f&quot;{name:&lt;26} {bsz:&gt;4} {seq:&gt;6} {kv/1e9:&gt;7.2f}G {pct:&gt;13.1f}%&quot;)
+</code></pre>
+<blockquote>
+<p><strong>KV Cache Memory Warning</strong>: The KV cache grows linearly with sequence length and batch size — a batch of 32 requests at 8K context can easily require 50+ GB of KV cache alone for a 70B model, before even storing the weights. On a single A100 80GB, storing 70B weights in bfloat16 consumes ~140 GB across multiple GPUs; KV cache must be budgeted per-GPU across the tensor-parallel split. Always profile KV cache size before deploying at batch sizes larger than 4.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Attention Type</th>
+<th>KV Heads (32L)</th>
+<th>Cache Size (seq=4096, bsz=1, dim=128)</th>
+<th>vs MHA</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MHA  (H=32)</td>
+<td>32</td>
+<td>~2.15 GB</td>
+<td>1.0x</td>
+<td>Full per-head K,V; GPT-2 / LLaMA-1</td>
+</tr>
+<tr>
+<td>MQA  (H=1)</td>
+<td>1</td>
+<td>~0.067 GB</td>
+<td>32x smaller</td>
+<td>Shared single K,V; PaLM, Falcon-7B</td>
+</tr>
+<tr>
+<td>GQA-8 (H=8)</td>
+<td>8</td>
+<td>~0.536 GB</td>
+<td>4x smaller</td>
+<td>LLaMA-3 all sizes, Mistral-7B</td>
+</tr>
+<tr>
+<td>GQA-4 (H=4)</td>
+<td>4</td>
+<td>~0.268 GB</td>
+<td>8x smaller</td>
+<td>Aggressive; viable at 13B+ scale</td>
+</tr>
+<tr>
+<td>GQA-2 (H=2)</td>
+<td>2</td>
+<td>~0.134 GB</td>
+<td>16x smaller</td>
+<td>Extreme compression; quality tradeoff</td>
+</tr>
+</tbody>
+</table>
+<h2>Multi-Query and Grouped-Query Attention</h2>
+<p>Standard Multi-Head Attention (MHA) assigns each query head its own K, V projection matrices, giving n_heads KV heads. Multi-Query Attention (MQA, Shazeer 2019) uses a single shared K, V head across all query heads, reducing KV cache by a factor of n_heads. For a 32-head model, MQA cuts KV cache 32x but can degrade quality, particularly on tasks requiring diverse attention patterns per head. Grouped-Query Attention (GQA, Ainslie et al. 2023) generalizes between MHA and MQA: G groups of query heads share one K,V head each, where 1 &lt;= G &lt; n_heads. LLaMA-3 (8B, 70B), LLaMA-3.1, Mistral-7B, Mixtral, Gemma, and most modern open-source LLMs use GQA with G=8 KV heads. GQA with G=8 achieves 4x KV cache reduction vs MHA while maintaining near-MHA quality at 7B+ parameter scale. The quality degradation from GQA is negligible compared to the memory and throughput benefits, making GQA the default for new large LLM architectures.</p>
+<pre><code class="language-python">import torch
+import math
+
+def kv_cache_gb(
+    n_layers: int, n_kv_heads: int, head_dim: int,
+    batch_size: int, seq_len: int, dtype_bytes: int = 2,
+) -&gt; float:
+    &quot;&quot;&quot;KV cache memory in GB (float16/bfloat16 by default).&quot;&quot;&quot;
+    return (2 * n_layers * n_kv_heads * head_dim
+            * batch_size * seq_len * dtype_bytes) / 1e9
+
+# Compare MHA, GQA variants, and MQA for 32-layer model, seq=4096, bsz=1
+base = dict(n_layers=32, head_dim=128, batch_size=1, seq_len=4096)
+attention_types = [
+    (&quot;MHA  (32 KV heads)&quot;,  32,  &quot;GPT-2 / Llama-1 style&quot;),
+    (&quot;GQA-8 (8 KV heads)&quot;,   8,  &quot;LLaMA-3 / Mistral-7B&quot;),
+    (&quot;GQA-4 (4 KV heads)&quot;,   4,  &quot;Custom GQA-4 config&quot;),
+    (&quot;GQA-2 (2 KV heads)&quot;,   2,  &quot;Aggressive compression&quot;),
+    (&quot;MQA   (1 KV head)&quot;,    1,  &quot;PaLM / Falcon-7B style&quot;),
+]
+mha_gb = kv_cache_gb(**base, n_kv_heads=32)
+print(f&quot;{'Attention Type':&lt;24} {'KV Heads':&gt;10} {'GB':&gt;8} {'vs MHA':&gt;10}  Notes&quot;)
+print(&quot;-&quot; * 75)
+for label, n_kv, notes in attention_types:
+    gb = kv_cache_gb(**base, n_kv_heads=n_kv)
+    reduction = mha_gb / gb
+    print(f&quot;{label:&lt;24} {n_kv:&gt;10} {gb:&gt;7.3f}G {reduction:&gt;9.1f}x  {notes}&quot;)
+print(f&quot;\nBase (MHA): {mha_gb:.3f} GB at seq=4096, bsz=1, 32L, dim=128, bf16&quot;)
+print(&quot;GQA-8 reduces KV cache 4x vs MHA with minimal quality loss at 7B+ scale.&quot;)
+</code></pre>
+<h2>KV Cache Eviction</h2>
+<p>For long-context inference where the KV cache would exceed GPU memory, eviction strategies selectively discard stored K, V entries. StreamingLLM (Xiao et al., 2023) keeps the first few tokens (attention sinks, typically 4) plus a sliding window of recent tokens. Attention sink tokens receive disproportionate attention weight; discarding them causes instability. Keeping only sinks + recent tokens (window size 512–2048) enables unbounded context at constant memory. H2O (Heavy-Hitter Oracle, Zhang et al., 2023) tracks cumulative attention weight per token and evicts those with the lowest accumulated score. Tokens that repeatedly receive high attention (heavy hitters) are preserved; rarely attended tokens are evicted. ScissorHands (Liu et al., 2023) maintains a fixed sparse pattern identifying persistent heavy-hitters across generation steps. SnapKV (Li et al., 2024) compresses the KV cache by clustering similar K,V vectors within a window and retaining representative centroids. All eviction strategies trade off quality (lower eviction rate → higher quality) vs memory (higher eviction rate → smaller cache) vs latency (eviction overhead per step).</p>
+<ul>
+<li>StreamingLLM: keep first 4 attention-sink tokens + sliding window (512-2048). Constant memory, unbounded context, small quality loss.</li>
+<li>H2O: track cumulative attention mass per token, evict lowest-scoring entries. Dynamic and task-adaptive, ~1-2% quality loss at 50% eviction.</li>
+<li>ScissorHands: identify persistent heavy-hitter positions; evict non-heavy-hitter tokens. Similar quality to H2O with lower per-step overhead.</li>
+<li>SnapKV: cluster similar K,V vectors, retain centroids. Good compression ratio (~4x) with strong long-context performance.</li>
+<li>Quantized KV cache (INT8/INT4): reduce dtype_bytes from 2 to 1 or 0.5, doubling effective batch size or sequence length at minimal quality cost.</li>
+<li>Layer-wise eviction: deeper layers have lower attention entropy and tolerate more aggressive eviction than early layers.</li>
+</ul>
+<h2>KV Cache in HuggingFace</h2>
+<p>HuggingFace Transformers implements KV caching via the <code>use_cache=True</code> parameter (enabled by default in <code>generate()</code>). The model returns <code>past_key_values</code>, a tuple of (K, V) tuples — one per layer — after each forward pass. In <code>generate()</code>, past_key_values is passed automatically between decode steps. Since Transformers v4.36, the <code>DynamicCache</code> class wraps past_key_values with an explicit <code>.update(key_states, value_states, layer_idx)</code> API, making cache inspection and manipulation straightforward. Static caches (<code>StaticCache</code>) pre-allocate fixed-size tensors to avoid dynamic resizing overhead during generation — useful for production serving where max sequence length is known. Quantized KV caches (<code>QuantoQuantizedCache</code>) store K,V in INT8 or INT4, halving or quartering cache memory at the cost of a quantization/dequantization step per layer.</p>
+<pre><code class="language-python">import torch
+import time
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+def benchmark_hf_kv_cache(
+    model_name: str = &quot;gpt2&quot;,
+    prompt: str = &quot;The KV cache is a key optimization for transformer inference because&quot;,
+    max_new_tokens: int = 80,
+):
+    &quot;&quot;&quot;Compare HuggingFace generation speed with vs without KV cache.&quot;&quot;&quot;
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(model_name).eval()
+    inputs = tokenizer(prompt, return_tensors=&quot;pt&quot;)
+    input_ids = inputs[&quot;input_ids&quot;]
+
+    # Inspect past_key_values from a single forward pass
+    with torch.no_grad():
+        fwd = model(input_ids, use_cache=True)
+    pkv = fwd.past_key_values  # tuple of (K, V) per layer
+    print(f&quot;Model: {model_name}  |  num layers in KV cache: {len(pkv)}&quot;)
+    print(f&quot;Layer-0 K shape: {pkv[0][0].shape}&quot;)  # (bsz, n_heads, seq, head_dim)
+
+    # With KV cache (default use_cache=True)
+    t0 = time.perf_counter()
+    with torch.no_grad():
+        out_cached = model.generate(input_ids, max_new_tokens=max_new_tokens, use_cache=True)
+    t_cached = time.perf_counter() - t0
+
+    # Without KV cache (recomputes all K,V at every step)
+    t0 = time.perf_counter()
+    with torch.no_grad():
+        out_uncached = model.generate(input_ids, max_new_tokens=max_new_tokens, use_cache=False)
+    t_uncached = time.perf_counter() - t0
+
+    speedup = t_uncached / t_cached
+    print(f&quot;use_cache=True:  {t_cached:.2f}s&quot;)
+    print(f&quot;use_cache=False: {t_uncached:.2f}s&quot;)
+    print(f&quot;KV cache speedup: {speedup:.1f}x  (grows with max_new_tokens)&quot;)
+
+benchmark_hf_kv_cache()
+</code></pre>
+<h2>Key Takeaways</h2>
+<ul>
+<li>KV cache converts O(n^2) total decode work to O(n): essential for any generation longer than ~10 tokens.</li>
+<li>Memory = 2 * layers * KV_heads * head_dim * batch * seq * dtype_bytes; model the budget explicitly before deployment.</li>
+<li>GQA with 8 KV heads is now the standard: 4x KV cache reduction vs MHA with negligible quality loss at 7B+ scale.</li>
+<li>MQA (1 KV head) gives maximum cache reduction (32x for 32-head models) but risks quality degradation; used in PaLM and Falcon.</li>
+<li>Decode phase is memory-bandwidth-bound: larger batches improve GPU utilization by amortizing weight reads across more tokens.</li>
+<li>KV cache eviction (StreamingLLM, H2O, SnapKV) enables long-context inference beyond available GPU memory at modest quality cost.</li>
+<li>HuggingFace DynamicCache and StaticCache provide flexible vs pre-allocated KV storage; prefer StaticCache for production generation latency.</li>
+<li>Quantized KV cache (INT8/INT4) provides 2-4x memory reduction; combine with GQA for maximum efficiency.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

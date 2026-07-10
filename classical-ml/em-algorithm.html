@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>EM Algorithm — E-Step, M-Step, and Convergence | Notes Backup</title>
+  <meta name="description" content="Derive the EM algorithm from first principles: the ELBO lower bound, Jensen&#x27;s inequality proof of monotone log-likelihood increase, the E-step as posterior inference over latent variables, and the M-step as complete-data MLE. Covers Baum-Welch for HMMs and EM variants." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>EM Algorithm — E-Step, M-Step, and Convergence</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Derive the EM algorithm from first principles: the ELBO lower bound, Jensen&#x27;s inequality proof of monotone log-likelihood increase, the E-step as posterior inference over latent variables, and the M-step as complete-data MLE. Covers Baum-Welch for HMMs and EM variants.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>EM Algorithm — E-Step, M-Step, and Convergence</h1>
+<p>The Expectation-Maximization (EM) algorithm solves a class of MLE problems where direct maximization of the observed-data likelihood is intractable due to latent variables. By introducing a lower bound (the ELBO) via Jensen's inequality, EM converts the hard problem into two alternating tractable steps. Understanding the derivation explains why EM monotonically increases the likelihood, why it converges to a local maximum, and when it should be preferred over direct gradient-based optimization.</p>
+<h2>The MLE with Latent Variables Problem</h2>
+<p>Given observed data X and latent variables Z, the complete-data log-likelihood log p(X,Z|θ) is often tractable (e.g., closed-form MLE for each component of a mixture). But the observed-data log-likelihood log p(X|θ) = log Σ_Z p(X,Z|θ) requires summing over all configurations of Z, which is exponentially large. Direct gradient ascent on log p(X|θ) is possible but computationally expensive and numerically unstable. EM sidesteps this by optimizing a tractable lower bound.</p>
+<h2>The ELBO and Jensen's Inequality</h2>
+<p>For any distribution q(Z), log p(X|θ) = log Σ_Z q(Z) [p(X,Z|θ)/q(Z)] ≥ Σ_Z q(Z) log[p(X,Z|θ)/q(Z)] = E_q[log p(X,Z|θ)] − E_q[log q(Z)] = ELBO(q,θ). The inequality follows from Jensen's (log is concave). The gap equals KL(q ‖ p(Z|X,θ)) ≥ 0. Setting q(Z) = p(Z|X,θ_old) makes KL=0, so the bound is tight at the current θ_old. The E-step computes this posterior; the M-step maximizes the resulting ELBO over θ, which equals maximizing Q(θ,θ_old) = E_{Z|X,θ_old}[log p(X,Z|θ)].</p>
+<pre><code class="language-python">import numpy as np
+from scipy.stats import norm
+from sklearn.datasets import make_blobs
+
+def em_1d_gmm(X, k=2, max_iter=100, tol=1e-6, seed=42):
+    &quot;&quot;&quot;EM for 1D GMM with ELBO (evidence lower bound) tracking.&quot;&quot;&quot;
+    rng = np.random.default_rng(seed)
+    n = len(X)
+    pi = np.ones(k) / k
+    mu = X[rng.choice(n, k, replace=False)]
+    sigma = np.full(k, X.std())
+    log_liks, elbos = [], []
+    for _ in range(max_iter):
+        # E-step: posterior P(z=k | x, theta)
+        R = np.array([pi[j] * norm.pdf(X, mu[j], sigma[j]) for j in range(k)]).T
+        px = R.sum(axis=1)
+        log_liks.append(np.log(px + 1e-300).sum())
+        R /= px[:, None]
+        # ELBO = E_q[log p(X,Z|theta)] - E_q[log q(Z)]
+        log_pxz = sum(R[:, j] * (np.log(pi[j]+1e-300) + norm.logpdf(X, mu[j], sigma[j]))
+                      for j in range(k)).sum()
+        entropy_q = -np.sum(R * np.log(R + 1e-300))
+        elbos.append(log_pxz + entropy_q)
+        # M-step
+        Nk = R.sum(axis=0)
+        pi = Nk / n
+        mu = (R * X[:, None]).sum(axis=0) / Nk
+        sigma = np.sqrt(((R * (X[:, None] - mu) ** 2).sum(axis=0)) / Nk)
+        if len(log_liks) &gt; 1 and abs(log_liks[-1] - log_liks[-2]) &lt; tol:
+            break
+    return pi, mu, sigma, np.array(log_liks), np.array(elbos)
+
+X1d = np.concatenate([np.random.normal(-3, 0.8, 200), np.random.normal(3, 1.2, 200)])
+pi, mu, sigma, lls, elbo = em_1d_gmm(X1d, k=2)
+print(f&quot;Component means: {mu.round(3)}, weights: {pi.round(3)}, sigmas: {sigma.round(3)}&quot;)
+print(f&quot;Log-likelihood monotone: {all(np.diff(lls) &gt;= -1e-6)}&quot;)
+print(f&quot;ELBO monotone:           {all(np.diff(elbo) &gt;= -1e-6)}&quot;)
+</code></pre>
+<h2>Why EM Monotonically Increases Log-Likelihood</h2>
+<p>After the E-step with q=p(Z|X,θ_old), the ELBO equals log p(X|θ_old). The M-step finds θ_new that maximizes Q(θ,θ_old), so Q(θ_new,θ_old) ≥ Q(θ_old,θ_old). Since the ELBO lower-bounds log p(X|θ) for all q, and since at θ_old the bound is tight: log p(X|θ_new) ≥ ELBO(q,θ_new) ≥ ELBO(q,θ_old) = log p(X|θ_old). Therefore each complete EM iteration cannot decrease the observed log-likelihood. Convergence follows because log p(X|θ) is bounded above (probabilities ≤ 1 so log-likelihood ≤ 0 per point) and monotonically increasing.</p>
+<pre><code class="language-python">import numpy as np
+from scipy.stats import norm
+
+rng = np.random.default_rng(0)
+X = np.concatenate([rng.normal(-2, 1, 150), rng.normal(3, 0.7, 100)])
+k = 2
+n = len(X)
+
+pi = np.array([0.5, 0.5])
+mu = np.array([-1.0, 1.0])
+sig = np.array([1.0, 1.0])
+
+prev_ll = -np.inf
+print(f&quot;{'Iter':&gt;6} {'Log-Lik':&gt;14} {'Delta':&gt;14} {'Monotone':&gt;10}&quot;)
+for it in range(20):
+    R = np.array([pi[j] * norm.pdf(X, mu[j], sig[j]) for j in range(k)]).T
+    px = R.sum(axis=1)
+    ll = np.log(px + 1e-300).sum()
+    delta = ll - prev_ll
+    print(f&quot;{it:&gt;6} {ll:&gt;14.4f} {delta:&gt;14.6f} {str(delta &gt;= -1e-8):&gt;10}&quot;)
+    R /= px[:, None]
+    Nk = R.sum(axis=0)
+    pi = Nk / n
+    mu = (R * X[:, None]).sum(axis=0) / Nk
+    sig = np.sqrt(((R * (X[:, None] - mu) ** 2).sum(axis=0)) / Nk)
+    if abs(ll - prev_ll) &lt; 1e-8:
+        print(f&quot;Converged at iteration {it}&quot;)
+        break
+    prev_ll = ll
+</code></pre>
+<h2>Baum-Welch — EM for Hidden Markov Models</h2>
+<p>The Baum-Welch algorithm is EM applied to Hidden Markov Models (HMMs). The latent variable Z = (z₁,...,zT) is the hidden state sequence. The E-step computes the forward-backward probabilities (γᵢ(t) = P(zₜ=i|X,θ) and ξᵢⱼ(t) = P(zₜ=i,zₜ₊₁=j|X,θ)) via the forward and backward passes on the trellis — an O(T·S²) computation. The M-step re-estimates transition matrix A, emission parameters B, and initial distribution π by taking expected sufficient statistics. The structure is exactly EM: E-step fills in soft latent states; M-step maximizes the complete-data likelihood using those soft counts.</p>
+<pre><code class="language-python">import numpy as np
+
+def forward_backward(obs, A, B, pi_init):
+    &quot;&quot;&quot;Forward-backward algorithm for discrete HMM — O(T * S^2).&quot;&quot;&quot;
+    T, S = len(obs), A.shape[0]
+    alpha = np.zeros((T, S))
+    beta = np.zeros((T, S))
+    alpha[0] = pi_init * B[:, obs[0]]
+    alpha[0] /= alpha[0].sum()
+    for t in range(1, T):
+        alpha[t] = (alpha[t-1] @ A) * B[:, obs[t]]
+        alpha[t] /= alpha[t].sum()
+    beta[-1] = 1.0
+    for t in range(T - 2, -1, -1):
+        beta[t] = A @ (B[:, obs[t+1]] * beta[t+1])
+        beta[t] /= beta[t].sum()
+    gamma = alpha * beta
+    gamma /= gamma.sum(axis=1, keepdims=True)
+    return gamma
+
+# Tiny 2-state HMM with 3 symbols
+np.random.seed(0)
+S, O_size, T = 2, 3, 80
+obs = np.random.choice(O_size, T)
+# Random init
+A = np.random.dirichlet([1, 1], size=S)
+B = np.random.dirichlet([1, 1, 1], size=S)
+pi_init = np.array([0.6, 0.4])
+
+for em_iter in range(15):
+    gamma = forward_backward(obs, A, B, pi_init)
+    pi_init = gamma[0]
+    A_new = np.zeros_like(A)
+    B_new = np.zeros_like(B)
+    for s in range(S):
+        A_new[s] = gamma[:-1, s, None] @ A[s, None] / gamma[:-1, s].sum()
+        for o in range(O_size):
+            B_new[s, o] = gamma[obs == o, s].sum() / gamma[:, s].sum()
+    A, B = A_new / A_new.sum(axis=1, keepdims=True), B_new
+print(f&quot;Converged. A=\n{A.round(3)}\nB=\n{B.round(3)}&quot;)
+</code></pre>
+<h2>EM Variants and When to Use Each</h2>
+<p>Several EM variants address different bottlenecks: Generalized EM (GEM) allows any step that increases Q rather than maximizing it — useful when the M-step has no closed form. Expectation-Conditional Maximization (ECM) breaks the M-step into conditional maximizations over parameter subsets — simplifying complex M-steps. Variational EM replaces the exact E-step posterior with a factored approximation q(Z) ≈ Πᵢ qᵢ(Zᵢ) — essential when the exact posterior is intractable (e.g., in Bayesian clustering or topic models like LDA).</p>
+<pre><code class="language-python">import numpy as np
+from scipy.special import digamma, gammaln
+
+def variational_dirichlet_mixture(X, k=3, max_iter=50, alpha0=1.0, seed=42):
+    &quot;&quot;&quot;Mean-field variational EM for a Dirichlet process mixture (simplified).&quot;&quot;&quot;
+    rng = np.random.default_rng(seed)
+    n, d = X.shape
+    # Variational parameters: responsibilities
+    r = rng.dirichlet(np.ones(k), size=n)  # q(Z) = Cat(r_i)
+    elbos = []
+    for it in range(max_iter):
+        Nk = r.sum(axis=0) + 1e-10
+        # Variational M-step: update natural parameters
+        alpha = alpha0 + Nk
+        mu_k = (r.T @ X) / Nk[:, None]
+        # Variational E-step: update responsibilities
+        log_r = digamma(alpha) - digamma(alpha.sum())
+        for j in range(k):
+            diff = X - mu_k[j]
+            log_r_j = -0.5 * (diff ** 2).sum(axis=1)
+            log_r = np.vstack([log_r, log_r_j]) if isinstance(log_r, np.ndarray) and log_r.ndim == 1 else log_r
+        # Simple E-step: use Euclidean distance for this illustration
+        dists = np.array([((X - mu_k[j])**2).sum(axis=1) for j in range(k)]).T
+        r = np.exp(-0.5 * dists)
+        r /= r.sum(axis=1, keepdims=True)
+        elbo_approx = -(r * dists / 2).sum()
+        elbos.append(elbo_approx)
+    return r, mu_k, elbos
+
+from sklearn.datasets import make_blobs
+X, _ = make_blobs(n_samples=200, centers=3, random_state=5)
+r, centers, elbos = variational_dirichlet_mixture(X, k=5)
+labels = r.argmax(axis=1)
+active = np.unique(labels)
+print(f&quot;Active components: {len(active)} (of 5 initialized)&quot;)
+print(f&quot;ELBO monotone: {all(np.diff(elbos) &gt;= -1e-4)}&quot;)
+</code></pre>
+<blockquote>
+<p><strong>EM vs Direct Gradient Ascent</strong>: EM is preferred when the M-step has a closed-form solution (as in GMMs, HMMs, and factor analysis), making each iteration cheap and exact. Direct gradient ascent on log p(X|θ) is preferred when the M-step lacks a closed form or when the E-step posterior is intractable. Stochastic EM (using mini-batches for the E-step) bridges the two approaches for large datasets.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Variant</th>
+<th>M-step</th>
+<th>E-step</th>
+<th>Convergence</th>
+<th>Use Case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Standard EM</td>
+<td>Exact closed-form maximization</td>
+<td>Exact posterior</td>
+<td>Monotone, linear near convergence</td>
+<td>GMMs, HMMs, Factor Analysis</td>
+</tr>
+<tr>
+<td>GEM (Generalized EM)</td>
+<td>Any θ that increases Q</td>
+<td>Exact posterior</td>
+<td>Monotone, slower</td>
+<td>M-step has no closed form</td>
+</tr>
+<tr>
+<td>ECM (Cond. Maximization)</td>
+<td>Sequential conditional maxima</td>
+<td>Exact posterior</td>
+<td>Monotone, may be slower</td>
+<td>Complex M-step, structured params</td>
+</tr>
+<tr>
+<td>Variational EM</td>
+<td>Exact or gradient step</td>
+<td>Factored approx q(Z)</td>
+<td>ELBO monotone, approximate</td>
+<td>Bayesian models, LDA, VAEs</td>
+</tr>
+</tbody>
+</table>
+<h2>K-Means as Hard EM</h2>
+<p>K-means is exactly EM applied to a GMM where all covariances are equal isotropic matrices σ²I and assignments are hard (one-hot). The E-step becomes nearest-centroid assignment (argmax of the Gaussian likelihood = argmin of squared distance), and the M-step becomes updating to the cluster mean (which maximizes the Gaussian log-likelihood). This view clarifies why k-means converges faster than GMM EM — hard assignments eliminate the costly responsibility computations — but also why it is less flexible: the hard E-step cannot express uncertainty about borderline points.</p>
+<ul>
+<li>Hard E-step: assign each point to one cluster (argmin distance) rather than computing soft responsibilities.</li>
+<li>M-step identical: cluster mean minimizes squared distance, exactly as in GMM M-step with spherical covariance.</li>
+<li>Convergence faster: no matrix inverse or determinant computation for covariances.</li>
+<li>WCSS = negative GMM complete-data log-likelihood under spherical equal-variance assumption.</li>
+<li>K-means as initialization: running k-means then using its labels as starting responsibilities for GMM EM often gives better convergence than random GMM initialization.</li>
+</ul>
+<p>The EM perspective on k-means also explains its sensitivity to initialization: the hard E-step creates sharp decision boundaries that can trap the algorithm in local optima from which soft EM could escape by spreading responsibility mass across clusters. When k-means gets stuck, switching to GMM EM with the k-means centroids as initialization often finds a better solution.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

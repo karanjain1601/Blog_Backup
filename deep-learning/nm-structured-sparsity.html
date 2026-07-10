@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>N:M Sparsity — Hardware-Accelerated Structured Sparsity | Notes Backup</title>
+  <meta name="description" content="N:M sparsity (e.g., 2:4) requires exactly N nonzeros per M consecutive weights, enabling 2× throughput via NVIDIA Sparse Tensor Cores. Covers mask generation, training-time enforcement, compression format, and accuracy vs hardware trade-offs." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>N:M Sparsity — Hardware-Accelerated Structured Sparsity</h1>
+      <ul class='note-meta'><li><strong>description:</strong> N:M sparsity (e.g., 2:4) requires exactly N nonzeros per M consecutive weights, enabling 2× throughput via NVIDIA Sparse Tensor Cores. Covers mask generation, training-time enforcement, compression format, and accuracy vs hardware trade-offs.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>N:M Sparsity — Hardware-Accelerated Structured Sparsity</h1>
+<p>N:M sparsity is a structured sparsity pattern where, within every consecutive group of M weights, exactly N are nonzero. The 2:4 pattern (2 nonzeros per 4 weights, 50% sparsity) is natively supported by NVIDIA A100 and later GPUs via Sparse Tensor Cores, delivering up to 2× throughput for linear layers with minimal accuracy loss. Unlike unstructured sparsity, 2:4 requires no specialized sparse solver — the hardware handles it transparently.</p>
+<h2>How Sparse Tensor Cores Work</h2>
+<p>In the compressed 2:4 representation, each group of 4 consecutive weights stores only 2 values plus a 2-bit index pair indicating their positions (00, 01, 10, or 11). The weight matrix is compressed to 50% storage. During matrix multiplication, the hardware unpacks the indices and multiplies only the nonzero values with the corresponding activations — effectively computing a sparse GEMM with no wasted multiplications. This is only available for linear (dense matmul) layers; batch norm, embeddings, and depthwise convolutions see no benefit.</p>
+<h2>2:4 Mask Generation</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def generate_2_4_mask(weight: torch.Tensor) -&gt; torch.Tensor:
+    &quot;&quot;&quot;
+    Generate a 2:4 sparsity mask: keep 2 largest-magnitude weights per group of 4.
+    weight: any shape; last dim is grouped into blocks of 4.
+    Returns a boolean mask of same shape.
+    &quot;&quot;&quot;
+    original_shape = weight.shape
+    # Flatten to 2D: (rows, cols) where cols must be divisible by 4
+    w2d = weight.view(-1, weight.shape[-1])  # (..., C) -&gt; (N, C)
+    N, C = w2d.shape
+    assert C % 4 == 0, f'Last dim {C} must be divisible by 4 for 2:4 sparsity'
+
+    # Group into blocks of 4
+    w_grouped = w2d.view(N, C // 4, 4)  # (N, C//4, 4)
+    # Find top-2 magnitudes within each group
+    _, top_idx = w_grouped.abs().topk(2, dim=-1)  # (N, C//4, 2)
+    # Build mask
+    mask = torch.zeros_like(w_grouped, dtype=torch.bool)
+    mask.scatter_(-1, top_idx, True)
+    return mask.view(original_shape)
+
+# Demonstrate
+torch.manual_seed(42)
+W = torch.randn(4, 8)  # 4 output neurons, 8 inputs
+mask = generate_2_4_mask(W)
+print('Weight matrix:')
+print(W.round(decimals=2))
+print('\n2:4 Mask (1=keep, 0=prune):')
+print(mask.int())
+print('\nSparse weight:')
+print((W * mask).round(decimals=2))
+print(f'\nSparsity: {(~mask).float().mean().item():.1%}')
+</code></pre>
+<h2>Training with 2:4 Constraint</h2>
+<p>The 2:4 constraint can be applied post-training (prune + short fine-tune) or enforced during training by re-applying the mask every N gradient steps. During training, the mask is recomputed periodically from the current weight magnitudes, and weights outside the mask are zeroed. Gradients still flow through all positions, but the zeroed weights are re-zeroed before each forward pass. This allows the network to re-allocate the 2 kept positions within each group as training progresses.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.optim as optim
+
+class SparseLinear24(nn.Module):
+    &quot;&quot;&quot;Linear layer that enforces 2:4 sparsity on its weight matrix.&quot;&quot;&quot;
+
+    def __init__(self, in_features: int, out_features: int):
+        super().__init__()
+        assert in_features % 4 == 0, 'in_features must be divisible by 4'
+        self.linear = nn.Linear(in_features, out_features)
+        self.mask = self._compute_mask()
+
+    def _compute_mask(self) -&gt; torch.Tensor:
+        W = self.linear.weight.data  # (out, in)
+        w_grouped = W.view(W.shape[0], W.shape[1] // 4, 4)
+        _, idx = w_grouped.abs().topk(2, dim=-1)
+        mask = torch.zeros_like(w_grouped, dtype=torch.bool)
+        mask.scatter_(-1, idx, True)
+        return mask.view(W.shape)
+
+    def apply_mask(self):
+        &quot;&quot;&quot;Re-prune and re-zero weights outside the current mask.&quot;&quot;&quot;
+        self.mask = self._compute_mask()
+        with torch.no_grad():
+            self.linear.weight.data *= self.mask.float()
+
+    def forward(self, x: torch.Tensor) -&gt; torch.Tensor:
+        return self.linear(x)
+
+# Simulate 2:4 training loop
+model = SparseLinear24(64, 32)
+optimizer = optim.SGD(model.parameters(), lr=0.01)
+remask_every = 10  # re-apply 2:4 mask every 10 steps
+
+for step in range(30):
+    x = torch.randn(16, 64)
+    loss = model(x).pow(2).mean()
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+    if (step + 1) % remask_every == 0:
+        model.apply_mask()
+        density = model.mask.float().mean().item()
+        print(f'Step {step+1}: loss={loss.item():.4f}  density={density:.2f}')
+</code></pre>
+<h2>Compressed Storage Format</h2>
+<p>In the 2:4 compressed format, a weight matrix of shape (M, K) is stored as: (1) a value tensor of shape (M, K/2) containing the 2 nonzero values per group and (2) a metadata tensor of shape (M, K/8) containing 2-bit indices (4 bits per group of 4). Total storage: K/2 values × element_size + K/8 metadata bytes. For FP16 weights, this is (K/2 × 2) + (K/8) = 5K/8 bytes vs K × 2 = 2K bytes uncompressed — a 3.2× reduction in storage per row.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+
+def compress_2_4(weight: torch.Tensor):
+    &quot;&quot;&quot;
+    Simulate 2:4 compression: returns (values, metadata) tensors.
+    values: nonzero elements, shape (rows, cols//2)
+    metadata: 4-bit indices packed as uint8, shape (rows, cols//8)
+    &quot;&quot;&quot;
+    W = weight.view(-1, weight.shape[-1])  # (N, C)
+    N, C = W.shape
+    assert C % 4 == 0
+    w_grouped = W.view(N, C // 4, 4)  # (N, G, 4) where G = C//4
+    scores, indices = w_grouped.abs().topk(2, dim=-1)  # (N, G, 2)
+    # Gather nonzero values
+    values = w_grouped.gather(-1, indices)  # (N, G, 2)
+    values_flat = values.reshape(N, C // 2)  # (N, C//2)
+    # Pack indices as 4 bits per group (2 positions in {0,1,2,3})
+    # Each index fits in 2 bits; 4 bits per group of 4
+    idx_sorted = indices.sort(dim=-1).values  # ensure ascending order
+    meta = (idx_sorted[..., 0] * 4 + idx_sorted[..., 1]).to(torch.uint8)  # (N, G)
+    return values_flat, meta
+
+W = torch.randn(8, 16)
+vals, meta = compress_2_4(W)
+
+uncompressed_bytes = W.numel() * 4  # float32
+compressed_bytes = vals.numel() * 4 + meta.numel()  # float32 vals + uint8 meta
+print(f'Original: {W.shape}  -&gt;  {uncompressed_bytes} bytes')
+print(f'Values:   {vals.shape},  Metadata: {meta.shape}')
+print(f'Compressed: {compressed_bytes} bytes  (ratio {uncompressed_bytes/compressed_bytes:.2f}x)')
+print(f'Density check: {vals.numel()}/{W.numel()} = {vals.numel()/W.numel():.0%}')
+</code></pre>
+<blockquote>
+<p><strong>2:4 Only Helps on A100+ for Linear Layers</strong>: Sparse Tensor Core acceleration is only available on NVIDIA Ampere (A100) and later GPUs. On earlier GPUs (V100, T4) or on CPU, 2:4 sparsity provides no speedup — the sparse zeros still participate in computation. Additionally, only linear (matmul) layers benefit; depthwise convolutions, batch norm, and embeddings remain dense. For CPU deployment, unstructured sparsity with SpMM or full structured pruning are better choices.</p>
+</blockquote>
+<h2>Accuracy vs Dense Baseline</h2>
+<p>NVIDIA's experiments on ResNet-50 and BERT show that 2:4 sparsity with 10–20 epochs of fine-tuning recovers to within 0.1–0.5% of the dense baseline. The key insight is that within each group of 4, the 2 surviving weights can be any pair — this gives the network enough flexibility to represent the same functions as the dense model. Larger models (GPT-3 scale) show even smaller accuracy gaps, as the redundancy in large models makes it easier to prune half the weights without losing function.</p>
+<h2>Comparison of Sparsity Formats</h2>
+<table>
+<thead>
+<tr>
+<th>Format</th>
+<th>Sparsity</th>
+<th>A100 Speedup</th>
+<th>Accuracy vs Dense</th>
+<th>Hardware Support</th>
+<th>Implementation Difficulty</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Dense (baseline)</td>
+<td>0%</td>
+<td>1×</td>
+<td>Baseline</td>
+<td>All hardware</td>
+<td>Trivial</td>
+</tr>
+<tr>
+<td>2:4 (N=2, M=4)</td>
+<td>50%</td>
+<td>~2×</td>
+<td>-0.1 to -0.5%</td>
+<td>A100+ only (Ampere)</td>
+<td>Low — torch.nn.utils.prune or apex</td>
+</tr>
+<tr>
+<td>1:4 (N=1, M=4)</td>
+<td>75%</td>
+<td>~2× (same HW path)</td>
+<td>-2 to -5%</td>
+<td>A100+ only</td>
+<td>Low — same tooling</td>
+</tr>
+<tr>
+<td>Unstructured 50%</td>
+<td>50%</td>
+<td>~1× (no HW support)</td>
+<td>-0.5 to -2%</td>
+<td>None (standard GPU)</td>
+<td>Low — threshold mask</td>
+</tr>
+<tr>
+<td>Structured filter 50%</td>
+<td>50% of filters</td>
+<td>~1.5–2× (any GPU)</td>
+<td>-1 to -3%</td>
+<td>All hardware</td>
+<td>High — reshape dependent layers</td>
+</tr>
+</tbody>
+</table>
+<h2>Applying 2:4 Sparsity with PyTorch Semi-Structured Pruning</h2>
+<p>PyTorch 2.1+ includes torch.sparse.SparseSemiStructuredTensor which wraps the 2:4 compressed format. Calling to_sparse_semi_structured(weight) returns a tensor that participates transparently in nn.Linear forward and backward passes, using cuSPARSELt under the hood on A100 GPUs. No changes to the model's forward method are required — simply convert the weight tensor after pruning.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+# Requires PyTorch &gt;= 2.1 and CUDA A100+
+# from torch.sparse import to_sparse_semi_structured, SparseSemiStructuredTensor
+
+def apply_2_4_to_model(model: nn.Module, verbose: bool = True):
+    &quot;&quot;&quot;
+    Apply 2:4 structured sparsity to all Linear layers.
+    Prune in-place using magnitude criterion, then convert to semi-structured format.
+    &quot;&quot;&quot;
+    n_converted = 0
+    for name, module in model.named_modules():
+        if not isinstance(module, nn.Linear):
+            continue
+        W = module.weight.data
+        if W.shape[1] % 4 != 0:
+            if verbose:
+                print(f'  Skip {name}: in_features={W.shape[1]} not divisible by 4')
+            continue
+        # Generate 2:4 mask and apply
+        w_grouped = W.view(W.shape[0], W.shape[1] // 4, 4)
+        _, idx = w_grouped.abs().topk(2, dim=-1)
+        mask = torch.zeros_like(w_grouped, dtype=torch.bool)
+        mask.scatter_(-1, idx, True)
+        module.weight.data = W * mask.view(W.shape).float()
+        n_converted += 1
+        if verbose:
+            density = mask.float().mean().item()
+            print(f'  {name}: {W.shape} pruned, density={density:.2f}')
+    print(f'Applied 2:4 sparsity to {n_converted} Linear layers.')
+
+model = nn.Sequential(nn.Linear(64, 128), nn.ReLU(), nn.Linear(128, 32))
+apply_2_4_to_model(model)
+</code></pre>
+<p>After applying 2:4 sparsity, re-training (fine-tuning) for 10–20 epochs with a small learning rate (10% of original) is sufficient to recover baseline accuracy on most tasks. Training-time 2:4 (enforcing the constraint throughout training) gives slightly better accuracy than post-training pruning but requires modifying the training loop to re-mask every few steps.</p>
+<ul>
+<li>2:4 is the sweet spot: 50% sparsity with 2× hardware speedup at near-zero accuracy cost.</li>
+<li>Metadata overhead: 2-bit index per position adds 6.25% storage overhead over the dense values-only storage.</li>
+<li>Only matmul layers benefit: skip 2:4 for depthwise conv, batch norm, and embedding layers.</li>
+<li>Re-masking frequency during training: every 100–1000 steps; too frequent slows training, too rare wastes capacity.</li>
+<li>For INT8 + 2:4: A100 supports INT8 Sparse Tensor Cores giving up to 4× throughput vs FP16 dense.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DeiT: Data-Efficient Image Transformers via Distillation | Notes Backup</title>
+  <meta name="description" content="DeiT trains ViT-scale transformers on ImageNet-1K alone using knowledge distillation from a CNN teacher — closing the data gap without JFT pretraining." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>DeiT: Data-Efficient Image Transformers via Distillation</h1>
+      <ul class='note-meta'><li><strong>description:</strong> DeiT trains ViT-scale transformers on ImageNet-1K alone using knowledge distillation from a CNN teacher — closing the data gap without JFT pretraining.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>DeiT: Data-Efficient Image Transformers via Distillation</h1>
+<h2>Overview</h2>
+<p>Vision Transformer (ViT) achieves state-of-the-art accuracy but requires pre-training on hundreds of millions of images (JFT-300M). DeiT — Data-efficient Image Transformers — addresses this bottleneck by training a transformer on ImageNet-1K alone (1.28M images) and reaching competitive accuracy through knowledge distillation from a CNN teacher model.</p>
+<p>DeiT introduces a dedicated distillation token — a learnable vector appended alongside the class token to the patch sequence. This token is supervised not by the ground-truth label but by the teacher model's output, enabling the student transformer to absorb convolutional inductive biases such as local feature hierarchies and translation equivariance.</p>
+<p>The approach is training-efficient: no proprietary dataset, no extra inference overhead, and the distillation token can be discarded at runtime in favour of the class token or a simple average of both. DeiT-B distilled matches ViT-B fine-tuned from JFT-300M while training only on public ImageNet-1K in under three days on 8 V100 GPUs.</p>
+<h2>Distillation Token</h2>
+<p>The standard ViT prepends a single [CLS] learnable embedding to the sequence of flattened patch projections. DeiT adds a second learnable embedding called the distillation token [DIST]. Both tokens attend to all patches and to each other through every transformer layer, accumulating globally mixed representations before the output heads.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class DeiT(nn.Module):
+    def __init__(self, embed_dim=768, num_classes=1000):
+        super().__init__()
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.dist_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.head = nn.Linear(embed_dim, num_classes)
+        self.head_dist = nn.Linear(embed_dim, num_classes)
+    def forward(self, patches):
+        B = patches.shape[0]
+        cls = self.cls_token.expand(B, -1, -1)
+        dist = self.dist_token.expand(B, -1, -1)
+        return torch.cat([cls, dist, patches], dim=1)
+</code></pre>
+<p>At inference time, DeiT produces two logit vectors — one from the class head, one from the distillation head. The authors recommend averaging these as the final prediction. The distillation head alone achieves slightly higher top-1 than the class head, evidence that the token has effectively internalised the CNN teacher's spatial priors.</p>
+<h2>Hard and Soft Distillation</h2>
+<p>Hard-label distillation treats the teacher's argmax prediction as a hard pseudo-label. The total loss splits equally: half is cross-entropy between student class logits and the true one-hot label; half is cross-entropy between student distillation logits and the teacher's hard decision. No temperature is involved, making this the simpler variant.</p>
+<pre><code class="language-python">import torch.nn.functional as F
+
+def hard_distillation_loss(student_cls_logits, student_dist_logits,
+                            labels, cnn_teacher, images):
+    teacher_pred = cnn_teacher(images).argmax(-1)
+    dist_loss = F.cross_entropy(student_dist_logits, teacher_pred)
+    cls_loss  = F.cross_entropy(student_cls_logits, labels)
+    total = 0.5 * cls_loss + 0.5 * dist_loss
+    return total
+</code></pre>
+<p>Soft distillation replaces the teacher's hard argmax with its full softmax distribution scaled by temperature τ, forming a smoother probability vector that reveals class similarity. The distillation branch minimises KL-divergence between the student's soft output and this smoothed teacher distribution, weighted by α and scaled by τ² for gradient magnitude.</p>
+<pre><code class="language-python">import torch.nn.functional as F
+
+def soft_distillation_loss(cls_logits, dist_logits, teacher_logits,
+                            labels, tau=3.0, alpha=0.5):
+    soft_teacher = F.softmax(teacher_logits / tau, dim=-1)
+    kl = F.kl_div(F.log_softmax(dist_logits / tau, dim=-1),
+                  soft_teacher, reduction='batchmean')
+    ce = F.cross_entropy(cls_logits, labels)
+    total = (1 - alpha) * ce + alpha * (tau ** 2) * kl
+    return total
+</code></pre>
+<h2>Training Recipe</h2>
+<p>DeiT's training recipe is heavy on regularisation and augmentation to compensate for the smaller dataset. The default schedule trains for 300 epochs with a cosine learning-rate schedule and linear warmup. AdamW is used with decoupled weight decay of 0.05 and gradient clipping, making training stable at large batch sizes without learning-rate scaling hacks.</p>
+<pre><code class="language-python">training_config = dict(
+    epochs=300,
+    batch_size=1024,
+    optimizer='AdamW',
+    lr=1e-3,
+    weight_decay=0.05,
+    stochastic_depth=0.1,
+    repeated_aug=True,
+    rand_augment='rand-m9-mstd0.5',
+    mixup_alpha=0.8,
+    cutmix_alpha=1.0,
+    warmup_epochs=5,
+    lr_schedule='cosine',
+)
+</code></pre>
+<p>Repeated augmentation samples each image multiple times per batch, exposing the model to correlated but varied views and effectively acting as dataset expansion. RandAugment applies a sequence of random photometric and geometric transforms; Mixup and CutMix blend pairs of training examples, while stochastic depth randomly drops transformer layers during training.</p>
+<blockquote>
+<p>****: DeiT's key finding: the distillation token learns from the CNN teacher's inductive biases (locality, translation invariance) that ViT lacks. Classifying via the distillation token alone outperforms the class token on many downstream tasks.</p>
+</blockquote>
+<h2>DeiT vs ViT</h2>
+<p>DeiT variants span three sizes — Tiny, Small, and Base — parameterised by embedding dimension and number of attention heads. All variants follow the same distillation regime with a RegNetY-16GF CNN teacher (84M params). The Base variant is architecturally identical to ViT-B/16, enabling a direct apples-to-apples accuracy comparison at the same parameter count.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>The distilled DeiT-B↑384 model achieves 85.2% top-1, surpassing ViT-B/16 fine-tuned on JFT by over 1 point and remaining competitive with convolutional networks of similar capacity. Throughput stays high because the architecture adds no extra layers — only an additional head and one embedding token, costing negligible FLOPs compared to patch projection and attention.</p>
+<h2>Key Takeaways</h2>
+<p>Knowledge distillation can substitute for large-scale pretraining: DeiT demonstrates that the data-hunger of vision transformers is not fundamental but arises from a lack of convolutional inductive biases. Injecting these biases via a CNN teacher allows a pure transformer to learn meaningful representations from ImageNet-1K alone without JFT pretraining.</p>
+<p>The distillation token is architecturally minimal but functionally significant. Its dedicated head is supervised on teacher outputs while the class head remains supervised on true labels, creating two complementary views of the input. Combining both heads at inference reliably outperforms using either head in isolation across standard classification benchmarks.</p>
+<p>DeiT's training recipe — AdamW, strong augmentation, repeated sampling, stochastic depth — became a template for subsequent vision transformer work including Swin and DeiT-III. The recipe matters as much as the architecture: applying it to plain ViT-B without distillation already closes a significant fraction of the accuracy gap versus CNN baselines on ImageNet.</p>
+    </article>
+  </main>
+</body>
+</html>

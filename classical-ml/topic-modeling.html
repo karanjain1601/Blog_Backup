@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Topic Modeling — LDA, NMF, and BTM | Notes Backup</title>
+  <meta name="description" content="Latent Dirichlet Allocation from its generative model to Gibbs sampling inference, NMF for topic extraction, BTM for short texts, and topic coherence evaluation with Cv score and NPMI." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Topic Modeling — LDA, NMF, and BTM</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Latent Dirichlet Allocation from its generative model to Gibbs sampling inference, NMF for topic extraction, BTM for short texts, and topic coherence evaluation with Cv score and NPMI.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Topic Modeling — LDA, NMF, and BTM</h1>
+<p>Topic modeling discovers the latent thematic structure in a corpus of documents without supervision. Given a bag-of-words matrix, it recovers topics (distributions over words) and document-topic mixtures. The two dominant approaches — LDA (probabilistic) and NMF (matrix factorization) — differ in their assumptions but often produce comparable results on clean corpora.</p>
+<h2>LDA Generative Model</h2>
+<p>LDA (Blei et al. 2003) assumes the following generative process: for each document d, draw a topic proportion vector θ_d ~ Dir(α). For each word position, draw a topic zₙ ~ Categorical(θ_d), then draw the word wₙ ~ Categorical(β_z) where β_k is the word distribution for topic k (β_k ~ Dir(η)). The Dirichlet prior α controls document sparsity (small α → documents focus on few topics); η controls topic sparsity (small η → topics focus on few words).</p>
+<pre><code class="language-python">import numpy as np
+
+def lda_gibbs(corpus, vocab_size, K, alpha=0.1, eta=0.01, n_iter=100):
+    &quot;&quot;&quot;Collapsed Gibbs sampling for LDA (pedagogical implementation).&quot;&quot;&quot;
+    D = len(corpus)
+    doc_topic = np.zeros((D, K), dtype=int)
+    topic_word = np.zeros((K, vocab_size), dtype=int)
+    topic_total = np.zeros(K, dtype=int)
+
+    # Random initialisation
+    assignments = []
+    for d, doc in enumerate(corpus):
+        z_doc = []
+        for w in doc:
+            z = np.random.randint(K)
+            z_doc.append(z)
+            doc_topic[d, z] += 1
+            topic_word[z, w] += 1
+            topic_total[z] += 1
+        assignments.append(z_doc)
+
+    # Gibbs iterations
+    for _ in range(n_iter):
+        for d, doc in enumerate(corpus):
+            for i, w in enumerate(doc):
+                z = assignments[d][i]
+                doc_topic[d, z] -= 1
+                topic_word[z, w] -= 1
+                topic_total[z] -= 1
+                # Conditional distribution p(z | rest)
+                likelihood = (topic_word[:, w] + eta) / (topic_total + vocab_size * eta)
+                prior = doc_topic[d] + alpha
+                p = likelihood * prior
+                p /= p.sum()
+                z_new = np.random.choice(K, p=p)
+                assignments[d][i] = z_new
+                doc_topic[d, z_new] += 1
+                topic_word[z_new, w] += 1
+                topic_total[z_new] += 1
+
+    theta = (doc_topic + alpha) / (doc_topic + alpha).sum(axis=1, keepdims=True)
+    phi = (topic_word + eta) / (topic_word + eta).sum(axis=1, keepdims=True)
+    return theta, phi
+
+print('LDA Gibbs sampler ready. Pass tokenised integer corpus.')
+</code></pre>
+<h2>LDA Inference with sklearn and pyLDAvis</h2>
+<pre><code class="language-python">import numpy as np
+from sklearn.datasets import fetch_20newsgroups
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.decomposition import LatentDirichletAllocation
+
+cats = ['sci.space', 'rec.autos', 'talk.politics.guns', 'comp.graphics']
+news = fetch_20newsgroups(subset='train', categories=cats,
+                          remove=('headers', 'footers', 'quotes'))
+
+vec = CountVectorizer(max_features=5000, stop_words='english',
+                      min_df=5, max_df=0.9)
+X_bow = vec.fit_transform(news.data)
+feature_names = np.array(vec.get_feature_names_out())
+
+K = 8
+lda = LatentDirichletAllocation(n_components=K, max_iter=20,
+                                 learning_method='online',
+                                 random_state=42, n_jobs=-1)
+doc_topics = lda.fit_transform(X_bow)
+
+for k in range(K):
+    top_idx = np.argsort(lda.components_[k])[-10:][::-1]
+    top_str = ' | '.join(feature_names[top_idx])
+    print(f'Topic {k:2d}: {top_str}')
+
+print(f'\nPerplexity: {lda.perplexity(X_bow):.1f}')
+print(f'Doc-topic matrix shape: {doc_topics.shape}')
+
+try:
+    import pyLDAvis.sklearn
+    panel = pyLDAvis.sklearn.prepare(lda, X_bow, vec, mds='tsne')
+    pyLDAvis.save_html(panel, 'lda_vis.html')
+    print('Interactive visualisation saved to lda_vis.html')
+except ImportError:
+    print('pip install pyLDAvis for interactive topic explorer')
+</code></pre>
+<blockquote>
+<p><strong>Hyperparameters: alpha and eta</strong>: alpha (document Dirichlet prior): smaller alpha (0.01–0.1) → documents are sparse over topics, more focused. Larger alpha (1.0) → documents blend many topics. eta (topic Dirichlet prior): smaller eta → topics are sparse over vocabulary (sharper, more coherent topics). A good default is alpha = 50/K and eta = 0.01.</p>
+</blockquote>
+<h2>NMF for Topic Modeling</h2>
+<p>Non-negative Matrix Factorization decomposes the TF-IDF matrix V ≈ WH where W ∈ ℝ₊ⁿˣᴷ (document-topic) and H ∈ ℝ₊ᴷˣᵛ (topic-word). The non-negativity constraint produces additive, parts-based topics. NMF is optimised via alternating non-negative least squares updates. Unlike LDA, NMF has no probabilistic interpretation and no built-in regularisation — it tends to produce topics that are more strongly driven by frequent terms.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.datasets import fetch_20newsgroups
+from sklearn.feature_extraction.text import TfidfVectorizer, CountVectorizer
+from sklearn.decomposition import NMF, LatentDirichletAllocation
+
+cats = ['sci.space', 'rec.autos', 'talk.politics.guns']
+news = fetch_20newsgroups(subset='train', categories=cats,
+                          remove=('headers', 'footers', 'quotes'))
+
+tfidf_vec = TfidfVectorizer(max_features=3000, stop_words='english', min_df=5)
+X_tfidf = tfidf_vec.fit_transform(news.data)
+names_tfidf = np.array(tfidf_vec.get_feature_names_out())
+
+count_vec = CountVectorizer(max_features=3000, stop_words='english', min_df=5)
+X_bow = count_vec.fit_transform(news.data)
+names_bow = np.array(count_vec.get_feature_names_out())
+
+K = 5
+nmf = NMF(n_components=K, random_state=42, max_iter=500, alpha_W=0.01)
+W_nmf = nmf.fit_transform(X_tfidf)
+
+lda = LatentDirichletAllocation(n_components=K, random_state=42, n_jobs=-1)
+W_lda = lda.fit_transform(X_bow)
+
+print('=== NMF Topics (TF-IDF) ===')
+for k in range(K):
+    top = ' | '.join(names_tfidf[np.argsort(nmf.components_[k])[-8:][::-1]])
+    print(f'  {k}: {top}')
+
+print('\n=== LDA Topics (Counts) ===')
+for k in range(K):
+    top = ' | '.join(names_bow[np.argsort(lda.components_[k])[-8:][::-1]])
+    print(f'  {k}: {top}')
+</code></pre>
+<h2>BTM for Short Texts</h2>
+<p>Standard LDA struggles with short texts (tweets, product reviews): a 10-word document has too few word co-occurrences to infer reliable topic proportions. Biterm Topic Model (BTM) operates at the corpus level: it models the distribution over biterms (unordered word pairs) directly. By aggregating co-occurrences across the whole corpus, BTM overcomes the data sparsity problem inherent to short documents.</p>
+<h2>Topic Coherence Evaluation</h2>
+<p>Perplexity measures held-out likelihood but correlates poorly with human judgement of topic quality. Coherence metrics measure the semantic relatedness of top words in each topic. The Cv score uses sliding-window PMI (Pointwise Mutual Information) computed over reference corpus co-occurrences. NPMI = PMI(w₁,w₂)/(-log p(w₁,w₂)) normalises PMI to [-1,1]. Cv ≈ 0.4 is mediocre; Cv &gt; 0.55 is good.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.datasets import fetch_20newsgroups
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.decomposition import LatentDirichletAllocation
+
+cats = ['sci.space', 'rec.autos', 'comp.graphics', 'talk.politics.guns']
+news = fetch_20newsgroups(subset='train', categories=cats,
+                          remove=('headers', 'footers', 'quotes'))
+
+try:
+    import gensim
+    import gensim.corpora as corpora
+    from gensim.models import CoherenceModel, LdaModel
+
+    # Tokenise and filter
+    texts = [[w.lower() for w in doc.split() if len(w) &gt; 3]
+              for doc in news.data]
+    dictionary = corpora.Dictionary(texts)
+    dictionary.filter_extremes(no_below=5, no_above=0.8)
+    corpus = [dictionary.doc2bow(doc) for doc in texts]
+
+    # Try several K values and pick best coherence
+    results = []
+    for K in [4, 6, 8, 10, 12]:
+        model = LdaModel(corpus=corpus, id2word=dictionary,
+                          num_topics=K, random_state=42, passes=5)
+        cm = CoherenceModel(model=model, texts=texts,
+                             dictionary=dictionary, coherence='c_v')
+        score = cm.get_coherence()
+        results.append((K, score))
+        print(f'K={K}: Cv coherence={score:.4f}')
+
+    best_K = max(results, key=lambda x: x[1])[0]
+    print(f'\nBest K by coherence: {best_K}')
+except ImportError:
+    print('pip install gensim for coherence evaluation')
+</code></pre>
+<h2>Preprocessing Pipeline</h2>
+<p>The quality of topic models is highly sensitive to preprocessing. Poor preprocessing is the most common reason for incoherent topics.</p>
+<ul>
+<li>Tokenise: split on whitespace and punctuation; lowercase all tokens</li>
+<li>Remove stop words: use domain-specific list, not just NLTK defaults; 'use', 'also', 'would' are common culprits</li>
+<li>Lemmatise (not just stem): 'running' → 'run', not 'runn'</li>
+<li>Filter by document frequency: min_df=5 (remove rare terms), max_df=0.9 (remove near-universal terms)</li>
+<li>Optionally: add bigrams (bigram_phraser from gensim) to capture 'machine_learning', 'new_york'</li>
+<li>Build dictionary: map tokens to integer IDs and create bag-of-words corpus</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>LDA</th>
+<th>NMF</th>
+<th>BTM</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Probabilistic</td>
+<td>Yes (generative)</td>
+<td>No</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Short text</td>
+<td>Poor</td>
+<td>Moderate</td>
+<td>Excellent</td>
+</tr>
+<tr>
+<td>Inference</td>
+<td>Gibbs or variational EM</td>
+<td>Alternating NNLS</td>
+<td>Gibbs on biterms</td>
+</tr>
+<tr>
+<td>Interpretability</td>
+<td>High</td>
+<td>High</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Coherence quality</td>
+<td>Good</td>
+<td>Good</td>
+<td>Good (short text)</td>
+</tr>
+<tr>
+<td>Input representation</td>
+<td>Count matrix</td>
+<td>TF-IDF matrix</td>
+<td>Biterm corpus</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Optimal Number of Topics</strong>: Plot coherence score (Cv) vs K. Choose the K at the elbow or the first local maximum. Avoid over-trusting perplexity — lower perplexity does not mean more interpretable topics. For practical use, 10–50 topics cover most corpora with 10k–100k documents. Domain experts should validate the top 10 words of each topic.</p>
+</blockquote>
+<hr />
+<p>LDA and NMF remain the most practical topic modeling approaches for mid-sized corpora. For short texts, BTM or LDA with aggregated pseudo-documents are better choices. Always evaluate with coherence metrics and human inspection — perplexity alone is a poor guide. Neural topic models (ProdLDA, CTM) offer better representations when pre-trained embeddings are available.</p>
+    </article>
+  </main>
+</body>
+</html>

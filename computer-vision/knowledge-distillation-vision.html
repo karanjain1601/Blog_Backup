@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Knowledge Distillation for Vision Models: Soft Labels and Feature Matching | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Knowledge Distillation for Vision Models: Soft Labels and Feature Matching</h1>
+      
+      <h1>Knowledge Distillation for Vision Models: Soft Labels and Feature Matching</h1>
+<p>Knowledge distillation transfers the generalisation capability of a large teacher model into a compact student by training the student to mimic teacher outputs rather than hard ground-truth labels. The technique was formalised by Hinton et al. in 2015 and has since become a cornerstone of model compression for vision tasks.</p>
+<p>Three distillation paradigms dominate vision compression: response-based (soft logits), feature-based (intermediate activations), and relation-based (pairwise sample relationships). Each paradigm transfers different facets of the teacher's knowledge, and combining them further closes the student–teacher accuracy gap.</p>
+<p>Response-based distillation trains the student on a weighted combination of cross-entropy loss against hard labels and KL-divergence against the teacher's softened class probabilities. The temperature parameter T controls how much information flows from near-zero probabilities, revealing the teacher's learned class similarities.</p>
+<pre><code class="language-python">T = 4\nsoft_target = softmax(teacher_logits / T)\nkl = F.kl_div(log_softmax(student_logits / T), soft_target, reduction='batchmean')\nloss = alpha * CE(student_logits, labels) + (1 - alpha) * T**2 * kl
+</code></pre>
+<p>At T=4 a ResNet-50 teacher trained on ImageNet produces soft distributions where related classes show non-trivial similarity scores. These soft targets provide richer supervision than one-hot labels and act as implicit label smoothing, improving the student's calibration and out-of-distribution generalisation robustness.</p>
+<blockquote>
+<p><strong>tip</strong>: Temperature T=4 is the standard for soft-label distillation — it softens the teacher distribution enough for the student to learn from class similarities (a cat is more like a dog than a car). T=1 collapses to hard labels; T&gt;8 over-smooths and loses signal.</p>
+</blockquote>
+<p>Feature-based distillation supervises the student's intermediate activations to match those of the teacher. This transfers richer geometric structure than logits alone, helping the student build representations that are spatially and semantically aligned with the teacher before reaching the final classification stage.</p>
+<pre><code class="language-python">teacher_feat = teacher.layer3(x)\nstudent_feat = adapter(student.layer3(x))\nfeat_loss = F.mse_loss(student_feat, teacher_feat.detach())
+</code></pre>
+<p>When teacher and student differ in channel dimensions, a 1×1 convolutional adapter projects the student feature map into the teacher's channel space before computing the regression loss. Adapters add negligible parameters and allow distillation across architecturally dissimilar teacher–student pairs without constraining design choices.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Teacher → Student</th>
+<th>Top-1 gain</th>
+<th>Extra params</th>
+<th>Training cost</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Hinton KD</td>
+<td>ResNet-50 → R-18</td>
+<td>+1.1%</td>
+<td>0</td>
+<td>1× base</td>
+</tr>
+<tr>
+<td>FitNets</td>
+<td>ResNet-50 → thin</td>
+<td>+1.8%</td>
+<td>adapter</td>
+<td>1.5×</td>
+</tr>
+<tr>
+<td>AT</td>
+<td>ResNet-50 → R-18</td>
+<td>+1.4%</td>
+<td>0</td>
+<td>1.2×</td>
+</tr>
+<tr>
+<td>CRD</td>
+<td>ResNet-50 → R-18</td>
+<td>+2.1%</td>
+<td>memory bank</td>
+<td>2×</td>
+</tr>
+<tr>
+<td>DeiT distillation</td>
+<td>ViT-B → ViT-S</td>
+<td>+2.5%</td>
+<td>distill token</td>
+<td>1.3×</td>
+</tr>
+<tr>
+<td>Self-KD</td>
+<td>R-50 → same arch</td>
+<td>+0.6%</td>
+<td>aux heads</td>
+<td>1.1×</td>
+</tr>
+</tbody>
+</table>
+<p>Attention transfer distills spatial attention maps rather than raw feature values. The teacher's attention — computed as the squared, channel-pooled activation — captures where the model looks. Matching these maps forces the student to focus on the same image regions, especially effective for detection and segmentation tasks.</p>
+<pre><code class="language-python">teacher_attn = teacher_feat.pow(2).mean(1)\nstudent_attn = student_feat.pow(2).mean(1)\nat_loss = F.mse_loss(\n    F.normalize(student_attn.view(B, -1)),\n    F.normalize(teacher_attn.view(B, -1))\n)
+</code></pre>
+<p>Attention maps are normalised to unit L2 norm before computing MSE loss to remove scale differences between teacher and student activation magnitudes. AT loss is added as a secondary term weighted at 0.1–1.0 relative to the primary cross-entropy, with larger weights for detection-heavy tasks requiring spatial fidelity.</p>
+<p>Self-distillation applies KD without a separate teacher: auxiliary classifier heads at shallower depths are trained to mimic the predictions of the deepest head. This free bonus of soft supervision improves the entire backbone without increasing inference cost, as auxiliary heads are discarded after training is complete.</p>
+<pre><code class="language-python">deep_pred = classifier(deep_feat)\nshallow_pred = aux_head(shallow_feat)\ndist_loss = KL(shallow_pred, deep_pred.detach())\n# trains shallow layers to mimic deeper layers
+</code></pre>
+<p>Born-Again Networks generalise self-distillation by training a sequence of student generations, each distilling the previous. Later generations consistently outperform the original teacher because distillation provides better gradient flow and avoids overfitting to training-set noise present in hard one-hot labels.</p>
+<p>Response-based distillation is the simplest to implement and works well when the teacher is much larger. Feature-based methods add 1–2% Top-1 accuracy over soft-label KD alone but require matching intermediate dimensions. Combine AT with KD for detection tasks where spatial structure matters more than global class scores.</p>
+<p>Use T=4 as the default temperature and alpha=0.5 to balance task and distillation losses. Run a short grid search over T in {2, 4, 8} if the teacher–student capacity gap is large. Always evaluate both Top-1 accuracy and calibration error, as distillation can shift confidence scores even without changing rank accuracy.</p>
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RWKV: Receptance Weighted Key Value | Notes Backup</title>
+  <meta name="description" content="A hybrid architecture combining RNN-style linear recurrence (efficient inference) with transformer-style attention-like interactions, enabling parallelizable training and O(1) inference per token." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>RWKV: Receptance Weighted Key Value</h1>
+      <ul class='note-meta'><li><strong>description:</strong> A hybrid architecture combining RNN-style linear recurrence (efficient inference) with transformer-style attention-like interactions, enabling parallelizable training and O(1) inference per token.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>RWKV: Receptance Weighted Key Value</h1>
+<p>RWKV (Peng et al., 2023) is an open-source language model architecture that combines the parallelizable training of transformers with the O(1) per-token inference of RNNs. The name stands for its four key vectors: Receptance (R), Weight (W), Key (K), and Value (V). RWKV replaces transformer self-attention with a linear recurrence mechanism called WKV that uses a channel-wise exponential decay (analogous to position-based attention bias) rather than quadratic pairwise attention scores. This design allows RWKV to be trained efficiently in parallel mode (like a transformer, using full sequence processing) but deployed in recurrent mode (like an RNN, processing one token at a time with a fixed-size state). The RWKV project has released a series of open models from 169M to 14B parameters, all trainable on commodity hardware, making it uniquely accessible among sub-quadratic architectures. RWKV-6 introduced several improvements including multi-scale time mixing and LoRA-style parameter efficiency, narrowing the gap with transformer baselines on downstream benchmarks.</p>
+<h2>Overview</h2>
+<p>RWKV's architecture consists of a stack of identical layers, each containing two sub-blocks: a Time Mixing block (which provides inter-token communication, analogous to attention) and a Channel Mixing block (which provides position-wise nonlinearity, analogous to the FFN). Both blocks use a key innovation called time-shifted mixing: instead of attending to all past tokens (like full attention) or only the immediately preceding token (like standard RNNs), RWKV's time mixing layer computes its key, value, and receptance vectors as a linear interpolation between the current token and the previous token's representation, with learnable mixing coefficients μ. This provides a form of local context that complements the global WKV recurrence. The WKV mechanism then aggregates information across the full history using channel-wise exponential decay weights w and a per-token bonus u for the current position. The resulting system can be parallelized during training by expressing the WKV computation as a parallel prefix scan, while at inference it reduces to a simple constant-size recurrence requiring only three floating-point vectors to maintain state between tokens.</p>
+<h2>Time Mixing and Channel Mixing</h2>
+<p>The Time Mixing block is the primary innovation in RWKV. For each layer, given input x_t at position t, RWKV computes time-shifted variants of x by mixing the current token with the previous token: x_k = lerp(x_{t-1}, x_t, μ_k) for the key projection, and similarly for value and receptance with different learned μ coefficients. These mixed inputs are projected through linear layers to produce K, V, and R vectors. The receptance R is passed through sigmoid to produce a scalar gate per channel. The final output is r ⊙ sigmoid · WKV(K, V), where WKV(K, V) is the core recurrence described below. The Channel Mixing block provides a gated feedforward network: it applies the same time-shifted mixing to produce key and value projections, uses ReLU² (squared ReLU) nonlinearity for the value, and gates with a sigmoid-activated receptance. This block is simpler than the time mixing block but uses the same time-shifting principle. In RWKV-6, the fixed linear interpolation was replaced with a data-dependent (token-wise) interpolation, adding a small amount of content-awareness to what was previously a purely positional mechanism.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class RWKVTimeMix(nn.Module):
+    &quot;&quot;&quot;RWKV time mixing: WKV recurrence with receptance gating.&quot;&quot;&quot;
+    def __init__(self, d_model):
+        super().__init__()
+        # w &lt; 0 for exponential decay; u is bonus for the current token
+        self.time_decay  = nn.Parameter(-5.0 * torch.ones(d_model))
+        self.time_first  = nn.Parameter(torch.zeros(d_model))
+        self.time_mix_k  = nn.Parameter(0.5 * torch.ones(1, 1, d_model))
+        self.time_mix_v  = nn.Parameter(0.5 * torch.ones(1, 1, d_model))
+        self.time_mix_r  = nn.Parameter(0.5 * torch.ones(1, 1, d_model))
+        self.key         = nn.Linear(d_model, d_model, bias=False)
+        self.value       = nn.Linear(d_model, d_model, bias=False)
+        self.receptance  = nn.Linear(d_model, d_model, bias=False)
+        self.output      = nn.Linear(d_model, d_model, bias=False)
+
+    def forward(self, x):
+        B, T, C = x.shape
+        x_prev = torch.cat([torch.zeros(B, 1, C, device=x.device), x[:, :-1]], dim=1)
+        xk = x * self.time_mix_k + x_prev * (1 - self.time_mix_k)
+        xv = x * self.time_mix_v + x_prev * (1 - self.time_mix_v)
+        xr = x * self.time_mix_r + x_prev * (1 - self.time_mix_r)
+        k = self.key(xk); v = self.value(xv)
+        r = torch.sigmoid(self.receptance(xr))
+        wkv = self._wkv(k, v)
+        return self.output(r * wkv)
+
+    def _wkv(self, k, v):
+        B, T, C = k.shape
+        w = -torch.exp(self.time_decay)  # per-channel decay
+        num = torch.zeros(B, C, device=k.device)
+        den = torch.zeros(B, C, device=k.device)
+        outs = []
+        for t in range(T):
+            e_bonus = (self.time_first + k[:, t]).exp()
+            num = num * w.exp() + e_bonus * v[:, t]
+            den = den * w.exp() + e_bonus
+            outs.append(num / (den + 1e-8))
+        return torch.stack(outs, dim=1)
+
+m = RWKVTimeMix(256)
+print(f'RWKV TimeMix: {m(torch.randn(1, 8, 256)).shape}')  # (1, 8, 256)
+</code></pre>
+<h2>WKV Attention Mechanism</h2>
+<p>The WKV mechanism is the core of RWKV's time mixing. It computes a weighted sum of values V using exponential decay weights, producing an output at each position that aggregates all past tokens with geometrically decreasing importance. Formally, WKV_t = (Σ_{s&lt;t} exp(-(t-1-s)w + k_s) · v_s + exp(u + k_t) · v_t) / (Σ_{s&lt;t} exp(-(t-1-s)w + k_s) + exp(u + k_t)), where w is a learned per-channel decay vector, u is a learned per-channel bonus for the current token, and k_s, v_s are the key and value at position s. This formula closely resembles attention but replaces the query-key dot products with a fixed positional decay (t-1-s)w, removing quadratic complexity. The u parameter ensures the current token always has non-negligible influence, preventing the model from entirely ignoring the current position. In practice, the raw formula is numerically unstable for long sequences (the exponentials can overflow), so a numerically stable variant subtracts the running maximum of the exponents before computing. RWKV's CUDA kernel implements this stable variant in a single pass over the sequence, achieving near-transformer training throughput. In RWKV-6, the scalar decay w was replaced with a data-dependent (input-driven) decay matrix, adding selectivity similar to Mamba's Δ but with lower expressiveness.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class RWKVChannelMix(nn.Module):
+    &quot;&quot;&quot;RWKV channel mixing: time-shifted gated FFN with squared-ReLU.&quot;&quot;&quot;
+    def __init__(self, d_model, ffn_dim=None):
+        super().__init__()
+        ffn_dim = ffn_dim or d_model * 4
+        self.time_mix_k = nn.Parameter(0.5 * torch.ones(1, 1, d_model))
+        self.time_mix_r = nn.Parameter(0.5 * torch.ones(1, 1, d_model))
+        self.key        = nn.Linear(d_model, ffn_dim, bias=False)
+        self.value      = nn.Linear(ffn_dim, d_model, bias=False)
+        self.receptance = nn.Linear(d_model, d_model, bias=False)
+
+    def forward(self, x):
+        B, T, C = x.shape
+        x_prev = torch.cat([torch.zeros(B, 1, C, device=x.device), x[:, :-1]], dim=1)
+        xk = x * self.time_mix_k + x_prev * (1 - self.time_mix_k)  # time-shifted key
+        xr = x * self.time_mix_r + x_prev * (1 - self.time_mix_r)  # time-shifted receptance
+        k = self.key(xk)
+        k_sq = torch.relu(k) ** 2  # squared ReLU — sharper gating than standard ReLU
+        v = self.value(k_sq)
+        r = torch.sigmoid(self.receptance(xr))  # gate output
+        return r * v
+
+m = RWKVChannelMix(512)
+x = torch.randn(2, 32, 512)
+print(f'Channel mix output: {m(x).shape}')  # (2, 32, 512)
+print(f'Squared-ReLU concentrates activation on strongest features')
+</code></pre>
+<h2>Parallel vs Recurrent Mode</h2>
+<p>RWKV's dual-mode operation is its most practically important property. In parallel mode (used during training), the WKV computation is expressed as a parallel prefix scan over the sequence dimension. The recurrence wkv_t = decay · wkv_{t-1} + k_t · v_t can be unrolled into a log-depth parallel scan tree, allowing all positions to be computed simultaneously on GPU. This enables RWKV to achieve near-transformer training throughput on modern hardware despite the sequential nature of the recurrence. In recurrent mode (used at inference), RWKV maintains three constant-size vectors as state: the numerator accumulator (num), the denominator accumulator (den), and the current maximum exponent (max_exp for numerical stability). Generating a new token requires only a single update to these three vectors — O(d_model) compute — compared to O(L · d_model) for a transformer attention step over an L-token KV cache. This makes RWKV especially attractive for edge deployment: a RWKV-7B model with 8K context history requires only ~3 MB of persistent state, compared to ~14 GB for an equivalent transformer KV cache at float16. The transition between modes is seamless: the same mathematical computation is performed, just with different algorithmic implementations.</p>
+<pre><code class="language-python">import torch
+
+def rwkv_parallel_scan(k, v, w, u):
+    &quot;&quot;&quot;Parallel WKV computation for training — equivalent to sequential recurrence.&quot;&quot;&quot;
+    B, T, C = k.shape
+    # Build cumulative decay weights for each (i, j) pair: exp(-(i-j)*|w|)
+    t_idx = torch.arange(T, device=k.device, dtype=torch.float32)
+    # decay_mat[i,j] = exp(-(i-j)*|w|) for i&gt;=j, else 0 (causal mask)
+    decay = -torch.exp(w).abs()  # (C,) per-channel decay
+    dist = t_idx.unsqueeze(0) - t_idx.unsqueeze(1)  # (T, T) distance matrix
+    causal_mask = dist &gt;= 0
+    # Compute attention-like weights with positional bias
+    attn_bias = dist.unsqueeze(-1) * decay.unsqueeze(0).unsqueeze(0)  # (T, T, C)
+    attn_w = torch.where(causal_mask.unsqueeze(-1), attn_bias, torch.full_like(attn_bias, float('-inf')))
+    # Add current-token bonus u on diagonal
+    diag_mask = dist == 0
+    attn_w = torch.where(diag_mask.unsqueeze(-1), attn_w + u.unsqueeze(0).unsqueeze(0), attn_w)
+    attn_w = torch.softmax(attn_w, dim=1)  # softmax over past positions
+    # Weighted sum of values: output[t] = sum_s attn_w[t,s] * v[s]
+    out = torch.einsum('tsc,bsc-&gt;btc', attn_w, v)
+    return out
+
+B, T, C = 1, 16, 64
+k = torch.randn(B, T, C); v = torch.randn(B, T, C)
+w = -torch.ones(C) * 2.0; u = torch.zeros(C)
+print(f'Parallel WKV output: {rwkv_parallel_scan(k, v, w, u).shape}')  # (1, 16, 64)
+</code></pre>
+<h2>RWKV-4 to RWKV-6 Evolution</h2>
+<p>The RWKV project has iterated rapidly from RWKV-4 (the first widely used version) through RWKV-6, with each version addressing specific weaknesses of the previous. RWKV-4 established the basic architecture with fixed scalar decay w per channel and demonstrated competitive perplexity vs. GPT-2 at matched parameter count. RWKV-5 introduced Eagle, which replaced the single-decay WKV with a multi-head variant, giving different decay rates to different groups of channels — improving long-range modeling. RWKV-5 also changed the time mixing to use per-head decay matrices rather than per-channel scalars, substantially improving quality on downstream tasks. RWKV-6 (Finch) further added data-dependent time mixing: instead of fixed linear interpolation coefficients μ, RWKV-6 computes content-aware μ values via a small gated network, making the mixing weights input-dependent in a manner similar to Mamba's Δ. RWKV-6 at 7B and 14B parameters achieves competitive performance with LLaMA-2-7B on many benchmarks, though it remains behind on tasks requiring precise in-context recall. The RWKV project also trains multilingual models (particularly strong in Chinese) and has fine-tuned variants for instruction following using RLHF-like methods.</p>
+<ul>
+<li>RWKV-4: Fixed scalar decay w per channel, single-head WKV, competitive perplexity vs GPT-2/GPT-Neo at matched scale.</li>
+<li>RWKV-5 (Eagle): Multi-head time decay — different decay rates per group of channels — improving long-range dependency modeling.</li>
+<li>RWKV-5 also introduced grouped-value projections (similar to GQA) for parameter efficiency and faster inference.</li>
+<li>RWKV-6 (Finch): Data-dependent time mixing with learned content-aware interpolation coefficients — adds selectivity missing from RWKV-4/5.</li>
+<li>RWKV-6 at 7B competes with LLaMA-2-7B on commonsense reasoning, reading comprehension, and coding benchmarks.</li>
+<li>RWKV-7 (GooseWing, 2024): Further architectural refinements including gated state updates and improved positional encoding schemes.</li>
+</ul>
+<h2>Training and Inference</h2>
+<p>RWKV is trained identically to a transformer: batches of token sequences are processed in parallel using the parallel WKV computation and standard cross-entropy loss. The training code can use HuggingFace-compatible dataloaders and standard optimizers (AdamW). The RWKV project uses custom CUDA kernels for the WKV forward and backward passes, implemented in the rwkv-cuda library, achieving ~80% of transformer training throughput for the same model size. The loss surface for RWKV is reported to be smoother than transformers, and the learning rate schedule can be simpler. At inference, RWKV is fundamentally an RNN: the persistent state consists of the num and den accumulators (of size d_model each) and the channel-mixing state (x_prev, of size d_model), summing to 3×d_model per layer. For a 7B RWKV model with 32 layers, the total state is ~600 MB at float32, independent of sequence length. A system generating tokens at 8K context history therefore uses the same memory at step 1 and step 8000 — a uniquely favorable property for streaming applications, long sessions, and edge devices with hard memory limits.</p>
+<pre><code class="language-python">import torch
+import time
+
+def rwkv_recurrent_step(x_t, state, w, u, key_layer, val_layer, rec_layer, out_layer):
+    &quot;&quot;&quot;Single RWKV recurrence step: O(d_model) compute, O(d_model) state.&quot;&quot;&quot;
+    num, den, x_prev = state   # constant-size state (no KV cache)
+    # Time-shifted mixing (simplified: full mixing uses per-channel coefficients)
+    xk = 0.5 * x_t + 0.5 * x_prev
+    k = key_layer(xk); v = val_layer(xk); r = torch.sigmoid(rec_layer(xk))
+    e_u = (u + k).exp()
+    new_num = num * w.exp() + e_u * v
+    new_den = den * w.exp() + e_u
+    wkv_t = new_num / (new_den + 1e-8)
+    out = out_layer(r * wkv_t)
+    new_state = (new_num, new_den, x_t)
+    return out, new_state
+
+def compare_inference_memory(d_model, n_layers, seq_len):
+    kv_mb  = 2 * seq_len * d_model * n_layers * 2 / 1e6  # Transformer KV cache (fp16)
+    rwkv_mb = 3 * d_model * n_layers * 4 / 1e6           # RWKV state (fp32, constant)
+    print(f'L={seq_len:&gt;6}: Transformer KV {kv_mb:&gt;7.1f} MB | RWKV state {rwkv_mb:&gt;6.2f} MB | {kv_mb/rwkv_mb:.0f}x')
+
+print('Memory comparison (7B-scale: d=4096, 32 layers):')
+for L in [512, 2048, 8192, 32768]:
+    compare_inference_memory(4096, 32, L)
+print('RWKV state is constant regardless of context length.')
+</code></pre>
+<h2>Comparison with Transformers</h2>
+<p>RWKV's relationship to transformers is nuanced. At small scale (&lt; 1B parameters), transformers typically outperform RWKV on perplexity due to the expressiveness advantage of full attention. At larger scale (3B–7B parameters), the gap narrows significantly: RWKV-6-7B achieves perplexity within 0.5 PPL of LLaMA-2-7B on The Pile, while being substantially more memory-efficient at inference. The quality gap is most pronounced on tasks requiring precise in-context retrieval: given a long document with a specific fact to retrieve, transformers reliably recall it while RWKV may confuse or miss it due to the compression inherent in its fixed state. RWKV has strong practical advantages for multilingual and low-resource settings: the community has fine-tuned RWKV models for Chinese, Japanese, Korean, and other languages with limited compute. The RWKV project is also unique in being fully open-source including weights, training code, and custom CUDA kernels. For deployment, RWKV's constant memory consumption makes it the only large language model architecture that can handle truly unbounded context without hardware upgrades, making it viable for applications with very long session histories where transformer KV caches would become prohibitively expensive.</p>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Pile PPL</th>
+<th>Inference mem (8K)</th>
+<th>Architecture</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>RWKV-4-3B</td>
+<td>9.41</td>
+<td>~3 MB state</td>
+<td>Pure RNN/WKV</td>
+<td>First widely-used RWKV; fixed decay</td>
+</tr>
+<tr>
+<td>RWKV-6-7B</td>
+<td>8.10</td>
+<td>~4 MB state</td>
+<td>WKV + data-dep mixing</td>
+<td>Competitive with LLaMA-2-7B on many tasks</td>
+</tr>
+<tr>
+<td>LLaMA-2-7B</td>
+<td>7.88</td>
+<td>~14 GB KV cache</td>
+<td>Transformer (GQA)</td>
+<td>Strong quality; large KV cache at long context</td>
+</tr>
+<tr>
+<td>Mamba-3B</td>
+<td>8.01</td>
+<td>~3 MB state</td>
+<td>Selective SSM</td>
+<td>Content-aware; hardware-aware scan</td>
+</tr>
+<tr>
+<td>GPT-NeoX-20B</td>
+<td>7.23</td>
+<td>~40 GB KV cache</td>
+<td>Transformer</td>
+<td>Good quality; very large KV cache</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>RWKV for Edge and Long-Session Deployment</strong>: RWKV can be fine-tuned exactly like a transformer (parallel mode) but deployed like an RNN (recurrent mode) — this makes it attractive for edge devices where KV cache memory is a hard constraint. A RWKV-7B model maintains a fixed state of roughly 4 MB regardless of conversation length, compared to a transformer's KV cache that grows by ~1 MB per 1K tokens at float16. After 100K tokens of conversation history, the transformer needs ~100 MB of KV cache (7B with GQA) or several GB (without GQA), while RWKV still uses 4 MB. The tradeoff is that RWKV does not support exact retrieval from arbitrary past positions — for applications where users rarely need the model to recall a specific detail from many turns ago, RWKV's memory efficiency often outweighs this limitation.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<p>RWKV demonstrates that the apparent dichotomy between RNNs (efficient inference) and transformers (parallelizable training) can be resolved with careful architectural design. By expressing the WKV recurrence as a parallel prefix scan, RWKV achieves transformer-like training throughput while maintaining O(1) inference complexity per token with a fixed-size state. The evolution from RWKV-4 to RWKV-6 shows a clear trend toward adding data-dependence (content-awareness) to the originally positional WKV mechanism, converging toward the expressiveness of Mamba's selective SSM. The practical adoption of RWKV in the open-source community — with models up to 14B parameters, multilingual fine-tunes, and instruction-tuned variants — demonstrates the viability of non-transformer architectures for real-world language model deployment, particularly in resource-constrained and long-session scenarios.</p>
+<ul>
+<li>RWKV's WKV mechanism replaces quadratic attention with a linear recurrence using per-channel exponential decay weights and a current-token bonus u.</li>
+<li>Time-shifted mixing (lerp between x_t and x_{t-1} with learned coefficients) gives each layer access to short-range local context without full attention.</li>
+<li>Parallel mode (training) and recurrent mode (inference) are mathematically equivalent — seamless switching with no accuracy loss.</li>
+<li>RWKV-6-7B achieves Pile perplexity within 0.5 PPL of LLaMA-2-7B while requiring only ~4 MB of persistent state at any sequence length.</li>
+<li>The primary weakness vs. transformers and Mamba is limited content-based selectivity — RWKV-6 addresses this partially via data-dependent mixing coefficients.</li>
+<li>RWKV is the most community-developed sub-quadratic LLM with fully open weights, training code, and CUDA kernels under the Apache 2.0 license.</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

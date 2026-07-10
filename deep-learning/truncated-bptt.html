@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Truncated BPTT — Practical Approximation for Long Sequences | Notes Backup</title>
+  <meta name="description" content="Implement TBPTT(k1,k2), compare gradient quality across chunk sizes, train a character-level language model with TBPTT, and profile memory usage versus full BPTT." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Truncated BPTT — Practical Approximation for Long Sequences</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Implement TBPTT(k1,k2), compare gradient quality across chunk sizes, train a character-level language model with TBPTT, and profile memory usage versus full BPTT.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Truncated BPTT — Practical Approximation for Long Sequences</h1>
+<p>Full BPTT through T=1000 steps requires O(T·H) memory to store all activations and runs T sequential backward passes. Truncated BPTT (TBPTT) approximates this by limiting backpropagation to k₂ steps while the forward pass can run k₁ ≥ k₂ steps before each update. The most common form is TBPTT(k,k) where k is the chunk size — forward and backward both span k steps. The hidden state is carried between chunks (allowing long-range information to propagate forward) but the gradient is detached (preventing gradient flow beyond the current chunk). This is why TBPTT learns short-range gradients accurately but cannot directly update weights based on dependencies longer than k steps.</p>
+<h2>Full BPTT Memory Problem</h2>
+<p>For a sequence of length T=1000, batch size B=32, hidden size H=512: full BPTT requires storing 1000×32×512×4 bytes ≈ 64 MB of hidden states per layer, plus matching buffers for tanh inputs. With multiple layers, the memory requirement grows proportionally. More critically, the backward graph contains T×H×H ≈ 262 million nodes, making each step of the backward pass slow. Gradient checkpointing can halve the memory requirement at 50% extra compute cost, but TBPTT remains the standard for RNN training because it is simpler and more predictable.</p>
+<h2>TBPTT(k₁,k₂) Formulation</h2>
+<p>TBPTT(k₁,k₂) generalises the common chunked form: k₁ is the forward stride (how many steps to advance before each update) and k₂ is the backpropagation depth (k₂ ≤ k₁). When k₁ &gt; k₂, the first k₁-k₂ steps of each stride are run without gradient tracking, then gradient is tracked for the last k₂ steps. Most implementations use k₁ = k₂ = chunk_size (Penn Treebank uses 35, word-level models often 128–256). The detached hidden state h.detach() carries forward-pass information (letting the model condition on distant history) without creating gradient paths into those distant steps.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+torch.manual_seed(0)
+T, B, I, H, O = 200, 8, 16, 64, 8
+k1, k2 = 100, 20  # forward k1 steps, backprop through k2 steps (k2 &lt; k1)
+
+rnn = nn.RNN(I, H, batch_first=True)
+fc  = nn.Linear(H, O)
+opt = torch.optim.Adam(list(rnn.parameters()) + list(fc.parameters()), lr=3e-4)
+x   = torch.randn(B, T, I)
+y   = torch.randn(B, T, O)
+
+h = torch.zeros(1, B, H)
+total_loss, n_updates = 0.0, 0
+
+for start in range(0, T - k2, k1):
+    # Run k1 - k2 steps forward without gradient to advance hidden state
+    no_grad_end = min(start + k1 - k2, T)
+    if no_grad_end &gt; start:
+        with torch.no_grad():
+            _, h = rnn(x[:, start:no_grad_end, :], h)
+        h = h.detach()
+    # Backprop through only the last k2 steps
+    bwd_start = min(start + k1 - k2, T - k2)
+    bwd_end   = min(bwd_start + k2, T)
+    opt.zero_grad()
+    out, h_new = rnn(x[:, bwd_start:bwd_end, :], h.detach())
+    loss = nn.functional.mse_loss(fc(out), y[:, bwd_start:bwd_end, :])
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(rnn.parameters(), 1.0)
+    opt.step()
+    h = h_new.detach()
+    total_loss += loss.item(); n_updates += 1
+
+print(f'TBPTT(k1={k1}, k2={k2}) over T={T}')
+print(f'Updates: {n_updates}, avg loss: {total_loss / max(n_updates, 1):.6f}')
+print(f'Gradient flows only through last k2={k2} steps per update.')
+</code></pre>
+<h2>Gradient Quality vs Chunk Size</h2>
+<p>As chunk size k₂ increases, the TBPTT gradient becomes a better approximation of the full BPTT gradient. The cosine similarity between the truncated and full gradient vectors measures gradient direction quality. For dependencies that decay exponentially (as with a well-behaved RNN), k₂=20 may capture 90%+ of the useful gradient signal. For tasks with long-range dependencies (e.g., matching parentheses 50 steps apart), small k₂ will fail to learn the task. The practical rule: k₂ should be at least as large as the longest dependency you need to learn.</p>
+<pre><code class="language-python">import numpy as np
+
+np.random.seed(7)
+T, I, H = 60, 4, 8
+Whh_scale = 0.5  # stable vanishing regime
+
+Wxh = np.random.randn(H, I) * 0.1
+Whh = np.random.randn(H, H) * Whh_scale / np.sqrt(H)
+bh  = np.zeros((H, 1))
+xs  = [np.random.randn(I, 1) for _ in range(T)]
+
+def forward_chunk(xs_list, h0):
+    hs = {-1: h0}
+    for t, x in enumerate(xs_list):
+        hs[t] = np.tanh(Wxh @ x + Whh @ hs[t-1] + bh)
+    return hs
+
+def grad_Whh(xs_list, hs, Whh):
+    dh = np.ones((H, 1)) / H; dW = np.zeros_like(Whh)
+    for t in reversed(range(len(xs_list))):
+        dt = (1 - hs[t]**2) * dh
+        dW += dt @ hs[t-1].T; dh = Whh.T @ dt
+    return dW
+
+# Full BPTT reference gradient
+hs_full = forward_chunk(xs, np.zeros((H, 1)))
+dW_ref  = grad_Whh(xs, hs_full, Whh)
+
+print(f'Chunk  Cosine Similarity  dWhh Norm  Note')
+for chunk in [5, 10, 20, 40, 60]:
+    dW_tbptt = np.zeros_like(Whh); h_carry = np.zeros((H, 1))
+    for s in range(0, T, chunk):
+        xc = xs[s:s + chunk]
+        hc = forward_chunk(xc, h_carry)
+        dW_tbptt += grad_Whh(xc, hc, Whh)
+        h_carry = hc[len(xc) - 1].copy()
+    cos = (np.dot(dW_ref.ravel(), dW_tbptt.ravel()) /
+           (np.linalg.norm(dW_ref) * np.linalg.norm(dW_tbptt) + 1e-9))
+    note = ' (full BPTT)' if chunk == T else ''
+    print(f'{chunk:&gt;5}  {cos:&gt;18.6f}  {np.linalg.norm(dW_tbptt):&gt;9.4f}{note}')
+</code></pre>
+<h2>Language Model Training with TBPTT</h2>
+<p>Character-level language models are trained by predicting the next character given all previous characters. The standard TBPTT implementation: (1) tokenise text into integers, (2) chunk the token sequence into blocks of size k, (3) for each block run a forward pass and backward pass, (4) carry the hidden state between blocks with h.detach(). This is the exact setup used in Mikolov (2010) and Karpathy's char-rnn. Chunk size 35 matches the Penn Treebank benchmark; modern implementations often use 128–256. Loss is cross-entropy over the vocabulary; perplexity = exp(cross-entropy) is the standard evaluation metric.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+torch.manual_seed(42)
+text  = 'the quick brown fox jumps over the lazy dog ' * 40
+chars = sorted(set(text))
+c2i   = {c: i for i, c in enumerate(chars)}
+vocab = len(chars)
+data  = torch.tensor([c2i[c] for c in text], dtype=torch.long)
+T_data, chunk, H, B = len(data) - 1, 35, 64, 1
+
+emb = nn.Embedding(vocab, H)
+rnn = nn.RNN(H, H, batch_first=True)
+fc  = nn.Linear(H, vocab)
+params = list(emb.parameters()) + list(rnn.parameters()) + list(fc.parameters())
+opt    = torch.optim.Adam(params, lr=1e-3)
+h = torch.zeros(1, B, H)
+total_loss, n_steps = 0.0, 0
+
+for start in range(0, T_data - chunk, chunk):
+    xc = data[start:start + chunk].unsqueeze(0)          # (1, chunk)
+    yc = data[start + 1:start + chunk + 1].unsqueeze(0)  # (1, chunk)
+    h  = h.detach()
+    embed_xc    = emb(xc)                                # (1, chunk, H)
+    hidden_out, h = rnn(embed_xc, h)                     # (1, chunk, H)
+    logits      = fc(hidden_out).view(-1, vocab)         # (chunk, vocab)
+    loss        = nn.functional.cross_entropy(logits, yc.view(-1))
+    opt.zero_grad(); loss.backward()
+    torch.nn.utils.clip_grad_norm_(rnn.parameters(), 5.0)
+    opt.step()
+    total_loss += loss.item(); n_steps += 1
+
+avg_ce = total_loss / n_steps
+print(f'Char LM: vocab={vocab}, chunk={chunk} (PTB-style TBPTT)')
+print(f'Steps: {n_steps}, avg cross-entropy: {avg_ce:.4f}')
+print(f'Perplexity: {torch.exp(torch.tensor(avg_ce)).item():.2f}')
+</code></pre>
+<h2>Memory Profiling</h2>
+<p>The memory advantage of TBPTT over full BPTT scales linearly with T/k. For T=1000 and k=35, TBPTT stores 28x fewer hidden state tensors. Profiling with torch.cuda.memory_allocated() or tracemalloc confirms this theoretical ratio. The autograd graph depth is also proportional to the chunk size, which affects backward pass time. Larger chunks give better gradient quality at the cost of more memory and slower backward passes — the fundamental trade-off in chunk size selection.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+torch.manual_seed(1)
+I, H, B = 16, 64, 4
+rnn = nn.RNN(I, H, batch_first=True)
+
+def count_graph_nodes(loss_tensor):
+    visited, stack = set(), [loss_tensor.grad_fn]
+    while stack:
+        n = stack.pop()
+        if n is None or id(n) in visited:
+            continue
+        visited.add(id(n))
+        stack.extend(c for c, _ in (n.next_functions or []))
+    return len(visited)
+
+print(f'{&quot;T&quot;:&gt;6} {&quot;Chunk&quot;:&gt;7} {&quot;Method&quot;:&lt;20} {&quot;Act. Mem MB&quot;:&gt;12} {&quot;Graph nodes&quot;:&gt;12}')
+bytes_per_float = 4
+for T in [50, 100, 200]:
+    x = torch.randn(B, T, I)
+    out_full, _ = rnn(x, torch.zeros(1, B, H))
+    nodes_full  = count_graph_nodes(out_full.sum())
+    full_mb     = T * H * B * bytes_per_float / 1e6
+    print(f'{T:&gt;6} {T:&gt;7} {&quot;Full BPTT&quot;:&lt;20} {full_mb:&gt;12.4f} {nodes_full:&gt;12}')
+    for chunk in [10, 25]:
+        if chunk &gt;= T:
+            continue
+        out_c, _ = rnn(x[:, :chunk, :], torch.zeros(1, B, H))
+        nodes_c  = count_graph_nodes(out_c.sum())
+        mb_c     = chunk * H * B * bytes_per_float / 1e6
+        ratio    = full_mb / mb_c
+        print(f'{T:&gt;6} {chunk:&gt;7} {f&quot;TBPTT k={chunk}&quot;:&lt;20} {mb_c:&gt;12.4f} '
+              f'{nodes_c:&gt;12}  ({ratio:.1f}x less mem)')
+</code></pre>
+<h2>Practical Chunk Size Selection</h2>
+<table>
+<thead>
+<tr>
+<th>Chunk Size</th>
+<th>Gradient Quality</th>
+<th>Memory per Chunk</th>
+<th>Dependencies Captured</th>
+<th>Typical Use Case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>10</td>
+<td>Poor — very local gradient only</td>
+<td>Very low — O(10·H·B)</td>
+<td>Up to 10 steps</td>
+<td>Simple pattern repetition, short-lag tasks</td>
+</tr>
+<tr>
+<td>35</td>
+<td>Moderate — PTB standard</td>
+<td>Low — O(35·H·B)</td>
+<td>Up to 35 steps</td>
+<td>Character-level LM, Penn Treebank word-level LM</td>
+</tr>
+<tr>
+<td>100</td>
+<td>Good — captures medium-range patterns</td>
+<td>Moderate — O(100·H·B)</td>
+<td>Up to 100 steps</td>
+<td>Word-level LM, machine translation sequences</td>
+</tr>
+<tr>
+<td>256</td>
+<td>Near-full BPTT quality</td>
+<td>High — O(256·H·B)</td>
+<td>Up to 256 steps</td>
+<td>Long documents, modern LSTM/GRU training</td>
+</tr>
+</tbody>
+</table>
+<h2>Trade-offs and Limitations</h2>
+<p>TBPTT introduces a systematic bias: weights are updated based on local gradient signals only, so long-range patterns are learned indirectly (via the hidden state carrying information forward) rather than directly via gradient. For tasks with dependencies shorter than k, TBPTT is as good as full BPTT. For tasks where the critical signal arrives &gt;k steps before the output, TBPTT may fail to learn even if the hidden state contains the information — because the gradient cannot credit-assign back to where the information was encoded.</p>
+<blockquote>
+<p><strong>Rule of Thumb for Chunk Size</strong>: Set chunk size to at least 2–3x the longest dependency you need to learn. If you're unsure, profile gradient cosine similarity between TBPTT and a short full-BPTT run on a small model. Use gradient checkpointing if you want full BPTT quality with acceptable memory: store every sqrt(T) hidden state and recompute the rest during backward.</p>
+</blockquote>
+<ul>
+<li>TBPTT(k,k): most common form — forward and backward both span k steps per chunk.</li>
+<li>TBPTT(k1,k2) with k1&gt;k2: run k1 steps before each update; backprop only k2 steps back.</li>
+<li>Carry h.detach() forward: hidden state carries long-range info; gradient is local only.</li>
+<li>Chunk size 35: PTB language model benchmark standard since Mikolov (2010).</li>
+<li>Gradient clipping (max_norm=1-5): mandatory alongside TBPTT to prevent explosions.</li>
+<li>Gradient quality monitoring: measure cosine similarity of TBPTT vs full BPTT on a small held-out task.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

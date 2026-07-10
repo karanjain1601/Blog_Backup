@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>StyleGAN: Disentangled Style Injection and AdaIN | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>StyleGAN: Disentangled Style Injection and AdaIN</h1>
+      
+      <h1>StyleGAN: Disentangled Style Injection and AdaIN</h1>
+<p>StyleGAN, introduced by Karras et al. at NVIDIA, restructures the traditional GAN generator by separating style from content. Rather than feeding noise z directly to the generator, it first maps z through a learned mapping network to an intermediate latent w, which then injects style at each resolution level via Adaptive Instance Normalization.</p>
+<p>This architecture yields a highly disentangled latent space where different style scales—coarse (pose, face shape), medium (facial features), and fine (color, texture)—are controlled independently. StyleGAN set a new FID record on FFHQ-1024 and remains foundational for controllable image generation research.</p>
+<p>The mapping network is an 8-layer MLP that transforms the initial noise z ∈ R^512 into an intermediate latent w ∈ R^512. Each layer applies a linear transformation followed by a LeakyReLU. The network learns to 'unentangle' the latent factors so that w-space has better disentanglement properties than z-space.</p>
+<pre><code>import torch.nn as nn
+
+class MappingNetwork(nn.Module):
+    def __init__(self, z_dim=512, w_dim=512, n_layers=8):
+        super().__init__()
+        layers = []
+        for i in range(n_layers):
+            in_d  = z_dim if i == 0 else w_dim
+            layers += [nn.Linear(in_d, w_dim), nn.LeakyReLU(0.2)]
+        self.net = nn.Sequential(*layers)
+        self.n_style_blocks = 18   # log2(1024) * 2
+    def forward(self, z):
+        w = self.net(z)            # (B, w_dim)
+        return w.unsqueeze(1).repeat(1, self.n_style_blocks, 1)
+</code></pre>
+<p>The w vector is repeated (or broadcast) to produce one style vector per synthesis block. In StyleGAN2, mixing regularization is applied: during training, two different w vectors are sometimes used—one for coarse layers and one for fine layers—encouraging the network to keep style scales separate.</p>
+<p>Adaptive Instance Normalization (AdaIN) is the mechanism by which style w controls each synthesis layer. The feature map is first normalized to zero mean and unit variance per channel, then rescaled and shifted by learned affine parameters derived from w. This allows w to set the 'style' of each layer independently.</p>
+<pre><code>import torch
+import torch.nn as nn
+
+class AdaIN(nn.Module):
+    def __init__(self, w_dim, channels):
+        super().__init__()
+        self.style_linear = nn.Linear(w_dim, channels * 2)
+    def forward(self, x, w):
+        # x: (B, C, H, W)  w: (B, w_dim)
+        y  = self.style_linear(w)          # (B, 2C)
+        y_s, y_b = y.chunk(2, dim=1)      # each (B, C)
+        y_s = y_s.unsqueeze(-1).unsqueeze(-1)
+        y_b = y_b.unsqueeze(-1).unsqueeze(-1)
+        mean = x.mean(dim=[2, 3], keepdim=True)
+        std  = x.std(dim=[2, 3], keepdim=True) + 1e-8
+        x_norm = (x - mean) / std
+        return y_s * x_norm + y_b
+</code></pre>
+<p>Because AdaIN normalizes the content of each feature map before applying style, the generator's learned constant (a fixed 4x4 learned tensor) carries spatial structure while w carries only style information. This clean separation is what gives StyleGAN its superior disentanglement compared to earlier architectures.</p>
+<p>StyleGAN adds per-pixel stochastic noise to each synthesis layer, distinct from the latent z. This noise captures fine-grained stochastic variation—hair strand placement, skin pore detail, background texture—that does not need to be globally consistent. The noise is scaled by a learned per-channel scalar before being added to the feature map.</p>
+<pre><code>import torch
+import torch.nn as nn
+
+class NoiseInjection(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.weight = nn.Parameter(torch.zeros(1, channels, 1, 1))
+    def forward(self, x, noise=None):
+        if noise is None:
+            B, C, H, W = x.shape
+            noise = torch.randn(B, 1, H, W, device=x.device)
+        return x + self.weight * noise
+</code></pre>
+<p>To generate a new stochastic variant of the same face (same identity, same pose, different hair wisps), hold w constant but resample the noise tensors injected at each layer. This separates high-level semantic control (w) from low-level stochastic texture (noise), a design that strongly influenced subsequent architectures.</p>
+<p>StyleGAN v1 used progressive growing (ProGAN): training starts at 4x4 and new layers are faded in as resolution doubles. While effective, this caused texture-structure artifacts. StyleGAN2 replaced progressive growing with multi-scale gradients (MSG) and path-length regularization, achieving better global consistency and significantly lower FID.</p>
+<pre><code>import torch
+
+def truncation_trick(w, w_bar, psi=0.7):
+    &quot;&quot;&quot;Apply truncation to w vectors for quality/diversity tradeoff.
+    w    : (B, n_blocks, w_dim) — sampled intermediate latents
+    w_bar: (1, n_blocks, w_dim) — EMA of w over training (mean face)
+    psi  : truncation strength in [0.5, 0.9]; lower = higher quality
+    &quot;&quot;&quot;
+    return w_bar + psi * (w - w_bar)
+
+# Update w_bar during training with EMA
+# w_bar = 0.995 * w_bar + 0.005 * w.mean(0, keepdim=True)
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Version</th>
+<th>Max Resolution</th>
+<th>FID (FFHQ)</th>
+<th>Key Innovation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>StyleGAN v1</td>
+<td>1024x1024</td>
+<td>4.40</td>
+<td>Mapping network + AdaIN + stochastic noise</td>
+</tr>
+<tr>
+<td>StyleGAN2</td>
+<td>1024x1024</td>
+<td>2.84</td>
+<td>Weight demodulation, no prog. growing, path-length reg</td>
+</tr>
+<tr>
+<td>StyleGAN3</td>
+<td>1024x1024</td>
+<td>2.79</td>
+<td>Alias-free synthesis, equivariant to translation/rotation</td>
+</tr>
+<tr>
+<td>StyleGAN-XL</td>
+<td>1024x1024</td>
+<td>2.30</td>
+<td>Class-conditional, projected discriminator, multi-scale</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>info</strong>: The w-space (intermediate latent) is more disentangled than z-space because the mapping network learns to spread styles. Editing in w-space (e.g. age, expression) produces cleaner semantic changes than editing z directly.</p>
+</blockquote>
+<p>StyleGAN's mapping network + AdaIN design cleanly separates identity (w) from stochastic texture (noise), enabling precise semantic editing in w-space. This has made StyleGAN the default backbone for GAN-based face editing, inversion, and interpolation research.</p>
+<p>StyleGAN2 is the practical workhorse: weight demodulation fixes water-droplet artifacts from AdaIN, and removing progressive growing simplifies training. StyleGAN3 further eliminates texture sticking by ensuring the synthesis network is equivariant to subpixel translation.</p>
+<p>For production use, prefer StyleGAN2-ADA (adaptive discriminator augmentation), which achieves strong performance with as few as 1,000 training images by augmenting discriminator inputs in a way that does not leak augmentation into generated samples.</p>
+    </article>
+  </main>
+</body>
+</html>

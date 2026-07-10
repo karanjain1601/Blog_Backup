@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Special Tokens — BOS, EOS, PAD, Instruction Formats, and Chat Templates | Notes Backup</title>
+  <meta name="description" content="Special tokens are structural vocabulary entries that control sequence boundaries, padding, and instruction formatting. Covers BOS/EOS/PAD roles, instruction format tokens across LLaMA-3/Mistral/ChatML/Alpaca/Gemma, apply_chat_template usage, stop token configuration, and left- vs right-padding strategies." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Special Tokens — BOS, EOS, PAD, Instruction Formats, and Chat Templates</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Special tokens are structural vocabulary entries that control sequence boundaries, padding, and instruction formatting. Covers BOS/EOS/PAD roles, instruction format tokens across LLaMA-3/Mistral/ChatML/Alpaca/Gemma, apply_chat_template usage, stop token configuration, and left- vs right-padding strategies.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Special Tokens — BOS, EOS, PAD, Instruction Formats, and Chat Templates</h1>
+<p>Special tokens are vocabulary entries with structural rather than semantic roles. Unlike regular subword tokens that represent text fragments, special tokens signal sequence boundaries, separate conversation turns, indicate padding positions, and trigger specific model behaviors. Every major language model family defines a distinct set of special tokens and an instruction format that the model has been trained to recognise. Mismatching these tokens at inference time — using the wrong chat template, wrong BOS token, or wrong stop condition — causes severe quality degradation even when the semantic content of the prompt is correct.</p>
+<h2>BOS, EOS, PAD — Core Structural Tokens</h2>
+<p>BOS (beginning of sequence) is prepended to every input sequence and signals to the model where text begins. EOS (end of sequence) signals the model to stop generating; it is also the token the model is trained to predict at the end of its output. Without a properly recognised EOS token in the stopping criteria, decoder-only models continue generating past the intended output until they hit the context limit. PAD fills shorter sequences in a batch to match the maximum sequence length; PAD tokens are masked in the attention computation so they do not influence loss or logits. SEP separates segments in encoder models like BERT; CLS is prepended as the classification token whose final-layer representation is used for sequence-level tasks.</p>
+<h2>Instruction Format Tokens by Model Family</h2>
+<p>LLaMA-3 uses &lt;|begin_of_text|&gt; as BOS, &lt;|eot_id|&gt; to mark end-of-turn, &lt;|start_header_id|&gt; and &lt;|end_header_id|&gt; to delimit role headers (system, user, assistant), and &lt;|end_of_text|&gt; as EOS. ChatML (used by GPT-4 and many open models) uses &lt;|im_start|&gt;role\n...content...&lt;|im_end|&gt; for each turn. Mistral/Mixtral uses <s> as BOS, [INST] and [/INST] to delimit user turns, and </s> as EOS with no explicit system token — system prompts are prepended to the first user message. Alpaca format uses human-readable delimiters: ### Instruction:\n...\n### Response:\n with generation stopping on the next ### marker.</p>
+<h2>Inspecting Special Tokens Across Model Families</h2>
+<pre><code class="language-python">from transformers import AutoTokenizer
+
+def inspect_special_tokens(model_name):
+    tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    print(f'\n=== {model_name} ===')
+    print(f'  bos_token:       {repr(tok.bos_token)} (id={tok.bos_token_id})')
+    print(f'  eos_token:       {repr(tok.eos_token)} (id={tok.eos_token_id})')
+    print(f'  pad_token:       {repr(tok.pad_token)} (id={tok.pad_token_id})')
+    print(f'  unk_token:       {repr(tok.unk_token)} (id={tok.unk_token_id})')
+    print(f'  sep_token:       {repr(tok.sep_token)}')
+    print(f'  all_special_tokens ({len(tok.all_special_tokens)} total):')
+    for st in tok.all_special_tokens[:10]:
+        sid = tok.convert_tokens_to_ids(st)
+        print(f'    {repr(st):&lt;40} id={sid}')
+    if hasattr(tok, 'chat_template') and tok.chat_template:
+        preview = tok.chat_template[:80].replace('\n', ' ')
+        print(f'  chat_template: {preview}...')
+
+models = [
+    'meta-llama/Meta-Llama-3-8B-Instruct',
+    'mistralai/Mistral-7B-Instruct-v0.2',
+    'google/gemma-7b-it',
+]
+for model in models:
+    try:
+        inspect_special_tokens(model)
+    except Exception as e:
+        print(f'{model}: {e}')
+</code></pre>
+<h2>Chat Template Application</h2>
+<p>HuggingFace tokenizers expose apply_chat_template(), which formats a list of role-content dictionaries into the model-specific instruction format. The template is stored in the tokenizer's tokenizer_config.json as a Jinja2 template string. Calling apply_chat_template() with add_generation_prompt=True appends the assistant header token, priming the model for response generation. Using this method guarantees correct formatting regardless of model family — the same Python code works for LLaMA-3, Mistral, and Gemma by switching only the model name.</p>
+<pre><code class="language-python">from transformers import AutoTokenizer
+
+def format_conversation(model_name, system_msg, user_msg, assistant_msg=None):
+    tok = AutoTokenizer.from_pretrained(model_name)
+    messages = []
+    if system_msg:
+        messages.append({'role': 'system', 'content': system_msg})
+    messages.append({'role': 'user', 'content': user_msg})
+    if assistant_msg:
+        messages.append({'role': 'assistant', 'content': assistant_msg})
+    formatted = tok.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=(assistant_msg is None),
+    )
+    token_ids = tok.apply_chat_template(
+        messages,
+        tokenize=True,
+        add_generation_prompt=(assistant_msg is None),
+        return_tensors='pt',
+    )
+    return formatted, token_ids
+
+system = 'You are a helpful assistant specialising in machine learning.'
+user = 'Explain the difference between BPE and WordPiece tokenization.'
+models = ['meta-llama/Meta-Llama-3-8B-Instruct', 'mistralai/Mistral-7B-Instruct-v0.2']
+for model in models:
+    try:
+        text, ids = format_conversation(model, system, user)
+        print(f'{model}:')
+        print(f'  Token count: {ids.shape[-1]}')
+        print(f'  First 200 chars: {text[:200]}')
+        print()
+    except Exception as e:
+        print(f'{model}: {e}')
+</code></pre>
+<h2>Generation Stop Token Configuration</h2>
+<p>Correct stop token configuration is essential for inference. The model's generate() method accepts eos_token_id as a single token id or a list of ids; generation halts when any of these ids is produced. For models with multiple stop tokens (LLaMA-3 has both &lt;|eot_id|&gt; and &lt;|end_of_text|&gt;), all valid stop ids must be included or the model will continue generating past the intended turn boundary. The stopping_criteria argument accepts custom StoppingCriteria subclasses for pattern-based stopping, useful when stop sequences span multiple tokens.</p>
+<pre><code class="language-python">import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM, StoppingCriteria, StoppingCriteriaList
+
+class MultiTokenStopCriteria(StoppingCriteria):
+    def __init__(self, stop_token_ids):
+        self.stop_ids = set(stop_token_ids)
+
+    def __call__(self, input_ids, scores, **kwargs):
+        last_token = input_ids[0, -1].item()
+        return last_token in self.stop_ids
+
+def configure_generation(model_name, prompt):
+    tok = AutoTokenizer.from_pretrained(model_name)
+    # Collect all valid stop token ids for this model
+    stop_ids = []
+    for special in [tok.eos_token, '&lt;|eot_id|&gt;', '&lt;|end_of_text|&gt;', '&lt;/s&gt;', '&lt;|im_end|&gt;']:
+        if special and special in tok.get_vocab():
+            stop_ids.append(tok.convert_tokens_to_ids(special))
+    stop_criteria = StoppingCriteriaList([MultiTokenStopCriteria(stop_ids)])
+    print(f'{model_name}:')
+    print(f'  Stop token ids: {stop_ids}')
+    stop_tokens = [tok.convert_ids_to_tokens(sid) for sid in stop_ids]
+    print(f'  Stop tokens:    {stop_tokens}')
+    return stop_criteria
+
+for model in ['meta-llama/Meta-Llama-3-8B', 'mistralai/Mistral-7B-v0.1']:
+    try:
+        configure_generation(model, 'test')
+    except Exception as e:
+        print(f'{model}: {e}')
+</code></pre>
+<h2>Padding Strategy for Batched Inference</h2>
+<p>Decoder-only models (GPT, LLaMA, Mistral) use left-padding for batched generation: PAD tokens are prepended so that all sequences in a batch end at the same position, allowing the model's autoregressive generation to begin at identical positions across batch elements. Right-padding is used for encoder training (BERT, RoBERTa) and for computing loss on variable-length sequences: padding is appended and masked via attention_mask. Using right-padding with a decoder-only model during generation causes incorrect output because the model sees PAD tokens between the prompt end and the first generated token.</p>
+<pre><code class="language-python">import torch
+from transformers import AutoTokenizer
+
+def demonstrate_padding(model_name, prompts):
+    tok = AutoTokenizer.from_pretrained(model_name)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+
+    # Left-padding: correct for decoder-only generation
+    tok.padding_side = 'left'
+    left_batch = tok(prompts, return_tensors='pt', padding=True, truncation=True)
+    print(f'Left-padding (decoder generation):')
+    print(f'  input_ids shape:      {left_batch.input_ids.shape}')
+    print(f'  attention_mask shape: {left_batch.attention_mask.shape}')
+    print(f'  First sequence ids:   {left_batch.input_ids[0].tolist()}')
+    print(f'  First seq mask:       {left_batch.attention_mask[0].tolist()}')
+
+    # Right-padding: correct for encoder training
+    tok.padding_side = 'right'
+    right_batch = tok(prompts, return_tensors='pt', padding=True, truncation=True)
+    print(f'Right-padding (encoder training):')
+    print(f'  First sequence ids:   {right_batch.input_ids[0].tolist()}')
+    print(f'  First seq mask:       {right_batch.attention_mask[0].tolist()}')
+
+short_prompts = ['Hi', 'Explain BPE tokenization in detail please.']
+demonstrate_padding('gpt2', short_prompts)
+</code></pre>
+<h2>Special Token Formats by Model Family</h2>
+<table>
+<thead>
+<tr>
+<th>Model Family</th>
+<th>BOS Token</th>
+<th>Turn Delimiter</th>
+<th>EOS Token</th>
+<th>System Role Format</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>LLaMA-3</td>
+<td>&lt;</td>
+<td>begin_of_text</td>
+<td>&gt;</td>
+<td>&lt;</td>
+</tr>
+<tr>
+<td>Mistral/Mixtral</td>
+<td><s></td>
+<td>[INST] / [/INST]</td>
+<td></s></td>
+<td>No system tag — prepend to first user message inside [INST]</td>
+</tr>
+<tr>
+<td>ChatML (GPT-4)</td>
+<td>&lt;</td>
+<td>im_start</td>
+<td>&gt;</td>
+<td>&lt;</td>
+</tr>
+<tr>
+<td>Alpaca</td>
+<td>None</td>
+<td>### Instruction:\n / ### Response:\n</td>
+<td>Stop on next ### (pattern-based)</td>
+<td>### System Prompt:\n{content}\n\n</td>
+</tr>
+<tr>
+<td>Gemma</td>
+<td><bos></td>
+<td><start_of_turn>role\n / <end_of_turn>\n</td>
+<td><eos></td>
+<td><start_of_turn>user\n{system+user}<end_of_turn></td>
+</tr>
+</tbody>
+</table>
+<p>System prompts encode the model's persona, constraints, and task context. In LLaMA-3 they are placed in a dedicated system header before the first user turn. In Mistral they are concatenated to the first user message inside [INST] brackets. In Gemma, there is no separate system role; system context is prepended to the user content in the first turn. These differences mean that a system prompt working correctly with one model family may produce different behavior on another even if the words are identical — the model has learned to respond to its specific structural delimiters.</p>
+<blockquote>
+<p><strong>Wrong Chat Template Causes Incoherent Outputs</strong>: Using the wrong chat template for a model causes dramatic quality degradation — models are trained to recognise specific delimiter tokens around each turn, and mismatched templates produce incoherent outputs even with correct content. Always use apply_chat_template() from the model's own tokenizer rather than hand-constructing prompt strings. If the tokenizer lacks a chat_template field (older models), check the model card for the exact format used during instruction tuning.</p>
+</blockquote>
+<ul>
+<li>Always use apply_chat_template() — never hand-construct instruction prompts for instruction-tuned models.</li>
+<li>Set eos_token_id to ALL valid stop token ids for the model family to prevent runaway generation.</li>
+<li>Use left-padding for decoder-only generation batches; use right-padding for encoder training.</li>
+<li>PAD token must be set for models that lack one (GPT-2): set pad_token = eos_token and mask it in attention_mask.</li>
+<li>LLaMA-3 has two stop tokens: &lt;|eot_id|&gt; ends a turn, &lt;|end_of_text|&gt; ends the document — both must be in stop ids.</li>
+<li>Tool call tokens in function-calling models (e.g., <tool_call>, &lt;|python_tag|&gt;) are additional special tokens to register.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GP Classification — Laplace Approximation and EP | Notes Backup</title>
+  <meta name="description" content="Non-Gaussian likelihoods for binary and multi-class GP classification: Laplace approximation via Newton&#x27;s method, Expectation Propagation, variational inference, and predictive comparison." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>GP Classification — Laplace Approximation and EP</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Non-Gaussian likelihoods for binary and multi-class GP classification: Laplace approximation via Newton&#x27;s method, Expectation Propagation, variational inference, and predictive comparison.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>GP Classification — Laplace Approximation and EP</h1>
+<h2>Why GP Classification Is Harder</h2>
+<p>For classification the likelihood p(y|f) = σ(y·f) where σ is the sigmoid function is non-Gaussian. The posterior p(f|X,y) ∝ p(y|f)p(f|X) is no longer Gaussian — it has no closed form. We need approximations. Three families are standard: (1) Laplace approximation — Gaussian centred at the MAP estimate; (2) Expectation Propagation (EP) — moment-matching approximation; (3) variational inference — optimise a lower bound on the marginal likelihood. Each trades off accuracy, cost, and implementation complexity.</p>
+<ul>
+<li>GP regression: Gaussian likelihood → closed-form posterior GP</li>
+<li>GP classification: sigmoid/softmax likelihood → intractable posterior</li>
+<li>Laplace: fastest, mode-matching Gaussian approximation at MAP</li>
+<li>EP: more accurate, moment-matching, iterative cavity updates</li>
+<li>Variational (SVGP): scalable to large n via inducing points and ELBO</li>
+<li>MCMC (HMC/NUTS): gold standard accuracy but very high computational cost</li>
+</ul>
+<h2>Laplace Approximation via Newton's Method</h2>
+<p>The Laplace approximation (1) finds the MAP estimate f̂ = argmax log p(f|X,y) = argmax [log p(y|f) − ½ fᵀ K⁻¹ f], (2) approximates the posterior with a Gaussian centred at f̂ with covariance (K⁻¹ + W)⁻¹ where W = −∇∇ log p(y|f̂) is the negative Hessian of the log likelihood. For binary classification W = diag(πᵢ(1−πᵢ)) where πᵢ = σ(f̂ᵢ). The MAP optimisation uses Newton's method, equivalent to Iteratively Reweighted Least Squares (IRLS).</p>
+<pre><code class="language-python">import numpy as np
+from scipy.special import expit as sigmoid
+from scipy.linalg import cho_factor, cho_solve
+import matplotlib.pyplot as plt
+
+def rbf_kernel(X1, X2, ell=1.0, sf2=1.0):
+    X1=np.atleast_2d(X1).reshape(-1,1); X2=np.atleast_2d(X2).reshape(-1,1)
+    return sf2*np.exp(-0.5*(X1-X2.T)**2/ell**2)
+
+def laplace_gp_classify(X_tr, y_tr, X_te, ell=1.0, sf2=1.0, n_iter=20):
+    n = len(y_tr)
+    K = rbf_kernel(X_tr, X_tr, ell, sf2)
+    f = np.zeros(n)  # initialise latent values at zero
+    for _ in range(n_iter):
+        pi  = sigmoid(f)                        # class probabilities
+        W   = pi*(1 - pi)                       # Hessian diagonal
+        W_sq = np.sqrt(W)
+        B   = np.eye(n) + W_sq[:,None]*K*W_sq[None,:]  # I + W^{1/2} K W^{1/2}
+        L   = np.linalg.cholesky(B)
+        b   = W*f + (y_tr+1)/2 - pi            # gradient step target
+        a   = b - W_sq*cho_solve(cho_factor(L), W_sq*(K@b))
+        f   = K @ a
+    pi  = sigmoid(f)
+    K_s = rbf_kernel(X_tr, X_te, ell, sf2)
+    mu_s = K_s.T @ ((y_tr+1)/2 - sigmoid(f))   # posterior mean approximation
+    pi_star = sigmoid(mu_s)
+    return pi_star, mu_s
+
+np.random.seed(42)
+X_tr = np.sort(np.random.uniform(-5,5,30))
+y_tr = np.sign(np.sin(X_tr) + 0.2*np.random.randn(30)).astype(int)
+X_te = np.linspace(-6,6,200)
+prob, _ = laplace_gp_classify(X_tr, y_tr, X_te)
+
+plt.figure(figsize=(10,4))
+plt.plot(X_te, prob, lw=2, label='P(y=+1|x*)')
+plt.scatter(X_tr, (y_tr+1)/2, c='r', zorder=5, s=50, label='Training labels')
+plt.axhline(0.5, ls='--', color='gray')
+plt.title('GP Classification — Laplace Approximation')
+plt.xlabel('x'); plt.ylabel('Predicted probability'); plt.legend(); plt.show()
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Approximation Strategy</th>
+<th>Accuracy vs EP</th>
+<th>Cost</th>
+<th>Implementation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Laplace</td>
+<td>Gaussian at MAP (mode-matching)</td>
+<td>Lower — misses skew</td>
+<td>O(n³) Newton steps</td>
+<td>Moderate — Newton IRLS loop</td>
+</tr>
+<tr>
+<td>EP</td>
+<td>Gaussian matching moments iteratively</td>
+<td>Best among approximations</td>
+<td>O(n³) per sweep</td>
+<td>Complex — cavity distributions</td>
+</tr>
+<tr>
+<td>Variational (SVGP)</td>
+<td>ELBO lower bound, inducing points</td>
+<td>Moderate, scalable</td>
+<td>O(nm²) — scalable</td>
+<td>GPyTorch VariationalGP</td>
+</tr>
+<tr>
+<td>MCMC (HMC)</td>
+<td>Gold standard — exact asymptotically</td>
+<td>Highest (given enough samples)</td>
+<td>Very high</td>
+<td>Pyro / NumPyro</td>
+</tr>
+</tbody>
+</table>
+<h2>GPyTorch GP Classifier with Variational Inference</h2>
+<p>For GP classification in GPyTorch, the standard approach uses variational inference (VariationalGP) with a Bernoulli likelihood. This avoids the non-Gaussian posterior problem by optimising a variational lower bound ELBO = E_q[log p(y|f)] − KL[q(f)||p(f)]. Inducing points approximate the full GP, giving O(nm²) cost with m inducing points.</p>
+<pre><code class="language-python">import torch
+import gpytorch
+from gpytorch.models import ApproximateGP
+from gpytorch.variational import CholeskyVariationalDistribution, VariationalStrategy
+import numpy as np
+
+class GPClassifier(ApproximateGP):
+    def __init__(self, inducing_points):
+        var_dist = CholeskyVariationalDistribution(inducing_points.size(0))
+        var_strat = VariationalStrategy(self, inducing_points, var_dist,
+                                        learn_inducing_locations=True)
+        super().__init__(var_strat)
+        self.mean_module  = gpytorch.means.ZeroMean()
+        self.covar_module = gpytorch.kernels.ScaleKernel(gpytorch.kernels.RBFKernel())
+
+    def forward(self, x):
+        return gpytorch.distributions.MultivariateNormal(
+            self.mean_module(x), self.covar_module(x))
+
+np.random.seed(0)
+X_np = np.sort(np.random.uniform(-5,5,80))
+y_np = (np.sin(X_np)&gt;0).astype(float)
+train_x = torch.tensor(X_np, dtype=torch.float32)
+train_y = torch.tensor(y_np, dtype=torch.float32)
+inducing = torch.linspace(-5,5,20)
+
+likelihood = gpytorch.likelihoods.BernoulliLikelihood()
+model = GPClassifier(inducing)
+optimizer = torch.optim.Adam([{'params':model.parameters()},
+                               {'params':likelihood.parameters()}], lr=0.05)
+mll = gpytorch.mlls.VariationalELBO(likelihood, model, num_data=len(train_y))
+model.train(); likelihood.train()
+for _ in range(200):
+    optimizer.zero_grad(); loss=-mll(model(train_x),train_y); loss.backward(); optimizer.step()
+
+model.eval(); likelihood.eval()
+with torch.no_grad():
+    test_x = torch.linspace(-6,6,200)
+    probs  = likelihood(model(test_x)).probs
+print('Variational GP Classifier trained. Inducing point locations learned.')
+</code></pre>
+<h2>Expectation Propagation vs Laplace</h2>
+<p>Expectation Propagation (EP) approximates each likelihood factor p(yᵢ|fᵢ) with a Gaussian tᵢ(fᵢ) = Zᵢ N(fᵢ; μᵢ, σᵢ²). The EP algorithm iterates: (1) compute the cavity distribution q₋ᵢ = q/tᵢ (remove one site), (2) project the product q₋ᵢ · p(yᵢ|fᵢ) onto a Gaussian by matching first two moments, (3) update tᵢ accordingly. EP converges to a Gaussian approximation whose moments match the true posterior's local moments — more accurate than Laplace, especially for unbalanced class distributions.</p>
+<pre><code class="language-python">import numpy as np
+from scipy.special import expit as sigmoid, ndtr
+from scipy.stats import norm
+import matplotlib.pyplot as plt
+
+# Simple comparison: Laplace vs Gaussian CDF likelihood (probit) predictive
+def probit_laplace_pred(f_test_mean, f_test_var):
+    &quot;&quot;&quot;Predictive probability using Laplace approx with probit likelihood.&quot;&quot;&quot;
+    kappa = 1.0 / np.sqrt(1.0 + np.pi * f_test_var / 8.0)
+    return ndtr(kappa * f_test_mean)
+
+def probit_ep_pred(f_test_mean, f_test_var):
+    &quot;&quot;&quot;EP predictive: integrate probit against N(f_test_mean, f_test_var).&quot;&quot;&quot;
+    # Exact for probit: p(y=1|x*) = Φ(μ/sqrt(1+σ²))
+    return ndtr(f_test_mean / np.sqrt(1.0 + f_test_var))
+
+latent_means = np.linspace(-3, 3, 200)
+for latent_var in [0.5, 1.0, 2.0]:
+    lap = probit_laplace_pred(latent_means, latent_var)
+    ep  = probit_ep_pred(latent_means,  latent_var)
+    diff = np.max(np.abs(lap - ep))
+    print(f'Latent var={latent_var}: max|Laplace-EP| = {diff:.4f}')
+
+fig, ax = plt.subplots(figsize=(8,4))
+for v, col in [(0.5,'blue'),(2.0,'red')]:
+    x = latent_means
+    ax.plot(x, probit_laplace_pred(x,v), ls='--', color=col, label=f'Laplace σ²={v}')
+    ax.plot(x, probit_ep_pred(x,v),      ls='-',  color=col, label=f'EP σ²={v}')
+ax.set_xlabel('Latent mean'); ax.set_ylabel('P(y=+1)')
+ax.legend(ncol=2); ax.set_title('Laplace vs EP Predictive Probabilities (probit likelihood)')
+plt.tight_layout(); plt.show()
+</code></pre>
+<blockquote>
+<p><strong>EP Is More Accurate Than Laplace for Classification</strong>: Laplace approximation matches the posterior mode (MAP) and curvature — it can be over-confident when the true posterior is skewed. EP matches first and second moments of the local likelihood approximations and is typically more accurate, especially for small datasets or imbalanced classes. For most practical GP classification tasks, use EP or variational inference over Laplace.</p>
+</blockquote>
+<h2>Multi-Class GP Classification</h2>
+<p>For K &gt; 2 classes, the likelihood p(y=k|f) = softmax(f)_k requires K latent GP functions — one per class. The posterior remains intractable. Common approaches: (1) One-vs-Rest with binary GP classifiers (simple but inconsistent probabilities), (2) Softmax likelihood with Laplace or EP (consistent but complex), (3) Dirichlet likelihood GP (naturally compositional). GPyTorch supports DirichletClassificationLikelihood for scalable multi-class GP classification.</p>
+<pre><code class="language-python">import torch
+import gpytorch
+import numpy as np
+from sklearn.datasets import load_iris
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+
+data = load_iris()
+X_np, y_np = data.data[:,:2], data.target  # first 2 features for viz
+scaler = StandardScaler()
+X_np = scaler.fit_transform(X_np)
+X_tr, X_te, y_tr, y_te = train_test_split(X_np, y_np, test_size=0.2, random_state=42)
+
+train_x = torch.tensor(X_tr, dtype=torch.float32)
+train_y = torch.tensor(y_tr, dtype=torch.long)
+test_x  = torch.tensor(X_te, dtype=torch.float32)
+
+likelihood = gpytorch.likelihoods.DirichletClassificationLikelihood(
+    train_y, learn_additional_noise=True)
+
+class MulticlassGP(gpytorch.models.ExactGP):
+    def __init__(self, train_x, train_y, likelihood):
+        super().__init__(train_x, train_y, likelihood)
+        self.mean_module  = gpytorch.means.ConstantMean(batch_shape=torch.Size([3]))
+        self.covar_module = gpytorch.kernels.ScaleKernel(
+            gpytorch.kernels.RBFKernel(batch_shape=torch.Size([3])),
+            batch_shape=torch.Size([3]))
+    def forward(self, x):
+        return gpytorch.distributions.MultivariateNormal(
+            self.mean_module(x), self.covar_module(x))
+
+model = MulticlassGP(train_x, likelihood.transformed_targets, likelihood)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.1)
+mll = gpytorch.mlls.ExactMarginalLogLikelihood(likelihood, model)
+model.train(); likelihood.train()
+for _ in range(100):
+    optimizer.zero_grad()
+    (-mll(model(train_x), likelihood.transformed_targets)).backward()
+    optimizer.step()
+print('Dirichlet GP multi-class model trained on Iris (3 classes).')
+</code></pre>
+<h2>Key Takeaways</h2>
+<p>GP classification requires approximations because the sigmoid/softmax likelihood makes the posterior non-Gaussian. Laplace approximation is simple and fast: Gaussian centred at the MAP with curvature from the Hessian W = diag(πᵢ(1−πᵢ)). EP iteratively matches moments of local likelihood approximations and is more accurate than Laplace. Variational inference (SVGP) scales to large datasets via inducing points. Multi-class classification uses K latent GPs with Dirichlet or softmax likelihood.</p>
+<ul>
+<li>GP classification: p(y|f)=σ(yf) is non-Gaussian → approximate posterior required</li>
+<li>Laplace: Gaussian at MAP; W=diag(π(1-π)) from sigmoid; IRLS Newton steps</li>
+<li>EP: cavity distribution update, moment-matching; more accurate than Laplace</li>
+<li>Variational (SVGP): ELBO optimisation with m inducing points; O(nm²) cost</li>
+<li>Multi-class: K latent GPs + softmax/Dirichlet likelihood; one-vs-rest as baseline</li>
+<li>GPyTorch: DirichletClassificationLikelihood for scalable multi-class GP</li>
+</ul>
+<blockquote>
+<p><strong>Predictive Probability vs Latent Mean</strong>: The GP classifier outputs a latent mean f<em>(x) ∈ ℝ. The predictive probability P(y=+1|x</em>) requires integrating σ(f<em>) over the posterior uncertainty in f</em>. This integral is approximated as σ(κ·μ<em>) where κ=(1+πσ²</em>/8)^{-1/2} in the Laplace case. Ignoring posterior uncertainty and using σ(μ*) alone produces over-confident probabilities.</p>
+</blockquote>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

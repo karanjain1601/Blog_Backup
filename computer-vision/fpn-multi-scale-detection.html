@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Feature Pyramid Networks for Multi-Scale Detection | Notes Backup</title>
+  <meta name="description" content="FPN in detection — how P3–P7 levels handle small-to-large objects, lateral connections between backbone stages, and how RetinaNet and Faster R-CNN use FPN for scale-invariant detection." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Feature Pyramid Networks for Multi-Scale Detection</h1>
+      <ul class='note-meta'><li><strong>description:</strong> FPN in detection — how P3–P7 levels handle small-to-large objects, lateral connections between backbone stages, and how RetinaNet and Faster R-CNN use FPN for scale-invariant detection.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Feature Pyramid Networks for Multi-Scale Detection</h1>
+<h2>Overview</h2>
+<p>Feature Pyramid Networks (FPN) solve a core challenge in object detection: objects appear at vastly different scales. A small pedestrian might span 32×32 pixels; a nearby car might span 400×400. Single-scale detectors struggle with this range. FPN builds a multi-resolution pyramid from a standard backbone, giving detectors strong semantic features at every scale.</p>
+<p>Before FPN, detectors either ran on a single feature map (fast but scale-sensitive) or on an image pyramid at multiple resolutions (accurate but slow). FPN achieves the best of both: one forward pass through the backbone produces a rich pyramid of feature maps at multiple strides, reusing computation efficiently.</p>
+<h2>FPN Architecture for Detection</h2>
+<p>FPN attaches to a standard backbone (ResNet, EfficientNet) and extracts feature maps at four or five stages — C2 through C5 — where each stage has half the spatial resolution of the previous. These form the bottom-up pathway. FPN then builds a top-down pathway starting from C5, progressively upsampling and merging with shallower, higher-resolution features via lateral connections.</p>
+<p>The output is five pyramid levels P3–P7 (P6 and P7 are obtained by strided convolutions on P5). P3 has stride 8 and captures fine spatial detail for small objects. P7 has stride 128 and captures coarse but semantically rich features for large objects. Each level outputs 256 channels by convention, simplifying downstream heads.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class LateralConnection(nn.Module):
+    def __init__(self, in_channels, out_channels=256):
+        super().__init__()
+        self.lateral_conv = nn.Conv2d(in_channels, out_channels, 1)
+        self.output_conv = nn.Conv2d(out_channels, out_channels, 3, padding=1)
+
+    def forward(self, bottom_up, top_down):
+        lateral = self.lateral_conv(bottom_up)
+        upsampled = F.interpolate(top_down, size=lateral.shape[-2:], mode='nearest')
+        merged = lateral + upsampled
+        return self.output_conv(merged)
+</code></pre>
+<h2>Lateral Connections</h2>
+<p>The lateral connection is FPN's key building block. At each level, a 1×1 conv reduces the bottom-up feature map to 256 channels. The top-down map (from the level above) is upsampled 2× using nearest-neighbor interpolation and added element-wise. A final 3×3 conv smooths aliasing artifacts. This merging ensures that every level carries both semantic richness (from depth) and spatial precision (from resolution).</p>
+<blockquote>
+<p>****: FPN's key contribution: strong semantic features (from deep layers) at high resolution (via upsampling) — without FPN, shallow features lack semantics and deep features lack resolution.</p>
+</blockquote>
+<h2>Scale Assignment</h2>
+<p>With multiple FPN levels available, detectors must assign each ground-truth object to exactly one level for training. The assignment is based on object size. Small objects (e.g., 32×32 pixels) go to P3, while large objects (e.g., 512×512 pixels) go to P7. The formula uses log2 of the object's size relative to a canonical size of 224 pixels, giving a continuous mapping that is then clipped to valid level indices.</p>
+<pre><code class="language-python">import math
+
+def assign_level(w, h, k0=4, k_min=3, k_max=5):
+    &quot;&quot;&quot;
+    Assign ground-truth box of size (w, h) to an FPN level.
+    k0=4 means a 224x224 object maps to P4.
+    &quot;&quot;&quot;
+    area = w * h
+    k = k0 + math.log2(math.sqrt(area) / 224.0)
+    k = int(math.floor(k))
+    k = max(k_min, min(k_max, k))
+    return k
+
+# Small object: 32x32 -&gt; P3, Large: 448x448 -&gt; P5
+print(assign_level(32, 32))   # -&gt; 3
+print(assign_level(224, 224)) # -&gt; 4
+print(assign_level(448, 448)) # -&gt; 5
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>FPN Level</th>
+<th>Stride</th>
+<th>Anchor Size Range</th>
+<th>Object Size Range</th>
+<th>Best Match</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>P3</td>
+<td>8</td>
+<td>16–48 px</td>
+<td>&lt; 64 px</td>
+<td>Small objects (pedestrians, text)</td>
+</tr>
+<tr>
+<td>P4</td>
+<td>16</td>
+<td>48–96 px</td>
+<td>64–128 px</td>
+<td>Medium objects (cars at distance)</td>
+</tr>
+<tr>
+<td>P5</td>
+<td>32</td>
+<td>96–192 px</td>
+<td>128–256 px</td>
+<td>Medium-large objects</td>
+</tr>
+<tr>
+<td>P6</td>
+<td>64</td>
+<td>192–384 px</td>
+<td>256–512 px</td>
+<td>Large objects</td>
+</tr>
+<tr>
+<td>P7</td>
+<td>128</td>
+<td>384–768 px</td>
+<td>&gt; 512 px</td>
+<td>Very large objects (trucks, buses)</td>
+</tr>
+</tbody>
+</table>
+<h2>RetinaNet with FPN</h2>
+<p>RetinaNet is the canonical FPN-based detector. It attaches identical classification and box regression heads to every FPN level (P3–P7). Each head is a stack of four 3×3 convolutions with ReLU, followed by a final prediction conv. Because the same head weights are shared across levels, the network is forced to learn scale-invariant features — the FPN levels handle scale variation, not the heads.</p>
+<p>RetinaNet also introduced Focal Loss to address the extreme foreground-background imbalance inherent in dense single-stage detection. With FPN providing multi-scale anchors and Focal Loss handling class imbalance, RetinaNet achieved state-of-the-art accuracy among single-stage detectors at the time of its introduction, matching or exceeding two-stage Faster R-CNN variants.</p>
+<pre><code class="language-python">import torch.nn as nn
+
+class RetinaNetHead(nn.Module):
+    def __init__(self, in_channels=256, num_anchors=9, num_classes=80):
+        super().__init__()
+        cls_layers, reg_layers = [], []
+        for _ in range(4):
+            cls_layers += [nn.Conv2d(in_channels, in_channels, 3, padding=1), nn.ReLU()]
+            reg_layers += [nn.Conv2d(in_channels, in_channels, 3, padding=1), nn.ReLU()]
+        self.cls_head = nn.Sequential(*cls_layers,
+            nn.Conv2d(in_channels, num_anchors * num_classes, 3, padding=1))
+        self.reg_head = nn.Sequential(*reg_layers,
+            nn.Conv2d(in_channels, num_anchors * 4, 3, padding=1))
+
+    def forward(self, fpn_levels):
+        return [(self.cls_head(p), self.reg_head(p)) for p in fpn_levels]
+</code></pre>
+<p>At inference, RetinaNet applies the head to all five FPN levels simultaneously. Each level produces a dense grid of anchor predictions. After sigmoid activation on class scores, predictions across all levels are concatenated and filtered using a score threshold, then Non-Maximum Suppression (NMS) is applied to remove duplicate detections. The total number of anchors is typically 100k–200k per image.</p>
+<pre><code class="language-python">import torchvision
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+
+# Load a pretrained RetinaNet with FPN backbone
+model = torchvision.models.detection.retinanet_resnet50_fpn(pretrained=True)
+model.eval()
+
+def visualize_fpn_detections(image_tensor, predictions, level_colors):
+    fig, ax = plt.subplots(1, figsize=(12, 8))
+    ax.imshow(image_tensor.permute(1, 2, 0))
+    for box, score, level in zip(predictions['boxes'],
+                                  predictions['scores'],
+                                  predictions.get('levels', [])):
+        x1, y1, x2, y2 = box.tolist()
+        color = level_colors.get(level, 'white')
+        rect = patches.Rectangle((x1,y1), x2-x1, y2-y1,
+                                   linewidth=1.5, edgecolor=color, facecolor='none')
+        ax.add_patch(rect)
+    plt.show()
+</code></pre>
+<h2>Key Takeaways</h2>
+<p>FPN is now a standard component in nearly every high-performance detector. Its core insight — combine top-down semantics with bottom-up resolution — applies beyond bounding boxes to instance segmentation (Mask R-CNN), keypoint detection, and panoptic segmentation. Understanding FPN is prerequisite knowledge for reading papers on EfficientDet, YOLOF, NASFPN, and BiFPN, all of which build on or modify the FPN design.</p>
+<p>Key principles to remember: (1) lateral 1×1 convs unify channel dimensions, (2) nearest-neighbor upsample avoids learned upsampling artifacts, (3) a 3×3 conv after merging aliases the upsampled map, (4) all levels output 256 channels, and (5) level assignment during training is rule-based (log2 formula) rather than learned. These design choices are simple but effective across a wide range of backbones and tasks.</p>
+    </article>
+  </main>
+</body>
+</html>

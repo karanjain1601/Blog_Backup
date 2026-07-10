@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Optical Flow Estimation: Classical and Deep Learning Approaches | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Optical Flow Estimation: Classical and Deep Learning Approaches</h1>
+      
+      <h1>Optical Flow Estimation: Classical and Deep Learning Approaches</h1>
+<h2>Overview</h2>
+<p>Optical flow is the apparent motion of image pixels between consecutive video frames caused by movement of objects or the camera. Dense optical flow estimates a 2D displacement vector for every pixel, yielding a flow field that captures where each pixel moved. It serves as a foundational primitive for action recognition, object tracking, video stabilization, and frame interpolation tasks.</p>
+<p>Classical methods rely on brightness constancy and spatial smoothness to solve an underdetermined system. Deep learning approaches learn rich feature representations, replacing hand-crafted assumptions with learned priors. Since FlowNet (2015), the gap has grown dramatically — modern networks like RAFT achieve endpoint errors below 1.5 pixels on Sintel Clean, surpassing all classical methods.</p>
+<h2>Lucas-Kanade and Horn-Schunck</h2>
+<p>Lucas-Kanade assumes brightness constancy: I(x,y,t) = I(x+u,y+v,t+1). A linearization yields the optical flow constraint Ix·u + Iy·v + It = 0 — one equation in two unknowns. Spatial coherence resolves this: pixels in a small patch share one flow vector. Stacking N patch equations gives an overdetermined system solved via weighted least squares using the image structure tensor.</p>
+<pre><code>import numpy as np
+import cv2
+
+def lucas_kanade(I1, I2, pts, win=7):
+    Ix = cv2.Sobel(I1, cv2.CV_64F, 1, 0)
+    Iy = cv2.Sobel(I1, cv2.CV_64F, 0, 1)
+    It = I2.astype(float) - I1.astype(float)
+    flows = []
+    for x, y in pts:
+        sl = np.s_[y-win:y+win+1, x-win:x+win+1]
+        A = np.stack([Ix[sl].ravel(), Iy[sl].ravel()], 1)
+        b = -It[sl].ravel()
+        u, v = np.linalg.lstsq(A, b, rcond=None)[0]
+        flows.append((u, v))
+    return flows
+</code></pre>
+<p>Horn-Schunck minimizes a global energy: λ∫(Ix·u + Iy·v + It)² + |∇u|² + |∇v|² dΩ. The regularization term penalizes large flow gradients, producing globally smooth flow fields. This handles the aperture problem elegantly but over-smooths motion boundaries. Both LK and HS fail on large displacements because linearization of brightness constancy only holds for sub-pixel motion.</p>
+<h2>FlowNet and Learning-Based Flow</h2>
+<p>FlowNet (2015) was the first end-to-end CNN for optical flow estimation. It introduced two designs: FlowNetS (simple encoder-decoder) and FlowNetC (with a correlation layer computing feature dot products across spatial offsets). The correlation layer builds a cost volume comparing features from both frames, then decoded into a dense flow field using strided convolutions and skip connections.</p>
+<pre><code>import torch
+import torch.nn.functional as F
+
+def correlation_layer(f1, f2, max_disp=4):
+    B, C, H, W = f1.shape
+    D = 2 * max_disp + 1
+    f2_pad = F.pad(f2, [max_disp]*4)
+    cost = torch.zeros(B, D*D, H, W, device=f1.device)
+    for i, dh in enumerate(range(-max_disp, max_disp+1)):
+        for j, dw in enumerate(range(-max_disp, max_disp+1)):
+            f2s = f2_pad[:, :, dh+max_disp:dh+max_disp+H,
+                               dw+max_disp:dw+max_disp+W]
+            cost[:, i*D+j] = (f1 * f2s).sum(1)
+    return cost / C
+</code></pre>
+<p>FlowNet2 stacks multiple FlowNet modules with warping: the second module receives frame2 warped by the first flow estimate, refining residual flow. SpyNet introduced spatial pyramid networks computing flow coarse-to-fine using only 1.2M parameters. PWCNet combined pyramid warping with a cost volume and context networks, achieving accuracy near FlowNet2 at ten times lower computational cost.</p>
+<h2>RAFT: Recurrent All-Pairs Flow</h2>
+<p>RAFT (Teed &amp; Deng, NeurIPS 2020) builds a 4-level feature pyramid from each input image using a shared encoder. It constructs an all-pairs correlation volume by computing dot products between every pair of pixels in the two feature maps. A recurrent GRU-based update operator then iteratively refines a flow field estimate, looking up from the correlation pyramid at each iteration step.</p>
+<pre><code>def raft_forward(img1, img2, iters=12):
+    fmap1 = feature_encoder(img1)
+    fmap2 = feature_encoder(img2)
+    corr_pyramid = build_corr_pyramid(fmap1, fmap2, levels=4)
+    context = context_encoder(img1)
+    net, inp = context.split([hidden_dim, inp_dim], dim=1)
+    flow = torch.zeros(B, 2, H//8, W//8, device=img1.device)
+    flow_preds = []
+    for _ in range(iters):
+        corr = corr_lookup(flow, corr_pyramid, radius=4)
+        net, delta_flow = gru_update(net, inp, corr, flow)
+        flow = flow + delta_flow
+        flow_preds.append(upsample_flow(flow))
+    return flow_preds
+</code></pre>
+<p>RAFT's all-pairs correlation volume is computed once and indexed at each GRU step using bilinear interpolation in a local radius around each predicted flow vector. Unlike cascaded architectures that re-extract features per scale, RAFT shares features across all iterations. This design enables RAFT to generalize well to unseen datasets without fine-tuning, unlike domain-specific predecessors.</p>
+<blockquote>
+<p><strong>info</strong>: RAFT's key innovation is iterative refinement via a GRU — it updates flow estimates 12 times using a 4-level correlation pyramid. Each GRU step refines the previous estimate rather than predicting flow from scratch, enabling both accuracy and generalization.</p>
+</blockquote>
+<h2>Evaluation Metrics</h2>
+<p>End-Point Error (EPE) measures the Euclidean distance between predicted and ground-truth flow vectors, averaged across all valid pixels. It is the primary metric on MPI-Sintel (synthetic, long sequences, large displacements) and KITTI (real-world driving). EPE is reported separately on Sintel Clean (no rendering effects) and Sintel Final (atmospheric effects including motion blur and fog).</p>
+<pre><code>import torch
+
+def evaluate_flow(pred_flow, gt_flow, valid_mask=None):
+    diff = pred_flow - gt_flow
+    epe = diff.norm(dim=1)                    # (B, H, W)
+    gt_mag = gt_flow.norm(dim=1).clamp(min=1e-6)
+    fl_mask = (epe &gt; 3.0) &amp; (epe / gt_mag &gt; 0.05)
+    if valid_mask is not None:
+        epe = epe[valid_mask]
+        fl_mask = fl_mask[valid_mask]
+    print(f&quot;EPE={epe.mean():.2f}  Fl={fl_mask.float().mean():.3f}&quot;)
+    return epe.mean().item(), fl_mask.float().mean().item()
+</code></pre>
+<p>The Fl (flow outlier) metric from KITTI counts pixels where EPE exceeds 3 px AND relative error exceeds 5% of the ground-truth magnitude. This threshold-based metric is robust to large motion magnitudes and measures catastrophic failures rather than average accuracy. KITTI further splits Fl into Fl-bg (static background) and Fl-fg (dynamic foreground) to analyze per-region failure modes.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Type</th>
+<th>Sintel Clean EPE</th>
+<th>Sintel Final EPE</th>
+<th>KITTI Fl %</th>
+<th>Speed (ms)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>LK</td>
+<td>Classical</td>
+<td>7.40</td>
+<td>8.90</td>
+<td>—</td>
+<td>15</td>
+</tr>
+<tr>
+<td>EpicFlow</td>
+<td>Classical+CNN</td>
+<td>4.12</td>
+<td>6.29</td>
+<td>26.3</td>
+<td>280</td>
+</tr>
+<tr>
+<td>FlowNet2</td>
+<td>CNN</td>
+<td>1.45</td>
+<td>3.96</td>
+<td>11.5</td>
+<td>120</td>
+</tr>
+<tr>
+<td>PWCNet</td>
+<td>CNN</td>
+<td>2.55</td>
+<td>3.93</td>
+<td>9.60</td>
+<td>35</td>
+</tr>
+<tr>
+<td>RAFT</td>
+<td>RNN</td>
+<td>1.43</td>
+<td>2.71</td>
+<td>5.10</td>
+<td>160</td>
+</tr>
+<tr>
+<td>FlowFormer</td>
+<td>Transformer</td>
+<td>1.01</td>
+<td>2.40</td>
+<td>4.09</td>
+<td>180</td>
+</tr>
+</tbody>
+</table>
+<h2>Key Takeaways</h2>
+<p>Sparse-to-dense evolution: optical flow research progressed from sparse feature tracking (KLT) to dense classical estimation (LK, HS) to learned cost-volume methods (FlowNet, PWCNet) to iterative refinement (RAFT). Each generation improved accuracy roughly 2× on Sintel, showing that architectural innovations compound over time in dense spatiotemporal estimation problems.</p>
+<p>Correlation volumes are the key differentiator between classical and learned flow methods. Classical methods compute correlation over raw pixel patches; learned methods compute it over deep feature maps. RAFT's all-pairs correlation — O(N²) in pixel count but computed once — enables richer matching than sliding-window approaches and drives its state-of-the-art accuracy on all standard benchmarks.</p>
+<p>Benchmark overfitting remains a concern: models trained on FlyingChairs and FlyingThings3D may not generalize to real video. RAFT mitigates this via iterative refinement and weight sharing, but the domain gap between synthetic training data and real deployment persists. Sintel-Final correlates better with real-world performance than Sintel-Clean due to its realistic rendering effects.</p>
+    </article>
+  </main>
+</body>
+</html>

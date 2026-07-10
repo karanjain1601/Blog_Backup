@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GAN Evaluation — FID, IS, and Precision/Recall | Notes Backup</title>
+  <meta name="description" content="Evaluating generative models is non-trivial because there is no single ground truth. Covers Inception Score (IS), Fréchet Inception Distance (FID), CLIP-FID, and the precision/recall decomposition that separates sample quality from diversity." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>GAN Evaluation — FID, IS, and Precision/Recall</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Evaluating generative models is non-trivial because there is no single ground truth. Covers Inception Score (IS), Fréchet Inception Distance (FID), CLIP-FID, and the precision/recall decomposition that separates sample quality from diversity.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>GAN Evaluation — FID, IS, and Precision/Recall</h1>
+<p>Evaluating generative models is fundamentally harder than discriminative models: there is no held-out test set with labels, and visual quality is subjective. The field has converged on automatic metrics computed over large sample sets — primarily FID and IS — but each has failure modes. Understanding what each metric measures, what biases it has, and when it misleads is essential for correctly interpreting GAN training progress and comparing models across papers.</p>
+<h2>Inception Score (IS)</h2>
+<p>IS (Salimans et al. 2016) measures two properties using a pretrained Inception v3 classifier: (1) quality — individual images should have confident (low-entropy) class predictions p(y|x); (2) diversity — the marginal p(y) = E_x[p(y|x)] should be uniform over classes. IS = exp(E_x[KL(p(y|x) ‖ p(y))]). Higher IS is better. Problems: IS does not compare generated images to real images at all — a model memorising the training set with perfect class balance achieves maximum IS. It is also sensitive to the Inception preprocessing and known to be gameable.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+def inception_score(pyx_all, n_splits=10):
+    '''IS from pre-extracted p(y|x) softmax probabilities.
+    pyx_all: (N, C) numpy array of class probabilities.
+    Returns (mean IS, std IS) across splits.'''
+    N, C = pyx_all.shape
+    split_sz = N // n_splits
+    scores = []
+    for i in range(n_splits):
+        part = pyx_all[i*split_sz : (i+1)*split_sz]  # (M, C)
+        py   = part.mean(axis=0, keepdims=True)        # marginal p(y)
+        kl   = np.sum(part * (np.log(part + 1e-10) -
+                              np.log(py   + 1e-10)), axis=1)  # per-sample KL
+        scores.append(float(np.exp(kl.mean())))
+    return float(np.mean(scores)), float(np.std(scores))
+
+np.random.seed(42)
+N, C = 1000, 10
+# High-quality: peaked, diverse -&gt; high IS
+pyx_good = np.eye(C)[np.random.randint(0, C, N)] * 0.9 + 0.01
+pyx_good /= pyx_good.sum(1, keepdims=True)
+mean_is, std_is = inception_score(pyx_good)
+print('High-quality IS: {:.2f} +/- {:.2f}'.format(mean_is, std_is))
+# Low-diversity: all predict class 0
+pyx_bad = np.zeros((N, C)); pyx_bad[:, 0] = 0.99; pyx_bad[:, 1:] = 0.01/9
+mean_b, std_b = inception_score(pyx_bad)
+print('Low-diversity IS: {:.2f} +/- {:.2f}'.format(mean_b, std_b))
+</code></pre>
+<h2>Fréchet Inception Distance (FID)</h2>
+<p>FID (Heusel et al. 2017) compares the distribution of real images to that of generated images using features extracted from Inception v3's pool3 layer (2048-d). Both sets of features are modelled as multivariate Gaussians; FID is the Fréchet distance between them: FID = ‖μ_r − μ_g‖² + Tr(Σ_r + Σ_g − 2(Σ_rΣ_g)^{1/2}). Lower FID means the generated distribution is closer to real. FID is sensitive to both quality (Σ mismatch from blurry images) and diversity (μ mismatch from mode collapse). Standard practice: use ≥10K generated and ≥10K real samples to stabilise the estimate.</p>
+<pre><code class="language-python">import numpy as np
+from scipy.linalg import sqrtm
+
+def frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
+    '''FID = ||mu1-mu2||^2 + Tr(sigma1 + sigma2 - 2*sqrtm(sigma1@sigma2)).'''
+    diff = mu1 - mu2
+    covmean, _ = sqrtm(sigma1 @ sigma2, disp=False)
+    if not np.isfinite(covmean).all():
+        offset = np.eye(sigma1.shape[0]) * eps
+        covmean = sqrtm((sigma1 + offset) @ (sigma2 + offset))
+    if np.iscomplexobj(covmean):
+        covmean = covmean.real
+    return float(diff @ diff + np.trace(sigma1 + sigma2 - 2*covmean))
+
+np.random.seed(0)
+d = 256   # reduced from 2048 for demo speed
+N = 500
+real_feats = np.random.randn(N, d)
+# Same distribution -&gt; FID near 0
+fake_same = np.random.randn(N, d)
+mu_r, sig_r = real_feats.mean(0), np.cov(real_feats, rowvar=False)
+mu_s, sig_s = fake_same.mean(0),  np.cov(fake_same,  rowvar=False)
+fid_good = frechet_distance(mu_r, sig_r, mu_s, sig_s)
+print('FID (same dist): {:.2f}'.format(fid_good))
+# Shifted distribution -&gt; higher FID
+fake_shift = np.random.randn(N, d) + 0.5
+mu_sh, sig_sh = fake_shift.mean(0), np.cov(fake_shift, rowvar=False)
+fid_bad = frechet_distance(mu_r, sig_r, mu_sh, sig_sh)
+print('FID (shifted):   {:.2f}'.format(fid_bad))
+</code></pre>
+<h2>CLIP-FID and Semantic Features</h2>
+<p>Inception v3 was trained on ImageNet and its features are biased toward ImageNet categories. CLIP-FID (Kynkäänniemi et al. 2022) replaces the Inception pool3 features with CLIP ViT-L/14 features, which are more semantically meaningful and better aligned with human perception. CLIP-FID shows better correlation with human judgement, especially for text-conditional models and out-of-distribution images. The computation is identical to FID — only the feature extractor changes. For modern diffusion model evaluation, CLIP-FID is increasingly preferred over standard FID.</p>
+<h2>Precision and Recall for GANs</h2>
+<p>Precision and Recall (Kynkäänniemi et al. 2019) decompose generation quality into two orthogonal aspects. Precision = fraction of generated samples that fall within the real data manifold (measures sample quality / fidelity). Recall = fraction of real samples that fall within the generated manifold (measures coverage / diversity). A mode-dropping GAN has high precision but low recall. A noisy GAN that generates blurry averages has low precision but potentially high recall. FID conflates both; P&amp;R separates them, enabling diagnosis of specific failure modes.</p>
+<pre><code class="language-python">import numpy as np
+
+def precision_recall_manifold(real_feats, fake_feats, k=3):
+    '''Precision/Recall via k-NN manifold estimation (Kynkaanniemi 2019).'''
+    def knn_radius(feats, k):
+        # Squared pairwise distances
+        sq = np.sum((feats[:, None] - feats[None]) ** 2, axis=-1)
+        np.fill_diagonal(sq, np.inf)
+        return np.sort(sq, axis=1)[:, k-1]   # kth-NN squared dist
+
+    r_real = knn_radius(real_feats, k)   # each real sample's ball radius
+    r_fake = knn_radius(fake_feats, k)
+    # dist from each fake to every real
+    d_f2r  = np.sum((fake_feats[:, None] - real_feats[None])**2, axis=-1)
+    prec   = np.mean(np.any(d_f2r &lt; r_real[None], axis=1))  # fake in real ball?
+    # dist from each real to every fake
+    d_r2f  = d_f2r.T
+    rec    = np.mean(np.any(d_r2f &lt; r_fake[None], axis=1))  # real in fake ball?
+    return float(prec), float(rec)
+
+np.random.seed(1)
+real_f = np.random.randn(300, 64)
+# Good model: same distribution
+fake_good = np.random.randn(300, 64)
+p1, r1 = precision_recall_manifold(real_f, fake_good)
+print('Good model  -- Precision: {:.3f}  Recall: {:.3f}'.format(p1, r1))
+# Mode drop: generate half the modes only
+fake_drop = np.random.randn(300, 64) * 0.5   # narrower distribution
+p2, r2 = precision_recall_manifold(real_f, fake_drop)
+print('Mode drop   -- Precision: {:.3f}  Recall: {:.3f}'.format(p2, r2))
+</code></pre>
+<blockquote>
+<p><strong>FID Requires Large Sample Sizes</strong>: FID is notoriously unstable at small sample counts. With N=1000 samples from identical distributions, FID can read 5–20 due to finite-sample noise in covariance estimation. The standard recommendation is N≥10000 for each of real and generated. Reporting FID with N&lt;5000 without confidence intervals is misleading. The bias of FID also depends on the feature dimensionality (2048 for Inception): the covariance matrix requires N &gt;&gt; 2048 samples to be well-conditioned.</p>
+</blockquote>
+<h2>Effect of Sample Size on FID Stability</h2>
+<p>FID inflates dramatically at small N because the sample covariance is a poor estimate of the true covariance when N &lt; d (undersampled regime). At N=100 with d=2048, the covariance matrix is rank-deficient and FID is effectively meaningless. As N grows, FID converges to the population value. Plotting FID vs N for your model is a diagnostic tool: if FID is still changing significantly at N=10K, increase the sample count before reporting.</p>
+<pre><code class="language-python">import numpy as np
+from scipy.linalg import sqrtm
+
+def fid_vs_n(d=64, n_values=None):
+    '''FID between identical distributions at different sample sizes.'''
+    if n_values is None:
+        n_values = [50, 100, 500, 1000, 5000]
+    np.random.seed(42)
+    pop = np.random.randn(20000, d)
+    for N in n_values:
+        real_s = pop[:N]; fake_s = pop[N:2*N]
+        mu_r, sig_r = real_s.mean(0), np.cov(real_s, rowvar=False)
+        mu_f, sig_f = fake_s.mean(0), np.cov(fake_s, rowvar=False)
+        cm = sqrtm(sig_r @ sig_f)
+        cm = cm.real if np.iscomplexobj(cm) else cm
+        fid = float(np.dot(mu_r-mu_f, mu_r-mu_f) +
+                    np.trace(sig_r + sig_f - 2*cm))
+        print('N={:6d}  FID={:.1f}'.format(N, fid))
+
+fid_vs_n(d=64)
+print('FID inflates at small N even when real and fake distributions are identical!')
+</code></pre>
+<h2>Practical Guidance for GAN Evaluation</h2>
+<p>Use FID as the primary metric but always report sample count and whether features are from Inception or CLIP. Report precision and recall when diagnosing mode collapse vs quality issues. IS is largely deprecated for conditional models — it does not penalise memorisation. CLIP-FID is preferred for text-conditional models. For paired translation (Pix2Pix), pixel-level metrics PSNR and SSIM against ground truth are most informative. Always compute metrics on a fixed held-out real set to enable fair comparison across checkpoints.</p>
+<ul>
+<li>FID: primary metric; use N&gt;=10000; lower is better; requires Inception or CLIP features.</li>
+<li>IS: secondary; ignores real data; gameable; mostly deprecated for modern conditional models.</li>
+<li>CLIP-FID: preferred for text-conditional and open-vocabulary generation tasks.</li>
+<li>Precision: measures sample fidelity — are generated samples on the real manifold?</li>
+<li>Recall: measures diversity coverage — does the generated manifold cover the real manifold?</li>
+<li>PSNR/SSIM: only meaningful for paired translation where ground truth exists.</li>
+</ul>
+<h2>Metric Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>What It Measures</th>
+<th>Compares to Real Data</th>
+<th>Sample Size Needed</th>
+<th>Modern Preference</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>IS</td>
+<td>Quality + diversity via Inception labels</td>
+<td>No</td>
+<td>N&gt;=5000</td>
+<td>Low (gameable, no real comparison)</td>
+</tr>
+<tr>
+<td>FID</td>
+<td>Feature distribution distance (Frechet)</td>
+<td>Yes</td>
+<td>N&gt;=10000</td>
+<td>High — standard benchmark</td>
+</tr>
+<tr>
+<td>CLIP-FID</td>
+<td>FID with CLIP features (semantic)</td>
+<td>Yes</td>
+<td>N&gt;=10000</td>
+<td>High for text-conditional models</td>
+</tr>
+<tr>
+<td>Precision</td>
+<td>Sample fidelity (fake in real manifold)</td>
+<td>Yes</td>
+<td>N&gt;=5000</td>
+<td>Medium — use with Recall</td>
+</tr>
+<tr>
+<td>Recall</td>
+<td>Coverage diversity (real in fake manifold)</td>
+<td>Yes</td>
+<td>N&gt;=5000</td>
+<td>Medium — use with Precision</td>
+</tr>
+</tbody>
+</table>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

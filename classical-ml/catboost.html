@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CatBoost — Ordered Boosting and Categorical Features | Notes Backup</title>
+  <meta name="description" content="Understand how ordered boosting prevents target leakage and prediction shift, how oblivious trees enable fast inference, and how CatBoost handles categoricals natively without preprocessing." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>CatBoost — Ordered Boosting and Categorical Features</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Understand how ordered boosting prevents target leakage and prediction shift, how oblivious trees enable fast inference, and how CatBoost handles categoricals natively without preprocessing.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>CatBoost — Ordered Boosting and Categorical Features</h1>
+<p>CatBoost is a gradient boosting library developed by Yandex that introduces two key innovations: ordered boosting to prevent prediction shift (a subtle form of target leakage in standard gradient boosting), and native categorical feature support via ordered target statistics. These improvements make CatBoost particularly strong out-of-the-box — it often requires less tuning than XGBoost or LightGBM and achieves competitive accuracy without manual encoding of categorical variables.</p>
+<h2>Prediction Shift in Standard Gradient Boosting</h2>
+<p>In standard gradient boosting, when computing the residual for sample i in iteration t, the model f_{t-1} was partially trained on sample i itself. This creates a circular dependency: the gradient target for sample i is computed from a model that has already 'seen' i, producing overconfident leaf values. This is called prediction shift: the distribution of gradient targets used during training differs from the distribution at test time. The effect is strongest for samples in small leaves and on small datasets where each sample has outsized influence on the tree.</p>
+<h2>Ordered Boosting — Fixing Prediction Shift</h2>
+<p>CatBoost addresses prediction shift with ordered boosting. Before training, a random permutation σ of the training samples is drawn. When computing the residual for sample σ(i) at step t, only the samples σ(1), ..., σ(i-1) that precede it in the permutation are used to build the model f_{t-1}. This ensures each sample's residual is computed from a model that has never seen that sample — exactly the unbiased condition required for clean gradient targets. In practice, CatBoost maintains several permutations and model copies to reduce variance from a single permutation choice.</p>
+<blockquote>
+<p><strong>Why Ordered Boosting Matters</strong>: Standard GB uses sample i to both build the model and evaluate its residual — a circular dependency. Ordered boosting breaks this by ensuring each sample's gradient is computed from a model trained only on preceding samples in a random permutation. This is analogous to time-series cross-validation applied to every sample, and it produces better-calibrated leaf values, especially on small datasets where prediction shift is most severe.</p>
+</blockquote>
+<h2>Oblivious Trees</h2>
+<p>CatBoost uses oblivious (symmetric) decision trees as base learners. Unlike standard CART trees where each node can use a different split feature and threshold, oblivious trees apply the same split condition at every node of a given depth level. A depth-d oblivious tree is fully described by d (feature, threshold) pairs. Prediction is O(depth) — a sample traverses the tree by evaluating d conditions and indexing into a lookup table of 2^d leaves. This enables very fast prediction (cache-friendly, no branching) and also acts as a regulariser: oblivious trees are less expressive than asymmetric trees, which reduces variance.</p>
+<h2>Native Categorical Feature Handling</h2>
+<p>Standard target encoding computes mean(y | category=c) using the full training set — this leaks the target for each sample into its own encoding. CatBoost uses ordered target statistics: for sample σ(i) in category c, the encoding is mean(y | category=c, j &lt; i in permutation σ), plus Laplace smoothing to handle rare categories. Combined with ordered boosting, this gives completely unbiased categorical encodings. CatBoost also automatically detects combinations of categorical features (interaction terms), which would be expensive to create manually.</p>
+<pre><code class="language-python">import numpy as np
+import pandas as pd
+from catboost import CatBoostClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+
+np.random.seed(42)
+n = 1000
+df = pd.DataFrame({
+    'city':   np.random.choice(['NYC', 'LA', 'Chicago', 'Houston', 'Phoenix'], n),
+    'device': np.random.choice(['mobile', 'desktop', 'tablet'], n),
+    'age':    np.random.randint(18, 70, n),
+    'income': np.random.exponential(50000, n),
+})
+df['label'] = ((df['income'] &gt; 50000) &amp; (df['age'] &gt; 30)).astype(int)
+df['label'] ^= np.random.binomial(1, 0.1, n)
+
+X = df.drop('label', axis=1)
+y = df['label']
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Pass categorical feature names directly — no encoding needed
+model = CatBoostClassifier(
+    iterations=300, depth=6, learning_rate=0.05,
+    cat_features=['city', 'device'], verbose=0, random_seed=42
+)
+model.fit(X_tr, y_tr)
+preds = model.predict(X_te)
+print(f'CatBoost accuracy: {accuracy_score(y_te, preds):.4f}')
+print('Feature importances:', dict(zip(X.columns, model.get_feature_importance().round(2))))
+</code></pre>
+<pre><code class="language-python">import numpy as np
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import log_loss
+from catboost import CatBoostClassifier
+
+# Compare ordered vs plain boosting — measure overfitting gap
+np.random.seed(0)
+X, y = make_classification(n_samples=300, n_features=20, n_informative=10,
+                            n_redundant=5, random_state=0)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.3, random_state=0)
+
+for boosting_type in ['Ordered', 'Plain']:
+    m = CatBoostClassifier(
+        iterations=500, depth=6, learning_rate=0.05,
+        boosting_type=boosting_type, verbose=0, random_seed=42
+    )
+    m.fit(X_tr, y_tr, eval_set=(X_te, y_te))
+    tr_loss = log_loss(y_tr, m.predict_proba(X_tr))
+    te_loss = log_loss(y_te, m.predict_proba(X_te))
+    print(f'{boosting_type:8s}: train={tr_loss:.4f}  test={te_loss:.4f}  '
+          f'gap={te_loss - tr_loss:.4f}')
+</code></pre>
+<pre><code class="language-python">import numpy as np
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+from catboost import CatBoostClassifier
+
+try:
+    from xgboost import XGBClassifier
+    from lightgbm import LGBMClassifier
+    has_others = True
+except ImportError:
+    has_others = False
+
+np.random.seed(42)
+X, y = make_classification(n_samples=2000, n_features=30, n_informative=15,
+                            n_redundant=8, random_state=42)
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.25, random_state=42)
+
+cb = CatBoostClassifier(iterations=400, depth=6, learning_rate=0.05,
+                         verbose=0, random_seed=42)
+cb.fit(X_tr, y_tr)
+print(f'CatBoost : {accuracy_score(y_te, cb.predict(X_te)):.4f}')
+
+if has_others:
+    xgb = XGBClassifier(n_estimators=400, max_depth=6, learning_rate=0.05,
+                         eval_metric='logloss', verbosity=0, random_state=42)
+    xgb.fit(X_tr, y_tr)
+    print(f'XGBoost  : {accuracy_score(y_te, xgb.predict(X_te)):.4f}')
+    lgbm = LGBMClassifier(n_estimators=400, max_depth=6, learning_rate=0.05,
+                           verbose=-1, random_state=42)
+    lgbm.fit(X_tr, y_tr)
+    print(f'LightGBM : {accuracy_score(y_te, lgbm.predict(X_te)):.4f}')
+</code></pre>
+<pre><code class="language-python">import numpy as np
+from sklearn.datasets import make_classification
+from sklearn.model_selection import train_test_split
+from catboost import CatBoostClassifier, Pool
+
+try:
+    import shap
+    has_shap = True
+except ImportError:
+    has_shap = False
+
+np.random.seed(42)
+X, y = make_classification(n_samples=1000, n_features=10, n_informative=6, random_state=42)
+feature_names = [f'feat_{i}' for i in range(X.shape[1])]
+X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=42)
+
+model = CatBoostClassifier(iterations=200, depth=5, learning_rate=0.1,
+                            verbose=0, random_seed=42)
+model.fit(X_tr, y_tr)
+
+# Built-in feature importance
+fi = model.get_feature_importance(type='PredictionValuesChange')
+for name, imp in sorted(zip(feature_names, fi), key=lambda x: -x[1])[:5]:
+    print(f'  {name}: {imp:.3f}')
+
+if has_shap:
+    explainer = shap.TreeExplainer(model)
+    shap_vals = explainer.shap_values(Pool(X_te, label=y_te))
+    mean_abs_shap = np.abs(shap_vals).mean(axis=0)
+    top = sorted(zip(feature_names, mean_abs_shap), key=lambda x: -x[1])[:5]
+    print('Top SHAP:', [(n, round(v, 4)) for n, v in top])
+</code></pre>
+<h2>GPU Training and Key Hyperparameters</h2>
+<p>CatBoost supports GPU training via task_type='GPU', which provides 40–100x speedup on large datasets. Key hyperparameters: iterations (total trees — use 1000+ with early stopping rather than tuning a small number), depth (6 is a strong default; oblivious trees are already regularised so depth 8-10 is feasible), learning_rate (default 0.03 is conservative; raise to 0.1 with fewer iterations for speed), l2_leaf_reg (L2 regularisation on leaf values). Use early_stopping_rounds=50 with an eval_set to prevent overfitting without grid-searching iterations.</p>
+<table>
+<thead>
+<tr>
+<th>Encoding Method</th>
+<th>Pros</th>
+<th>Cons</th>
+<th>Leakage Risk</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>One-hot encoding</td>
+<td>No leakage, simple</td>
+<td>High cardinality → huge dimensionality</td>
+<td>None</td>
+</tr>
+<tr>
+<td>Ordinal encoding</td>
+<td>Compact, fast</td>
+<td>Imposes false ordering on unordered categories</td>
+<td>None</td>
+</tr>
+<tr>
+<td>Mean target encoding (global)</td>
+<td>Compact, captures target signal</td>
+<td>Severely overfits rare categories</td>
+<td>High — sample uses own label</td>
+</tr>
+<tr>
+<td>Target encoding + 5-fold CV</td>
+<td>Good signal, reduced leakage</td>
+<td>Complex pipeline, still some leakage</td>
+<td>Low-moderate</td>
+</tr>
+<tr>
+<td>CatBoost ordered statistics</td>
+<td>No leakage, Laplace smoothing for rare cats</td>
+<td>CatBoost-specific, not exportable</td>
+<td>None — ordered by design</td>
+</tr>
+</tbody>
+</table>
+<h2>When CatBoost Wins and Practical Tips</h2>
+<p>CatBoost tends to outperform other boosting frameworks when: (1) the dataset has many high-cardinality categorical features; (2) the dataset is small (ordered boosting's unbiasedness is most valuable); (3) minimal preprocessing is desired. On fully numerical datasets with large n, LightGBM is often faster. On datasets requiring exact replication or large SHAP communities, XGBoost has a more mature ecosystem. For production systems with mixed categorical/numerical data and moderate size, CatBoost is often the best starting point requiring the least feature engineering.</p>
+<ul>
+<li>Pass cat_features by name or index — CatBoost handles all encoding internally with ordered statistics.</li>
+<li>Use early_stopping_rounds=50 with an eval_set to find optimal iterations without grid search.</li>
+<li>CatBoost's default hyperparameters are well-tuned — test without tuning first, then tune depth and l2_leaf_reg.</li>
+<li>For imbalanced classification, set auto_class_weights='Balanced' to upweight the minority class.</li>
+<li>Save models with model.save_model('cb.cbm') for efficient C++ inference without Python runtime.</li>
+<li>GPU training: set task_type='GPU' and devices='0' — requires CUDA toolkit; supports oblivious trees only.</li>
+</ul>
+<blockquote>
+<p><strong>CatBoost Default Hyperparameters Are Strong</strong>: Unlike XGBoost and LightGBM which often require significant tuning, CatBoost's defaults — depth=6, learning_rate=0.03, iterations=1000 with early stopping — are competitive across a wide range of tabular datasets. The ordered boosting reduces overfitting automatically, so aggressive regularisation tuning is less critical. Start with defaults, then tune only depth and l2_leaf_reg if needed.</p>
+</blockquote>
+<p>CatBoost's ordered boosting and native categorical support represent a principled solution to two of the most common practical problems in gradient boosting: overfitting on small datasets and the need for extensive categorical preprocessing. While XGBoost and LightGBM remain strong alternatives, CatBoost's out-of-the-box performance, especially on datasets with categorical variables, makes it the preferred starting point for many real-world tabular machine learning tasks.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

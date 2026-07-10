@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Forward Pass — Linear Layers, Activations, and Loss | Notes Backup</title>
+  <meta name="description" content="Trace the forward pass step by step: linear transformation z=Wx+b, activation a=σ(z), batched matrix form, shape tracking, composition of transformations, cross-entropy and MSE loss, and the computational graph as foundation for autograd." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Forward Pass — Linear Layers, Activations, and Loss</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Trace the forward pass step by step: linear transformation z=Wx+b, activation a=σ(z), batched matrix form, shape tracking, composition of transformations, cross-entropy and MSE loss, and the computational graph as foundation for autograd.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Forward Pass — Linear Layers, Activations, and Loss</h1>
+<p>The forward pass is the computation that transforms raw input into a prediction. Every layer applies a linear transformation followed by a non-linear activation; stacking these layers allows the network to approximate arbitrarily complex functions. Understanding the mechanics — shape tracking, vectorised batch computation, and the cached intermediate values — is prerequisite for implementing backpropagation correctly.</p>
+<h2>Linear Layer: z = Wx + b</h2>
+<p>A single linear (fully-connected) layer computes z = Wx + b where W ∈ ℝ^{d_out × d_in}, x ∈ ℝ^{d_in}, b ∈ ℝ^{d_out}. For a mini-batch of m samples, inputs are stacked row-wise: X ∈ ℝ^{m × d_in}. The batched form is Z = XWᵀ + b where the bias b broadcasts across the batch dimension, giving Z ∈ ℝ^{m × d_out}. Shape tracking is critical — a dimension mismatch silently corrupts computations rather than raising an error in some frameworks.</p>
+<h2>Activation Functions and Non-linearity</h2>
+<p>Without non-linear activations, stacking linear layers collapses to a single linear map: W₂(W₁x + b₁) + b₂ = (W₂W₁)x + (W₂b₁ + b₂). The network cannot represent XOR, let alone vision or language tasks. An activation a = σ(z) applied element-wise breaks linearity. Common choices: ReLU a = max(0, z), sigmoid a = 1/(1+e⁻ᶻ), GELU, and SiLU. The activation is applied after every linear layer except — typically — the final output layer.</p>
+<h2>Composition and the Computational Graph</h2>
+<p>A two-layer MLP forward pass: z₁ = XW₁ᵀ + b₁, a₁ = ReLU(z₁), z₂ = a₁W₂ᵀ + b₂, ŷ = softmax(z₂). Each intermediate value is a node in the computational graph. During the forward pass these values are cached (z₁, a₁, z₂) because the backward pass needs them to compute gradients. Autograd engines like PyTorch build this graph dynamically as operations execute.</p>
+<pre><code class="language-python">import numpy as np
+
+def relu(z):
+    return np.maximum(0, z)
+
+def softmax(z):
+    z_shifted = z - z.max(axis=1, keepdims=True)  # numerical stability
+    exp_z = np.exp(z_shifted)
+    return exp_z / exp_z.sum(axis=1, keepdims=True)
+
+def mlp_forward(X, W1, b1, W2, b2):
+    &quot;&quot;&quot;Two-layer MLP forward pass; returns prediction and cached intermediates.&quot;&quot;&quot;
+    z1 = X @ W1.T + b1          # (m, d_hidden)
+    a1 = relu(z1)               # (m, d_hidden)
+    z2 = a1 @ W2.T + b2         # (m, d_out)
+    y_hat = softmax(z2)         # (m, d_out)
+    cache = {'X': X, 'z1': z1, 'a1': a1, 'z2': z2}
+    return y_hat, cache
+
+np.random.seed(42)
+m, d_in, d_h, d_out = 8, 16, 32, 4
+X  = np.random.randn(m, d_in)
+W1 = np.random.randn(d_h, d_in) * np.sqrt(2.0 / d_in)  # He init
+b1 = np.zeros(d_h)
+W2 = np.random.randn(d_out, d_h) * np.sqrt(2.0 / d_h)
+b2 = np.zeros(d_out)
+
+y_hat, cache = mlp_forward(X, W1, b1, W2, b2)
+print('Input  shape:', X.shape)
+print('z1     shape:', cache['z1'].shape)
+print('a1     shape:', cache['a1'].shape)
+print('Output shape:', y_hat.shape)
+print('Row sums (should be 1):', y_hat.sum(axis=1).round(6))
+</code></pre>
+<h2>PyTorch Forward Pass with Shape Tracing</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class TwoLayerMLP(nn.Module):
+    def __init__(self, d_in, d_hidden, d_out):
+        super().__init__()
+        self.fc1 = nn.Linear(d_in, d_hidden)
+        self.act = nn.ReLU()
+        self.fc2 = nn.Linear(d_hidden, d_out)
+
+    def forward(self, x):
+        print(f'  input  : {tuple(x.shape)}')
+        z1 = self.fc1(x)
+        print(f'  after fc1 : {tuple(z1.shape)}')
+        a1 = self.act(z1)
+        print(f'  after ReLU: {tuple(a1.shape)}')
+        z2 = self.fc2(a1)
+        print(f'  output    : {tuple(z2.shape)}')
+        return z2
+
+torch.manual_seed(0)
+m, d_in, d_h, d_out = 8, 16, 32, 4
+model = TwoLayerMLP(d_in, d_h, d_out)
+X = torch.randn(m, d_in)
+print('Forward pass shape trace:')
+logits = model(X)
+print('\nParameter count:')
+for name, p in model.named_parameters():
+    print(f'  {name}: {tuple(p.shape)}  numel={p.numel()}')
+</code></pre>
+<h2>Loss Functions: Cross-Entropy and MSE</h2>
+<p>The loss quantifies how wrong the prediction is. For classification, categorical cross-entropy is L = -(1/m) Σᵢ Σₖ yᵢₖ log(ŷᵢₖ) where y is one-hot. When the target is a class index (not one-hot), this simplifies to L = -(1/m) Σᵢ log(ŷᵢ,cᵢ) — only the log-probability of the correct class matters. For regression, MSE is L = (1/m) Σᵢ (yᵢ - ŷᵢ)². The raw logits z can be passed directly to a numerically stable cross-entropy implementation instead of first computing softmax then log.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+import torch.nn as nn
+
+# --- Scratch implementation ---
+def cross_entropy_scratch(logits, y_true):
+    &quot;&quot;&quot;logits: (m, C) raw scores; y_true: (m,) integer class indices.&quot;&quot;&quot;
+    m = logits.shape[0]
+    # Numerically stable: subtract max before exp
+    shifted = logits - logits.max(axis=1, keepdims=True)
+    log_probs = shifted - np.log(np.exp(shifted).sum(axis=1, keepdims=True))
+    return -log_probs[np.arange(m), y_true].mean()
+
+np.random.seed(0)
+m, C = 16, 5
+logits_np = np.random.randn(m, C)
+y_true_np = np.random.randint(0, C, m)
+
+loss_scratch = cross_entropy_scratch(logits_np, y_true_np)
+
+# --- PyTorch built-in (combines LogSoftmax + NLLLoss) ---
+logits_t = torch.tensor(logits_np, dtype=torch.float32)
+y_true_t = torch.tensor(y_true_np, dtype=torch.long)
+loss_torch = nn.CrossEntropyLoss()(logits_t, y_true_t).item()
+
+print(f'Scratch CE loss: {loss_scratch:.6f}')
+print(f'PyTorch CE loss: {loss_torch:.6f}')
+print(f'Difference     : {abs(loss_scratch - loss_torch):.2e}')
+</code></pre>
+<blockquote>
+<p><strong>Numerical Stability in Cross-Entropy</strong>: Never compute softmax first and then take log: log(softmax(z)) suffers from underflow when z contains large negative values. Always use the log-sum-exp trick: log Σ exp(zₖ) = max(z) + log Σ exp(zₖ - max(z)). PyTorch's nn.CrossEntropyLoss applies this automatically — pass raw logits, not softmax probabilities.</p>
+</blockquote>
+<h2>Forward Pass Profiling</h2>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import time
+
+class ProfiledMLP(nn.Module):
+    def __init__(self, dims):
+        super().__init__()
+        layers = []
+        for i in range(len(dims) - 1):
+            layers.append(nn.Linear(dims[i], dims[i+1]))
+            if i &lt; len(dims) - 2:
+                layers.append(nn.ReLU())
+        self.net = nn.Sequential(*layers)
+        self.timings = {}
+        self.hook_handles = []
+
+    def forward(self, x):
+        return self.net(x)
+
+def profile_layers(model, x, n_runs=50):
+    results = []
+    for name, module in model.named_modules():
+        if isinstance(module, (nn.Linear, nn.ReLU)):
+            times = []
+            for _ in range(n_runs):
+                t0 = time.perf_counter()
+                with torch.no_grad():
+                    x = module(x)
+                times.append((time.perf_counter() - t0) * 1e6)
+            results.append((name or type(module).__name__, x.shape, float(np.mean(times))))
+            break  # demo: profile first layer only
+    return results
+
+import numpy as np
+torch.manual_seed(0)
+m = 512
+model = ProfiledMLP([784, 512, 256, 128, 10])
+x = torch.randn(m, 784)
+
+t_total = time.perf_counter()
+for _ in range(100):
+    with torch.no_grad():
+        out = model(x)
+elapsed = (time.perf_counter() - t_total) * 10  # ms per forward
+print(f'Batch size {m}, 100 runs: {elapsed:.2f} ms/forward')
+print(f'Output shape: {tuple(out.shape)}')
+for name, p in model.named_parameters():
+    mb = p.numel() * 4 / 1024**2
+    print(f'  {name}: {tuple(p.shape)} — {mb:.4f} MB')
+</code></pre>
+<h2>Common Loss Functions</h2>
+<table>
+<thead>
+<tr>
+<th>Loss</th>
+<th>Task</th>
+<th>Output Range</th>
+<th>Gradient</th>
+<th>When to Use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>MSE</td>
+<td>Regression</td>
+<td>(-∞, +∞)</td>
+<td>2(ŷ-y)/m — linear, large for big errors</td>
+<td>Clean targets, Gaussian noise assumption</td>
+</tr>
+<tr>
+<td>Cross-Entropy</td>
+<td>Multi-class classification</td>
+<td>(0, +∞)</td>
+<td>ŷ-y (softmax+CE combined) — clean and bounded</td>
+<td>Default for classification with class indices</td>
+</tr>
+<tr>
+<td>Binary CE</td>
+<td>Binary / multi-label</td>
+<td>(0, +∞)</td>
+<td>ŷ-y per logit — separable</td>
+<td>Each output is independent binary decision</td>
+</tr>
+<tr>
+<td>Focal Loss</td>
+<td>Imbalanced classification</td>
+<td>(0, +∞)</td>
+<td>Down-weights easy examples via (1-p)^γ factor</td>
+<td>Object detection, extreme class imbalance</td>
+</tr>
+<tr>
+<td>Contrastive/Triplet</td>
+<td>Metric learning</td>
+<td>(0, +∞)</td>
+<td>Pushes same-class embeddings together, different apart</td>
+<td>Face recognition, few-shot learning, retrieval</td>
+</tr>
+</tbody>
+</table>
+<h2>Why Non-Linear Activations Are Essential</h2>
+<p>A network with L linear layers and no activations is equivalent to a single linear layer: the composition of linear maps is linear. No matter how many layers are stacked, the hypothesis class remains {x ↦ Ax + b | A ∈ ℝ^{d_out × d_in}}. Adding a single non-linear activation already makes the network a universal function approximator (by the universal approximation theorem): given sufficient hidden units, a one-hidden-layer network with sigmoid activations can approximate any continuous function on a compact domain to arbitrary precision. In practice, depth is more parameter-efficient than width for learning hierarchical representations.</p>
+<ul>
+<li>Linearity collapse: W₂(W₁x+b₁)+b₂ = W₃x+b₃ — depth adds nothing without activation.</li>
+<li>Universal approximation: one hidden layer + sigmoid is a universal approximator (width ↑ as ε ↓).</li>
+<li>Depth efficiency: deep networks represent exponentially more functions than shallow ones of equal width.</li>
+<li>Sparse activations: ReLU outputs exactly zero for half of inputs on average — computationally efficient.</li>
+<li>Gradient flow: activation choice determines whether gradients vanish (sigmoid deep) or flow freely (ReLU).</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

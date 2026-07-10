@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Reward Modeling — Bradley-Terry Model and Pairwise Preference Learning | Notes Backup</title>
+  <meta name="description" content="Covers reward model training on pairwise preference data using the Bradley-Terry model and log-sigmoid loss, RM architecture (pretrained LLM backbone with scalar head), preference dataset creation from human comparisons, pairwise accuracy and margin evaluation, reward hacking detection via score distribution monitoring, and comparison of InstructGPT, Anthropic, Llama-3, Zephyr, and Nemotron reward models." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Reward Modeling — Bradley-Terry Model and Pairwise Preference Learning</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Covers reward model training on pairwise preference data using the Bradley-Terry model and log-sigmoid loss, RM architecture (pretrained LLM backbone with scalar head), preference dataset creation from human comparisons, pairwise accuracy and margin evaluation, reward hacking detection via score distribution monitoring, and comparison of InstructGPT, Anthropic, Llama-3, Zephyr, and Nemotron reward models.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Reward Modeling — Bradley-Terry Model and Pairwise Preference Learning</h1>
+<p>A reward model (RM) is a neural network trained to predict which of two responses a human would prefer, given the same prompt. It converts qualitative human judgements into a scalar signal that downstream training (RLHF, best-of-N sampling) can optimise. The RM is the critical bottleneck in the RLHF pipeline: its errors compound — a biased RM produces biased policy updates, and the policy is then trained to exploit RM weaknesses (reward hacking). Understanding the Bradley-Terry loss, RM architecture, data collection, evaluation, and bias mitigation is essential for anyone building RLHF or preference-learning systems.</p>
+<h2>Bradley-Terry Model and Pairwise Loss</h2>
+<p>The Bradley-Terry model provides a principled probabilistic foundation for pairwise preference learning. Given prompt x, chosen response y_w, and rejected response y_l, the probability that a human prefers y_w is modelled as P(y_w &gt; y_l | x) = σ(r(x, y_w) − r(x, y_l)) where σ is the sigmoid function and r is the scalar reward function. The RM loss is the negative log-likelihood of observed preferences: L = −E[log σ(r_w − r_l)]. Minimising this loss pushes r(x, y_w) to be larger than r(x, y_l) by an amount proportional to how confidently the model assigns the preference. The margin r_w − r_l is the key quantity: large positive margins indicate high-confidence correct preferences.</p>
+<h2>Reward Model Architecture</h2>
+<p>The RM is initialised from a pretrained LLM (often the SFT model) with its language modelling head replaced by a single linear layer that outputs a scalar reward. The backbone processes the full prompt-plus-response sequence, and the scalar head pools the final hidden state at the last non-padding token position. Using the last token captures the cumulative context of the entire response. Initialising from the SFT model (rather than the raw pretrained model) is important — the SFT model already speaks instruction-following language, so it requires less data to learn preference distinctions. RM size typically matches or is larger than the policy model to act as an accurate critic.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+class RewardModel(nn.Module):
+    def __init__(self, base_model_name, dtype=torch.bfloat16):
+        super().__init__()
+        self.backbone = AutoModelForCausalLM.from_pretrained(base_model_name, torch_dtype=dtype)
+        d_model = self.backbone.config.hidden_size
+        self.backbone.lm_head = nn.Identity()  # remove token prediction head
+        self.reward_head = nn.Linear(d_model, 1, bias=False)
+
+    def forward(self, input_ids, attention_mask):
+        out = self.backbone(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
+        last_hidden = out.hidden_states[-1]          # (B, T, d_model)
+        seq_lens = attention_mask.sum(dim=1) - 1    # index of last real token
+        batch_idx = torch.arange(last_hidden.size(0), device=last_hidden.device)
+        pooled = last_hidden[batch_idx, seq_lens]   # (B, d_model)
+        return self.reward_head(pooled).squeeze(-1) # (B,)
+
+def bradley_terry_loss(r_chosen, r_rejected):
+    &quot;&quot;&quot;L = -E[log sigma(r_w - r_l)], the pairwise Bradley-Terry loss.&quot;&quot;&quot;
+    return -torch.nn.functional.logsigmoid(r_chosen - r_rejected).mean()
+
+def rm_train_step(model, chosen_batch, rejected_batch, optimizer):
+    r_w = model(**chosen_batch)
+    r_l = model(**rejected_batch)
+    loss = bradley_terry_loss(r_w, r_l)
+    optimizer.zero_grad()
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    optimizer.step()
+    accuracy = (r_w &gt; r_l).float().mean().item()
+    margin   = (r_w - r_l).mean().item()
+    return {&quot;loss&quot;: loss.item(), &quot;accuracy&quot;: accuracy, &quot;margin&quot;: margin}
+</code></pre>
+<h2>Preference Dataset Creation</h2>
+<p>RM training requires pairwise comparison data: for each prompt, at least two responses are generated and a human labeller selects the preferred one. In practice, labellers compare 2–8 completions per prompt and rank them — this yields O(k²) pairs from k completions, making comparison more efficient than absolute scoring. Labeller agreement is typically 70–80% (inter-annotator agreement), setting the upper bound on RM accuracy. The Anthropic HH-RLHF dataset (helpfulness + harmlessness) and OpenAI's InstructGPT comparisons are the most widely used public datasets. Data scale ranges from 10K pairs (small internal RM) to 1M+ (production systems like InstructGPT or Claude's RM).</p>
+<pre><code class="language-python">from datasets import load_dataset
+from transformers import AutoTokenizer
+import torch
+
+def format_preference_pair(tokenizer, prompt, chosen, rejected, max_length=512):
+    &quot;&quot;&quot;Tokenize chosen and rejected responses for Bradley-Terry RM training.&quot;&quot;&quot;
+    def encode(response):
+        text = f&quot;Human: {prompt}\n\nAssistant: {response}&quot;
+        enc  = tokenizer(text, max_length=max_length, truncation=True,
+                         padding=&quot;max_length&quot;, return_tensors=&quot;pt&quot;)
+        return enc[&quot;input_ids&quot;][0], enc[&quot;attention_mask&quot;][0]
+
+    chosen_ids,   chosen_mask   = encode(chosen)
+    rejected_ids, rejected_mask = encode(rejected)
+    return {
+        &quot;chosen_input_ids&quot;:       chosen_ids,
+        &quot;chosen_attention_mask&quot;:  chosen_mask,
+        &quot;rejected_input_ids&quot;:     rejected_ids,
+        &quot;rejected_attention_mask&quot;: rejected_mask,
+    }
+
+tokenizer = AutoTokenizer.from_pretrained(&quot;meta-llama/Llama-3-8B&quot;)
+tokenizer.pad_token = tokenizer.eos_token
+
+dataset = load_dataset(&quot;Anthropic/hh-rlhf&quot;, split=&quot;train[:5000]&quot;)
+
+def preprocess(ex):
+    # HH-RLHF format: chosen and rejected are full conversation strings
+    prompt   = ex[&quot;chosen&quot;].rsplit(&quot;Assistant:&quot;, 1)[0].strip()
+    chosen_r = ex[&quot;chosen&quot;].rsplit(&quot;Assistant:&quot;, 1)[-1].strip()
+    rejected_r = ex[&quot;rejected&quot;].rsplit(&quot;Assistant:&quot;, 1)[-1].strip()
+    return format_preference_pair(tokenizer, prompt, chosen_r, rejected_r)
+
+tokenized = dataset.map(preprocess, remove_columns=dataset.column_names)
+print(f&quot;Preference pairs tokenized: {len(tokenized)}&quot;)
+</code></pre>
+<h2>RM Evaluation — Accuracy, Margin, and Calibration</h2>
+<p>The primary RM evaluation metric is pairwise accuracy: the fraction of held-out pairs where the RM assigns a higher reward to the chosen response. Random chance is 50%; a well-trained RM achieves 70–85% depending on data quality and model size. The mean reward margin (r_w − r_l) measures separability — larger margins indicate more confident, calibrated predictions. Calibration assessment checks whether the RM's win probability σ(r_w − r_l) matches empirical win rates: a RM predicting 80% win rate should be correct 80% of the time. RewardBench is the standard benchmark for comparing RMs across helpfulness, safety, and reasoning axes.</p>
+<pre><code class="language-python">import torch
+import numpy as np
+
+def evaluate_reward_model(model, eval_loader, device=&quot;cuda&quot;):
+    &quot;&quot;&quot;Compute pairwise accuracy, mean margin, and score distribution statistics.&quot;&quot;&quot;
+    model.eval()
+    r_chosen_all, r_rejected_all = [], []
+    with torch.no_grad():
+        for batch in eval_loader:
+            r_w = model(
+                input_ids=batch[&quot;chosen_input_ids&quot;].to(device),
+                attention_mask=batch[&quot;chosen_attention_mask&quot;].to(device)
+            )
+            r_l = model(
+                input_ids=batch[&quot;rejected_input_ids&quot;].to(device),
+                attention_mask=batch[&quot;rejected_attention_mask&quot;].to(device)
+            )
+            r_chosen_all.extend(r_w.cpu().float().tolist())
+            r_rejected_all.extend(r_l.cpu().float().tolist())
+    rw = np.array(r_chosen_all)
+    rl = np.array(r_rejected_all)
+    accuracy  = float((rw &gt; rl).mean())
+    margin    = float((rw - rl).mean())
+    overlap   = float((rw &lt; rl).mean())  # fraction where RM is wrong
+    print(f&quot;Pairwise accuracy : {accuracy:.3f}&quot;)
+    print(f&quot;Mean margin       : {margin:.3f}&quot;)
+    print(f&quot;Chosen  — mean: {rw.mean():.3f}, std: {rw.std():.3f}&quot;)
+    print(f&quot;Rejected — mean: {rl.mean():.3f}, std: {rl.std():.3f}&quot;)
+    print(f&quot;RM error rate     : {overlap:.3f}&quot;)
+    return {&quot;accuracy&quot;: accuracy, &quot;margin&quot;: margin}
+</code></pre>
+<h2>Reward Hacking Detection</h2>
+<p>Reward hacking occurs when the policy being trained by RLHF learns to exploit spurious features that the RM has overfit: verbose responses, particular sentence openers, or formatting patterns that correlate with high reward but not genuine quality. Detection requires monitoring the reward score distribution across training iterations — reward hacking manifests as monotonic score inflation without corresponding quality improvement. Ensemble RMs (averaging across 3–5 independently trained RMs) reduce hacking by making it harder to simultaneously exploit all models. KL-divergence regularisation (penalising divergence from the SFT policy) bounds how far the policy can exploit the RM before the KL penalty dominates.</p>
+<pre><code class="language-python">import numpy as np
+
+class RewardHackingMonitor:
+    &quot;&quot;&quot;Track reward distribution across RL training to detect score inflation.&quot;&quot;&quot;
+
+    def __init__(self, baseline_window=50, detection_window=20, z_threshold=3.0):
+        self.history = []  # list of (step, mean, std)
+        self.baseline_window  = baseline_window
+        self.detection_window = detection_window
+        self.z_threshold = z_threshold
+
+    def record(self, step, rewards):
+        self.history.append((step, float(np.mean(rewards)), float(np.std(rewards))))
+
+    def detect_inflation(self):
+        if len(self.history) &lt; self.baseline_window + self.detection_window:
+            return False
+        means = [h[1] for h in self.history]
+        baseline = np.array(means[:self.baseline_window])
+        recent   = np.array(means[-self.detection_window:])
+        z = (recent.mean() - baseline.mean()) / (baseline.std() + 1e-8)
+        inflating = z &gt; self.z_threshold
+        print(f&quot;Baseline mean: {baseline.mean():.3f}  Recent mean: {recent.mean():.3f}  Z={z:.2f}&quot;)
+        if inflating:
+            print(f&quot;[WARNING] Reward inflation detected (Z={z:.2f} &gt; {self.z_threshold}) — possible reward hacking&quot;)
+        return inflating
+
+# Simulate training with gradual reward inflation
+monitor = RewardHackingMonitor(baseline_window=50, detection_window=20)
+for step in range(150):
+    rewards = np.random.normal(0.5 + step * 0.012, 0.3, size=32)
+    monitor.record(step, rewards)
+monitor.detect_inflation()
+</code></pre>
+<h2>Reward Model Characteristics Comparison</h2>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Size</th>
+<th>Training Data</th>
+<th>Pairwise Accuracy</th>
+<th>Notable Bias / Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>InstructGPT RM (OpenAI)</td>
+<td>6B</td>
+<td>50K human comparisons, 2–7 completions/prompt</td>
+<td>~70% held-out</td>
+<td>Length bias; human labeller agreement ~72%</td>
+</tr>
+<tr>
+<td>Anthropic (Claude) RM</td>
+<td>52B</td>
+<td>500K+ HH-RLHF helpfulness + harmlessness pairs</td>
+<td>~75%</td>
+<td>Helpfulness-harmlessness trade-off explicitly modelled</td>
+</tr>
+<tr>
+<td>Llama-3 RM (Meta)</td>
+<td>70B</td>
+<td>Proprietary human + synthetic preference pairs</td>
+<td>~80% (Arena)</td>
+<td>Length bias reduced via normalisation; strong on reasoning</td>
+</tr>
+<tr>
+<td>Zephyr RLAIF RM</td>
+<td>7B</td>
+<td>AI Feedback — Claude as labeller (UltraFeedback)</td>
+<td>~65%</td>
+<td>Less length bias; bounded by LLM judge quality ceiling</td>
+</tr>
+<tr>
+<td>Nemotron-4-340B-Reward</td>
+<td>340B</td>
+<td>Proprietary large-scale synthetic preferences</td>
+<td>~82% (RewardBench)</td>
+<td>Near human-agreement; best open published RM as of 2024</td>
+</tr>
+</tbody>
+</table>
+<h2>DPO, Implicit Rewards, and Bypassing the RM</h2>
+<p>Direct Preference Optimisation (DPO) bypasses explicit RM training entirely. It shows that the optimal RLHF policy has a closed-form expression in terms of the preference data, allowing direct policy optimisation from pairwise comparisons. The DPO loss is L_DPO = −log σ(β log(π_θ(y_w|x)/π_ref(y_w|x)) − β log(π_θ(y_l|x)/π_ref(y_l|x))), which implicitly defines a reward r(x,y) = β log(π_θ(y|x)/π_ref(y|x)). DPO eliminates RM training overhead and avoids reward hacking (there is no separate RM to hack), but requires the preference data to be high quality since the policy is trained directly on it. Hybrid approaches like IPO and KTO extend DPO to handle label noise and non-pairwise data.</p>
+<ul>
+<li>RLHF pipeline: SFT → RM training on human pairs → PPO optimisation with KL penalty → evaluate with RM.</li>
+<li>DPO shortcut: SFT → DPO directly on preference pairs — no RM, no PPO, half the training stages.</li>
+<li>Best-of-N sampling: generate N responses, re-rank with RM, select the top-scoring one — inference-time reward hacking.</li>
+<li>RM ensemble: train 3–5 RMs on different data splits, average rewards — reduces hacking surface area significantly.</li>
+<li>Length normalisation: divide reward by response length (in tokens) to penalise verbosity bias in the RM signal.</li>
+<li>Reward model calibration: check that σ(r_w - r_l) matches empirical win rate on held-out data via reliability diagrams.</li>
+</ul>
+<blockquote>
+<p><strong>Length Bias in Reward Models</strong>: Length bias in reward models is pervasive — RMs trained on human preferences systematically rate longer responses higher even when shorter responses are more accurate. Always check reward vs length correlation and use length-normalised scoring. A simple test: generate two versions of each response (short and verbose) and check if the RM consistently prefers the longer one regardless of content quality.</p>
+</blockquote>
+<p>Reward modelling is the most data-sensitive component of the RLHF pipeline. The RM quality ceiling is set by human labeller agreement (~72–80%), so investing in labeller training, clear annotation guidelines, and careful prompt design pays large dividends. Monitoring reward score distributions throughout RL training (not just at the end) is essential for catching reward hacking before it corrupts the policy. For teams without the budget for large-scale human annotation, RLAIF (using a strong LLM as the preference labeller) or DPO with public preference datasets (UltraFeedback, HH-RLHF) are viable alternatives that approach RM quality within 5–10 percentage points.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

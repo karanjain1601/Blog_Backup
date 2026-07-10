@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LSTM Gradient Flow — How Gates Solve Vanishing Gradient | Notes Backup</title>
+  <meta name="description" content="How LSTM cell-state gradients bypass vanishing gradient: dL/dCt multiplied only by forget gate ft+1 not Whh at every step. Constant error carousel (Hochreiter 1997), forget gate as gradient valve, LSTM vs RNN gradient norms over 100 steps, copying task benchmark, and LSTM variant extensions." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>LSTM Gradient Flow — How Gates Solve Vanishing Gradient</h1>
+      <ul class='note-meta'><li><strong>description:</strong> How LSTM cell-state gradients bypass vanishing gradient: dL/dCt multiplied only by forget gate ft+1 not Whh at every step. Constant error carousel (Hochreiter 1997), forget gate as gradient valve, LSTM vs RNN gradient norms over 100 steps, copying task benchmark, and LSTM variant extensions.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>LSTM Gradient Flow — How Gates Solve Vanishing Gradient</h1>
+<p>The vanishing gradient problem is the central obstacle in training recurrent networks on long sequences: gradients shrink exponentially as they flow backward through time, making it impossible for the network to learn dependencies spanning more than a few dozen steps. LSTM (Long Short-Term Memory, Hochreiter &amp; Schmidhuber 1997) addresses this with the constant error carousel — a dedicated cell state Ct whose gradient is multiplied by forget gate values instead of the full recurrent weight matrix Whh, allowing gradient to flow across hundreds of timesteps without exponential decay.</p>
+<h2>Vanilla RNN and the Vanishing Gradient</h2>
+<p>In a vanilla RNN, ht = tanh(Wxx xt + Whh ht-1 + b). The gradient of the loss with respect to ht flows backward as dL/dht = (dL/dht+1) Whhᵀ diag(1 - ht+1²). Each backward step multiplies by Whhᵀ — if the largest singular value of Whh is less than 1, the power Whhᵀᵀ shrinks to zero exponentially; if greater than 1, it explodes. The tanh factor diag(1 - ht²) is always in [0,1], adding further shrinkage. Gradients from distant timesteps become negligible after 15–20 steps.</p>
+<h2>LSTM Architecture — Cell State and Gates</h2>
+<p>LSTM introduces a cell state Ct ∈ ℝᴴ running alongside the hidden state. Four gate computations control information flow: forget gate ft = σ(Wf[ht-1, xt] + bf) decides what to erase; input gate it = σ(Wi[ht-1, xt] + bi) and candidate g̃t = tanh(Wg[ht-1, xt] + bg) write new information; output gate ot = σ(Wo[ht-1, xt] + bo) reads from cell. The additive cell update is Ct = ft ⊙ Ct-1 + it ⊙ g̃t. This additive structure is the key to gradient flow — gradient can bypass the recurrent matrix multiplication entirely.</p>
+<pre><code class="language-python">import numpy as np
+
+def sigmoid(x):
+    return 1.0 / (1.0 + np.exp(-np.clip(x, -10, 10)))
+
+def simulate_gradient_flow(T=100, H=32, forget_bias=2.0, seed=42):
+    &quot;&quot;&quot;Track gradient norm through T timesteps: LSTM cell path vs vanilla RNN.&quot;&quot;&quot;
+    rng = np.random.default_rng(seed)
+    Whh = rng.normal(0, 1.0 / np.sqrt(H), (H, H))  # RNN recurrent weight matrix
+    cell_grad = np.ones(H)
+    rnn_grad  = np.ones(H)
+    cell_norms, rnn_norms = [1.0], [1.0]
+
+    for t in range(T):
+        f = sigmoid(rng.normal(forget_bias, 0.3, H))  # forget gates ~sigmoid(2)=0.88
+        cell_grad = cell_grad * f                      # LSTM: element-wise forget gate only
+        rnn_grad  = Whh.T @ rnn_grad                   # RNN: full H x H matrix multiply
+        cell_norms.append(float(np.linalg.norm(cell_grad)))
+        rnn_norms.append(float(np.linalg.norm(rnn_grad)))
+
+    return np.array(cell_norms), np.array(rnn_norms)
+
+lstm_norms, rnn_norms = simulate_gradient_flow(T=100)
+print('Gradient norm (start=1.0, flowing backward toward t=0):')
+print('{:&gt;6} {:&gt;12} {:&gt;14}'.format('Step', 'LSTM cell', 'Vanilla RNN'))
+for t in [10, 25, 50, 75, 100]:
+    print('{:&gt;6} {:&gt;12.4f} {:&gt;14.4e}'.format(t, lstm_norms[t], rnn_norms[t]))
+print('LSTM retains {:.1f}% of gradient at t=100'.format(100 * lstm_norms[100]))
+print('RNN  retains {:.2e}% of gradient at t=100'.format(100 * rnn_norms[100]))
+</code></pre>
+<h2>Forget Gate as Information Valve</h2>
+<p>The critical insight is in the backward pass through the cell state: dL/dCt = dL/dCt+1 ⊙ ft+1 + (contributions from output gate path). At each step backward, the cell gradient is element-wise multiplied by the forget gate ft+1 ∈ (0,1). If ft ≈ 1 for all t — the gate stays open — gradient flows through all T steps with minimal decay: this is Hochreiter's constant error carousel. If ft ≈ 0, gradient is blocked at that step. The multiplication is by ft (a learned gate vector) rather than Whh (a full H×H matrix), avoiding the spectral radius problem entirely.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+def extract_forget_gates(seq_len=60, input_size=4, hidden_size=16, seed=1):
+    &quot;&quot;&quot;Show forget gate activations step-by-step using LSTMCell.&quot;&quot;&quot;
+    torch.manual_seed(seed)
+    cell = nn.LSTMCell(input_size, hidden_size)
+    x = torch.cat([
+        torch.ones(seq_len // 2, input_size),
+        -torch.ones(seq_len // 2, input_size)
+    ], dim=0)
+    h = torch.zeros(1, hidden_size)
+    c = torch.zeros(1, hidden_size)
+    fg_means = []
+
+    with torch.no_grad():
+        for t in range(seq_len):
+            gates = x[t:t+1] @ cell.weight_ih.T + h @ cell.weight_hh.T
+            gates += cell.bias_ih + cell.bias_hh
+            f = torch.sigmoid(gates[:, hidden_size:2*hidden_size])
+            fg_means.append(f.mean().item())
+            h, c = cell(x[t:t+1], (h, c))
+
+    rm = np.array(fg_means)
+    print('Forget gate mean (1=keep memory, 0=erase):')
+    print('  Phase 1 t=00-29: {:.3f}'.format(rm[:30].mean()))
+    print('  Transition t=30: {:.3f}  &lt;- drops on input distribution shift'.format(rm[30]))
+    print('  Phase 2 t=31-59: {:.3f}'.format(rm[31:].mean()))
+
+extract_forget_gates()
+</code></pre>
+<h2>Gradient Paths: Cell State vs Hidden State</h2>
+<p>LSTM has two distinct gradient paths: the cell state path where dL/dCt is multiplied only by element-wise forget gates, and the hidden state path where dL/dht flows through gate Jacobians and weight matrices. The cell path is the high-speed gradient highway; the hidden path is subject to more decay. In practice, gradients at t=0 from losses at t=T are orders of magnitude larger via the cell path than via the RNN hidden path, which is why LSTM can capture dependencies at 100+ step distances.</p>
+<table>
+<thead>
+<tr>
+<th>Gradient Path</th>
+<th>Multiplied By Each Step</th>
+<th>Vanishing Risk</th>
+<th>Long-Range (T=100)</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Vanilla RNN hidden</td>
+<td>Whhᵀ · diag(1-ht²)</td>
+<td>High — matrix power, spectral radius &lt; 1 kills gradient</td>
+<td>Near zero for most weight inits</td>
+</tr>
+<tr>
+<td>LSTM cell state</td>
+<td>ft+1 element-wise, ft ∈ (0,1)</td>
+<td>Low — product of scalars; stays near 1 if forget bias &gt; 0</td>
+<td>50–90% retained with ft ≈ 0.88</td>
+</tr>
+<tr>
+<td>LSTM hidden state</td>
+<td>Gate Jacobians + partial Whh terms</td>
+<td>Medium — more paths but still partially matrix-gated</td>
+<td>Partial — better than RNN, worse than cell</td>
+</tr>
+<tr>
+<td>GRU hidden state</td>
+<td>zt update gate (interpolation)</td>
+<td>Medium — update gate acts as combined forget/input</td>
+<td>Similar to LSTM cell in practice</td>
+</tr>
+</tbody>
+</table>
+<h2>Copying Task Benchmark</h2>
+<p>The copying task tests long-range memory directly: a token presented at t=0 must be reproduced after T blank filler timesteps. No shortcut exists — the model must hold the initial token in working memory across T steps. Vanilla RNNs fail at T &gt; 20–30 due to vanishing gradients. LSTMs solve the task reliably for T up to 200+ steps because the cell state can maintain the required information through the forget gate holding near 1.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.optim as optim
+
+class VanillaRNNCopy(nn.Module):
+    def __init__(self, n_tok, h):
+        super().__init__()
+        self.emb = nn.Embedding(n_tok + 1, h)
+        self.rnn = nn.RNN(h, h, batch_first=True)
+        self.fc  = nn.Linear(h, n_tok)
+    def forward(self, x):
+        _, hn = self.rnn(self.emb(x))
+        return self.fc(hn.squeeze(0))
+
+class LSTMCopy(nn.Module):
+    def __init__(self, n_tok, h):
+        super().__init__()
+        self.emb  = nn.Embedding(n_tok + 1, h)
+        self.lstm = nn.LSTM(h, h, batch_first=True)
+        self.fc   = nn.Linear(h, n_tok)
+    def forward(self, x):
+        _, (hn, _) = self.lstm(self.emb(x))
+        return self.fc(hn.squeeze(0))
+
+def run_task(ModelClass, T=50, n_tok=8, h=64, epochs=40):
+    torch.manual_seed(42)
+    targets = torch.randint(0, n_tok, (256,))
+    seqs = torch.full((256, T + 1), n_tok)  # blank = n_tok
+    seqs[:, 0] = targets
+    model = ModelClass(n_tok, h)
+    opt = optim.Adam(model.parameters(), lr=2e-3)
+    for _ in range(epochs):
+        loss = nn.CrossEntropyLoss()(model(seqs), targets)
+        opt.zero_grad(); loss.backward(); opt.step()
+    return (model(seqs).argmax(1) == targets).float().mean().item()
+
+print('Copying task (T=50 blank steps, 8 token classes, chance=0.125):')
+print('  Vanilla RNN accuracy: {:.3f}'.format(run_task(VanillaRNNCopy)))
+print('  LSTM        accuracy: {:.3f}'.format(run_task(LSTMCopy)))
+</code></pre>
+<h2>Gradient Highway — Cell vs Hidden Norms</h2>
+<p>To visualize the gradient highway empirically, compute the gradient of the last-step loss with respect to each timestep's input vector. Large gradient at early timesteps means the network is learning from distant inputs. Near-zero gradient at t=0 means the signal has vanished and those steps contribute nothing to learning. LSTM's cell path delivers gradients at t=0 that are orders of magnitude larger than vanilla RNN — which explains why LSTM can actually update weights based on inputs seen 40+ steps earlier.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import numpy as np
+
+def gradient_highway(make_rnn, T=40, H=24, I=4):
+    &quot;&quot;&quot;Gradient norm at each timestep's input from loss at the final timestep.&quot;&quot;&quot;
+    torch.manual_seed(0)
+    model = make_rnn(I, H, batch_first=True)
+    x = torch.randn(1, T, I, requires_grad=True)
+    out, _ = model(x)
+    out[0, -1, :].sum().backward()
+    return x.grad[0].norm(dim=1).detach().numpy()
+
+lstm_g = gradient_highway(nn.LSTM)
+rnn_g  = gradient_highway(nn.RNN)
+
+print('Gradient norm per input timestep (loss at t=39, T=40):')
+print('{:&gt;5} {:&gt;12} {:&gt;12}'.format('t', 'LSTM', 'RNN'))
+for t in [0, 5, 10, 20, 30, 39]:
+    print('{:&gt;5} {:&gt;12.4f} {:&gt;12.4e}'.format(t, float(lstm_g[t]), float(rnn_g[t])))
+ratio = float(lstm_g[0]) / max(float(rnn_g[0]), 1e-20)
+print('Ratio LSTM/RNN at t=0: {:.2e}x more gradient preserved'.format(ratio))
+</code></pre>
+<blockquote>
+<p><strong>LSTM Does Not Fully Solve Vanishing Gradient</strong>: If the forget gate saturates near zero (ft ≈ 0), gradient is blocked at that timestep — a learned forgetting event stops gradient flow just as effectively as vanishing. Over very long sequences, the product of forget gates Π ft still shrinks if ft &lt; 1 consistently. LSTMs with large forget gate bias (initialized near 1, e.g. bias_f = 1.0) combined with gradient clipping work well in practice, but provide no theoretical guarantee of complete gradient preservation.</p>
+</blockquote>
+<h2>LSTM Variants and Extensions</h2>
+<p>Several variants extend the basic LSTM: peephole connections allow gates to see the cell state directly — ft = σ(Wf[ht-1, Ct-1, xt] + bf) — improving precision for periodic timing tasks; Phased LSTM adds an oscillatory time gate that opens only at certain phases, enabling efficient processing of irregularly-sampled time series; GRU (Cho et al. 2014) merges forget and input gates into an update gate and eliminates the separate cell state, often matching LSTM performance with fewer parameters; Layer Norm LSTM applies layer normalization inside each gate for stability in deep stacks.</p>
+<ul>
+<li>Peephole LSTM: gates see Ct-1 directly — better temporal precision for CTC speech tasks.</li>
+<li>Phased LSTM: oscillatory time gate — updates only at certain phases for asynchronous sensor data.</li>
+<li>GRU (Cho 2014): 2 gates, no cell state, ~25% fewer params — often competitive on short sequences.</li>
+<li>Coupled Input-Forget: it = 1 - ft — one fewer gate, enforces conservation (what is forgotten is replaced).</li>
+<li>Layer Norm LSTM: normalizes gate pre-activations — stabilizes deep stacks of 4+ layers.</li>
+<li>minLSTM / minGRU (2024): simplified variants parallelizable via associative scan — no sequential dependency at training time.</li>
+</ul>
+<p>The fundamental insight of LSTM — using an additive cell update with learned gating rather than multiplicative recurrent matrix — influenced virtually every subsequent sequence model. Transformers extend this idea further by using attention to route gradient across arbitrary positions without any recurrent structure, but LSTM remains the reference baseline for tasks requiring interpretable gate behavior and exact sequential processing.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

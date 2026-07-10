@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pix2Pix — Paired Image-to-Image Translation | Notes Backup</title>
+  <meta name="description" content="Pix2Pix (Isola et al. 2017) learns image-to-image translation from paired data using a U-Net generator with skip connections, a PatchGAN discriminator that classifies 70x70 overlapping patches, and a combined GAN + L1 objective that enforces both local realism and global consistency." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Pix2Pix — Paired Image-to-Image Translation</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Pix2Pix (Isola et al. 2017) learns image-to-image translation from paired data using a U-Net generator with skip connections, a PatchGAN discriminator that classifies 70x70 overlapping patches, and a combined GAN + L1 objective that enforces both local realism and global consistency.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Pix2Pix — Paired Image-to-Image Translation</h1>
+<p>Pix2Pix (Isola et al. 2017) frames image translation as a conditional GAN problem: given a paired dataset of (input image A, target image B), train a generator G to map A → B such that the output is indistinguishable from real B images. Applications include edges→photos, maps→satellite imagery, semantic labels→photorealistic images, and day→night conversion. Paired training data is the central requirement — and limitation — of Pix2Pix; when pairs are unavailable, CycleGAN is used instead.</p>
+<h2>cGAN Formulation with L1 Reconstruction Loss</h2>
+<p>The Pix2Pix objective is L = L_cGAN(G,D) + λ·L_L1(G). The cGAN term L_cGAN encourages G to produce realistic-looking outputs that fool D. The L1 term L_L1 = E[‖y - G(x)‖₁] penalises deviation from the ground-truth target and forces global consistency. L1 is preferred over L2 because L2 tends to produce blurry outputs (it minimises expected squared error, which encourages averaging over modes). λ=100 is the standard setting — strong enough to prevent G from ignoring the input content.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def unet_down(in_ch, out_ch, norm=True):
+    layers = [nn.Conv2d(in_ch, out_ch, 4, 2, 1, bias=not norm)]
+    if norm: layers.append(nn.InstanceNorm2d(out_ch))
+    layers.append(nn.LeakyReLU(0.2, True))
+    return nn.Sequential(*layers)
+
+def unet_up(in_ch, out_ch, dropout=False):
+    layers = [nn.ConvTranspose2d(in_ch, out_ch, 4, 2, 1, bias=False),
+              nn.InstanceNorm2d(out_ch), nn.ReLU(True)]
+    if dropout: layers.append(nn.Dropout(0.5))
+    return nn.Sequential(*layers)
+
+class Pix2PixGenerator(nn.Module):
+    '''U-Net generator with skip connections for Pix2Pix.'''
+    def __init__(self, in_ch=3, out_ch=3, ngf=32):
+        super().__init__()
+        self.e1 = unet_down(in_ch, ngf, norm=False)
+        self.e2 = unet_down(ngf,   ngf*2)
+        self.e3 = unet_down(ngf*2, ngf*4)
+        self.e4 = unet_down(ngf*4, ngf*8)
+        self.d1 = unet_up(ngf*8,   ngf*4, dropout=True)
+        self.d2 = unet_up(ngf*4*2, ngf*2)
+        self.d3 = unet_up(ngf*2*2, ngf)
+        self.d4 = nn.Sequential(
+            nn.ConvTranspose2d(ngf*2, out_ch, 4, 2, 1), nn.Tanh())
+
+    def forward(self, x):
+        e1=self.e1(x); e2=self.e2(e1); e3=self.e3(e2); e4=self.e4(e3)
+        d=self.d1(e4); d=self.d2(torch.cat([d,e3],1))
+        d=self.d3(torch.cat([d,e2],1))
+        return self.d4(torch.cat([d,e1],1))
+
+G=Pix2PixGenerator()
+print('Generator output:', G(torch.randn(1,3,64,64)).shape)
+</code></pre>
+<h2>PatchGAN Discriminator</h2>
+<p>Instead of classifying the entire image as real or fake, the PatchGAN discriminator classifies overlapping 70×70 patches. The output is a spatial map where each value is the real/fake score for the corresponding patch. This design has three advantages: (1) it focuses D's capacity on local texture and high-frequency details where GAN training is most useful; (2) it has fewer parameters than a full-image D; and (3) it can be applied to images of any resolution — just run the convolutional D across the full image.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def d_block(in_ch, out_ch, stride=2, norm=True):
+    layers = [nn.Conv2d(in_ch, out_ch, 4, stride, 1, bias=not norm)]
+    if norm: layers.append(nn.InstanceNorm2d(out_ch))
+    layers.append(nn.LeakyReLU(0.2, True))
+    return nn.Sequential(*layers)
+
+class PatchGANDiscriminator(nn.Module):
+    '''70x70 PatchGAN: each output pixel scores one overlapping patch.'''
+    def __init__(self, in_ch=6, ndf=32):
+        super().__init__()
+        # Input: concat(real_A, real_B or fake_B) -&gt; 6 channels
+        self.net = nn.Sequential(
+            d_block(in_ch, ndf,    norm=False),  # 64-&gt;32
+            d_block(ndf,   ndf*2),               # 32-&gt;16
+            d_block(ndf*2, ndf*4),               # 16-&gt;8
+            d_block(ndf*4, ndf*8, stride=1),     # 8-&gt;8
+            nn.Conv2d(ndf*8, 1, 4, 1, 1))        # patch logits
+
+    def forward(self, x, y):
+        return self.net(torch.cat([x, y], 1))   # condition on input
+
+D = PatchGANDiscriminator()
+x = torch.randn(2, 3, 64, 64)
+y = torch.randn(2, 3, 64, 64)
+out = D(x, y)
+print('PatchGAN output shape:', out.shape)  # spatial patch map
+</code></pre>
+<h2>Combined GAN and L1 Loss Training Step</h2>
+<p>Training alternates between updating D and G. D is updated to maximise log D(x,y) + log(1−D(x,G(x))). G is updated to minimise the adversarial loss log(1−D(x,G(x))) plus λ·L1(G(x),y). In practice, G minimises −log D(x,G(x)) (non-saturating variant) for stronger gradients early in training. The L1 coefficient λ=100 means the generator primarily optimises reconstruction fidelity, using the adversarial signal to sharpen textures that L1 would otherwise blur.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+def pix2pix_step(G, D, real_A, real_B, lam=100.0):
+    '''Compute G and D losses for one training step.'''
+    bce = nn.BCEWithLogitsLoss()
+    l1  = nn.L1Loss()
+    fake_B = G(real_A)
+    # -- Discriminator --
+    real_out = D(real_A, real_B)
+    fake_out = D(real_A, fake_B.detach())
+    loss_D   = 0.5 * (bce(real_out, torch.ones_like(real_out)) +
+                      bce(fake_out, torch.zeros_like(fake_out)))
+    # -- Generator --
+    fake_out_g  = D(real_A, fake_B)
+    loss_G_adv  = bce(fake_out_g, torch.ones_like(fake_out_g))
+    loss_G_l1   = l1(fake_B, real_B) * lam
+    loss_G      = loss_G_adv + loss_G_l1
+    return loss_D, loss_G, loss_G_adv.item(), loss_G_l1.item()
+
+G = Pix2PixGenerator(); D = PatchGANDiscriminator()
+rA = torch.randn(2, 3, 64, 64); rB = torch.randn(2, 3, 64, 64)
+ld, lg, adv, l1v = pix2pix_step(G, D, rA, rB)
+print('loss_D={:.3f}  loss_G_adv={:.3f}  loss_G_L1={:.3f}'.format(
+      ld.item(), adv, l1v))
+</code></pre>
+<h2>Skip Connections in the U-Net</h2>
+<p>The U-Net architecture uses encoder-decoder skip connections: activations from encoder layer i are concatenated to the corresponding decoder layer n−i. This preserves fine-grained spatial detail (textures, edges, precise geometry) that would otherwise be lost through the bottleneck. Without skip connections, the generator must re-synthesise all spatial structure from the compressed bottleneck representation — a harder task that results in blurrier outputs. Skip connections allow the decoder to focus on high-level style and content rather than reconstructing low-level structure from scratch.</p>
+<ul>
+<li>Skip from e1 to d4: preserves finest spatial detail (edges, textures)</li>
+<li>Skip from e2 to d3: preserves mid-scale structure</li>
+<li>Skip from e3 to d2: preserves coarse layout</li>
+<li>Bottleneck (e4): forces global context compression — the only path for holistic reasoning</li>
+<li>Dropout on decoder (d1): adds stochasticity, acts as regularisation during training</li>
+<li>Instance norm (not batch norm): per-image normalisation avoids cross-image contamination in paired training</li>
+</ul>
+<h2>Evaluation: PSNR and SSIM</h2>
+<p>Paired image translation enables pixel-level metrics against ground truth. PSNR (Peak Signal-to-Noise Ratio) measures MSE in dB: PSNR = 20·log₁₀(MAX) − 10·log₁₀(MSE). Higher is better; typical values for good translation: 25–35 dB. SSIM (Structural Similarity Index) measures luminance, contrast, and structure similarity in [−1,1]. Higher is better; SSIM &gt; 0.9 is considered high quality. Perceptual metrics (LPIPS) and FID are also used when ground truth pairs are available.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def psnr(pred, target, max_val=1.0):
+    '''Peak Signal-to-Noise Ratio in dB (higher is better).'''
+    mse = F.mse_loss(pred, target)
+    if mse == 0:
+        return float('inf')
+    return 20.0 * torch.log10(torch.tensor(max_val)) - 10.0 * torch.log10(mse)
+
+def ssim_1ch(pred, target, C1=0.01**2, C2=0.03**2):
+    '''Single-channel SSIM approximation (simplified).'''
+    mu_p, mu_t = pred.mean(), target.mean()
+    var_p = pred.var(); var_t = target.var()
+    cov   = ((pred - mu_p) * (target - mu_t)).mean()
+    num = (2*mu_p*mu_t + C1) * (2*cov + C2)
+    den = (mu_p**2 + mu_t**2 + C1) * (var_p + var_t + C2)
+    return (num / den).item()
+
+torch.manual_seed(0)
+G = Pix2PixGenerator()
+real_A = torch.randn(1, 3, 64, 64)
+real_B = torch.tanh(real_A + 0.3)  # simulate paired target
+with torch.no_grad():
+    fake_B = G(real_A)
+print('PSNR: {:.2f} dB'.format(psnr(fake_B, real_B).item()))
+print('SSIM: {:.4f}'.format(ssim_1ch(fake_B, real_B)))
+</code></pre>
+<blockquote>
+<p><strong>L1 Loss Blurs; GAN Sharpens</strong>: L1 loss alone produces blurry outputs because it minimises expected absolute error — averaging across ambiguous texture modes. The GAN loss sharpens the output by penalising blurriness as a tell-tale sign of fakeness. The key insight of Pix2Pix is that L1 handles global structure (shape, layout) while the adversarial loss handles local texture (sharpness, grain). Setting lambda too low lets GAN dominate and produces artefacts; too high and the output blurs toward the L1 minimum.</p>
+</blockquote>
+<h2>Applications and Limitations</h2>
+<p>Pix2Pix has been applied to edges→photos (using HED edge detector), architectural labels→facades, aerial maps→satellite imagery, day→night, BW→colour, and medical image modality translation (MRI→CT). The central limitation is the requirement for aligned paired data — collecting such pairs is expensive and sometimes impossible (e.g., photo↔painting). CycleGAN addresses unpaired settings. SPADE/GauGAN extends Pix2Pix with spatially-adaptive normalisation for semantic image synthesis with better quality on segmentation maps.</p>
+<h2>Pix2Pix vs Related Methods</h2>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Paired Data</th>
+<th>Generator</th>
+<th>Discriminator</th>
+<th>Key Loss</th>
+<th>Best Application</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Pix2Pix</td>
+<td>Required</td>
+<td>U-Net + skip</td>
+<td>PatchGAN 70×70</td>
+<td>GAN + L1</td>
+<td>Edges→photo, map→satellite</td>
+</tr>
+<tr>
+<td>CycleGAN</td>
+<td>Not required</td>
+<td>ResNet + IN</td>
+<td>PatchGAN</td>
+<td>GAN + cycle + identity</td>
+<td>Style transfer, domain adaptation</td>
+</tr>
+<tr>
+<td>SPADE / GauGAN</td>
+<td>Segmentation map</td>
+<td>SPADE ResNet</td>
+<td>Multi-scale PatchGAN</td>
+<td>GAN + feature match + VGG</td>
+<td>Semantic→photorealistic synthesis</td>
+</tr>
+<tr>
+<td>BicycleGAN</td>
+<td>Required</td>
+<td>U-Net</td>
+<td>PatchGAN</td>
+<td>GAN + L1 + KL</td>
+<td>Multi-modal diverse translation</td>
+</tr>
+</tbody>
+</table>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

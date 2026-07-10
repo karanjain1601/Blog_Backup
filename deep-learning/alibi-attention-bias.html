@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ALiBi — Attention with Linear Biases for Length Generalization | Notes Backup</title>
+  <meta name="description" content="How ALiBi (Press et al. 2022) replaces positional embeddings with per-head linear distance penalties on attention logits, enabling train-short-test-long generalisation used in BLOOM-176B and MPT." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>ALiBi — Attention with Linear Biases for Length Generalization</h1>
+      <ul class='note-meta'><li><strong>description:</strong> How ALiBi (Press et al. 2022) replaces positional embeddings with per-head linear distance penalties on attention logits, enabling train-short-test-long generalisation used in BLOOM-176B and MPT.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>ALiBi — Attention with Linear Biases for Length Generalization</h1>
+<p>ALiBi (Attention with Linear Biases), introduced by Press et al. (2022), takes a radically simple approach to positional encoding: <em>do not add any positional information to the token embeddings at all</em>. Instead, subtract a linear bias from the raw attention logits at every layer and every head. The bias penalises attention to distant tokens in proportion to their distance, giving each head a built-in recency preference — zero learned positional parameters, zero embedding lookup, and a formula that remains valid at any sequence length.</p>
+<h2>The ALiBi Mechanism</h2>
+<p>In standard scaled dot-product attention the logit for query position i attending to key position j is QᵢKⱼᵀ / √d_k. ALiBi modifies this to: score_alibi(i, j) = QᵢKⱼᵀ / √d_k − m·|i − j|, where m is a head-specific slope. The bias term depends only on the <em>relative</em> distance |i − j|, not on absolute position values. Crucially, this means the bias is valid at any absolute position — including positions 1025, 2048, or 8192 that were never seen during training on 1024-token sequences. No new embedding rows are needed for unseen positions; the distance formula extrapolates automatically.</p>
+<p>$$\text{score_alibi}(i,j) = \frac{Q_i K_j^{\top}}{\sqrt{d_k}} - m \cdot |i - j|$$</p>
+<h2>Geometric Slopes per Head</h2>
+<p>Each attention head uses a different slope m drawn from a geometric sequence. For h heads, the slopes are: m_k = 2^{−8k/h} for k = 1, …, h. This gives a sequence from 2^{−8/h} (shallowest, global head) down to 2^{−8} (steepest, local head) — the paper reverses the indexing so head 1 is steepest and the last head is shallowest. Head 1 sharply penalises distance; a token at distance 10 receives a bias of −10m₁ which is very negative. The last head's shallow slope means distant tokens still receive near-zero bias and can contribute meaningfully. This diversity lets the model capture both local syntactic cues and long-range semantic dependencies simultaneously across heads.</p>
+<ul>
+<li>Head 1 (steepest slope m = 2^{-8}): effectively a local attention window of a few tokens</li>
+<li>Head h (shallowest slope m = 2^{-8/h}): can attend globally with small distance penalty</li>
+<li>Slopes are fixed at initialisation — never updated by gradient descent</li>
+<li>Bias is a lower-triangular matrix combined with the causal mask at each layer</li>
+<li>The bias tensor is computed on-the-fly for each sequence length — no max-length cap</li>
+</ul>
+<h2>Code 1 — ALiBi Bias Computation</h2>
+<p>Computing the geometric slope sequence and building the full (n_heads × seq_len × seq_len) bias tensor. The implementation handles non-power-of-2 head counts by interpolating extra intermediate slopes.</p>
+<pre><code class="language-python">import torch
+import math
+
+
+def get_alibi_slopes(n_heads: int) -&gt; torch.Tensor:
+    &quot;&quot;&quot;Geometric sequence: {2^{-8/h}, 2^{-8*2/h}, ..., 2^{-8}} for h heads.&quot;&quot;&quot;
+    # Use largest power of 2 &lt;= n_heads as the base count
+    n = 2 ** math.floor(math.log2(n_heads))
+    m0 = 2 ** (-8 / n)                           # base step ratio
+    slopes = torch.tensor([m0 ** i for i in range(1, n + 1)], dtype=torch.float32)
+    if n &lt; n_heads:                               # non-power-of-2: interpolate extras
+        extra = torch.tensor(
+            [m0 ** (i / 2) for i in range(1, 2 * (n_heads - n) + 1, 2)],
+            dtype=torch.float32,
+        )
+        slopes = torch.cat([slopes, extra], dim=0)
+    return slopes  # shape (n_heads,)
+
+
+def compute_alibi_bias(n_heads: int, seq_len: int) -&gt; torch.Tensor:
+    &quot;&quot;&quot;Return ALiBi bias tensor of shape (n_heads, seq_len, seq_len).&quot;&quot;&quot;
+    slopes = get_alibi_slopes(n_heads)            # (H,)
+    pos    = torch.arange(seq_len, dtype=torch.float32)
+    dist   = (pos.unsqueeze(0) - pos.unsqueeze(1)).abs()   # |i-j| matrix (L, L)
+    # (H, 1, 1) * (1, L, L) =&gt; (H, L, L)
+    return -slopes.view(n_heads, 1, 1) * dist.unsqueeze(0)
+
+
+# Example: 8 heads, sequence length 16
+bias   = compute_alibi_bias(8, 16)
+slopes = get_alibi_slopes(8)
+print(&quot;Bias shape:&quot;, bias.shape)                  # (8, 16, 16)
+print(&quot;Slopes:&quot;, slopes.numpy().round(5))
+print(&quot;Head 0 bias at dist=8 (steepest):&quot;,  bias[0, 8, 0].item())
+print(&quot;Head 7 bias at dist=8 (shallowest):&quot;, bias[7, 8, 0].item())
+</code></pre>
+<h2>Code 2 — ALiBi Inside Multi-Head Attention</h2>
+<p>Integrating the ALiBi bias tensor into a full multi-head attention module. The bias is added to raw attention logits <em>before</em> softmax. No modification to Q, K, or V projections is needed — the token embeddings remain position-free.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+
+
+class ALiBiMultiHeadAttention(nn.Module):
+    &quot;&quot;&quot;Multi-head attention that uses ALiBi logit biases instead of positional embeddings.&quot;&quot;&quot;
+
+    def __init__(self, d_model: int, n_heads: int):
+        super().__init__()
+        assert d_model % n_heads == 0
+        self.n_heads = n_heads
+        self.d_k  = d_model // n_heads
+        self.qkv  = nn.Linear(d_model, 3 * d_model, bias=False)
+        self.proj = nn.Linear(d_model, d_model, bias=False)
+        slopes = self._make_slopes(n_heads)
+        self.register_buffer(&quot;slopes&quot;, slopes)   # fixed, never trained
+
+    @staticmethod
+    def _make_slopes(n: int) -&gt; torch.Tensor:
+        base = 2 ** (-8 / (2 ** math.floor(math.log2(n))))
+        return torch.tensor([base ** i for i in range(1, n + 1)], dtype=torch.float32)
+
+    def _alibi_bias(self, seq_len: int) -&gt; torch.Tensor:
+        pos  = torch.arange(seq_len, device=self.slopes.device, dtype=torch.float32)
+        dist = (pos.unsqueeze(0) - pos.unsqueeze(1)).abs()          # (L, L)
+        return -self.slopes.view(-1, 1, 1) * dist.unsqueeze(0)      # (H, L, L)
+
+    def forward(self, x: torch.Tensor, causal: bool = True) -&gt; torch.Tensor:
+        B, L, _ = x.shape
+        qkv = self.qkv(x).reshape(B, L, 3, self.n_heads, self.d_k).permute(2, 0, 3, 1, 4)
+        Q, K, V = qkv[0], qkv[1], qkv[2]
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
+        scores = scores + self._alibi_bias(L)    # &lt;-- ALiBi bias injected here
+        if causal:
+            mask = torch.triu(torch.ones(L, L, device=x.device), diagonal=1).bool()
+            scores = scores.masked_fill(mask, float(&quot;-inf&quot;))
+        out = torch.matmul(F.softmax(scores, dim=-1), V)
+        return self.proj(out.transpose(1, 2).reshape(B, L, -1))
+</code></pre>
+<blockquote>
+<p><strong>Recency Bias Is Built In</strong>: ALiBi's linear penalty creates a fixed recency advantage: the immediately preceding token (distance 1) receives a bias of −m, while a token at distance 100 receives −100m. This is a hardcoded inductive bias — the model cannot learn to attend uniformly at all distances. For retrieval-style tasks where a relevant token may be far away and needs high attention weight regardless of position, this monotonic decay is a meaningful limitation.</p>
+</blockquote>
+<h2>Train Short, Test Long — Extrapolation</h2>
+<p>The critical advantage of ALiBi over sinusoidal and learned positional embeddings is its behaviour at sequence lengths beyond the training window. Sinusoidal PE is theoretically unbounded but introduces a distribution shift at inference because the model rarely sees the longest-range sinusoidal patterns during training. Learned PE cannot generalise at all to positions beyond max_train_len. ALiBi's bias depends only on relative distance, so evaluating at length 2048 when trained on 1024 tokens is handled seamlessly: the maximum distance increases, but the formula is unchanged.</p>
+<pre><code class="language-python">import math
+
+# Approximate perplexity results from Press et al. (2022) Table 1
+# All models trained on sequences of length 1024 (WikiText-103)
+
+train_len = 1024
+test_lens  = [512, 1024, 2048, 4096, 8192]
+
+results = {
+    &quot;Sinusoidal PE&quot;: {512: 17.5, 1024: 17.8, 2048: 23.9, 4096: 38.4, 8192: float(&quot;inf&quot;)},
+    &quot;Learned PE&quot;:    {512: 17.3, 1024: 17.6, 2048: float(&quot;inf&quot;), 4096: float(&quot;inf&quot;), 8192: float(&quot;inf&quot;)},
+    &quot;ALiBi&quot;:         {512: 17.6, 1024: 17.9, 2048: 18.3, 4096: 19.0, 8192: 20.5},
+}
+
+print(f&quot;Perplexity at Various Lengths (trained on {train_len} tokens)&quot;)
+print(f&quot;{'Length':&lt;10}&quot;, end=&quot;&quot;)
+for name in results:
+    print(f&quot;{name:&lt;20}&quot;, end=&quot;&quot;)
+print()
+print(&quot;-&quot; * 70)
+
+for L in test_lens:
+    tag = &quot;  (train)&quot; if L == train_len else &quot;  OOD&quot; if L &gt; train_len else &quot;&quot;
+    print(f&quot;{L:&lt;10}&quot;, end=&quot;&quot;)
+    for name, ppl_map in results.items():
+        val = ppl_map.get(L, float(&quot;nan&quot;))
+        s   = &quot;inf&quot; if math.isinf(val) else f&quot;{val:.1f}&quot;
+        print(f&quot;{s:&lt;20}&quot;, end=&quot;&quot;)
+    print(tag)
+
+print()
+print(&quot;ALiBi degrades gracefully. Learned PE fails completely at OOD lengths.&quot;)
+print(&quot;Sinusoidal PE degrades sharply beyond 2x training length.&quot;)
+</code></pre>
+<h2>Code 4 — Per-Head Slope Visualization</h2>
+<p>Visualising how each head's slope controls the effective attention window size. A steep slope makes the model tightly locally focused; a shallow slope allows globally distributed attention over hundreds of tokens.</p>
+<pre><code class="language-python">import math
+import numpy as np
+import matplotlib.pyplot as plt
+
+
+def get_alibi_slopes(n_heads: int) -&gt; list:
+    n  = 2 ** math.floor(math.log2(n_heads))
+    m0 = 2 ** (-8 / n)
+    slopes = [m0 ** i for i in range(1, n + 1)]
+    if n &lt; n_heads:
+        slopes += [m0 ** (i / 2) for i in range(1, 2 * (n_heads - n) + 1, 2)]
+    return slopes
+
+
+n_heads   = 8
+max_dist  = 64
+slopes    = get_alibi_slopes(n_heads)
+distances = np.arange(max_dist)
+
+fig, axes = plt.subplots(2, 4, figsize=(14, 5), sharey=True)
+axes = axes.flatten()
+for h, (ax, m) in enumerate(zip(axes, slopes)):
+    bias = -m * distances
+    ax.plot(distances, bias, color=f&quot;C{h}&quot;, linewidth=2)
+    ax.set_title(f&quot;Head {h+1}  m={m:.5f}&quot;, fontsize=9)
+    ax.set_xlabel(&quot;|i - j| distance&quot;)
+    if h % 4 == 0:
+        ax.set_ylabel(&quot;logit bias&quot;)
+plt.suptitle(&quot;ALiBi Per-Head Linear Decay (8 heads)&quot;, fontsize=12, y=1.01)
+plt.tight_layout()
+plt.savefig(&quot;alibi_slopes.png&quot;, dpi=120, bbox_inches=&quot;tight&quot;)
+
+print(f&quot;{'Head':&lt;8}{'Slope m':&lt;15}{'bias at dist=10':&lt;20}{'Attention character'}&quot;)
+print(&quot;-&quot; * 58)
+chars = [&quot;Very local&quot;, &quot;Local&quot;, &quot;Local&quot;, &quot;Moderate&quot;,
+         &quot;Moderate&quot;, &quot;Semi-global&quot;, &quot;Semi-global&quot;, &quot;Global&quot;]
+for h, (m, c) in enumerate(zip(slopes, chars)):
+    print(f&quot;{h+1:&lt;8}{m:&lt;15.6f}{-m*10:&lt;20.4f}{c}&quot;)
+</code></pre>
+<h2>Comparison of Positional Encoding Methods</h2>
+<p>ALiBi occupies a unique niche: zero trainable parameters, no embedding lookup, and graceful extrapolation beyond the training length. The tradeoff is a hardcoded monotonic decay that cannot learn non-monotonic attention patterns. The table below compares five approaches across properties relevant to deployment.</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Train-short test-long</th>
+<th>Params</th>
+<th>Implementation</th>
+<th>Monotonic decay</th>
+<th>Used in</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Sinusoidal</td>
+<td>Poor — distribution shift</td>
+<td>0</td>
+<td>Low</td>
+<td>No</td>
+<td>Original Transformer, BART</td>
+</tr>
+<tr>
+<td>Learned Absolute</td>
+<td>None — hard OOD failure</td>
+<td>max_len × d_model</td>
+<td>Low</td>
+<td>No</td>
+<td>BERT, GPT-2, early GPT-3</td>
+</tr>
+<tr>
+<td>RoPE</td>
+<td>Good — rotary relative PE</td>
+<td>0</td>
+<td>Medium</td>
+<td>No (rotary)</td>
+<td>LLaMA 1/2/3, Mistral, Falcon</td>
+</tr>
+<tr>
+<td>ALiBi</td>
+<td>Very good — linear decay</td>
+<td>0</td>
+<td>Low</td>
+<td>Yes (hardcoded)</td>
+<td>BLOOM-176B, MPT-7B, OPT variants</td>
+</tr>
+<tr>
+<td>NoPE</td>
+<td>Moderate — implicit causal</td>
+<td>0</td>
+<td>Trivial (remove PE)</td>
+<td>N/A</td>
+<td>Research ablations, decoder studies</td>
+</tr>
+</tbody>
+</table>
+<p>ALiBi was adopted in BLOOM-176B (the first open multilingual 100B+ model), the Mosaic MPT family, and several OPT variants. Its zero-parameter overhead and minimal implementation changes made it attractive at scale. As of 2024, RoPE has largely displaced ALiBi in new large models due to RoPE's superior long-context performance when combined with positional interpolation techniques like YaRN or LongRoPE. ALiBi's primary limitation — hardcoded monotonic decay — becomes significant in retrieval-augmented tasks where the relevant passage is far from the current generation position and must receive high attention weight regardless of distance.</p>
+    </article>
+  </main>
+</body>
+</html>

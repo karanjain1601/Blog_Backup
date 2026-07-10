@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Maximum Likelihood Estimation (MLE) | Notes Backup</title>
+  <meta name="description" content="Likelihood and log-likelihood, MLE for Gaussian and Bernoulli, logistic regression via MLE, asymptotic properties (consistency, normality, efficiency), Fisher information, and the Cramér-Rao bound." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Maximum Likelihood Estimation (MLE)</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Likelihood and log-likelihood, MLE for Gaussian and Bernoulli, logistic regression via MLE, asymptotic properties (consistency, normality, efficiency), Fisher information, and the Cramér-Rao bound.</li><li><strong>topic:</strong> math-foundations</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Maximum Likelihood Estimation (MLE)</h1>
+<p>Maximum likelihood estimation is the workhorse of statistical inference and the default framework for training ML models. Training a neural network with cross-entropy loss is exactly MLE for a categorical model. Fitting a Gaussian to data is MLE. Linear regression with MSE loss is MLE under a Gaussian noise model. Understanding MLE rigorously — the likelihood function, why we work in log-space, closed-form vs gradient-based solutions, and the asymptotic properties that justify why MLE works — gives a unified theoretical foundation for all these methods.</p>
+<h2>Core Definition — Likelihood and Log-Likelihood</h2>
+<p>Given a parametric model p(x|θ) and observed data x₁, …, xₙ (iid), the likelihood is:</p>
+<p>L(θ; x₁,…,xₙ) = Πᵢ p(xᵢ|θ)</p>
+<p>The MLE is θ̂ = argmax_θ L(θ; x). Taking logs (monotone transformation, preserves argmax):</p>
+<p>ℓ(θ) = log L(θ) = Σᵢ log p(xᵢ|θ)</p>
+<p>Working with log-likelihood is preferred for two reasons:
+1. <strong>Numerical stability</strong>: products of many probabilities underflow to 0 for large n; sums of log-probabilities remain representable.
+2. <strong>Decomposability</strong>: the log-likelihood decomposes additively over data points, making optimisation, SGD, and mini-batching natural.</p>
+<p>For regular models (smoothly parametrised, identifiable), the MLE is found by solving the score equations: ∇_θ ℓ(θ) = 0. Sometimes closed-form solutions exist (Gaussian, exponential family); more often we use gradient-based optimisation.</p>
+<pre><code class="language-python">import numpy as np
+from scipy.optimize import minimize
+from scipy.stats import norm
+
+rng = np.random.default_rng(42)
+
+# MLE for Gaussian: closed-form vs gradient ascent
+n = 1000
+mu_true, sigma_true = 3.5, 1.2
+X = rng.normal(mu_true, sigma_true, n)
+
+# Closed-form MLE
+mu_hat     = np.mean(X)
+sigma_hat  = np.std(X, ddof=0)   # MLE uses n (biased)
+sigma_unb  = np.std(X, ddof=1)   # unbiased uses n-1
+
+print(&quot;=== Gaussian MLE (n=1000) ===&quot;)
+print(f&quot;True:  mu={mu_true}, sigma={sigma_true}&quot;)
+print(f&quot;MLE:   mu={mu_hat:.4f}, sigma={sigma_hat:.4f}  (biased)&quot;)
+print(f&quot;Unbiased: sigma={sigma_unb:.4f}  (Bessel's correction)&quot;)
+
+# Log-likelihood function
+def neg_log_likelihood(params, X):
+    mu, log_sigma = params
+    sigma = np.exp(log_sigma)   # reparameterise to ensure sigma &gt; 0
+    return -np.sum(norm.logpdf(X, mu, sigma))
+
+# Gradient-based MLE (should match closed-form)
+result = minimize(neg_log_likelihood, x0=[0.0, 0.0], args=(X,), method='L-BFGS-B')
+mu_opt, sigma_opt = result.x[0], np.exp(result.x[1])
+print(f&quot;Gradient ascent: mu={mu_opt:.4f}, sigma={sigma_opt:.4f}&quot;)
+
+# Log-likelihood at MLE vs other values
+ell_mle   = -neg_log_likelihood([mu_hat, np.log(sigma_hat)], X)
+ell_wrong = -neg_log_likelihood([mu_hat + 0.5, np.log(sigma_hat)], X)
+print(f&quot;\nLog-likelihood at MLE:       {ell_mle:.2f}&quot;)
+print(f&quot;Log-likelihood at mu+0.5:    {ell_wrong:.2f}  (lower, as expected)&quot;)
+
+# MLE for Bernoulli: p_hat = k/n (proportion of successes)
+k, n_bern = 37, 100
+p_hat = k / n_bern
+print(f&quot;\n=== Bernoulli MLE ===&quot;)
+print(f&quot;Observed: {k}/{n_bern} successes =&gt; p_hat = {p_hat:.4f}&quot;)
+# Log-likelihood: k*log(p) + (n-k)*log(1-p)
+p_grid = np.linspace(0.01, 0.99, 1000)
+ll = k * np.log(p_grid) + (n_bern - k) * np.log(1 - p_grid)
+print(f&quot;Max LL at p={p_grid[np.argmax(ll)]:.4f}&quot;)
+</code></pre>
+<h2>MLE for Logistic Regression</h2>
+<p>For binary classification with label y ∈ {0,1} and features x, logistic regression assumes:</p>
+<p>p(y=1|x, w) = σ(wᵀx) = 1/(1 + exp(−wᵀx))</p>
+<p>The log-likelihood for n iid observations is:</p>
+<p>ℓ(w) = Σᵢ [yᵢ log σ(wᵀxᵢ) + (1−yᵢ) log(1−σ(wᵀxᵢ))]
+     = Σᵢ [yᵢ wᵀxᵢ − log(1 + exp(wᵀxᵢ))]</p>
+<p>This is concave in w (the Hessian is −X^T D X where D is diagonal with positive entries), so gradient ascent or Newton-Raphson converges to the global maximum. The gradient is:</p>
+<p>∇_w ℓ(w) = Σᵢ (yᵢ − σ(wᵀxᵢ)) xᵢ = X^T (y − ŷ)</p>
+<p>Newton-Raphson update: w_{t+1} = w_t − H⁻¹ ∇ℓ where H = −X^T D X (IRLS: iteratively reweighted least squares).</p>
+<pre><code class="language-python">import numpy as np
+from scipy.special import expit  # numerically stable sigmoid
+
+rng = np.random.default_rng(42)
+
+# Generate binary classification data
+n, d = 500, 3
+X = rng.standard_normal((n, d))
+X = np.hstack([np.ones((n,1)), X])   # add intercept
+w_true = np.array([0.5, 1.2, -0.8, 0.3])
+y = (rng.uniform(size=n) &lt; expit(X @ w_true)).astype(float)
+
+def log_likelihood(w, X, y):
+    p = expit(X @ w)
+    return np.sum(y * np.log(p + 1e-15) + (1-y) * np.log(1-p + 1e-15))
+
+def gradient(w, X, y):
+    return X.T @ (y - expit(X @ w))
+
+def hessian(w, X):
+    p = expit(X @ w)
+    D = np.diag(p * (1 - p))   # weights
+    return -X.T @ D @ X
+
+# Newton-Raphson (IRLS)
+print(&quot;=== Logistic Regression: Newton-Raphson ===&quot;)
+w = np.zeros(d + 1)
+for it in range(10):
+    g = gradient(w, X, y)
+    H = hessian(w, X)
+    w = w - np.linalg.solve(H, g)   # w = w - H^{-1} g
+    ll = log_likelihood(w, X, y)
+    grad_norm = np.linalg.norm(g)
+    print(f&quot;  iter {it+1:2d}: ll={ll:.4f}  ||grad||={grad_norm:.4e}&quot;)
+
+print(f&quot;\nTrue w: {w_true}&quot;)
+print(f&quot;MLE  w: {np.round(w, 4)}&quot;)
+
+# Gradient ascent comparison
+print(&quot;\n=== Gradient Ascent (lr=0.1) ===&quot;)
+w_gd = np.zeros(d + 1)
+for it in range(100):
+    w_gd += 0.1 * gradient(w_gd, X, y)
+print(f&quot;GD w (100 steps): {np.round(w_gd, 4)}&quot;)
+print(f&quot;Newton converges in ~5 steps; GD needs many more.&quot;)
+</code></pre>
+<h2>Fisher Information and Cramér-Rao Bound</h2>
+<p>The Fisher information matrix measures how much information the data carries about θ:</p>
+<p>I(θ) = E_θ[(∇_θ log p(X|θ))(∇_θ log p(X|θ))^T] = −E_θ[∇²_θ log p(X|θ)]</p>
+<p>For n iid observations: Iₙ(θ) = n I₁(θ).</p>
+<p>The Cramér-Rao lower bound (CRLB) states that for any unbiased estimator θ̂ of θ:</p>
+<p>Var(θ̂) ≥ I(θ)⁻¹</p>
+<p>The MLE achieves this bound asymptotically (it is asymptotically efficient). Fisher information also determines the geometry used by natural gradient descent: the natural gradient ∇̃ℓ = I(θ)⁻¹ ∇ℓ follows the steepest ascent in the space of probability distributions (Fisher-Rao metric), not Euclidean parameter space.</p>
+<h2>Asymptotic Properties of MLE</h2>
+<p>Under regularity conditions, the MLE has three key asymptotic properties:</p>
+<ol>
+<li>
+<p><strong>Consistency</strong>: θ̂_n → θ* as n → ∞ (in probability). The MLE converges to the true parameter.</p>
+</li>
+<li>
+<p><strong>Asymptotic normality</strong>: √n (θ̂_n − θ<em>) → N(0, I(θ</em>)⁻¹). The MLE is approximately Gaussian around the true parameter, with variance shrinking as 1/n.</p>
+</li>
+<li>
+<p><strong>Asymptotic efficiency</strong>: the MLE achieves the Cramér-Rao lower bound — no other consistent estimator has smaller asymptotic variance.</p>
+</li>
+<li>
+<p><strong>Invariance</strong>: if θ̂ is the MLE of θ, then g(θ̂) is the MLE of g(θ) for any function g. This means MLE of σ² is (σ̂)², and MLE of log σ is log σ̂.</p>
+</li>
+</ol>
+<p>These properties justify using MLE as the default estimator: it is consistent, as efficient as possible, and its uncertainty can be quantified via the Fisher information.</p>
+<pre><code class="language-python">import numpy as np
+from scipy.stats import norm
+
+rng = np.random.default_rng(42)
+
+# Demonstrate consistency: MLE converges to true theta as n grows
+mu_true, sigma_true = 2.0, 1.5
+print(&quot;=== MLE Consistency for Gaussian mu ===&quot;)
+print(f&quot;True mu = {mu_true}&quot;)
+for n in [10, 100, 1000, 10000, 100000]:
+    X = rng.normal(mu_true, sigma_true, n)
+    mu_hat = np.mean(X)
+    se = sigma_true / np.sqrt(n)
+    print(f&quot;  n={n:&gt;7,}: mu_hat={mu_hat:.4f}  SE={se:.4f}  error={abs(mu_hat-mu_true):.4f}&quot;)
+
+# Fisher information for Gaussian: I(mu) = 1/sigma^2
+I_mu = 1 / sigma_true**2
+print(f&quot;\nFisher information I(mu) = 1/sigma^2 = {I_mu:.4f}&quot;)
+print(f&quot;Cramer-Rao bound on Var(mu_hat): &gt;= 1/(n*I) = sigma^2/n&quot;)
+print(f&quot;MLE achieves: Var(sample mean) = sigma^2/n = {sigma_true**2/1000:.6f} (n=1000)&quot;)
+
+# Asymptotic normality: sqrt(n)(mu_hat - mu_true) -&gt; N(0, 1/I)
+print(&quot;\n=== Asymptotic Normality Check (n=100, 5000 reps) ===&quot;)
+n = 100; n_reps = 5000
+mu_hats = [np.mean(rng.normal(mu_true, sigma_true, n)) for _ in range(n_reps)]
+scaled = np.sqrt(n) * (np.array(mu_hats) - mu_true)   # should be ~ N(0, sigma^2)
+print(f&quot;Empirical std of sqrt(n)*(mu_hat - mu): {np.std(scaled):.4f}&quot;)
+print(f&quot;Theoretical (sigma):                    {sigma_true:.4f}&quot;)
+
+# MLE invariance: MLE of sigma^2 is (sigma_hat)^2
+X_sample = rng.normal(mu_true, sigma_true, 1000)
+sigma_hat = np.std(X_sample, ddof=0)
+print(f&quot;\nMLE invariance: MLE of sigma^2 = (sigma_hat)^2 = {sigma_hat**2:.4f}&quot;)
+print(f&quot;Direct MLE of sigma^2 = {np.var(X_sample, ddof=0):.4f}  (same)&quot;)
+</code></pre>
+<h2>ML and AI Connections</h2>
+<p>MLE unifies the training objectives of nearly all discriminative models in ML:</p>
+<ul>
+<li><strong>Cross-entropy loss</strong> = negative log-likelihood of a categorical model: minimise −Σᵢ log p(yᵢ|xᵢ, θ)</li>
+<li><strong>MSE loss</strong> = negative log-likelihood under a Gaussian noise model: p(y|x,θ) = N(y; f(x,θ), σ²)</li>
+<li><strong>Binary cross-entropy</strong> = negative log-likelihood of a Bernoulli model: p(y|x,θ) = σ(f(x,θ))^y (1−σ(f(x,θ)))^{1-y}</li>
+<li><strong>Contrastive loss / InfoNCE</strong> = MLE for noise-contrastive estimation, learning representations by classifying real from noise samples</li>
+</ul>
+<p>Fisher information also drives natural gradient methods (NGD, KFAC, Shampoo) which rescale gradients by the inverse Fisher matrix, taking steps that are equidistant in probability space rather than parameter space — potentially much faster convergence for ill-conditioned problems.</p>
+<h2>Pitfalls</h2>
+<p>Common MLE pitfalls:</p>
+<ol>
+<li>
+<p><strong>Overfitting for small n</strong>: MLE is asymptotically efficient but can severely overfit for small n. A Bernoulli model trained on 3 heads out of 3 flips gives p̂ = 1.0 — predicting heads with certainty. This is why MAP estimation (adding a prior) is preferred for small datasets.</p>
+</li>
+<li>
+<p><strong>Non-identifiability</strong>: if multiple θ values give the same likelihood, the MLE is not unique. Example: mixture models with permutable component labels. Regularisation or constraints break the symmetry.</p>
+</li>
+<li>
+<p><strong>Numerical overflow in likelihood</strong>: always work with log-likelihoods, never raw likelihoods. Πᵢ p(xᵢ|θ) underflows to 0 for n as small as 100 for typical ML models.</p>
+</li>
+<li>
+<p><strong>Confusing MLE with MMSE</strong>: MLE maximises p(D|θ) not E[θ|D]. For asymmetric posteriors or small n, the MLE can be far from the posterior mean.</p>
+</li>
+</ol>
+<blockquote>
+<p><strong>WARNING: MLE Requires i.i.d. Data</strong></p>
+<p>Standard MLE theory assumes data points are independent and identically distributed. In practice, data often violates this: time series have temporal correlation, hierarchical data has cluster structure, and fine-tuning data may have domain shift. Ignoring dependence gives asymptotically wrong standard errors and may bias the MLE itself. Use robust standard errors, mixed-effects models, or separate likelihoods for correlated data.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Loss Function</th>
+<th>MLE Interpretation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Gaussian regression</td>
+<td>MSE = (y-ŷ)²</td>
+<td>MLE under p(y</td>
+</tr>
+<tr>
+<td>Logistic regression</td>
+<td>Binary cross-entropy</td>
+<td>MLE under p(y</td>
+</tr>
+<tr>
+<td>Softmax classifier</td>
+<td>Cross-entropy</td>
+<td>MLE under p(y</td>
+</tr>
+<tr>
+<td>Language model</td>
+<td>Cross-entropy per token</td>
+<td>MLE under p(xₜ</td>
+</tr>
+<tr>
+<td>VAE encoder</td>
+<td>ELBO</td>
+<td>Variational MLE for marginal log p(x)</td>
+</tr>
+<tr>
+<td>GAN discriminator</td>
+<td>Binary cross-entropy</td>
+<td>Noise-contrastive MLE</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>Key Takeaways</h2>
+<ul>
+<li>MLE finds θ̂ = argmax_θ Σᵢ log p(xᵢ|θ) — always work with log-likelihood for numerical stability and additive decomposability.</li>
+<li>Closed-form MLE exists for Gaussian (sample mean and biased variance), Bernoulli (sample proportion), and exponential family distributions generally.</li>
+<li>Logistic regression MLE is concave (globally optimal), found efficiently via Newton-Raphson (5-10 iterations) or gradient ascent.</li>
+<li>Fisher information I(θ) = E[(∇ log p)²] measures data informativeness; the Cramér-Rao bound Var(θ̂) ≥ 1/I(θ) lower-bounds any unbiased estimator's variance.</li>
+<li>MLE is asymptotically consistent, normally distributed, and efficient — but can badly overfit for small n; use MAP estimation (regularisation) in that regime.</li>
+<li>Training with cross-entropy loss, MSE loss, or binary cross-entropy is exactly MLE under Categorical, Gaussian, and Bernoulli models respectively.</li>
+<li>Natural gradient descent uses the Fisher information matrix to rescale gradients, stepping in probability space rather than parameter space for faster convergence on ill-conditioned problems.</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

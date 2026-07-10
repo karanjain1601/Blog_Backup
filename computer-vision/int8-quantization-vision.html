@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>INT8 Quantization for Vision Models: PTQ and QAT | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>INT8 Quantization for Vision Models: PTQ and QAT</h1>
+      
+      <h1>INT8 Quantization for Vision Models: PTQ and QAT</h1>
+<p>INT8 quantization maps 32-bit floating-point weights and activations to 8-bit integers, reducing memory footprint by 4× and enabling hardware-accelerated integer arithmetic on CPUs, GPUs, and mobile NPUs. For vision models, INT8 inference typically runs 2–4× faster than FP32 with less than 1% Top-1 accuracy loss.</p>
+<p>Two main approaches exist: Post-Training Quantization converts a trained FP32 model to INT8 with a short calibration step, while Quantization-Aware Training simulates quantisation during training. PTQ is faster to apply; QAT recovers more accuracy for aggressive compression ratios below 8 bits or on small datasets.</p>
+<p>Symmetric quantization maps the range [-max, max] to [-127, 127] with zero_point=0, simplifying multiply-accumulate hardware. Asymmetric quantization maps [x_min, x_max] to [0, 255] with an integer zero-point, which better accommodates one-sided distributions such as ReLU output activations that are always non-negative.</p>
+<pre><code class="language-python">scale = (x_max - x_min) / 255\nzero_point = round(-x_min / scale)\nx_int8 = clamp(round(x / scale + zero_point), 0, 255)\nx_dequant = scale * (x_int8 - zero_point)
+</code></pre>
+<p>The scale factor bridges float and integer domains: a large scale means coarse quantization with significant rounding error; a small scale reduces rounding error but may clip outliers. Calibration with a representative dataset — 100 to 1000 images — determines optimal scale and zero-point values for each tensor.</p>
+<p>PTQ converts a pre-trained FP32 model to INT8 in three steps: configure the quantization scheme, run calibration to collect activation statistics, and convert the model to use integer arithmetic. No retraining is required, making PTQ the fastest path to a quantized model suitable for initial latency benchmarking.</p>
+<pre><code class="language-python">model.eval()\nmodel.qconfig = get_default_qconfig('x86')\nprepare(model, inplace=True)\ncalibrate(model, calib_loader)\nconvert(model, inplace=True)
+</code></pre>
+<p>Calibration collects activation statistics across a representative dataset — typically 100 to 1000 images. Min-max calibration is simple but sensitive to outliers; percentile clipping at the 99.9th percentile and entropy-based KL calibration yield better accuracy on models with heavy-tailed activation distributions.</p>
+<blockquote>
+<p><strong>info</strong>: Activations are harder to quantize than weights — they vary per input, making a fixed scale suboptimal. Per-channel quantization for weights (different scale per output channel) with dynamic calibration for activations gives the best INT8 accuracy with minimal effort.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Bits</th>
+<th>Top-1 drop</th>
+<th>Speedup</th>
+<th>Memory reduction</th>
+<th>Calibration needed</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>FP32 baseline</td>
+<td>32</td>
+<td>0.0%</td>
+<td>1.0×</td>
+<td>1.0×</td>
+<td>No</td>
+</tr>
+<tr>
+<td>FP16</td>
+<td>16</td>
+<td>&lt;0.1%</td>
+<td>1.5×</td>
+<td>0.5×</td>
+<td>No</td>
+</tr>
+<tr>
+<td>INT8 PTQ</td>
+<td>8</td>
+<td>0.3%</td>
+<td>2.8×</td>
+<td>0.25×</td>
+<td>Yes (small)</td>
+</tr>
+<tr>
+<td>INT8 QAT</td>
+<td>8</td>
+<td>0.1%</td>
+<td>2.8×</td>
+<td>0.25×</td>
+<td>Yes (full)</td>
+</tr>
+<tr>
+<td>INT4 PTQ</td>
+<td>4</td>
+<td>2.5%</td>
+<td>4.0×</td>
+<td>0.125×</td>
+<td>Yes (small)</td>
+</tr>
+<tr>
+<td>Mixed precision</td>
+<td>8/16</td>
+<td>0.15%</td>
+<td>2.2×</td>
+<td>0.35×</td>
+<td>Yes (small)</td>
+</tr>
+</tbody>
+</table>
+<p>QAT inserts fake-quantize nodes into the computational graph that round values to the nearest representable integer during the forward pass and use a straight-through estimator for gradients. This allows the model's weight distributions to adapt to the quantization grid across full training epochs, closing the PTQ accuracy gap.</p>
+<pre><code class="language-python">model.train()\nmodel.qconfig = get_default_qat_qconfig('x86')\nprepare_qat(model, inplace=True)\nfor epoch in range(qat_epochs):\n    train_epoch(model, loader, optimizer)\nconvert(model, inplace=True)
+</code></pre>
+<p>QAT typically requires 10–20% of the original training schedule with a reduced learning rate (10× lower) and converges faster when initialised from the PTQ model. Freeze batch normalisation statistics after the first few epochs to prevent activation drift during fake-quantize updates and stabilise the training curve.</p>
+<p>Per-channel quantization assigns a separate scale to each output channel of a weight tensor, dramatically reducing rounding error on layers with high inter-channel weight variance. This is critical for depthwise-separable convolutions in MobileNets, where channel weight ranges vary by up to 10× across individual filters.</p>
+<pre><code class="language-python">for layer in model.layers:\n    quantize_layer(model, layer)\n    acc = evaluate(model, val_loader)\n    sensitivity[layer.name] = baseline_acc - acc\n    restore_fp32(model, layer)\n\nsensitive = sorted(sensitivity, key=lambda k: -sensitivity[k])[:top_k]\nkeep_fp16(model, sensitive)
+</code></pre>
+<p>Mixed-precision quantization keeps accuracy-sensitive layers in FP16 or FP32 while quantizing the remaining 80–90% of parameters to INT8. Sensitivity analysis — measuring accuracy drop when each layer is quantized in isolation — identifies which layers to protect, typically the first convolution and the final classifier head.</p>
+<p>PTQ is the right first step: apply calibrated INT8 with per-channel weight quantization and test latency on the target device. If the accuracy drop exceeds 1%, switch to QAT with 10–20% of original training epochs. Avoid INT4 without QAT — quantization error compounds across layers and typically exceeds 3% Top-1 loss.</p>
+<p>Profile both theoretical FLOPs and actual device latency. INT8 gives 2–3× speedup on x86 CPUs via VNNI instructions and 3–4× on ARM via NEON int8 kernels. For Transformer-based vision models such as ViT and Swin Transformer, attention softmax and LayerNorm operations are quantization-sensitive and should remain in FP16.</p>
+    </article>
+  </main>
+</body>
+</html>

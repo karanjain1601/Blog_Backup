@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ViT Fine-Tuning Recipe: Best Practices for Downstream Tasks | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>ViT Fine-Tuning Recipe: Best Practices for Downstream Tasks</h1>
+      
+      <h1>ViT Fine-Tuning Recipe: Best Practices for Downstream Tasks</h1>
+<h2>Overview</h2>
+<h2>Pre-Training vs Fine-Tuning Gap</h2>
+<h2>Learning Rate and Schedule</h2>
+<pre><code class="language-python">from transformers import get_cosine_schedule_with_warmup
+
+def build_schedule(optimizer, num_warmup_epochs, total_epochs, steps_per_epoch):
+    warmup_steps = num_warmup_epochs * steps_per_epoch
+    total_steps = total_epochs * steps_per_epoch
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=total_steps,
+    )
+    return scheduler
+
+# Call scheduler.step() after each optimizer.step()
+# Linear warmup for 5 epochs, then cosine decay to near-zero
+</code></pre>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from torchvision.transforms.v2 import MixUp
+
+mixup = MixUp(alpha=0.2, num_classes=NUM_CLASSES)
+criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
+
+def train_step(model, optimizer, x, y):
+    x, y = mixup(x, y)        # y becomes soft labels
+    logits = model(x)
+    loss = criterion(logits, y)
+    optimizer.zero_grad()
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    optimizer.step()
+    return loss.item()
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Recipe Component</th>
+<th>Recommended Value</th>
+<th>Ablation Effect</th>
+<th>Note</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Base LR</td>
+<td>1e-4 to 3e-4</td>
+<td>+1.5% vs 1e-3</td>
+<td>AdamW optimizer</td>
+</tr>
+<tr>
+<td>LR decay (alpha)</td>
+<td>0.75 per layer</td>
+<td>+0.8% vs uniform</td>
+<td>Layer-wise LLRD</td>
+</tr>
+<tr>
+<td>Warmup</td>
+<td>5 epochs</td>
+<td>+0.4% vs no warmup</td>
+<td>Linear ramp</td>
+</tr>
+<tr>
+<td>Weight decay</td>
+<td>0.05</td>
+<td>+0.3% vs 0.0</td>
+<td>All non-bias params</td>
+</tr>
+<tr>
+<td>Batch size</td>
+<td>512-1024</td>
+<td>Minimal if LR scaled</td>
+<td>Scale LR linearly</td>
+</tr>
+<tr>
+<td>Label smoothing</td>
+<td>0.1</td>
+<td>+0.2% vs hard labels</td>
+<td>CrossEntropyLoss arg</td>
+</tr>
+</tbody>
+</table>
+<h2>Layer-Wise LR Decay</h2>
+<blockquote>
+<p><strong>warning</strong>: Fine-tuning ViT-L with a uniform LR for all layers often degrades early-layer features trained during pre-training. Use layer-wise decay (alpha=0.75) to preserve learned representations while adapting the head.</p>
+</blockquote>
+<pre><code class="language-python">def get_layer_decay_params(model, base_lr, decay=0.75):
+    param_groups = []
+    num_layers = model.config.num_hidden_layers
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if 'embeddings' in name or 'patch_embed' in name:
+            layer_idx = 0
+        elif 'layer' in name or 'block' in name:
+            layer_idx = int(name.split('.')[2]) + 1
+        else:
+            layer_idx = num_layers + 1  # classification head
+        lr = base_lr * (decay ** (num_layers + 1 - layer_idx))
+        param_groups.append({'params': [param], 'lr': lr})
+    return param_groups
+</code></pre>
+<h2>Resolution Change and Patch Adaptation</h2>
+<pre><code class="language-python">import torch, torch.nn.functional as F
+
+def resize_pos_embed(model, new_h, new_w, patch_size=16):
+    old = model.pos_embed          # (1, N+1, D)
+    cls_tok = old[:, :1, :]
+    patches = old[:, 1:, :]
+    gs_old = int(patches.shape[1] ** 0.5)
+    patches = patches.reshape(1, gs_old, gs_old, -1).permute(0, 3, 1, 2)
+    nh, nw = new_h // patch_size, new_w // patch_size
+    patches = F.interpolate(patches, (nh, nw), mode='bicubic', align_corners=False)
+    patches = patches.permute(0, 2, 3, 1).reshape(1, nh * nw, old.shape[-1])
+    new_embed = torch.cat([cls_tok, patches], dim=1)
+    model.pos_embed = torch.nn.Parameter(new_embed)
+</code></pre>
+<h2>Key Takeaways</h2>
+    </article>
+  </main>
+</body>
+</html>

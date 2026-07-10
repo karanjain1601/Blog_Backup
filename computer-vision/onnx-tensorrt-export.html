@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ONNX and TensorRT Export: Deploying Vision Models at Inference Speed | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>ONNX and TensorRT Export: Deploying Vision Models at Inference Speed</h1>
+      
+      <h1>ONNX and TensorRT Export: Deploying Vision Models at Inference Speed</h1>
+<h2>Overview</h2>
+<p>Deploying vision models in production requires moving beyond PyTorch eager mode into optimized runtimes. ONNX provides a portable intermediate representation, while TensorRT compiles that representation into hardware-fused GPU kernels. Together they form a two-stage pipeline: export once to ONNX, then compile a platform-specific TensorRT engine for each target GPU.</p>
+<p>This note covers the full export and compilation pipeline: ONNX export with dynamic axes, TensorRT engine building with FP16 and INT8 precision modes, INT8 calibration workflows, and practical latency profiling techniques to verify that each optimization delivers measurable gains before it is promoted to production serving.</p>
+<h2>ONNX Export from PyTorch</h2>
+<p>torch.onnx.export traces the model with a dummy input and records every tensor operation into the ONNX graph. Setting opset_version=17 ensures access to the latest standardized operators. Dynamic axes let the exported graph accept variable batch sizes at runtime without re-exporting, which is critical for serving workloads with unpredictable concurrency.</p>
+<pre><code class="language-python">import torch
+
+model.eval()
+dummy_input = torch.randn(1, 3, 224, 224).cuda()
+torch.onnx.export(
+    model,
+    dummy_input,
+    &quot;model.onnx&quot;,
+    opset_version=17,
+    input_names=[&quot;image&quot;],
+    output_names=[&quot;logits&quot;],
+    dynamic_axes={&quot;image&quot;: {0: &quot;batch&quot;}},
+    do_constant_folding=True,
+)
+</code></pre>
+<p>After export, validate the graph with onnx.checker.check_model and run a sanity check using onnxruntime to confirm outputs match PyTorch within floating-point tolerance. Common failure modes include custom operators not mapped to ONNX primitives and control flow branches that cannot be statically traced during export.</p>
+<h2>TensorRT Engine Building</h2>
+<p>TensorRT's builder API parses the ONNX graph and applies layer fusion, kernel autotuning, and precision lowering. The EXPLICIT_BATCH flag is required for all modern networks — it exposes the batch dimension to the optimizer, enabling further fusion across batch-level operations. Setting max_workspace_size controls scratch memory available during autotuning.</p>
+<pre><code class="language-python">import tensorrt as trt
+logger = trt.Logger(trt.Logger.WARNING)
+builder = trt.Builder(logger)
+network = builder.create_network(
+    1 &lt;&lt; int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
+)
+parser = trt.OnnxParser(network, logger)
+parser.parse_from_file(&quot;model.onnx&quot;)
+config = builder.create_builder_config()
+config.max_workspace_size = 1 &lt;&lt; 30  # 1 GB
+engine = builder.build_engine(network, config)
+</code></pre>
+<p>Serialize the built engine with engine.serialize() and save it as a .plan file. Deserializing at serving time costs only milliseconds compared with the minutes-long build step. Always store the engine alongside the source ONNX file and rebuild only when model weights, architecture, or target GPU generation changes.</p>
+<h2>INT8 Calibration for TensorRT</h2>
+<p>INT8 quantization halves memory bandwidth and enables faster integer arithmetic units, but requires a calibration step to determine the optimal per-tensor quantization scale. The calibrator runs a representative sample of real data through the FP32 network and records activation histograms, which TensorRT uses to minimize quantization error across all layers.</p>
+<pre><code class="language-python">config = builder.create_builder_config()
+config.set_flag(trt.BuilderFlag.FP16)
+config.set_flag(trt.BuilderFlag.INT8)
+config.int8_calibrator = MyCalibrator(
+    calib_loader,
+    cache_file=&quot;calib.cache&quot;
+)
+config.max_workspace_size = 1 &lt;&lt; 30
+engine = builder.build_engine(network, config)
+</code></pre>
+<p>The calibration cache stores computed scales so subsequent builds skip the data-pass entirely. Always validate INT8 accuracy against your full evaluation set after calibration. Layers sensitive to quantization error can be forced to run in FP16 by marking them individually: network.get_layer(i).precision = trt.DataType.HALF.</p>
+<h2>Profiling and Debugging</h2>
+<p>Profiling TensorRT inference requires CUDA-aware timing that synchronizes the GPU before reading the clock. Python time.time() measures wall time including scheduling jitter, CUDA kernel submission latency, and Python GIL contention — none of which reflects actual kernel execution. Use CUDA events or nsys profile for accurate per-layer attribution.</p>
+<pre><code class="language-python">import numpy as np
+
+times = []
+with torch.cuda.profiler.profile():
+    for _ in range(100):
+        output = trt_infer(engine, input_data)
+        torch.cuda.synchronize()
+        times.append(measure_event_time())
+
+p50 = np.percentile(times, 50)
+p99 = np.percentile(times, 99)
+print(f&quot;p50={p50:.2f}ms  p99={p99:.2f}ms&quot;)
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>Format</th>
+<th>Precision</th>
+<th>Latency (ms, A100)</th>
+<th>Memory (GB)</th>
+<th>Portability</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>PyTorch FP32</td>
+<td>FP32</td>
+<td>8.2</td>
+<td>2.1</td>
+<td>High (any PyTorch env)</td>
+</tr>
+<tr>
+<td>TorchScript FP32</td>
+<td>FP32</td>
+<td>7.8</td>
+<td>2.0</td>
+<td>High (no Python needed)</td>
+</tr>
+<tr>
+<td>ONNX FP32</td>
+<td>FP32</td>
+<td>6.5</td>
+<td>1.9</td>
+<td>High (multi-runtime)</td>
+</tr>
+<tr>
+<td>TensorRT FP16</td>
+<td>FP16</td>
+<td>3.1</td>
+<td>1.1</td>
+<td>Low (GPU-specific)</td>
+</tr>
+<tr>
+<td>TensorRT INT8</td>
+<td>INT8</td>
+<td>1.8</td>
+<td>0.6</td>
+<td>Low (GPU-specific)</td>
+</tr>
+</tbody>
+</table>
+<p>For production monitoring, instrument your serving container with histogram metrics — p50, p95, and p99 — rather than averages. A 5% tail at p99 can represent thousands of SLA violations per hour in high-QPS deployments. Correlate latency spikes with GPU utilization, memory bandwidth saturation, and PCIe transfer overhead.</p>
+<h2>Key Takeaways</h2>
+<blockquote>
+<p><strong>warning</strong>: TensorRT engines are hardware-specific — an engine built on an A100 will not run on a T4. Always rebuild engines on the target deployment hardware. Cache the engine file (.plan) and rebuild only when the model or target GPU changes.</p>
+</blockquote>
+<p>Export with opset_version=17 and dynamic axes to future-proof the ONNX artifact. Validate ONNX outputs against PyTorch with absolute tolerance less than 1e-4 before investing in TensorRT compilation. FP16 typically recovers 2x latency over FP32 with negligible accuracy loss; INT8 adds another 1.5-2x but demands careful calibration and accuracy re-validation.</p>
+<p>Profile with CUDA events, not Python timers, and always report p99 latency alongside mean. Target-specific TensorRT builds are non-portable — maintain a rebuild pipeline triggered by GPU type changes in your deployment environment. Document the hardware, driver version, and TensorRT version used for each engine in your model registry.</p>
+    </article>
+  </main>
+</body>
+</html>

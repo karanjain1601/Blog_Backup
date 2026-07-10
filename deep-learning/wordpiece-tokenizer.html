@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>WordPiece — BERT’s Likelihood-Based Subword Tokenizer | Notes Backup</title>
+  <meta name="description" content="How WordPiece builds BERT&#x27;s vocabulary using a likelihood-based merge criterion, the ## continuation marker, special tokens, cased vs uncased variants, fast Rust tokenizers, and token alignment for span tasks." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>WordPiece — BERT’s Likelihood-Based Subword Tokenizer</h1>
+      <ul class='note-meta'><li><strong>description:</strong> How WordPiece builds BERT&#x27;s vocabulary using a likelihood-based merge criterion, the ## continuation marker, special tokens, cased vs uncased variants, fast Rust tokenizers, and token alignment for span tasks.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>WordPiece — BERT’s Likelihood-Based Subword Tokenizer</h1>
+<p>WordPiece is the tokenization algorithm used by BERT, DistilBERT, ELECTRA, and other encoder-only models. Like BPE, it starts from a character vocabulary and iteratively merges pairs, but it uses a different merge criterion: instead of selecting the pair with the highest raw frequency count, WordPiece selects the pair that maximises the likelihood ratio p(ab) / [p(a) × p(b)]. This likelihood-based criterion favours merges that reduce the corpus perplexity most—it will prefer to merge rare pairs that almost always appear together over frequent pairs that each occur independently. The resulting vocabulary uses a ## prefix (two hash symbols) for continuation subwords—tokens that appear mid-word rather than at the start.</p>
+<h2>Introduction</h2>
+<p>BERT-base uses a 30,522-token WordPiece vocabulary. The fixed vocabulary was built on the BooksCorpus + English Wikipedia training corpus and is shared across all BERT checkpoints of the same language and case configuration. Special tokens [PAD]=0, [UNK]=100, [CLS]=101, [SEP]=102, [MASK]=103 are reserved at fixed IDs. The ## prefix distinguishes continuation subwords from word-start subwords: 'running' is tokenized as ['running'] if it is a single token, or ['run', '##ning'] if split. This explicit marking allows the model to learn morphological patterns: ##ing, ##ed, ##er, ##ly appear in the vocabulary as distinct tokens, giving WordPiece an explicit representation of suffixes that BPE lacks.</p>
+<h2>Likelihood-Based Merge Criterion</h2>
+<p>The WordPiece score for merging tokens a and b is: score(a, b) = freq(ab) / [freq(a) × freq(b)]. This is proportional to the pointwise mutual information (PMI) of the pair. A pair with score &gt;&gt; 1 almost always co-occurs—merging it reduces description length significantly. A pair with score ≈ 1 occurs at chance—merging it doesn't help. Contrast with BPE which uses raw count freq(ab): BPE would prefer 'th' (very frequent pair) over 'qu' (nearly always paired), while WordPiece would score 'qu' higher because freq(q) is low and q almost always precedes u. The likelihood criterion produces a more semantically coherent vocabulary for morphologically rich text.</p>
+<pre><code class="language-python">from collections import Counter
+
+def compute_wp_score(pair_freq, tok_freq):
+    &quot;&quot;&quot;WordPiece likelihood score: freq(ab) / (freq(a) * freq(b)).&quot;&quot;&quot;
+    a, b = pair_freq
+    fa = tok_freq.get(a, 1)
+    fb = tok_freq.get(b, 1)
+    return pair_freq / (fa * fb) if fa * fb &gt; 0 else 0.0
+
+def build_wordpiece_vocab(corpus, num_merges):
+    words = corpus.lower().split()
+    word_freq = Counter(words)
+    # Initial vocab: first char is bare, rest get ## prefix
+    vocab = {}
+    tok_freq = Counter()
+    for w, freq in word_freq.items():
+        chars = [w[0]] + ['##' + c for c in w[1:]]
+        key = ' '.join(chars)
+        vocab[key] = freq
+        for ch in chars:
+            tok_freq[ch] += freq
+
+    for merge_step in range(num_merges):
+        pair_counts = Counter()
+        for word, freq in vocab.items():
+            syms = word.split()
+            for i in range(len(syms) - 1):
+                pair_counts[(syms[i], syms[i+1])] += freq
+        if not pair_counts:
+            break
+        # WordPiece: score by likelihood ratio, not raw count
+        best = max(pair_counts, key=lambda p: pair_counts[p] / (tok_freq[p[0]] * tok_freq[p[1]] + 1e-9))
+        score = pair_counts[best] / (tok_freq[best[0]] * tok_freq[best[1]] + 1e-9)
+        merged = best[0] + best[1].lstrip('#')
+        # Update vocab
+        import re
+        pat = re.compile(r'(?&lt;!\S)' + re.escape(best[0] + ' ' + best[1]) + r'(?!\S)')
+        vocab = {pat.sub(merged, w): f for w, f in vocab.items()}
+        tok_freq[merged] += pair_counts[best]
+        print(f'  Step {merge_step+1:2d}: {best[0]} + {best[1]} -&gt; {merged} (score={score:.5f})')
+
+corpus = 'playing played plays player lower lowest running runner runs quickly quick'
+print('WordPiece likelihood-based merges (vs BPE count-based):')
+build_wordpiece_vocab(corpus, num_merges=10)
+</code></pre>
+<h2>Vocabulary Construction</h2>
+<p>BERT's 30K vocabulary was built by running WordPiece on a large English corpus with target size 30,522. The vocabulary includes: single characters (a–z, A–Z, 0–9, punctuation), common whole words, and a large set of ## continuation subwords covering common suffixes (##ing, ##ed, ##er, ##ly, ##tion, ##al). Cased BERT preserves case and accent marks; uncased BERT lowercases all text and strips accent characters (e.g., é → e) before tokenization. The uncased vocabulary is smaller because lowercase letters cover more text. Out-of-vocabulary characters (those not in the initial character vocabulary) cause the entire word to be tokenized as [UNK]—unlike BPE which always has a byte fallback.</p>
+<pre><code class="language-python">def wordpiece_encode(word, vocab_set, unk_token='[UNK]'):
+    &quot;&quot;&quot;Greedy longest-match WordPiece encoding with ## prefix.&quot;&quot;&quot;
+    if word in vocab_set:
+        return [word]
+    tokens = []
+    start = 0
+    while start &lt; len(word):
+        end = len(word)
+        cur_substr = None
+        while start &lt; end:
+            substr = word[start:end]
+            if start &gt; 0:
+                substr = '##' + substr
+            if substr in vocab_set:
+                cur_substr = substr
+                break
+            end -= 1
+        if cur_substr is None:
+            return [unk_token]  # entire word -&gt; [UNK]
+        tokens.append(cur_substr)
+        start = end
+    return tokens
+
+# Simulate a small WordPiece vocabulary
+small_vocab = {
+    'play', '##ing', '##ed', '##er', '##s', '##ly',
+    'run', 'low', '##est', '##er', 'quick', 'the', 'a',
+    'p', 'l', 'a', 'y', 'r', 'u', 'n', 'e', 'q', 'i', 'c', 'k',
+    '[UNK]', '[CLS]', '[SEP]', '[PAD]', '[MASK]',
+}
+test_words = ['playing', 'played', 'player', 'running', 'lowest', 'zyx']
+print(f'{&quot;Word&quot;:&lt;12} {&quot;WordPiece Tokens&quot;}')
+print('-' * 45)
+for w in test_words:
+    toks = wordpiece_encode(w, small_vocab)
+    print(f'{w:&lt;12} {toks}')
+</code></pre>
+<h2>Special Tokens and Formats</h2>
+<p>BERT uses four special tokens in every input: [CLS] (ID 101) prepended to every sequence, used as the sequence classification token; [SEP] (ID 102) appended after each sentence; [PAD] (ID 0) for padding to uniform length; [MASK] (ID 103) for masked language model pre-training. For sentence pairs (e.g., NLI, QA), the format is [CLS] sentence_A [SEP] sentence_B [SEP]. The token_type_ids tensor indicates which sentence each token belongs to: 0 for sentence A (including [CLS] and first [SEP]) and 1 for sentence B (including second [SEP]). The attention_mask tensor masks padding tokens from self-attention: 1 for real tokens, 0 for [PAD].</p>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Value / Detail</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Continuation marker</td>
+<td>## prefix on mid-word subwords (e.g., ##ing, ##ed)</td>
+</tr>
+<tr>
+<td>Special tokens</td>
+<td>[PAD]=0, [UNK]=100, [CLS]=101, [SEP]=102, [MASK]=103</td>
+</tr>
+<tr>
+<td>Pre-tokenization</td>
+<td>Whitespace split → punctuation split → WordPiece</td>
+</tr>
+<tr>
+<td>OOV handling</td>
+<td>Any char not in character vocab → entire word becomes [UNK]</td>
+</tr>
+<tr>
+<td>Vocab size (BERT-base)</td>
+<td>30,522 tokens (cased and uncased models)</td>
+</tr>
+<tr>
+<td>Case handling</td>
+<td>Cased: preserves case + accents; Uncased: lowercase + accent strip</td>
+</tr>
+<tr>
+<td>Fast tokenizer</td>
+<td>Rust implementation via HuggingFace tokenizers library</td>
+</tr>
+</tbody>
+</table>
+<h2>Encoding Mechanics</h2>
+<p>BERT's tokenization pipeline has three stages: (1) whitespace tokenization splits on any whitespace character; (2) punctuation tokenization further splits tokens on punctuation boundaries (so 'end.' becomes ['end', '.']); (3) WordPiece tokenization applies the greedy longest-match algorithm with ## prefixes. The encode_plus method returns a dictionary with input_ids, token_type_ids, and attention_mask. Setting return_offsets_mapping=True adds a mapping from each token position to its character span in the original string—essential for NER and span extraction tasks where the model must predict character-level labels.</p>
+<pre><code class="language-python">from transformers import BertTokenizerFast
+
+tokenizer = BertTokenizerFast.from_pretrained('bert-base-uncased')
+
+# Single sentence
+text = 'The quick brown fox jumps over the lazy dog.'
+enc = tokenizer(text, return_tensors='pt', return_offsets_mapping=True)
+print('Single sentence encoding:')
+print(f'  input_ids   : {enc[&quot;input_ids&quot;][0].tolist()}')
+print(f'  tokens      : {tokenizer.convert_ids_to_tokens(enc[&quot;input_ids&quot;][0].tolist())}')
+print(f'  attn_mask   : {enc[&quot;attention_mask&quot;][0].tolist()}')
+print(f'  offsets     : {enc[&quot;offset_mapping&quot;][0].tolist()}')
+print()
+
+# Sentence pair (NLI format)
+sentA = 'The cat sat on the mat.'
+sentB = 'A feline rested on a rug.'
+enc2 = tokenizer(sentA, sentB, return_tensors='pt', padding=True, truncation=True)
+print('Sentence pair encoding:')
+print(f'  tokens      : {tokenizer.convert_ids_to_tokens(enc2[&quot;input_ids&quot;][0].tolist())}')
+print(f'  type_ids    : {enc2[&quot;token_type_ids&quot;][0].tolist()}')
+print(f'  Format: [CLS] sentA [SEP] sentB [SEP]')
+print()
+print(f'Vocab size: {tokenizer.vocab_size}')
+print(f'Special tokens: {tokenizer.all_special_tokens}')
+</code></pre>
+<h2>Cased vs Uncased</h2>
+<p>BERT-base-uncased lowercases all input and strips Unicode accent characters before WordPiece tokenization: 'Étude' becomes 'etude'. This reduces vocabulary diversity and improves coverage of common words, but loses case and diacritic information. BERT-base-cased preserves case and accents, making it better for tasks where case carries semantic meaning: named entity recognition (differentiating 'apple' the fruit from 'Apple' the company), and languages where diacritics change word meaning (French, German, Spanish). For most English classification tasks, uncased performs comparably or better due to improved generalisation across case variants.</p>
+<blockquote>
+<p><strong>Continuation Marker Semantics</strong>: WordPiece's ## continuation marker means vocabulary statistics differ from BPE — 'running' and '##running' are distinct tokens. This gives WordPiece an explicit representation of morphological suffixes: ##ing, ##ed, ##er, ##ly, ##tion are all high-frequency vocabulary entries encoding suffix semantics. BPE merges these into the preceding subword without marking the boundary, so 'run' and 'running' share no explicit subword. For morphologically rich languages (Finnish, Turkish, Hungarian), WordPiece's explicit suffix representation can provide cleaner morphological signal to the model.</p>
+</blockquote>
+<h2>Token Alignment for Span Tasks</h2>
+<p>Span-extraction tasks (NER, QA, coreference) require mapping model predictions from token space back to character offsets in the original text. The offset_mapping return value provides exactly this: each token gets a (start, end) character span. Tokens split by WordPiece have consecutive overlapping spans: 'running' split as ['run', '##ning'] gets offsets [(0,3), (3,7)]. [CLS] and [SEP] special tokens get offset (0, 0). When aligning labels for NER training, use the word_ids() method to get the word index for each token, then assign the label of the original word to its first subword (and a special ignore label, typically -100, to all continuation subwords).</p>
+<pre><code class="language-python">from transformers import AutoTokenizer
+
+# Cross-tokenizer comparison on the same sentences
+sentences = [
+    'running quickly',
+    'tokenization splits text',
+    'supercalifragilistic',
+    'the quick brown fox',
+    'GPT-4 outperforms earlier models',
+]
+
+models = [
+    ('BPE (GPT-2)',      'gpt2'),
+    ('WordPiece (BERT)', 'bert-base-uncased'),
+    ('Unigram (T5)',     't5-small'),
+]
+for model_name, model_id in models:
+    print(f'\n--- {model_name} ---')
+    tok = AutoTokenizer.from_pretrained(model_id)
+    for sent in sentences:
+        tokens = tok.tokenize(sent)
+        print(f'  {sent!r:&lt;35} -&gt; {len(tokens):2d} tokens: {tokens}')
+
+print('\nKey differences:')
+print('  BPE (GPT-2)  : no continuation marker, space encoded as G-dot prefix')
+print('  WordPiece    : ## prefix for mid-word subwords (explicit suffix marking)')
+print('  Unigram (T5) : _ prefix for word-start subwords (like SentencePiece)')
+</code></pre>
+<h2>Key Takeaways</h2>
+<ul>
+<li>WordPiece uses a likelihood ratio merge criterion (score = freq(ab) / [freq(a) × freq(b)]) rather than BPE's raw frequency count.</li>
+<li>The ## prefix marks continuation subwords: 'running' → ['run', '##ning'] gives explicit morphological suffix representation.</li>
+<li>BERT uses 30,522 tokens with fixed special IDs: [PAD]=0, [UNK]=100, [CLS]=101, [SEP]=102, [MASK]=103.</li>
+<li>Input format for sentence pairs: [CLS] sentA [SEP] sentB [SEP]; token_type_ids=0 for sentA, 1 for sentB.</li>
+<li>Uncased BERT strips accents and lowercases; cased BERT preserves case. Use cased for NER, uncased for classification.</li>
+<li>Use BertTokenizerFast (Rust backend) for production; it is 10–100× faster and supports offset_mapping.</li>
+<li>For NER/span tasks, use word_ids() to align WordPiece tokens to original words; assign -100 to continuation subword labels.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

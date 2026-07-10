@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DenseNet: Densely Connected Convolutional Networks | Notes Backup</title>
+  <meta name="description" content="Dense connections where each layer receives feature maps from all preceding layers — feature reuse, reduced redundancy, improved gradient flow, and comparison to ResNet." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>DenseNet: Densely Connected Convolutional Networks</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Dense connections where each layer receives feature maps from all preceding layers — feature reuse, reduced redundancy, improved gradient flow, and comparison to ResNet.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>DenseNet: Densely Connected Convolutional Networks</h1>
+<h2>Overview</h2>
+<p>DenseNet, introduced by Huang et al. in 2017, establishes dense connectivity where each layer receives feature maps from all preceding layers. For an L-layer network this creates L(L+1)/2 connections. Unlike ResNets that add residual shortcuts, DenseNet concatenates feature maps, preserving all learned representations throughout the network.</p>
+<p>The key insight is aggressive feature reuse: because all previous feature maps are directly accessible, individual layers can be narrower, learning only incremental improvements. This dramatically reduces total parameter count compared to networks that must relearn representations at each stage, while also combating vanishing gradients throughout training.</p>
+<h2>Dense Block Architecture</h2>
+<p>A DenseBlock groups layers that share the same spatial resolution. Within the block, each DenseLayer receives the concatenation of all preceding layer outputs as input — not just the immediately previous layer. The input to layer l is [x0, x1, ..., x(l-1)], a concatenation across the channel dimension (dim=1 in PyTorch).</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class DenseLayer(nn.Module):
+    def __init__(self, in_channels, growth_rate):
+        super().__init__()
+        self.bn1 = nn.BatchNorm2d(in_channels)
+        self.conv1 = nn.Conv2d(in_channels, 4 * growth_rate, kernel_size=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(4 * growth_rate)
+        self.conv2 = nn.Conv2d(4 * growth_rate, growth_rate, kernel_size=3, padding=1, bias=False)
+
+    def forward(self, inputs):
+        x = torch.cat(inputs, dim=1)
+        x = self.conv1(torch.relu(self.bn1(x)))
+        return self.conv2(torch.relu(self.bn2(x)))
+</code></pre>
+<p>Each DenseLayer follows the BN→ReLU→Conv1×1→BN→ReLU→Conv3×3 pattern. The bottleneck Conv1×1 reduces channels to 4×growth_rate before the 3×3 convolution. This bottleneck design (DenseNet-B) cuts computation while maintaining expressiveness. The output of each layer adds exactly growth_rate channels to the concatenated feature map.</p>
+<pre><code class="language-python">class DenseBlock(nn.Module):
+    def __init__(self, num_layers, in_channels, growth_rate):
+        super().__init__()
+        self.layers = nn.ModuleList()
+        for i in range(num_layers):
+            self.layers.append(
+                DenseLayer(in_channels + i * growth_rate, growth_rate)
+            )
+
+    def forward(self, x):
+        features = [x]
+        for layer in self.layers:
+            features.append(layer(features))
+        return torch.cat(features, dim=1)
+</code></pre>
+<p>The DenseBlock stacks k DenseLayers. After k layers starting from in_channels, the output has in_channels + k×growth_rate channels. Each new layer receives all prior feature maps via list concatenation before the forward pass, enabling gradients to flow directly to all earlier layers without any transformation or gating.</p>
+<h2>Growth Rate and Concatenation</h2>
+<p>The growth rate k is a key hyperparameter controlling how many new feature maps each layer contributes to the collective knowledge. A small k (e.g., 12 or 32) keeps individual layers narrow. Because each layer has read access to all prior feature maps, the network can be very informative without redundancy — each layer adds a focused, non-redundant contribution.</p>
+<p>Input to layer l in a DenseBlock: x_l = H_l([x_0, x_1, …, x_(l-1)]) where H_l is the composite function BN→ReLU→Conv. After l layers the channel count is k_0 + l×k, where k_0 is the initial channel count. Concatenation across channels preserves spatial resolution within a block, keeping spatial information intact for all subsequent layers.</p>
+<h2>Transition Layers</h2>
+<p>Between DenseBlocks, transition layers perform downsampling and channel compression. They consist of BN→ReLU→Conv1×1→AvgPool2d(2). The Conv1×1 applies a compression factor θ ∈ (0, 1] to reduce channels from C to floor(θ×C). DenseNet-C uses θ&lt;1 for compression; DenseNet-BC combines both bottleneck layers and compression for maximum efficiency.</p>
+<pre><code class="language-python">class TransitionLayer(nn.Module):
+    def __init__(self, in_channels, compression=0.5):
+        super().__init__()
+        out_channels = int(in_channels * compression)
+        self.block = nn.Sequential(
+            nn.BatchNorm2d(in_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False),
+            nn.AvgPool2d(kernel_size=2, stride=2)
+        )
+
+    def forward(self, x):
+        return self.block(x)
+</code></pre>
+<p>With θ=0.5, each transition layer halves the channel count, preventing the channel dimension from growing too large as features accumulate across DenseBlocks. The AvgPool2d with stride 2 halves spatial dimensions. Together, these two reductions balance the channel growth from dense connectivity and keep the network computationally tractable at deeper stages.</p>
+<h2>DenseNet vs ResNet</h2>
+<p>ResNet uses additive shortcuts: y = F(x) + x, which requires matching dimensions and limits direct gradient access to earlier layers. DenseNet uses concatenative shortcuts: y = cat(x_0,...,x_l), preserving all original features without loss. This distinction drives DenseNet's superior parameter efficiency and richer gradient propagation in very deep networks.</p>
+<pre><code class="language-python">def measure_gradient_norms(model, x, y, criterion):
+    grad_norms = {}
+    def make_hook(name):
+        def hook_fn(grad):
+            grad_norms[name] = grad.norm().item()
+        return hook_fn
+    handles = []
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            handles.append(param.register_hook(make_hook(name)))
+    loss = criterion(model(x), y)
+    loss.backward()
+    for h in handles:
+        h.remove()
+    return grad_norms
+</code></pre>
+<table>
+<thead>
+<tr>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td></td>
+</tr>
+</tbody>
+</table>
+<p>DenseNet-121 achieves 74.98% Top-1 with only 8M parameters and 2.9G FLOPs, while ResNet-50 needs 25.6M parameters for comparable accuracy. DenseNet-201 surpasses ResNet-50 by 1.4% with fewer FLOPs and parameters. This demonstrates that dense connectivity is a more parameter-efficient architectural strategy than residual connections for ImageNet classification.</p>
+<blockquote>
+<p><strong>tip</strong>: DenseNet's dense connections act as deep supervision — every layer receives gradient directly from the loss through multiple paths. This makes it particularly effective when training data is limited.</p>
+</blockquote>
+<h2>Key Takeaways</h2>
+<p>Dense connectivity maximizes feature reuse: every layer has direct access to the input image and all intermediate representations. This alleviates vanishing gradients, strengthens feature propagation, and encourages reuse, leading to substantially more compact models. The growth rate k and compression factor θ are the primary knobs for trading off accuracy against computational cost.</p>
+<p>DenseNet excels in low-data regimes due to implicit deep supervision from dense gradient paths. It is widely used in medical imaging where labeled data is scarce. The DenseNet-BC variant (bottleneck + compression) is the recommended configuration for ImageNet-scale tasks, delivering strong accuracy-to-parameter ratios across DenseNet-121 through DenseNet-264.</p>
+<p>Compared to ResNet, DenseNet achieves equivalent or better accuracy with significantly fewer parameters and FLOPs, making it preferable for resource-constrained deployment. However, concatenation of growing feature maps increases GPU memory during training. Gradient checkpointing is commonly applied to DenseNet to trade compute for memory in practice.</p>
+    </article>
+  </main>
+</body>
+</html>

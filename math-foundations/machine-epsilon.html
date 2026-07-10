@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Machine Epsilon and Floating-Point Precision | Notes Backup</title>
+  <meta name="description" content="Machine epsilon definition, the relative error model, float equality pitfalls, Kahan compensated summation, and how floating-point precision constrains gradient computation in mixed-precision ML training." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Machine Epsilon and Floating-Point Precision</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Machine epsilon definition, the relative error model, float equality pitfalls, Kahan compensated summation, and how floating-point precision constrains gradient computation in mixed-precision ML training.</li><li><strong>topic:</strong> math-foundations</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Machine Epsilon and Floating-Point Precision</h1>
+<p>Machine epsilon is the fundamental precision limit of floating-point arithmetic. It determines the smallest relative difference that can be distinguished from zero, sets the floor for numerical differentiation step sizes, and quantifies the precision of gradient computations across every layer of a deep network. Understanding machine epsilon is essential for diagnosing numerical instabilities, choosing convergence tolerances, and reasoning about which operations can safely run in bf16 versus those that require fp32. Every practitioner building at scale will eventually hit a wall caused by insufficient numerical precision — understanding epsilon is the starting point for debugging such failures.</p>
+<h2>Core Definition</h2>
+<p>Machine epsilon (ε_mach) is the smallest positive floating-point number ε such that fl(1 + ε) &gt; 1 — equivalently, the spacing between 1.0 and the next representable number. For a format with m mantissa bits:</p>
+<p>ε_mach = 2^{−m}</p>
+<p>Values by format:
+- fp64 (double): ε = 2^{−52} ≈ 2.22×10⁻¹⁶  (53 significant bits)
+- fp32 (float):  ε = 2^{−23} ≈ 1.19×10⁻⁷  (24 significant bits)
+- fp16 (half):   ε = 2^{−10} ≈ 9.77×10⁻⁴  (11 significant bits)
+- bf16:          ε = 2^{−7}  ≈ 7.81×10⁻³  (8 significant bits)</p>
+<p>The unit roundoff is ε_mach/2 — the maximum relative rounding error for any single IEEE 754 operation. Crucially, floating-point numbers are not uniformly spaced: they are denser near zero and sparser for large magnitudes. For a value x, the absolute spacing is approximately |x| × ε_mach, so precision is always measured in relative terms.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+
+# Machine epsilon from numpy finfo
+print(&quot;=== finfo values ===&quot;)
+for dtype in [np.float16, np.float32, np.float64]:
+    info = np.finfo(dtype)
+    print(f&quot;{dtype.__name__:10s}: eps={info.eps:.3e}  tiny={info.tiny:.3e}  max={info.max:.3e}&quot;)
+
+# bfloat16 is torch-only
+print()
+for dtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64]:
+    info = torch.finfo(dtype)
+    print(f&quot;{str(dtype):20s}: eps={info.eps:.3e}  bits={info.bits}&quot;)
+
+# Empirically compute fp32 epsilon
+print(&quot;\n=== Empirical fp32 epsilon ===&quot;)
+eps = np.float32(1.0)
+while np.float32(1.0) + eps / np.float32(2.0) &gt; np.float32(1.0):
+    eps = eps / np.float32(2.0)
+print(f&quot;Empirical fp32 eps = {eps * 2:.6e}  (np.finfo = {np.finfo(np.float32).eps:.6e})&quot;)
+
+# Non-uniform spacing: absolute precision depends on magnitude
+print(&quot;\n=== Spacing at Different Magnitudes (fp32) ===&quot;)
+for x_val in [0.5, 1.0, 16.0, 1024.0, 1e6]:
+    x = np.float32(x_val)
+    nxt = np.nextafter(x, np.float32(np.inf))
+    spacing = float(nxt - x)
+    print(f&quot;  x={x_val:&gt;10g}: abs_spacing={spacing:.3e}  rel_spacing={spacing/x_val:.3e}&quot;)
+# Observation: relative spacing ~constant (eps_mach), absolute spacing grows with x
+</code></pre>
+<h2>The Relative Error Model</h2>
+<p>The IEEE 754 standard guarantees that every correctly-rounded operation satisfies:</p>
+<p>fl(a ∘ b) = (a ∘ b)(1 + δ),  |δ| ≤ ε_mach/2</p>
+<p>This holds for addition, subtraction, multiplication, division, and square root. It means every single floating-point operation introduces relative error at most ε_mach/2. For a computation involving N operations, accumulated error is at most N × ε_mach/2 in the worst case (all errors constructively reinforce), though in practice random cancellation reduces this to roughly √N × ε_mach/2.</p>
+<p>Implication for gradient computation: if gradient magnitudes are O(1), fp32 gradients are accurate to ~7 decimal places — more than sufficient. If gradients are very small (O(1e-6) or smaller), the relative error of fp16 can dominate. This is why fp32 master weights are maintained in mixed-precision training even when forward and backward passes run in bf16.</p>
+<h2>Float Equality and Comparison</h2>
+<p>Direct equality comparison (a == b) is almost never appropriate for floating-point values computed by different code paths. Because intermediate rounding errors accumulate differently, two mathematically identical computations can produce slightly different results. The classic example: 0.1 + 0.2 ≠ 0.3 in binary floating-point because none of these values are exactly representable.</p>
+<p>Correct approach: check if |a − b| ≤ atol + rtol × |b| for appropriate tolerances. This is exactly what numpy.isclose and torch.isclose implement. For fp32 computations with ~100 operations, rtol=1e-4 and atol=1e-6 is a reasonable default. For bf16, rtol=1e-2 reflects the format's limited precision. For gradient checking (numerical vs analytical), use central differences with step h ≈ √ε_mach ≈ 1e-4 for fp32.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+
+# Classic float equality failure
+print(&quot;0.1 + 0.2 == 0.3:&quot;, 0.1 + 0.2 == 0.3)   # False
+print(f&quot;0.1 + 0.2 = {0.1 + 0.2:.17f}&quot;)
+print(f&quot;0.3       = {0.3:.17f}&quot;)
+
+# Correct: tolerance-based comparison
+print(&quot;np.isclose:&quot;, np.isclose(0.1 + 0.2, 0.3))  # True
+# Formula: |a-b| &lt;= atol + rtol * |b|
+
+# fp32 roundtrip through string vs computation
+a = np.float32(1.0 / 3.0)
+b = np.float32(0.333333)
+print(f&quot;\n1/3 fp32={a:.8f}, 0.333333={b:.8f}, isclose={np.isclose(a, b, rtol=1e-4)}&quot;)
+
+# torch.isclose for tensor comparison
+x = torch.tensor([1.0, 1.0 + 1e-7, 1000.0], dtype=torch.float32)
+y = torch.tensor([1.0, 1.0,         1000.0 + 1e-4], dtype=torch.float32)
+print(&quot;torch.isclose (rtol=1e-4, atol=1e-6):&quot;, torch.isclose(x, y, rtol=1e-4, atol=1e-6))
+
+# Optimal step for gradient checking: h = sqrt(eps_mach)
+fp32_eps = np.finfo(np.float32).eps
+h = np.sqrt(fp32_eps)
+print(f&quot;\nOptimal gradient-check step (fp32): h = sqrt({fp32_eps:.2e}) = {h:.4e}&quot;)
+
+def numerical_grad_central(f, x, h=1e-4):
+    return (f(x + h) - f(x - h)) / (2 * h)
+
+f = lambda x: x**3 - 2*x + 1
+print(f&quot;Numerical grad of x^3-2x+1 at x=2: {numerical_grad_central(f, 2.0):.8f}&quot;)
+print(f&quot;Analytical (3x^2-2) at x=2:         {3*4 - 2:.8f}&quot;)
+</code></pre>
+<h2>Kahan Compensated Summation</h2>
+<p>Naive sequential summation accumulates O(n × ε_mach) error: each addition introduces a small rounding error that grows with n. For n = 10 million fp32 additions, the worst-case accumulated error is ~1.19. The Kahan compensated summation algorithm reduces this to O(ε_mach) independent of n by tracking the low-order bits discarded in each addition.</p>
+<p>The algorithm maintains a compensation variable c. At each step:
+- y = xᵢ − c   (adjust input by accumulated error)
+- t = total + y  (add adjusted value)
+- c = (t − total) − y  (capture bits lost when adding y to total)
+- total = t</p>
+<p>The key insight: (t − total) recovers what was actually added to total (not exactly y due to rounding), so (t − total) − y captures the rounding error. NumPy's built-in sum uses pairwise summation, achieving O(log n × ε_mach) — better than naive but worse than Kahan.</p>
+<pre><code class="language-python">import numpy as np
+
+def naive_sum(arr):
+    &quot;&quot;&quot;Sequential summation — O(n * eps) accumulated error.&quot;&quot;&quot;
+    total = arr.dtype.type(0.0)
+    for x in arr:
+        total += x
+    return float(total)
+
+def kahan_sum(arr):
+    &quot;&quot;&quot;Kahan compensated summation — O(eps) error independent of n.&quot;&quot;&quot;
+    total = arr.dtype.type(0.0)
+    comp  = arr.dtype.type(0.0)
+    for x in arr:
+        y     = x - comp        # corrected addend
+        t     = total + y       # provisional sum
+        comp  = (t - total) - y # new compensation (bits lost)
+        total = t
+    return float(total)
+
+# Compare on 10M fp32 values
+n = 10_000_000
+rng = np.random.default_rng(42)
+vals_f32 = rng.standard_normal(n).astype(np.float32)
+true_sum = float(np.sum(vals_f32.astype(np.float64)))  # fp64 ground truth
+
+naive  = naive_sum(vals_f32)
+kahan  = kahan_sum(vals_f32)
+np_sum = float(np.sum(vals_f32))   # pairwise summation
+
+print(f&quot;True sum (fp64): {true_sum:.8f}&quot;)
+print(f&quot;Naive fp32:  error={abs(naive  - true_sum):.3e}&quot;)
+print(f&quot;Kahan fp32:  error={abs(kahan  - true_sum):.3e}&quot;)
+print(f&quot;np.sum fp32: error={abs(np_sum - true_sum):.3e}&quot;)
+
+# Error scaling with n
+print(&quot;\n--- Error growth vs n (all-ones * 1e-7) ---&quot;)
+for n_t in [100, 10_000, 1_000_000]:
+    v = np.ones(n_t, dtype=np.float32) * np.float32(1e-7)
+    true_v = n_t * 1e-7
+    ne = abs(naive_sum(v) - true_v); ke = abs(kahan_sum(v) - true_v)
+    print(f&quot;  n={n_t:&gt;9,}: naive_err={ne:.2e}  kahan_err={ke:.2e}&quot;)
+</code></pre>
+<h2>ML and AI Connections</h2>
+<p>In deep learning, floating-point precision affects every computation stage differently. The forward pass is usually fine in bf16 because LayerNorm and residual connections keep activations in a healthy range. The backward pass is more sensitive: gradients must survive many matrix multiplications, and vanishing gradients compound precision loss. Loss scaling (used in AMP/FSDP training) multiplies the loss by a large factor (e.g., 2^15 = 32768) before backward, shifting small gradients into the representable fp16 range, then divides the recovered gradients before the optimizer step.</p>
+<p>Attention is particularly sensitive: Q@K^T values can become large for high model dimensions, causing overflow in fp16 (but not bf16, which has the same exponent range as fp32). FlashAttention addresses this by computing softmax in tiles with online normalization, keeping intermediate values in registers and avoiding materialization of the full attention matrix in lower-precision formats.</p>
+<pre><code class="language-python">import numpy as np
+import torch
+
+# Mixed precision dot product error analysis
+print(&quot;=== Dot product precision analysis (n=1024) ===&quot;)
+n = 1024
+rng = np.random.default_rng(42)
+a = rng.standard_normal(n).astype(np.float32)
+b = rng.standard_normal(n).astype(np.float32)
+true_dot = float(np.dot(a.astype(np.float64), b.astype(np.float64)))
+
+a_t, b_t = torch.tensor(a), torch.tensor(b)
+results = {
+    &quot;fp32&quot;: float(torch.dot(a_t, b_t)),
+    &quot;bf16 (fp32 acc)&quot;: float(torch.dot(a_t.bfloat16().float(), b_t.bfloat16().float())),
+    &quot;fp16 (fp32 acc)&quot;: float(torch.dot(a_t.half().float(), b_t.half().float())),
+    &quot;bf16 acc&quot;: float(torch.dot(a_t.bfloat16(), b_t.bfloat16())),
+}
+for name, val in results.items():
+    print(f&quot;  {name:20s}: {val:.6f}  rel_err={abs(val-true_dot)/abs(true_dot):.2e}&quot;)
+
+# Loss scaling simulation (AMP)
+print(&quot;\n=== Loss Scaling (AMP) ===&quot;)
+tiny_grad = torch.tensor(1e-6, dtype=torch.float16)
+scale = 2**15
+scaled = tiny_grad * scale
+print(f&quot;Tiny grad fp16: {float(tiny_grad):.4e}&quot;)
+print(f&quot;Scaled by {scale}: {float(scaled):.4e}&quot;)
+print(f&quot;Unscaled: {float(scaled / scale):.4e}&quot;)
+
+# Accumulation error in iterative algorithm
+print(&quot;\n=== Iterative accumulation error ===&quot;)
+x_fp32 = np.float32(0.0)
+for _ in range(10000): x_fp32 += np.float32(0.0001)
+x_fp64 = sum(0.0001 for _ in range(10000))
+print(f&quot;fp64 reference: {x_fp64:.10f}&quot;)
+print(f&quot;fp32 result:    {float(x_fp32):.10f}  error={abs(float(x_fp32)-x_fp64):.3e}&quot;)
+</code></pre>
+<h2>Pitfalls</h2>
+<p>The most common floating-point pitfalls in ML code:</p>
+<ol>
+<li>
+<p><strong>Catastrophic cancellation</strong>: subtracting nearly equal numbers destroys significant digits. Computing variance as E[X²] − E[X]² can lose all precision when the mean is large relative to the standard deviation.</p>
+</li>
+<li>
+<p><strong>Order-of-operations sensitivity</strong>: (a + b) + c ≠ a + (b + c) in floating-point. GPU reduction kernels may produce different results depending on thread ordering — this is expected and usually benign.</p>
+</li>
+<li>
+<p><strong>Convergence checks with exact equality</strong>: while loss != prev_loss can loop forever or terminate early. Always use tolerance-based convergence: |loss − prev| &lt; tol.</p>
+</li>
+<li>
+<p><strong>Mixing magnitudes</strong>: adding 1e8 and 1e-8 in fp32 loses the small term entirely — it falls within machine epsilon of the large term and gets absorbed as rounding noise.</p>
+</li>
+</ol>
+<h2>Practical Guidance</h2>
+<p>Concrete rules for floating-point precision in ML systems:</p>
+<ul>
+<li><strong>Gradient checking</strong>: central differences (f(x+h) − f(x−h))/(2h) with h = √ε_mach ≈ 1e-4 for fp32. Expect rtol ≈ 1e-4 for agreement.</li>
+<li><strong>Convergence tests</strong>: use |loss − prev_loss| &lt; rtol × |prev_loss| + atol, never exact equality.</li>
+<li><strong>Mixed-precision training</strong>: keep Adam m1/m2 and master weights in fp32; forward/backward in bf16; loss and attention accumulation in fp32.</li>
+<li><strong>High-precision reductions</strong>: prefer numpy's built-in sum (pairwise) over naive loops; use Kahan summation for very high accuracy requirements.</li>
+<li><strong>Testing numerical correctness</strong>: torch.testing.assert_close(a, b, rtol=1e-4, atol=1e-6) for fp32; rtol=1e-2 for bf16.</li>
+</ul>
+<blockquote>
+<p><strong>WARNING: Precision is Magnitude-Relative</strong></p>
+<p>Machine epsilon is a relative precision: the absolute precision at value x is |x| × ε_mach. At x = 10⁶ in fp32, absolute precision ≈ 0.119 — no decimal places at all. Operations that simultaneously involve very large and very small numbers are especially prone to catastrophic cancellation. Normalize inputs to a sensible range before performing sensitive operations.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Format</th>
+<th>Mantissa bits</th>
+<th>ε_mach</th>
+<th>Safe ML use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>fp64</td>
+<td>52</td>
+<td>2.22e-16</td>
+<td>Ground truth, numerical testing</td>
+</tr>
+<tr>
+<td>fp32</td>
+<td>23</td>
+<td>1.19e-7</td>
+<td>Optimizer state, master weights, loss</td>
+</tr>
+<tr>
+<td>fp16</td>
+<td>10</td>
+<td>9.77e-4</td>
+<td>Tensor Core compute (limited exponent range)</td>
+</tr>
+<tr>
+<td>bf16</td>
+<td>7</td>
+<td>7.81e-3</td>
+<td>Forward/backward pass (full fp32 exponent range)</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>Key Takeaways</h2>
+<ul>
+<li>ε_mach = 2^{-m} for m mantissa bits; fp32 ε ≈ 1.19e-7, bf16 ε ≈ 7.81e-3.</li>
+<li>Every IEEE 754 operation introduces relative error ≤ ε_mach/2; N operations accumulate ≤ N × ε_mach/2 worst case.</li>
+<li>Floating-point numbers are not uniformly spaced — absolute spacing scales as |x| × ε_mach.</li>
+<li>Never use == for float comparison; use np.isclose or torch.isclose with explicit rtol and atol.</li>
+<li>Kahan compensated summation reduces error from O(n × ε) to O(ε) independent of n — critical for high-precision reductions.</li>
+<li>In mixed-precision training, bf16 is safe for forward/backward because mini-batch gradient noise dominates numerical precision error; fp32 is required for optimizer state and master weights.</li>
+<li>For gradient checking, use central differences with h ≈ √ε_mach; for stable variance, use Welford's online algorithm rather than E[X²] − E[X]².</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

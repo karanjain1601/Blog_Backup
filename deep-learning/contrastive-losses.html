@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Contrastive Losses — Triplet, NT-Xent, and InfoNCE | Notes Backup</title>
+  <meta name="description" content="Learn how contrastive losses train embeddings where similar pairs cluster close and dissimilar pairs push apart — covering triplet loss with hard negative mining, NT-Xent (SimCLR), InfoNCE (MoCo), and SupCon, with full implementations." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Contrastive Losses — Triplet, NT-Xent, and InfoNCE</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Learn how contrastive losses train embeddings where similar pairs cluster close and dissimilar pairs push apart — covering triplet loss with hard negative mining, NT-Xent (SimCLR), InfoNCE (MoCo), and SupCon, with full implementations.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Contrastive Losses — Triplet, NT-Xent, and InfoNCE</h1>
+<p>Contrastive learning trains an embedding function f: X → ℝᵈ such that semantically similar inputs map to nearby points and dissimilar inputs to distant ones. Unlike supervised cross-entropy which trains per-class decision boundaries, contrastive losses operate on pairs or triplets and directly shape the geometry of the representation space. The field produced three dominant loss formulations — triplet, NT-Xent, and InfoNCE — each with different assumptions about how negatives are sourced and counted.</p>
+<h2>Triplet Loss and Hard Negative Mining</h2>
+<p>Triplet loss operates on an anchor a, a positive p (same class or augmented view), and a negative n (different class). The loss is L = max(0, d(a,p) − d(a,n) + α) where d is Euclidean or cosine distance and α &gt; 0 is the margin. Geometrically, this pushes the negative at least α further from the anchor than the positive. With random negatives the loss saturates quickly — hard negative mining selects negatives that violate the margin, keeping gradients informative throughout training.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+def hard_negative_triplet_loss(embeddings, labels, margin=0.3):
+    B = embeddings.size(0)
+    dist = torch.cdist(embeddings, embeddings, p=2)
+    loss_total = torch.tensor(0.0)
+    n_triplets = 0
+    for i in range(B):
+        idx = torch.arange(B)
+        pos_mask = (labels == labels[i]) &amp; (idx != i)
+        neg_mask = labels != labels[i]
+        if not pos_mask.any() or not neg_mask.any():
+            continue
+        d_ap = dist[i][pos_mask].max()
+        d_an = dist[i][neg_mask].min()
+        loss_total = loss_total + F.relu(d_ap - d_an + margin)
+        n_triplets += 1
+    return loss_total / max(n_triplets, 1)
+
+torch.manual_seed(42)
+embs = F.normalize(torch.randn(16, 128), dim=1)
+labels = torch.tensor([0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3])
+print(f'Triplet loss: {hard_negative_triplet_loss(embs, labels):.4f}')
+</code></pre>
+<h2>NT-Xent Loss (SimCLR)</h2>
+<p>NT-Xent (Normalized Temperature-scaled Cross Entropy) is the loss used in SimCLR. For a batch of N examples, each is augmented twice to produce 2N views. For a positive pair (i,j): L_{i,j} = −log[exp(sim(zᵢ,zⱼ)/τ) / Σ_{k≠i} exp(sim(zᵢ,zₖ)/τ)]. The denominator sums over all 2N−2 negatives. Temperature τ controls sharpness — low τ concentrates the distribution, making the task harder. SimCLR showed that larger batches are critical because they provide more negatives.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def nt_xent_loss(z1, z2, temperature=0.5):
+    B = z1.size(0)
+    z = F.normalize(torch.cat([z1, z2], dim=0), dim=1)
+    sim = torch.mm(z, z.t()) / temperature
+    mask = torch.eye(2 * B, dtype=torch.bool)
+    sim.masked_fill_(mask, float('-inf'))
+    labels = torch.cat([torch.arange(B, 2*B), torch.arange(B)])
+    return F.cross_entropy(sim, labels)
+
+torch.manual_seed(0)
+B, D = 64, 128
+z1 = F.normalize(torch.randn(B, D), dim=1)
+z2 = F.normalize(z1 + 0.1 * torch.randn(B, D), dim=1)
+for tau in [0.1, 0.5, 1.0]:
+    print(f'tau={tau}: NT-Xent = {nt_xent_loss(z1, z2, temperature=tau):.4f}')
+</code></pre>
+<h2>InfoNCE Loss (MoCo Style with Queue)</h2>
+<p>InfoNCE (from Contrastive Predictive Coding) is a lower bound on mutual information I(X;Y). MoCo uses a queue of K negatives maintained across batches, allowing large effective batch sizes without proportionally increasing GPU memory. The momentum encoder update is θₖ ← m·θₖ + (1−m)·θq (EMA), ensuring queue keys stay consistent despite not being end-to-end differentiated.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import copy
+
+class InfoNCEWithQueue(nn.Module):
+    def __init__(self, encoder, dim=128, K=4096, m=0.999, tau=0.07):
+        super().__init__()
+        self.encoder_q = encoder
+        self.encoder_k = copy.deepcopy(encoder)
+        for p in self.encoder_k.parameters(): p.requires_grad_(False)
+        self.tau, self.m = tau, m
+        self.register_buffer('queue', F.normalize(torch.randn(dim, K), dim=0))
+        self.register_buffer('ptr', torch.zeros(1, dtype=torch.long))
+
+    @torch.no_grad()
+    def _ema(self):
+        for pq, pk in zip(self.encoder_q.parameters(), self.encoder_k.parameters()):
+            pk.data = pk.data * self.m + pq.data * (1 - self.m)
+
+    @torch.no_grad()
+    def _enqueue(self, k):
+        ptr = int(self.ptr)
+        self.queue[:, ptr:ptr+k.size(0)] = k.T
+        self.ptr[0] = (ptr + k.size(0)) % self.queue.size(1)
+
+    def forward(self, xq, xk):
+        q = F.normalize(self.encoder_q(xq), dim=1)
+        with torch.no_grad():
+            self._ema()
+            k = F.normalize(self.encoder_k(xk), dim=1)
+        l_pos = (q * k).sum(1, keepdim=True) / self.tau
+        l_neg = q @ self.queue.detach() / self.tau
+        loss = F.cross_entropy(torch.cat([l_pos, l_neg], dim=1),
+                               torch.zeros(q.size(0), dtype=torch.long))
+        self._enqueue(k)
+        return loss
+</code></pre>
+<h2>Supervised Contrastive Loss (SupCon)</h2>
+<p>SupCon (Khosla et al. 2020) extends NT-Xent to the supervised setting. Instead of treating only the augmented pair as positives, all samples from the same class act as positives: L_sup = Σᵢ (−1/|P(i)|) Σ_{p∈P(i)} log[exp(sim(zᵢ,zₚ)/τ) / Σ_{k≠i} exp(sim(zᵢ,zₖ)/τ)]. This consistently outperforms cross-entropy on ImageNet by 1–2% because the loss explicitly shapes embedding geometry.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+
+def supcon_loss(embeddings, labels, temperature=0.1):
+    B = embeddings.size(0)
+    z = F.normalize(embeddings, dim=1)
+    sim = torch.mm(z, z.t()) / temperature
+    label_mask = (labels.unsqueeze(0) == labels.unsqueeze(1))
+    self_mask  = torch.eye(B, dtype=torch.bool)
+    pos_mask   = label_mask &amp; ~self_mask
+    sim.masked_fill_(self_mask, float('-inf'))
+    log_prob = sim - torch.logsumexp(sim, dim=1, keepdim=True)
+    n_pos = pos_mask.sum(1).clamp(min=1)
+    loss  = -(log_prob * pos_mask).sum(1) / n_pos
+    return loss.mean()
+
+torch.manual_seed(0)
+B, D = 32, 64
+emb = torch.randn(B, D)
+lbl = torch.tensor([i // 8 for i in range(B)])
+print(f'SupCon loss: {supcon_loss(emb, lbl):.4f}')
+</code></pre>
+<h2>Projection Head and Representation Quality</h2>
+<p>A 2-layer MLP projection head z = g(h) placed between the encoder output and the contrastive loss improves downstream linear probing performance. The projection head warps the embedding space in ways that optimize the contrastive objective but hurt linear separability. Discarding the projection head and using h for downstream tasks recovers this quality. This was the key engineering insight in SimCLR — the loss should act on projected embeddings, not on the final representation.</p>
+<p>L2-normalizing embeddings before computing cosine similarity is equally important. Without normalization, the embedding norm absorbs the temperature scaling and the loss degenerates — high-norm embeddings always dominate the softmax regardless of direction. Normalize before both the contrastive loss and any downstream evaluation.</p>
+<h2>Choosing the Right Loss</h2>
+<blockquote>
+<p><strong>Temperature τ Selection</strong>: Too high (τ → 1): all similarities roughly equal, model cannot discriminate. Too low (τ → 0): loss focuses only on the single hardest negative. SimCLR found τ=0.5 optimal; MoCo uses τ=0.07. Always sweep τ with a small linear probe early in training.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Loss</th>
+<th>Negatives per sample</th>
+<th>Batch size sensitivity</th>
+<th>Temperature</th>
+<th>Best use case</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Triplet</td>
+<td>1 hardest negative</td>
+<td>Low — works with small batches</td>
+<td>None (margin α)</td>
+<td>Metric learning, face verification</td>
+</tr>
+<tr>
+<td>NT-Xent (SimCLR)</td>
+<td>2N−2 in-batch</td>
+<td>High — needs ≥256</td>
+<td>τ ∈ [0.1, 0.5]</td>
+<td>Self-supervised contrastive pre-training</td>
+</tr>
+<tr>
+<td>InfoNCE (MoCo)</td>
+<td>Queue K=4096–65536</td>
+<td>Low — queue decouples from batch</td>
+<td>τ ∈ [0.03, 0.1]</td>
+<td>Memory-efficient SSL at any batch size</td>
+</tr>
+<tr>
+<td>SupCon</td>
+<td>All non-same-class in batch</td>
+<td>Medium</td>
+<td>τ ∈ [0.1, 0.5]</td>
+<td>Supervised fine-tuning, label-efficient</td>
+</tr>
+</tbody>
+</table>
+<h2>Key Practical Rules</h2>
+<ul>
+<li>Hard negative mining is essential for triplet — random negatives saturate the loss in 1–2 epochs.</li>
+<li>NT-Xent treats the entire 2N batch as negatives except the paired view; batch size is a hyperparameter.</li>
+<li>InfoNCE lower-bounds mutual information — maximizing it maximizes representation quality up to encoder capacity.</li>
+<li>Use a 2-layer MLP projection head during training; discard it for downstream tasks.</li>
+<li>Always L2-normalize embeddings before computing cosine similarity.</li>
+<li>SupCon consistently beats cross-entropy by 1–2% on ImageNet-scale benchmarks.</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

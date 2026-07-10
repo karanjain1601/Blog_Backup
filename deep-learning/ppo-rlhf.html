@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PPO for RLHF — Policy Optimization with Reward Model and KL Penalty | Notes Backup</title>
+  <meta name="description" content="Deep dive into PPO-RLHF: four-model architecture, per-token KL penalty, clipped surrogate objective, GAE advantage estimation, and the rollout training loop from InstructGPT." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>PPO for RLHF — Policy Optimization with Reward Model and KL Penalty</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Deep dive into PPO-RLHF: four-model architecture, per-token KL penalty, clipped surrogate objective, GAE advantage estimation, and the rollout training loop from InstructGPT.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>PPO for RLHF — Policy Optimization with Reward Model and KL Penalty</h1>
+<p>PPO-RLHF (Proximal Policy Optimization for Reinforcement Learning from Human Feedback) is the training algorithm behind InstructGPT and early ChatGPT. It fine-tunes a language model using human preference signals by formulating alignment as a reinforcement learning problem over token sequences. The key insight is to maximize expected reward while preventing the policy from deviating too far from a supervised fine-tuned baseline using a KL divergence penalty.</p>
+<h2>The Four Models in PPO-RLHF</h2>
+<p>Four distinct neural networks operate simultaneously during PPO-RLHF training, each with a specific role. At 7B parameter scale, this requires roughly 4x the GPU memory of inference alone, making multi-GPU setups or LoRA adapters on the policy and value heads a practical necessity.</p>
+<ul>
+<li>Policy pi_theta: the LLM being trained, initialized from the SFT checkpoint, updated by PPO gradients each iteration</li>
+<li>Reference policy pi_ref: frozen copy of the SFT model, provides the KL anchor that prevents reward hacking and degenerate outputs</li>
+<li>Reward model r_phi: trained on human preference comparisons, scores (prompt, completion) pairs with a scalar reward signal</li>
+<li>Value model V_psi: predicts expected future return from each token position, used for GAE advantage estimation during PPO updates</li>
+</ul>
+<h2>Objective Function and KL Penalty</h2>
+<p>The RLHF objective maximizes E[r(x,y)] - beta * KL[pi_theta || pi_ref], where r(x,y) is the reward model score, beta controls the KL penalty strength, pi_theta is the policy being trained, and pi_ref is the frozen SFT reference. The KL term prevents the policy from exploiting reward model weaknesses by constraining it to stay close to human-like outputs. InstructGPT starts with beta=0.02 and uses an adaptive controller targeting 6 nats of divergence.</p>
+<h2>Per-Token KL and Shaped Reward</h2>
+<p>PPO-RLHF applies a per-token KL penalty at each position t: KL_t = log pi_theta(a_t|s_t) - log pi_ref(a_t|s_t). The shaped reward signal is R_t = r(x,y) * 1[t=T] - beta * KL_t — the terminal reward model score minus ongoing KL penalties at every token position. This dense reward signal speeds up credit assignment compared to a purely terminal reward.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+from typing import Tuple
+
+def compute_ppo_rlhf_reward(
+    policy_logprobs: torch.Tensor,
+    ref_logprobs: torch.Tensor,
+    rm_scores: torch.Tensor,
+    beta: float = 0.1,
+    response_mask: torch.Tensor = None,
+) -&gt; torch.Tensor:
+    # Per-token KL: KL_t = log pi_theta(a_t) - log pi_ref(a_t)
+    per_token_kl = policy_logprobs - ref_logprobs  # [batch, seq_len]
+    # Initialize reward tensor with KL penalty at every token position
+    rewards = -beta * per_token_kl  # [batch, seq_len]
+    # Add terminal RM reward at the last response token
+    if response_mask is not None:
+        last_token_idx = response_mask.sum(dim=1).long() - 1
+    else:
+        last_token_idx = torch.full(
+            (rewards.size(0),), rewards.size(1) - 1, dtype=torch.long
+        )
+    for i, idx in enumerate(last_token_idx):
+        rewards[i, idx] += rm_scores[i]
+    # Zero out padding positions
+    if response_mask is not None:
+        rewards = rewards * response_mask
+    return rewards  # [batch, seq_len]
+</code></pre>
+<h2>PPO Clipped Objective</h2>
+<p>PPO uses a clipped surrogate objective to prevent destructively large policy updates. The importance ratio r_t = pi_theta(a_t) / pi_old(a_t) measures policy drift from the rollout policy. Clipping r_t to [1-eps, 1+eps] bounds the gradient step. The L_CLIP objective takes the pessimistic minimum: min(r_t * A_t, clip(r_t, 1-eps, 1+eps) * A_t), preventing updates that exploit outlier advantages.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+from typing import Tuple
+
+def ppo_clipped_loss(
+    old_logprobs: torch.Tensor,
+    new_logprobs: torch.Tensor,
+    advantages: torch.Tensor,
+    response_mask: torch.Tensor,
+    clip_eps: float = 0.2,
+) -&gt; Tuple[torch.Tensor, dict]:
+    # Importance sampling ratio: r_t = pi_theta / pi_old
+    log_ratio = new_logprobs - old_logprobs
+    ratio = log_ratio.exp()  # [batch, seq_len]
+    # Clipped surrogate: min(r_t * A_t, clip(r_t, 1-eps, 1+eps) * A_t)
+    unclipped = ratio * advantages
+    clipped = ratio.clamp(1 - clip_eps, 1 + clip_eps) * advantages
+    policy_loss = -torch.min(unclipped, clipped)
+    # Average loss over valid response tokens only
+    masked_loss = (policy_loss * response_mask).sum() / response_mask.sum()
+    clip_frac = ((ratio - 1.0).abs() &gt; clip_eps).float().mean().item()
+    approx_kl = (log_ratio * response_mask).sum() / response_mask.sum()
+    return masked_loss, {&quot;clip_frac&quot;: clip_frac, &quot;approx_kl&quot;: approx_kl.item()}
+</code></pre>
+<h2>Value Function and GAE Estimation</h2>
+<p>The value model V_psi estimates expected future return from each token position, enabling Generalized Advantage Estimation (GAE). With lambda=0.95, GAE computes advantages as exponentially weighted TD errors: A_t = sum((gamma*lambda)^l * delta_{t+l}) where delta_t = r_t + gamma * V(s_{t+1}) - V(s_t). Returns, which serve as value training targets, are computed as advantages plus value estimates.</p>
+<pre><code class="language-python">import torch
+from typing import Tuple
+
+def compute_gae_returns(
+    rewards: torch.Tensor,
+    values: torch.Tensor,
+    response_mask: torch.Tensor,
+    gamma: float = 1.0,
+    lam: float = 0.95,
+) -&gt; Tuple[torch.Tensor, torch.Tensor]:
+    # Compute GAE advantages and returns for PPO-RLHF value training
+    batch, seq_len = rewards.shape
+    advantages = torch.zeros_like(rewards)
+    last_gae = torch.zeros(batch, device=rewards.device)
+    for t in reversed(range(seq_len)):
+        mask_t = response_mask[:, t]
+        if t &lt; seq_len - 1:
+            next_val = values[:, t + 1]
+        else:
+            next_val = torch.zeros(batch, device=values.device)
+        delta = rewards[:, t] + gamma * next_val - values[:, t]
+        last_gae = delta + gamma * lam * last_gae
+        advantages[:, t] = last_gae * mask_t
+    # Returns = advantages + values (targets for value function training)
+    returns = advantages + values
+    # Normalize advantages over valid response positions
+    adv_flat = advantages[response_mask.bool()]
+    advantages = (advantages - adv_flat.mean()) / (adv_flat.std() + 1e-8)
+    return advantages, returns
+</code></pre>
+<h2>RLHF Rollout Loop</h2>
+<p>Each PPO iteration begins with a rollout phase: sample prompts from the dataset, generate completions with the current policy using temperature sampling, score with the reward model, compute per-token KL with the frozen reference, then use GAE to produce advantage estimates. Multiple PPO epochs then update the policy and value head using mini-batches from the rollout buffer. Typical setups use 512 rollouts per iteration with 4 PPO epochs.</p>
+<pre><code class="language-python">import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+def collect_rlhf_rollouts(
+    policy_model: AutoModelForCausalLM,
+    reward_model,
+    tokenizer: AutoTokenizer,
+    prompts: list,
+    max_new_tokens: int = 256,
+    device: str = &quot;cuda&quot;,
+) -&gt; dict:
+    # Generate completions and score with reward model
+    policy_model.eval()
+    with torch.no_grad():
+        inputs = tokenizer(
+            prompts, return_tensors=&quot;pt&quot;, padding=True, truncation=True
+        ).to(device)
+        outputs = policy_model.generate(
+            **inputs,
+            max_new_tokens=max_new_tokens,
+            do_sample=True,
+            temperature=0.9,
+            top_p=0.95,
+            return_dict_in_generate=True,
+        )
+        response_ids = outputs.sequences[:, inputs[&quot;input_ids&quot;].shape[1]:]
+        completions = tokenizer.batch_decode(response_ids, skip_special_tokens=True)
+        rm_inputs = tokenizer(
+            prompts, completions, return_tensors=&quot;pt&quot;, padding=True
+        ).to(device)
+        rm_scores = reward_model(**rm_inputs).logits.squeeze(-1)
+    return {&quot;completions&quot;: completions, &quot;rm_scores&quot;: rm_scores, &quot;response_ids&quot;: response_ids}
+</code></pre>
+<h2>PPO Hyperparameters for RLHF</h2>
+<table>
+<thead>
+<tr>
+<th>Hyperparameter</th>
+<th>Symbol</th>
+<th>InstructGPT Value</th>
+<th>Effect of Increasing</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>KL coefficient</td>
+<td>beta</td>
+<td>0.02 (adaptive)</td>
+<td>Stronger drift penalty, slower learning, less reward hacking</td>
+</tr>
+<tr>
+<td>Clip epsilon</td>
+<td>eps</td>
+<td>0.2</td>
+<td>Wider trust region, noisier updates, higher clip fraction</td>
+</tr>
+<tr>
+<td>GAE lambda</td>
+<td>lambda</td>
+<td>0.95</td>
+<td>More bias, less variance in advantage estimates</td>
+</tr>
+<tr>
+<td>Rollout batch size</td>
+<td>B</td>
+<td>512 sequences</td>
+<td>More diverse experience, slower per-iteration wall time</td>
+</tr>
+<tr>
+<td>PPO mini-batch size</td>
+<td>M</td>
+<td>64 sequences</td>
+<td>Noisier gradients but faster steps per rollout buffer</td>
+</tr>
+<tr>
+<td>PPO epochs per rollout</td>
+<td>E</td>
+<td>4</td>
+<td>More gradient reuse per rollout, risk of overfit to stale advantages</td>
+</tr>
+</tbody>
+</table>
+<p>The KL coefficient beta is the most sensitive hyperparameter in PPO-RLHF. Too small and the policy reward hacks; too large and learning stalls. InstructGPT uses an adaptive controller that increases beta when KL exceeds the target and decreases it when below, maintaining roughly 6 nats of divergence throughout training.</p>
+<blockquote>
+<p><strong>Warning</strong>: PPO for RLHF requires 4 models simultaneously in GPU memory (policy, reference, reward, value) — typical 7B scale RLHF needs 4x the memory of inference, requiring multi-GPU or LoRA on policy/value heads. With full-precision 7B models each requiring ~14GB VRAM, a single 80GB A100 is insufficient for naive full-parameter RLHF at this scale.</p>
+</blockquote>
+<p>PPO-RLHF remains the gold standard for aligning large language models with human preferences at scale. Its four-model architecture, per-token KL penalties, and clipped surrogate objective work together to produce helpful and harmless outputs — but the engineering complexity and memory requirements have driven the community toward simpler alternatives like DPO for smaller-scale experiments.</p>
+    </article>
+  </main>
+</body>
+</html>

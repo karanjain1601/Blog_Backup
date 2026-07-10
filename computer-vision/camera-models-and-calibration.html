@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Camera Models and Calibration: Pinhole, Distortion, and Extrinsics | Notes Backup</title>
+  <meta name="description" content="" />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Camera Models and Calibration: Pinhole, Distortion, and Extrinsics</h1>
+      
+      <h1>Camera Models and Calibration: Pinhole, Distortion, and Extrinsics</h1>
+<h2>Overview</h2>
+<p>Camera calibration determines the mathematical relationship between 3D world points and their 2D image projections. It involves estimating intrinsic parameters — focal length, principal point, and distortion coefficients — and extrinsic parameters, the rotation and translation relating the camera coordinate frame to the world frame.</p>
+<p>Accurate calibration is foundational for all 3D computer vision tasks. Even a 1% focal length error produces a 1% systematic depth error. Calibration is performed offline using known patterns such as checkerboards or ChArUco boards, which supply precise 3D-to-2D correspondences for parameter estimation via nonlinear least squares optimization.</p>
+<h2>Pinhole Camera Model</h2>
+<p>The pinhole camera model approximates a lens as a single point through which all light rays pass. A 3D point X_world is first transformed to camera coordinates via the extrinsic R and t, then projected to the normalized image plane by dividing by depth, and finally scaled by focal length and shifted by the principal point to pixel coordinates.</p>
+<pre><code># Extrinsic: world to camera coordinates
+X_cam = R @ X_world + t       # shape (3,)
+# Perspective division (project to normalized plane)
+x_n = X_cam[0] / X_cam[2]    # normalized x
+y_n = X_cam[1] / X_cam[2]    # normalized y
+# Intrinsic: scale and shift to pixel coordinates
+x_px = f_x * x_n + c_x       # pixel x
+y_px = f_y * y_n + c_y       # pixel y
+</code></pre>
+<p>The full projection is written compactly as p = K [R | t] X, where K is the 3x3 intrinsic matrix, [R|t] is the 3x4 extrinsic matrix, and X is the homogeneous 4D world point. This form is used throughout multi-view geometry for triangulation, bundle adjustment, and PnP-based camera pose estimation from 2D-3D correspondences.</p>
+<h2>Lens Distortion</h2>
+<p>Real lenses deviate from the ideal pinhole model due to optical aberrations. Radial distortion causes straight lines to curve inward (barrel distortion, k1 &lt; 0) or outward (pincushion distortion, k1 &gt; 0). Tangential distortion arises from lens tilt relative to the image sensor plane and is typically much smaller than radial distortion.</p>
+<pre><code>r2 = x_n**2 + y_n**2
+r4 = r2**2
+# Radial distortion
+x_d = x_n * (1 + k1*r2 + k2*r4)
+y_d = y_n * (1 + k1*r2 + k2*r4)
+# Tangential distortion
+x_d += 2*p1*x_n*y_n + p2*(r2 + 2*x_n**2)
+y_d += p1*(r2 + 2*y_n**2) + 2*p2*x_n*y_n
+</code></pre>
+<p>For fisheye and wide-angle lenses with field-of-view above 120 degrees, the standard polynomial model breaks down. OpenCV provides a fisheye model using equidistant projection: theta_d = theta<em>(1 + k1</em>theta^2 + k2<em>theta^4 + k3</em>theta^6 + k4*theta^8), where theta is the angle of incidence, accurately handling extreme radial distortion in automotive cameras.</p>
+<blockquote>
+<p><strong>tip</strong>: Use a checkerboard with at least 20 different poses covering the image corners and center. Poor calibration (reprojection error &gt; 1px) propagates into every downstream 3D task — depth estimation, SLAM, stereo matching. Recalibrate when the camera is physically disturbed.</p>
+</blockquote>
+<h2>Intrinsic Matrix</h2>
+<p>The intrinsic matrix K encodes the camera's internal optical parameters in a 3x3 upper-triangular matrix: K = [[fx, s, cx], [0, fy, cy], [0, 0, 1]]. The skew s is nearly always zero for modern digital cameras. fx and fy may differ if pixels are non-square, though most sensors have square pixels so fx is approximately equal to fy.</p>
+<p>The principal point (cx, cy) is ideally at the image center but can be offset by a few percent of image dimensions due to sensor alignment tolerances. Even small principal point errors cause parallax artifacts in stereo rectification and incorrect 3D reconstruction. Accurate estimation requires calibration images that cover the image corners and edges thoroughly.</p>
+<table>
+<thead>
+<tr>
+<th>Parameter</th>
+<th>Symbol</th>
+<th>Typical Value</th>
+<th>Effect of Error</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Focal length</td>
+<td>fx, fy</td>
+<td>400-4000 px</td>
+<td>Depth scale error</td>
+</tr>
+<tr>
+<td>Principal point</td>
+<td>cx, cy</td>
+<td>~image center</td>
+<td>Parallax / rectification shift</td>
+</tr>
+<tr>
+<td>Radial distortion 1</td>
+<td>k1</td>
+<td>-0.3 to 0.3</td>
+<td>Barrel / pincushion bow</td>
+</tr>
+<tr>
+<td>Radial distortion 2</td>
+<td>k2</td>
+<td>-0.1 to 0.1</td>
+<td>Higher-order bow</td>
+</tr>
+<tr>
+<td>Tangential distortion</td>
+<td>p1, p2</td>
+<td>~0 to 0.005</td>
+<td>Image tilt artifacts</td>
+</tr>
+<tr>
+<td>Baseline (stereo)</td>
+<td>b</td>
+<td>0.05-0.60 m</td>
+<td>Depth range and accuracy</td>
+</tr>
+</tbody>
+</table>
+<h2>Extrinsic Calibration</h2>
+<p>Extrinsic calibration estimates the rigid-body transformation (R, t) between coordinate frames. For a single camera it is the pose relative to the world frame per calibration image. For a stereo pair it is the fixed relative pose between cameras. Multi-camera rigs require a calibration target simultaneously visible to all cameras.</p>
+<pre><code>ret, K, dist, rvecs, tvecs = cv2.calibrateCamera(
+    obj_pts,        # list of (N,3) world coordinates
+    img_pts,        # list of (N,2) image coordinates
+    img_size,
+    None, None      # no initial guess for K or dist
+)
+# ret = mean reprojection error in pixels
+# Good calibration: ret &lt; 0.5 px
+</code></pre>
+<pre><code>ret, K1, d1, K2, d2, R, T, E, F = cv2.stereoCalibrate(
+    obj_pts, left_pts, right_pts,
+    K1, d1, K2, d2, img_size,
+    flags=cv2.CALIB_FIX_INTRINSIC
+)
+# R, T: rotation and translation from left to right camera
+# E: essential matrix,  F: fundamental matrix
+# Use R, T with cv2.stereoRectify to compute rectification maps
+</code></pre>
+<p>LiDAR-to-camera extrinsic calibration is more challenging because the sensors have fundamentally different measurement modalities. Target-based methods use reflective boards; targetless approaches minimize mutual information or edge alignment across many frames. The output is a 6-DoF rigid transform from LiDAR coordinates into the camera coordinate frame.</p>
+<h2>Key Takeaways</h2>
+<p>The pinhole model with radial and tangential distortion (OpenCV's 5-parameter model: k1, k2, p1, p2, k3) is sufficient for most cameras with field-of-view under 90 degrees. Use the fisheye model for wide-angle lenses. Always verify quality by checking reprojection error and visually inspecting undistorted images for residual bow.</p>
+<p>Intrinsic calibration is performed once per camera unless the lens or focus setting changes. Extrinsic calibration between a camera pair must be redone if the physical mounting changes. For production systems, verify calibration periodically by checking the epipolar geometry of live rectified image pairs against expected horizontal alignment.</p>
+<p>Modern calibration pipelines like Kalibr and the ROS camera_calibration package handle multi-camera and IMU-camera calibration using bundle adjustment to jointly optimize all parameters, significantly reducing systematic errors that arise from treating intrinsic and extrinsic calibration as fully independent sequential steps.</p>
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Open-Vocabulary Object Detection | Notes Backup</title>
+  <meta name="description" content="Detecting arbitrary object categories described by text — Grounding DINO, OWL-ViT, and how CLIP-based visual-semantic alignment enables zero-shot detection of novel categories." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Open-Vocabulary Object Detection</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Detecting arbitrary object categories described by text — Grounding DINO, OWL-ViT, and how CLIP-based visual-semantic alignment enables zero-shot detection of novel categories.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Open-Vocabulary Object Detection</h1>
+<p>Open-vocabulary detection (OVD) removes the fixed class constraint of conventional detectors. Instead of training with a closed set of N categories, OVD models accept arbitrary text queries at inference time and detect matching objects. This enables zero-shot detection of novel categories never seen during training.</p>
+<p>The core enabler is vision-language pretraining — models like CLIP learn aligned visual and text embeddings from hundreds of millions of image-caption pairs. OVD builds detection heads on top of these embeddings, leveraging language generalization to recognize categories defined only by their names.</p>
+<p>A closed-vocabulary detector (Faster R-CNN, YOLO) maps visual features to a fixed softmax over N trained classes. Adding a new class requires annotating examples and retraining. An open-vocabulary detector encodes category names as text embeddings at inference time, comparing them to visual region features — new categories cost only a text string.</p>
+<table>
+<thead>
+<tr>
+<th>Model</th>
+<th>Backbone</th>
+<th>Text encoder</th>
+<th>Zero-shot COCO AP</th>
+<th>Speed</th>
+<th>HuggingFace available</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GLIP</td>
+<td>Swin-L</td>
+<td>BERT-Large</td>
+<td>49.8</td>
+<td>~5 FPS</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>Grounding DINO</td>
+<td>Swin-T/L</td>
+<td>BERT-Base</td>
+<td>52.5 (Swin-L)</td>
+<td>~10 FPS</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>OWL-ViT</td>
+<td>ViT-L/14</td>
+<td>CLIP text</td>
+<td>36.1</td>
+<td>~15 FPS</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>OWLv2</td>
+<td>ViT-H/14</td>
+<td>CLIP text</td>
+<td>44.6</td>
+<td>~8 FPS</td>
+<td>Yes</td>
+</tr>
+<tr>
+<td>YOLO-World</td>
+<td>YOLOv8-L</td>
+<td>CLIP text</td>
+<td>35.4</td>
+<td>~74 FPS</td>
+<td>Yes</td>
+</tr>
+</tbody>
+</table>
+<p>The trade-off between open-vocabulary flexibility and inference speed is stark. YOLO-World reaches 74 FPS by distilling CLIP text embeddings offline and fusing them efficiently, but lags in zero-shot AP. Grounding DINO runs cross-modal attention between image and text tokens at each layer, achieving higher AP at lower throughput.</p>
+<p>CLIP's image encoder produces global image embeddings optimised for image-text matching — not localised region features needed for detection. OVD methods address this by either: (a) extracting patch-level features from ViT before the pooling layer, (b) using a region proposal network to crop and re-encode regions, or (c) training a cross-attention module that grounds text tokens to spatial image features.</p>
+<pre><code>import torch
+import open_clip
+
+def encode_categories(category_names, model_name='ViT-L-14', pretrained='openai'):
+    &quot;&quot;&quot;Encode category names as CLIP text embeddings for novel-class detection.&quot;&quot;&quot;
+    model, _, _ = open_clip.create_model_and_transforms(model_name, pretrained)
+    tokenizer = open_clip.get_tokenizer(model_name)
+    texts = [f'a photo of a {c}' for c in category_names]
+    tokens = tokenizer(texts)
+    with torch.no_grad():
+        text_feats = model.encode_text(tokens)  # (C, D)
+        text_feats = text_feats / text_feats.norm(dim=-1, keepdim=True)
+    return text_feats  # compare to visual region features via dot product
+</code></pre>
+<p>The prompt template 'a photo of a {classname}' consistently outperforms bare classnames in CLIP-based detection. More advanced ensembling uses 80 prompt templates (from the original CLIP paper) and averages their text embeddings — this adds ~0.5–1 AP on COCO zero-shot benchmarks at negligible inference cost.</p>
+<p>Grounding DINO fuses DINO's query-based object detection with BERT text encoding. Text tokens and image features interact through cross-attention at multiple encoder layers, producing grounded representations. The decoder queries attend to both modalities to produce category-conditioned box predictions for each text phrase.</p>
+<pre><code>from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
+import torch
+from PIL import Image
+import requests
+
+model_id = 'IDEA-Research/grounding-dino-base'
+processor = AutoProcessor.from_pretrained(model_id)
+model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id)
+
+image = Image.open('image.jpg')
+text = 'cat . dog . person .'  # dot-separated categories
+inputs = processor(images=image, text=text, return_tensors='pt')
+with torch.no_grad():
+    outputs = model(**inputs)
+results = processor.post_process_grounded_object_detection(
+    outputs, inputs.input_ids, threshold=0.3, target_sizes=[image.size[::-1]])
+</code></pre>
+<p>Grounding DINO accepts free-form text phrases, not just category names. This enables referring expression detection ('the red car on the left') and multi-category batch queries ('cat . dog . person .') where the dot separates independent query terms. The model handles up to 256 text tokens per query.</p>
+<p>OWL-ViT (Vision Transformer for Open-World Localization) takes a minimalist approach: add a lightweight box regression head and a bipartite matching loss to a pretrained CLIP ViT. Image patch tokens serve as region queries; text embeddings serve as category classifiers. No cross-modal attention layers — just linear probes on top of frozen CLIP.</p>
+<pre><code>from transformers import Owlv2Processor, Owlv2ForObjectDetection
+import torch
+from PIL import Image
+
+processor = Owlv2Processor.from_pretrained('google/owlv2-base-patch16')
+model = Owlv2ForObjectDetection.from_pretrained('google/owlv2-base-patch16')
+
+image = Image.open('scene.jpg')
+texts = [['a cat', 'a dog', 'a person']]  # batch of query lists
+inputs = processor(text=texts, images=image, return_tensors='pt')
+with torch.no_grad():
+    outputs = model(**inputs)
+results = processor.post_process_object_detection(
+    outputs, threshold=0.2, target_sizes=torch.tensor([image.size[::-1]]))
+boxes, scores, labels = results[0]['boxes'], results[0]['scores'], results[0]['labels']
+</code></pre>
+<blockquote>
+<p>****: Open-vocabulary detectors shift the bottleneck from annotation (class-specific) to language (free-form) — the category set is defined at inference time, not training time.</p>
+</blockquote>
+<p>OWLv2 extends OWL-ViT with self-training on detected pseudo-labels — the model detects objects on unlabelled images, filters high-confidence predictions, and re-trains on them. This self-distillation loop improves zero-shot AP by ~8 points over OWL-ViT on COCO without additional annotated data.</p>
+<pre><code>from pycocotools.coco import COCO
+from pycocotools.cocoeval import COCOeval
+import json
+
+def evaluate_zero_shot_novel(gt_path, pred_path, novel_cat_ids):
+    &quot;&quot;&quot;Evaluate open-vocab detector AP on COCO novel categories only.&quot;&quot;&quot;
+    coco_gt = COCO(gt_path)
+    with open(pred_path) as f:
+        preds = json.load(f)
+    coco_dt = coco_gt.loadRes(preds)
+    ev = COCOeval(coco_gt, coco_dt, iouType='bbox')
+    ev.params.catIds = novel_cat_ids  # restrict to novel classes
+    ev.evaluate()
+    ev.accumulate()
+    ev.summarize()
+    return float(ev.stats[0])  # AP50:95 on novel categories
+</code></pre>
+<p>Choose the right OVD model for your use case: YOLO-World for real-time applications where throughput matters, Grounding DINO for highest accuracy and referring expression support, OWLv2 for a clean HuggingFace-native pipeline with good accuracy-speed balance.</p>
+<p>OVD models still underperform supervised detectors on base categories by 5–15 AP. When your category set is fixed and annotation budget allows, a supervised detector trained specifically on those categories will outperform zero-shot OVD. Use OVD when categories are dynamic, large in number, or annotating them is impractical.</p>
+<p>Prompt engineering matters significantly for OVD. Specificity helps: 'a close-up photo of a tabby cat' outperforms 'cat' for fine-grained categories. Negative prompts (supported in some models) reduce false positives from background confusion. Test multiple prompt variants and ensemble their similarity scores.</p>
+<p>For production deployment, pre-encode your category text embeddings offline and cache them. At inference, only the image encoder runs per frame — text encoding is amortised. This reduces runtime overhead to nearly zero compared to encoding text queries per image, especially with large category vocabularies.</p>
+    </article>
+  </main>
+</body>
+</html>

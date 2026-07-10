@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Self-Attention vs Cross-Attention — Encoder and Decoder Patterns | Notes Backup</title>
+  <meta name="description" content="Contrast self-attention (Q=K=V from same sequence) with cross-attention (Q from decoder, K/V from encoder), implement both from scratch, and trace their roles in BERT, GPT, T5, and diffusion models." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Self-Attention vs Cross-Attention — Encoder and Decoder Patterns</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Contrast self-attention (Q=K=V from same sequence) with cross-attention (Q from decoder, K/V from encoder), implement both from scratch, and trace their roles in BERT, GPT, T5, and diffusion models.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Self-Attention vs Cross-Attention — Encoder and Decoder Patterns</h1>
+<p>Attention mechanisms differ fundamentally in where their Q, K, and V inputs come from. Self-attention takes all three from the same sequence, allowing each position to attend to every other position in that same sequence. Cross-attention takes Q from one sequence and K, V from a different sequence, bridging information between two separate representations. These two variants are not interchangeable — each is used in specific architectural positions with specific computational purposes.</p>
+<h2>Self-Attention — Definition and Properties</h2>
+<p>In self-attention Q = X·WQ, K = X·WK, V = X·WV where X is the same input sequence. Every position produces a query that is scored against keys from all other positions in X — the attention matrix A ∈ ℝ^{n×n} is square. Bidirectional self-attention allows each position to attend to all others (including future positions), making the representations context-aware in both directions. Causal (masked) self-attention applies an upper-triangular mask of −∞ to the score matrix before softmax, preventing position i from attending to positions j &gt; i. This preserves the autoregressive property required for text generation.</p>
+<pre><code class="language-python">import numpy as np
+
+def self_attention(X, W_Q, W_K, W_V, causal=False):
+    # X: (n, d_model); Q=K=V all derived from same X
+    Q = X @ W_Q    # (n, dk)
+    K = X @ W_K    # (n, dk)
+    V = X @ W_V    # (n, dv)
+    dk = Q.shape[-1]
+    S = Q @ K.T / np.sqrt(dk)    # (n, n) — square matrix
+    if causal:
+        # Upper triangle -&gt; -inf so softmax gives 0 weight
+        mask = np.triu(np.ones_like(S), k=1) * -1e9
+        S = S + mask
+    S -= S.max(axis=-1, keepdims=True)
+    A = np.exp(S); A /= A.sum(axis=-1, keepdims=True)
+    return A @ V, A
+
+np.random.seed(42)
+n, d_model, dk, dv = 6, 64, 32, 32
+X = np.random.randn(n, d_model)
+W_Q = np.random.randn(d_model, dk) * 0.1
+W_K = np.random.randn(d_model, dk) * 0.1
+W_V = np.random.randn(d_model, dv) * 0.1
+
+_, A_bi  = self_attention(X, W_Q, W_K, W_V, causal=False)
+_, A_cau = self_attention(X, W_Q, W_K, W_V, causal=True)
+print('Bidirectional SA shape:', A_bi.shape, '(n x n, square)')
+print('Upper triangle zero in causal SA:', np.allclose(np.triu(A_cau, 1), 0))
+print('Causal: position 0 attends only to itself:', A_cau[0].round(4))
+print('Causal: position 5 attends to all 6:', (A_cau[5] &gt; 1e-6).sum(), 'positions')
+</code></pre>
+<h2>Cross-Attention — Definition and Properties</h2>
+<p>In cross-attention the query Q comes from one sequence (e.g., decoder states) while keys K and values V come from a second sequence (e.g., encoder output). Queries and keys must share the same inner dimension dₖ but the two sequences can have different lengths: nq ≠ nk. The attention matrix A ∈ ℝ^{nq×nk} is rectangular — each of the nq query positions attends over all nk key-value positions. No causal masking is needed (and none is applied) because the query sequence is attending to a fully-observed context sequence, not to its own future.</p>
+<pre><code class="language-python">import numpy as np
+
+def cross_attention(Q_seq, KV_seq, W_Q, W_K, W_V):
+    # Q_seq: (nq, d_q) — decoder states; KV_seq: (nk, d_kv) — encoder output
+    Q = Q_seq  @ W_Q    # (nq, dk)
+    K = KV_seq @ W_K    # (nk, dk)
+    V = KV_seq @ W_V    # (nk, dv)
+    dk = Q.shape[-1]
+    S = Q @ K.T / np.sqrt(dk)    # (nq, nk) — RECTANGULAR, nq != nk
+    S -= S.max(axis=-1, keepdims=True)
+    A = np.exp(S); A /= A.sum(axis=-1, keepdims=True)
+    return A @ V, A              # output: (nq, dv), weights: (nq, nk)
+
+np.random.seed(7)
+nq, nk, d_model, dk, dv = 4, 10, 64, 32, 32
+dec_states = np.random.randn(nq, d_model)   # short target sequence
+enc_states  = np.random.randn(nk, d_model)  # longer source sequence
+W_Q = np.random.randn(d_model, dk) * 0.1
+W_K = np.random.randn(d_model, dk) * 0.1
+W_V = np.random.randn(d_model, dv) * 0.1
+
+out, A = cross_attention(dec_states, enc_states, W_Q, W_K, W_V)
+print('Dec states:', dec_states.shape, '  Enc states:', enc_states.shape)
+print('Attention matrix:', A.shape, '&lt;- rectangular (nq x nk)')
+print('Output:', out.shape)
+print('Row sums (should be 1):', A.sum(axis=1).round(5))
+</code></pre>
+<blockquote>
+<p><strong>Key Difference — Where Q, K, V Come From</strong>: Self-attention: Q, K, V all from the same tensor X — the attention matrix is always square (n×n). Cross-attention: Q from sequence A, K and V from sequence B — the attention matrix is rectangular (nA×nB) and nA can differ from nB. Confusing these causes shape errors: if you pass a cross-attention decoder query (nq=8) against encoder keys (nk=100) and expect a square matrix, you will get a (8×100) matrix — correct for cross-attention, not for self-attention.</p>
+</blockquote>
+<h2>Encoder Self-Attention — Bidirectional Context</h2>
+<p>Transformer encoders (BERT, RoBERTa, ViT) use bidirectional self-attention throughout. Every token/patch position attends to every other position in the same sequence with no masking. This allows each position to integrate context from both its left and right neighbours in every layer, building representations that are conditioned on the full input sequence. The encoder output H ∈ ℝ^{n×d_model} is a contextualised representation of every input position — it is then passed as the K and V source to the decoder's cross-attention.</p>
+<h2>Decoder Attention Patterns — Causal Self + Cross</h2>
+<p>A standard Transformer decoder (T5, BART, original seq2seq) contains two attention sub-layers per block. First, causal self-attention: the decoder's own generated tokens attend only to previously generated tokens (positions 0..t-1 for position t), enforcing autoregressive left-to-right generation. Second, cross-attention: the decoder queries attend over the full encoder output to pull in source-sequence information. This cross-attention is the information bridge that replaced the RNN context vector in pre-Transformer seq2seq models.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+
+class EncDecBlock(nn.Module):
+    def __init__(self, d, h, ff):
+        super().__init__()
+        self.enc_sa   = nn.MultiheadAttention(d, h, batch_first=True)
+        self.dec_sa   = nn.MultiheadAttention(d, h, batch_first=True)
+        self.dec_ca   = nn.MultiheadAttention(d, h, batch_first=True)
+        self.enc_ff   = nn.Sequential(nn.Linear(d, ff), nn.ReLU(), nn.Linear(ff, d))
+        self.dec_ff   = nn.Sequential(nn.Linear(d, ff), nn.ReLU(), nn.Linear(ff, d))
+        self.norms    = nn.ModuleList([nn.LayerNorm(d) for _ in range(5)])
+
+    def encode(self, src):
+        a, _ = self.enc_sa(src, src, src)              # bidirectional self-attn
+        x = self.norms[0](src + a)
+        return self.norms[1](x + self.enc_ff(x))
+
+    def decode(self, tgt, enc_out, causal_mask=None):
+        a, _ = self.dec_sa(tgt, tgt, tgt, attn_mask=causal_mask)  # causal
+        x = self.norms[2](tgt + a)
+        a, cross_w = self.dec_ca(x, enc_out, enc_out)              # cross-attn
+        x = self.norms[3](x + a)
+        return self.norms[4](x + self.dec_ff(x)), cross_w
+
+torch.manual_seed(3)
+d, h, ff = 128, 4, 256
+model = EncDecBlock(d, h, ff)
+src = torch.randn(2, 15, d)   # batch=2, src_len=15
+tgt = torch.randn(2,  8, d)   # batch=2, tgt_len=8
+enc_out        = model.encode(src)
+dec_out, cross_w = model.decode(tgt, enc_out)
+print('Encoder output:', tuple(enc_out.shape))
+print('Decoder output:', tuple(dec_out.shape))
+print('Cross-attention weights:', tuple(cross_w.shape), '(batch x tgt x src)')
+</code></pre>
+<h2>Cross-Attention Alignment Visualisation</h2>
+<p>In seq2seq models, the cross-attention weight matrix is an alignment: entry A[i,j] is how much decoder position i (target token) attends to encoder position j (source token). For translation, this roughly recovers monotonic alignment for similar-language pairs and reordering alignment for distant-language pairs. In image captioning, A[i,j] shows which image patch decoder step i focuses on when generating word i. In text-to-speech, it provides a soft alignment between phoneme output frames and input character positions.</p>
+<pre><code class="language-python">import numpy as np
+
+def cross_attn(dec_Q, enc_KV, W_Q, W_K, W_V):
+    Q = dec_Q @ W_Q; K = enc_KV @ W_K; V = enc_KV @ W_V
+    S = Q @ K.T / np.sqrt(W_Q.shape[1])
+    S -= S.max(1, keepdims=True)
+    A = np.exp(S); A /= A.sum(1, keepdims=True)
+    return A @ V, A
+
+np.random.seed(11)
+src_tok = ['Le', 'chat', 'est', 'assis', 'sur', 'le', 'tapis', '.']
+tgt_tok = ['The', 'cat', 'sat', 'on', 'the', 'mat', '.']
+nq, nk, d, dk = len(tgt_tok), len(src_tok), 32, 16
+W_Q = np.random.randn(d, dk) * 0.3
+W_K = np.random.randn(d, dk) * 0.3
+W_V = np.random.randn(d, dk) * 0.3
+dec_states = np.random.randn(nq, d)
+enc_states  = np.random.randn(nk, d)
+_, A = cross_attn(dec_states, enc_states, W_Q, W_K, W_V)
+
+col_w = max(len(t) for t in src_tok) + 1
+print('Cross-attention alignment (rows=target, cols=source):')
+print('{:&gt;8}'.format('') + ''.join('{:&gt;{w}}'.format(t, w=col_w) for t in src_tok))
+print('-' * (8 + col_w * nk))
+for i, tgt in enumerate(tgt_tok):
+    row = A[i]
+    cells = ''.join(
+        '{:&gt;{w}}'.format('##' if j == row.argmax() else '--' if row[j] &gt; 0.15 else '  ', w=col_w)
+        for j in range(nk))
+    print('{:&gt;8}{} peak-&gt;{}'.format(tgt, cells, src_tok[row.argmax()]))
+print('Alignment shape:', A.shape, '(nq={} x nk={})'.format(nq, nk))
+</code></pre>
+<h2>Usage Across Architectures</h2>
+<p>BERT and encoder-only models use bidirectional self-attention exclusively — no cross-attention, no causal mask. GPT and decoder-only models use causal self-attention exclusively — no cross-attention, no encoder. T5 and BART are encoder-decoder models with both: the encoder stack uses bidirectional self-attention and the decoder uses causal self-attention plus cross-attention to the encoder output. Vision Transformers (ViT) use bidirectional self-attention among image patches; cross-attention is added in decoder heads for dense prediction tasks (DETR, Mask2Former).</p>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>Self-Attention</th>
+<th>Cross-Attention</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Q source</td>
+<td>Same sequence X as K and V</td>
+<td>Different sequence (e.g., decoder states)</td>
+</tr>
+<tr>
+<td>K, V source</td>
+<td>Same sequence X as Q</td>
+<td>Different sequence (e.g., encoder output)</td>
+</tr>
+<tr>
+<td>Attention matrix shape</td>
+<td>n × n (square)</td>
+<td>nq × nk (rectangular, nq ≠ nk in general)</td>
+</tr>
+<tr>
+<td>Directionality</td>
+<td>Bidirectional or causal (masked)</td>
+<td>Unrestricted — all nk encoder positions visible</td>
+</tr>
+<tr>
+<td>Used in</td>
+<td>BERT (bidir), GPT (causal), ViT (bidir)</td>
+<td>T5, BART, classic seq2seq, DETR, ControlNet</td>
+</tr>
+<tr>
+<td>Computational role</td>
+<td>Build contextual representations within one sequence</td>
+<td>Bridge information across two different sequences</td>
+</tr>
+<tr>
+<td>Can attend to its own future?</td>
+<td>Yes (bidir) or no (causal mask)</td>
+<td>N/A — K/V come from a separate fully-observed sequence</td>
+</tr>
+</tbody>
+</table>
+<h2>Cross-Attention Beyond NLP</h2>
+<p>Cross-attention has become a general mechanism for conditioning one modality on another. In diffusion models (Stable Diffusion), the denoising U-Net uses cross-attention at each resolution to condition image features on text embeddings — the image features provide queries, the CLIP text encoder output provides keys and values. ControlNet adds a copy of the U-Net encoder with additional cross-attention inputs from spatial conditioning signals (depth maps, pose, edges). In multimodal LLMs (Flamingo, LLaVA), cross-attention allows the language model to attend to visual patch embeddings from a frozen vision encoder.</p>
+<ul>
+<li>Diffusion U-Net: image patch queries attend over CLIP text embedding keys/values for text-to-image generation</li>
+<li>ControlNet: spatial control signals (edge, depth, pose) provide additional cross-attention conditioning to U-Net</li>
+<li>Flamingo / LLaVA: language decoder cross-attends to visual patch embeddings from a ViT vision encoder</li>
+<li>DETR object detection: object query embeddings cross-attend to CNN feature maps for end-to-end detection</li>
+<li>AlphaFold2 (Evoformer): sequence-structure cross-attention; cross-attention between MSA rows and pair representations</li>
+<li>Perceiver IO: latent array cross-attends to arbitrary-modality input arrays, enabling modality-agnostic processing</li>
+</ul>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

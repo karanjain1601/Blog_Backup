@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fine-Grained Mixture of Experts | Notes Backup</title>
+  <meta name="description" content="Using many small experts instead of few large ones — as in DeepSeek-MoE and MiniMax — to improve expert specialization and routing granularity without increasing computation." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Fine-Grained Mixture of Experts</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Using many small experts instead of few large ones — as in DeepSeek-MoE and MiniMax — to improve expert specialization and routing granularity without increasing computation.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Fine-Grained Mixture of Experts</h1>
+<p>Traditional MoE architectures use a small number of large experts — typically 8 or 16, each with the same hidden dimension as a dense FFN. Fine-grained MoE (Dai et al., 2024, DeepSeek-MoE; and subsequent work) challenges this default by splitting each expert into many smaller sub-experts. Instead of 8 experts each with hidden dimension d_ff, fine-grained MoE uses 64 or 128 experts each with hidden dimension d_ff/8. Total parameter count is identical, top-K active FLOPs are identical (routing top-16 of 128 small experts ≈ routing top-2 of 16 large experts), but the granularity of the routing decision is much finer. This finer granularity allows each expert to specialise more narrowly, reducing knowledge redundancy and improving the information efficiency of the parameter budget.</p>
+<h2>Overview</h2>
+<p>Fine-grained MoE was introduced in the DeepSeek-MoE paper (Dai et al., 2024) and adopted in DeepSeek-V2 (236B total, 21B active). The key observation is that coarse MoE (8 large experts) forces each expert to be general — it cannot afford to specialise too narrowly because it must process 1/8 of all tokens including many for which it has no expertise. Fine-grained MoE (64–128 small experts) allows each expert to process only 1/64–1/128 of tokens, enabling much tighter specialisation. Routing top-K_r of N_r fine-grained experts (with K_r/N_r = K/N, same active fraction) produces identical compute while gaining routing precision. The practical benefit is measurable improvement in downstream task accuracy at the same FLOPs, with the main cost being more complex routing and load-balancing across many more experts.</p>
+<h2>Coarse vs Fine-Grained Experts</h2>
+<p>The fundamental difference between coarse and fine-grained MoE is the granularity of the expert function. A coarse expert with hidden dimension d_ff learns a general transformation that applies to many token types. A fine-grained expert with hidden dimension d_ff/m (for m-fold splitting) learns a narrower transformation that applies to m times fewer tokens on average. The analogy is professional versus generalist: a coarse expert is like a generalist doctor who sees every patient; a fine-grained expert is like a specialist who sees only patients with a specific condition. The specialist can develop much deeper expertise in that narrow domain. The challenge is that with many small experts, the routing decision (which specialist?) becomes more critical — a misrouted token receives a less-applicable transformation.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class FineGrainedMoELayer(nn.Module):
+    &quot;&quot;&quot;Fine-grained MoE: many small experts vs few large experts.
+    Same total params and same active FLOPs as coarse MoE.&quot;&quot;&quot;
+    def __init__(self, d_model: int, d_ff: int,
+                 n_experts: int, top_k: int):
+        super().__init__()
+        # Each expert has d_ff hidden units (same as coarse)
+        # but n_experts is much larger (e.g., 64 vs 8)
+        self.n_experts, self.top_k = n_experts, top_k
+        self.router  = nn.Linear(d_model, n_experts, bias=False)
+        self.w1 = nn.Parameter(torch.randn(n_experts, d_model, d_ff) * 0.02)
+        self.w2 = nn.Parameter(torch.randn(n_experts, d_ff, d_model) * 0.02)
+
+    def forward(self, x: torch.Tensor) -&gt; torch.Tensor:
+        N, D = x.shape[0] * x.shape[1], x.shape[2]
+        xf   = x.view(N, D)
+        probs, idx = torch.topk(F.softmax(self.router(xf), -1), self.top_k, -1)
+        probs = probs / probs.sum(-1, keepdim=True)
+        out   = torch.zeros_like(xf)
+        for k in range(self.top_k):
+            for e in range(self.n_experts):
+                m = idx[:, k] == e
+                if not m.any(): continue
+                h = F.gelu(xf[m] @ self.w1[e])
+                out[m] += probs[m, k:k+1] * (h @ self.w2[e])
+        return out.view_as(x)
+
+# Coarse: 8 experts, top-2 | Fine-grained: 64 experts, top-16 (same active fraction)
+coarse = FineGrainedMoELayer(512, 2048, n_experts=8,  top_k=2)
+fine   = FineGrainedMoELayer(512, 2048, n_experts=64, top_k=16)
+print(f&quot;Coarse params: {sum(p.numel() for p in coarse.parameters()):,}&quot;)
+print(f&quot;Fine   params: {sum(p.numel() for p in fine.parameters()):,}&quot;)
+</code></pre>
+<h2>DeepSeek-MoE Design</h2>
+<p>DeepSeek-MoE uses N_r=64 fine-grained routed experts (compared to Mixtral's 8), routing top-K_r=6 per token. Additionally, it adds N_s=2 shared experts that always activate for every token regardless of routing — these handle common knowledge that every token needs. The routing is: output = sum(shared_expert_i(x)) + sum_{k in top-K_r} g_k * E_k(x). The 64 small routed experts together with 2 always-active shared experts give DeepSeek-MoE significantly higher specialisation than a comparable 8-expert model. The paper demonstrates that the fine-grained experts develop more distinct weight matrices (lower cosine similarity between expert weight pairs) and show sharper token routing patterns than coarse experts trained with the same compute budget.</p>
+<pre><code class="language-python">import torch
+import torch.nn.functional as F
+from itertools import combinations
+
+def measure_knowledge_redundancy(expert_weights: torch.Tensor) -&gt; dict:
+    &quot;&quot;&quot;Measure cosine similarity between expert weight matrices.
+    Lower mean similarity = more specialisation = less redundancy.
+    expert_weights: (n_experts, d_in * d_out) flattened weight vectors.&quot;&quot;&quot;
+    n = expert_weights.shape[0]
+    norms  = F.normalize(expert_weights, dim=-1)            # (E, D)
+    sims   = []
+    for i, j in combinations(range(n), 2):
+        sims.append((norms[i] * norms[j]).sum().item())
+    sims = torch.tensor(sims)
+    return {&quot;mean_sim&quot;: sims.mean().item(),
+            &quot;std_sim&quot;:  sims.std().item(),
+            &quot;max_sim&quot;:  sims.max().item()}
+
+# Simulate random expert weights for coarse (8) vs fine-grained (64)
+torch.manual_seed(42)
+for name, n_exp in [(&quot;coarse-8&quot;, 8), (&quot;fine-64&quot;, 64)]:
+    W = torch.randn(n_exp, 512 * 128)                      # flatten d_model x d_ff
+    r = measure_knowledge_redundancy(W)
+    print(f&quot;{name:&gt;10}: mean_sim={r['mean_sim']:.4f}  max_sim={r['max_sim']:.4f}&quot;)
+</code></pre>
+<h2>Expert Granularity Tradeoffs</h2>
+<p>Increasing the number of experts while holding total parameters and active FLOPs constant involves genuine tradeoffs. Smaller individual experts have lower hidden dimension (d_ff/m for m-fold split) and therefore lower representational capacity per expert. For very fine-grained experts (m=16, hidden dim reduced 16x), each expert may lack the capacity to learn complex transformations. Additionally, with many experts, routing becomes more critical: the router must correctly assign each token to its most appropriate expert among 64 or 128 options, a harder problem than choosing among 8. This requires the router to develop finer-grained representations and may require longer training to converge. The sweet spot in practice appears to be around 32–128 experts for most model scales, balancing specialisation benefits against per-expert capacity and routing difficulty.</p>
+<table>
+<thead>
+<tr>
+<th>Config</th>
+<th>N experts</th>
+<th>Expert hidden dim</th>
+<th>Top-K</th>
+<th>Active params (M)</th>
+<th>Specialisation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GShard 2048E</td>
+<td>2048</td>
+<td>d_ff (full)</td>
+<td>2</td>
+<td>~2x dense FFN</td>
+<td>Very high (but routing hard)</td>
+</tr>
+<tr>
+<td>Switch-C 2048E</td>
+<td>2048</td>
+<td>d_ff (full)</td>
+<td>1</td>
+<td>~1x dense FFN</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Mixtral 8E</td>
+<td>8</td>
+<td>d_ff (full)</td>
+<td>2</td>
+<td>~2x dense FFN</td>
+<td>Moderate</td>
+</tr>
+<tr>
+<td>DeepSeek-MoE 64E</td>
+<td>64</td>
+<td>d_ff/8</td>
+<td>6 routed + 2 shared</td>
+<td>~1x dense FFN</td>
+<td>High</td>
+</tr>
+<tr>
+<td>Fine-grained 128E</td>
+<td>128</td>
+<td>d_ff/16</td>
+<td>16</td>
+<td>~1x dense FFN</td>
+<td>Very high</td>
+</tr>
+</tbody>
+</table>
+<h2>Routing with Many Experts</h2>
+<p>Routing among 64 or 128 experts introduces new challenges. The router is a linear layer of size d_model × n_experts; at n_experts=128, this is d_model × 128 parameters — still a small fraction of total params. The softmax over 128 logits is more diffuse than over 8, meaning the top-K probability mass is more spread out. This can make the router signal weaker and slower to develop. DeepSeek-MoE addresses this with a normalised top-K selection: after computing the top-K experts, the gating weights are renormalised to sum to 1, sharpening the signal. Additionally, the load-balancing challenge is harder with more experts — ensuring each of 128 experts receives roughly 1/128 of tokens requires stronger regularisation or expert choice routing.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class DeepSeekMoEStyle(nn.Module):
+    &quot;&quot;&quot;Fine-grained MoE with shared + routed experts (DeepSeek-MoE style).&quot;&quot;&quot;
+    def __init__(self, d_model: int, d_ff: int,
+                 n_shared: int, n_routed: int, top_k: int):
+        super().__init__()
+        self.top_k = top_k
+        self.router = nn.Linear(d_model, n_routed, bias=False)
+        # Shared experts: always active for every token
+        self.shared = nn.ModuleList([
+            nn.Sequential(nn.Linear(d_model, d_ff), nn.GELU(),
+                          nn.Linear(d_ff, d_model)) for _ in range(n_shared)])
+        # Routed experts: fine-grained (smaller d_ff)
+        self.routed = nn.ModuleList([
+            nn.Sequential(nn.Linear(d_model, d_ff), nn.GELU(),
+                          nn.Linear(d_ff, d_model)) for _ in range(n_routed)])
+
+    def forward(self, x: torch.Tensor) -&gt; torch.Tensor:
+        # Shared expert output (always active)
+        shared_out = sum(e(x) for e in self.shared)
+        # Routed expert output (top-K of N_r)
+        N, D  = x.shape[0] * x.shape[1], x.shape[2]
+        xf    = x.view(N, D)
+        probs, idx = torch.topk(F.softmax(self.router(xf), -1), self.top_k, -1)
+        probs = probs / probs.sum(-1, keepdim=True)
+        routed_out = torch.zeros_like(xf)
+        for k in range(self.top_k):
+            for e, expert in enumerate(self.routed):
+                m = idx[:, k] == e
+                if m.any():
+                    routed_out[m] += probs[m, k:k+1] * expert(xf[m])
+        return shared_out + routed_out.view_as(x)
+
+model = DeepSeekMoEStyle(512, 256, n_shared=2, n_routed=64, top_k=6)
+print(model(torch.randn(2, 8, 512)).shape)
+</code></pre>
+<h2>Knowledge Redundancy</h2>
+<p>A key motivation for fine-grained MoE is reducing knowledge redundancy — the phenomenon where multiple experts in a coarse MoE learn similar functions because they each must cover a broad range of token types. When 8 experts each process 1/8 of tokens and the token distribution is not cleanly separable into 8 clusters, experts must generalise across multiple clusters, leading to overlapping weight matrices. Fine-grained MoE with 64 experts allows each expert to specialise in a tighter cluster, reducing weight matrix overlap. DeepSeek-MoE quantifies this by measuring pairwise cosine similarity between expert weight matrices: fine-grained models show lower mean similarity (more diverse expertise) than coarse models, even at identical total parameter count.</p>
+<blockquote>
+<p><strong>Fine-Grained Specialisation</strong>: Fine-grained MoE with 64+ experts typically shows higher expert specialisation — different experts learn syntax vs semantics vs domain knowledge — than coarse MoE with 8 experts. But it requires careful load balancing across many more experts and a router that can distinguish among 64+ options.</p>
+</blockquote>
+<h2>Shared Expert Combination</h2>
+<p>DeepSeek-MoE combines fine-grained routed experts with a small number of always-active shared experts. The shared experts handle common knowledge — patterns that appear in nearly every token type and therefore should not be 'wasted' on routed experts that specialise in narrow domains. By offloading common patterns to shared experts, the routed experts are freed to specialise more aggressively. This is analogous to having generalist staff who handle routine work while specialists focus on complex cases. In practice, 2–4 shared experts are sufficient; more shared experts reduce the specialisation benefit of routing. The load-balancing auxiliary loss is applied only to the routed experts (shared experts activate for all tokens, so they are always perfectly balanced).</p>
+<pre><code class="language-python">import torch
+import numpy as np
+
+def expert_specialisation_sweep(n_experts_list: list, n_tokens: int = 10000,
+                                top_k: int = 2) -&gt; None:
+    &quot;&quot;&quot;Measure routing entropy as a proxy for specialisation across expert counts.
+    Higher entropy per expert = broader coverage = less specialisation.&quot;&quot;&quot;
+    print(f&quot;{'N experts':&gt;12} {'expert hidden':&gt;14} {'top_k':&gt;7} &quot;
+          f&quot;{'active frac':&gt;12} {'load_cv_est':&gt;12}&quot;)
+    for n in n_experts_list:
+        # Simulate uniform routing (best case for load balance)
+        counts = torch.zeros(n)
+        for _ in range(n_tokens):
+            chosen = torch.randperm(n)[:top_k]
+            counts[chosen] += 1
+        load = counts / counts.sum()
+        cv   = (load.std() / load.mean()).item()
+        active_frac = top_k / n
+        expert_hidden = f&quot;d_ff/{n//8}&quot; if n &gt;= 8 else &quot;d_ff&quot;
+        print(f&quot;{n:&gt;12} {expert_hidden:&gt;14} {top_k:&gt;7} &quot;
+              f&quot;{active_frac:&gt;12.3f} {cv:&gt;12.4f}&quot;)
+
+expert_specialisation_sweep([8, 16, 32, 64, 128], top_k=2)
+</code></pre>
+<h2>Key Takeaways</h2>
+<p>Fine-grained MoE is an architectural refinement that improves expert specialisation without changing total parameter count or active FLOPs. By splitting each of N coarse experts into m fine-grained experts and increasing top-K proportionally, the active computation budget stays the same while the routing precision improves dramatically. DeepSeek-MoE demonstrates that 64 fine-grained routed experts plus 2 shared experts outperform 8 coarse experts at the same FLOPs on downstream benchmarks. The main costs are increased routing complexity, harder load balancing across more experts, and potentially weaker per-expert capacity if expert hidden dimension becomes too small. The optimal granularity depends on model scale and training data diversity.</p>
+<ul>
+<li>Fine-grained MoE: many small experts (64–128) vs few large ones (8–16), same total params and FLOPs</li>
+<li>Experts specialise more narrowly, reducing weight matrix cosine similarity (knowledge redundancy)</li>
+<li>DeepSeek-MoE uses 64 routed + 2 shared experts; routes top-6 routed experts per token</li>
+<li>Load balancing is harder across 64+ experts — use stronger aux loss or expert choice routing</li>
+<li>Shared experts handle common patterns; frees routed experts to specialise more aggressively</li>
+<li>Sweet spot: 32–128 experts for typical LLM scales; beyond 256 routing quality degrades</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>

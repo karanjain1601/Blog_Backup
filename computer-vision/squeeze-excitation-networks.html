@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Squeeze-and-Excitation Networks | Notes Backup</title>
+  <meta name="description" content="Channel attention via global average pooling (squeeze) and two FC layers (excitation) — how SE blocks recalibrate channel-wise feature responses and improve accuracy with minimal parameter overhead." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Squeeze-and-Excitation Networks</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Channel attention via global average pooling (squeeze) and two FC layers (excitation) — how SE blocks recalibrate channel-wise feature responses and improve accuracy with minimal parameter overhead.</li><li><strong>topic:</strong> computer-vision</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Squeeze-and-Excitation Networks</h1>
+<p>Squeeze-and-Excitation (SE) Networks, introduced by Hu et al. at CVPR 2018, won the ImageNet ILSVRC classification challenge. The core idea is channel attention: learn which feature channels are most informative for a given input and recalibrate their responses accordingly. This is achieved through a lightweight gating mechanism that adds minimal parameters.</p>
+<p>Standard CNNs treat all channels equally when combining feature maps. SE blocks address this by explicitly modeling channel interdependencies. Given a feature map of shape (H, W, C), SE blocks produce a vector of C weights — one per channel — that amplify useful features and suppress less relevant ones, improving representational power without changing spatial resolution.</p>
+<p>The squeeze operation compresses spatial information into a channel descriptor. Global Average Pooling (GAP) aggregates each channel's feature map into a single scalar by averaging over all H×W spatial positions. The result is a vector z ∈ ℝ^C, where z_c = (1/H×W) Σ u_c(i,j). This gives the network a global view of each channel's activation distribution.</p>
+<p>GAP is chosen over more complex pooling strategies because it is differentiable, computationally free, and captures holistic channel-level statistics. It allows the subsequent excitation module to reason about channel relationships in a position-agnostic manner, focusing on what is present rather than where it appears in the spatial dimensions of the feature map.</p>
+<p>The excitation operation transforms the squeezed descriptor z into channel weights s ∈ [0,1]^C. Two fully connected layers form a bottleneck: z is projected down from C to C/r neurons (r is the reduction ratio), then back up to C neurons. A sigmoid activation ensures each weight lies in [0,1], enabling soft, differentiable channel selection that recalibrates feature responses.</p>
+<pre><code class="language-python">import torch.nn as nn
+class SEBlock(nn.Module):
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channels, channels // reduction, bias=False),
+            nn.ReLU(),
+            nn.Linear(channels // reduction, channels, bias=False),
+            nn.Sigmoid()
+        )
+    def forward(self, x):
+        b, c = x.shape[:2]
+        s = self.fc(self.pool(x).view(b, c)).view(b, c, 1, 1)
+        return x * s
+</code></pre>
+<p>The reduction ratio r controls the bottleneck size, trading off accuracy against parameter efficiency. A smaller r (e.g., r=4) enables richer channel interactions but adds more parameters; a larger r (e.g., r=32) is more frugal but may lose representational capacity. The original paper recommends r=16 as a default, balancing accuracy gains and computational overhead.</p>
+<pre><code class="language-python">class SEResBlock(nn.Module):
+    def __init__(self, channels, reduction=16):
+        super().__init__()
+        self.conv1 = nn.Conv2d(channels, channels, 3, padding=1)
+        self.bn1   = nn.BatchNorm2d(channels)
+        self.conv2 = nn.Conv2d(channels, channels, 3, padding=1)
+        self.bn2   = nn.BatchNorm2d(channels)
+        self.se    = SEBlock(channels, reduction)
+        self.relu  = nn.ReLU(inplace=True)
+    def forward(self, x):
+        out = self.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out = self.se(out)          # recalibrate channels
+        return self.relu(out + x)  # add skip connection
+</code></pre>
+<p>SE blocks integrate seamlessly into existing architectures as drop-in modules. In ResNets, the SE block is inserted after the second convolution and before the residual addition. In VGG-style networks it follows each convolutional block. Placement before the skip connection ensures recalibration happens on transformed features, preserving the identity shortcut's gradient flow.</p>
+<pre><code class="language-python">def sweep_reduction_ratios(val_loader, ratios=[4, 8, 16, 32]):
+    results = {}
+    for r in ratios:
+        model = SEResNet50(reduction=r).cuda()
+        params = sum(p.numel() for p in model.parameters())
+        acc = evaluate(model, val_loader)
+        results[r] = {
+            &quot;params_M&quot;: params / 1e6,
+            &quot;top1_acc&quot;: acc
+        }
+        print(f&quot;r={r}: {params/1e6:.1f}M params, {acc:.2f}% top-1&quot;)
+    return results
+</code></pre>
+<p>SE blocks are computationally efficient: the squeeze operation (GAP) is parameter-free, and the two FC layers add only 2(C²/r) parameters per block. For a ResNet-50 with ~25M parameters, adding SE blocks with r=16 increases parameter count by about 2.5M (~10%), yet consistently delivers 1–2% top-1 accuracy gains on ImageNet — a highly favorable trade-off.</p>
+<table>
+<thead>
+<tr>
+<th></th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td></td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p>****: SE blocks add only ~2% extra parameters but consistently yield 1–2% top-1 accuracy gains — they are now standard in EfficientNet, MobileNetV3, and RegNet architectures.</p>
+</blockquote>
+<p>FLOPs overhead from SE blocks is negligible because the FC layers operate on the channel vector (C values) rather than full feature maps (H×W×C values). For a 14×14×512 feature map, GAP reduces spatial dimensions entirely, so subsequent FC layers process only 512 values — orders of magnitude cheaper than the spatial convolution operations they accompany.</p>
+<pre><code class="language-python">import torch, matplotlib.pyplot as plt
+def visualize_se_weights(model, x):
+    weights = {}
+    def hook(name):
+        def fn(m, inp, out):
+            weights[name] = out.detach().squeeze().cpu()
+        return fn
+    for name, m in model.named_modules():
+        if isinstance(m, SEBlock):
+            m.fc.register_forward_hook(hook(name))
+    with torch.no_grad():
+        model(x)
+    for name, w in weights.items():
+        plt.bar(range(len(w)), w.numpy())
+        plt.title(f&quot;SE weights: {name}&quot;); plt.show()
+</code></pre>
+<p>SE Networks demonstrate that explicit channel attention is a powerful and general technique for improving CNN performance. The squeeze-excitation paradigm — aggregate global context, learn channel weights, recalibrate — is intuitive and effective. The original SE-ResNet-154 achieved 2.251% top-5 error on ImageNet, winning the ILSVRC 2017 classification challenge outright.</p>
+<p>The reduction ratio r offers a direct knob for the accuracy-efficiency trade-off. Practitioners should benchmark r=8 and r=16 first; r=4 is worth exploring when accuracy is the priority and compute budget allows. SE blocks are particularly beneficial in depthwise-separable architectures such as MobileNets, where channel mixing is limited by the factored convolution design.</p>
+<p>SE Networks inspired subsequent attention mechanisms: CBAM extends channel attention with spatial attention; ECA-Net replaces FC layers with 1D convolution over adjacent channels for lower overhead; GE-Nets use gather-excite to capture spatial context at multiple scales. Despite these advances, SE blocks remain a go-to choice due to their simplicity and strong empirical results.</p>
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DBSCAN — Density-Based Spatial Clustering | Notes Backup</title>
+  <meta name="description" content="Master DBSCAN&#x27;s density-reachability framework: core, border, and noise points, the cluster expansion algorithm, O(n log n) complexity with spatial indexing, ε selection via the k-distance graph, and a head-to-head comparison with k-means on non-convex data." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>DBSCAN — Density-Based Spatial Clustering</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Master DBSCAN&#x27;s density-reachability framework: core, border, and noise points, the cluster expansion algorithm, O(n log n) complexity with spatial indexing, ε selection via the k-distance graph, and a head-to-head comparison with k-means on non-convex data.</li><li><strong>topic:</strong> classical-ml</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>DBSCAN — Density-Based Spatial Clustering</h1>
+<p>DBSCAN (Density-Based Spatial Clustering of Applications with Noise) discovers clusters as dense regions separated by low-density areas. Unlike k-means or GMMs, DBSCAN requires no assumption about the number of clusters, handles arbitrarily shaped clusters, and naturally labels outliers as noise. Its two parameters — ε (neighborhood radius) and minPts (minimum neighborhood size) — control the density threshold that defines a cluster.</p>
+<h2>Core, Border, and Noise Points</h2>
+<p>DBSCAN classifies every point into one of three roles based on its ε-neighborhood Nε(x) = {y : dist(x,y) ≤ ε}: a core point has |Nε(x)| ≥ minPts (sufficient local density to form a cluster); a border point has |Nε(x)| &lt; minPts but is within ε of at least one core point (on the edge of a cluster); a noise point (outlier) is neither a core nor a border point. These roles capture the intuition that clusters have a dense interior, a transition region, and isolated outliers.</p>
+<ul>
+<li>Core point: ≥ minPts points (including itself) within distance ε. These form the cluster skeleton.</li>
+<li>Border point: fewer than minPts neighbors within ε, but reachable from a core point. Belongs to a cluster but not its interior.</li>
+<li>Noise point: fewer than minPts neighbors within ε and not reachable from any core point. Labeled −1 in sklearn.</li>
+<li>Density-reachability: x is density-reachable from y if there is a chain of core points connecting them within ε.</li>
+<li>Density-connectivity: x and y are density-connected if there exists a point z from which both are density-reachable.</li>
+</ul>
+<h2>The DBSCAN Algorithm</h2>
+<p>The algorithm iterates through all unvisited points: if a point is a core point, a new cluster is started by expanding from it — all density-reachable points are recursively added. Border points are added when they fall within ε of an expanding core cluster. Points that are never reached are marked as noise. With a spatial index (e.g., a KD-tree or ball tree), neighborhood queries take O(log n) on average, giving O(n log n) total complexity. Without a spatial index the naive implementation is O(n²).</p>
+<pre><code class="language-python">import numpy as np
+from collections import deque
+
+def dbscan_naive(X, eps, min_pts):
+    &quot;&quot;&quot;DBSCAN from scratch — O(n^2), for pedagogical clarity.&quot;&quot;&quot;
+    n = X.shape[0]
+    labels = np.full(n, -2, dtype=int)  # -2 = unvisited, -1 = noise
+    cluster_id = 0
+
+    def neighbors(idx):
+        dists = np.sqrt(((X - X[idx]) ** 2).sum(axis=1))
+        return np.where(dists &lt;= eps)[0]
+
+    for i in range(n):
+        if labels[i] != -2:
+            continue
+        nbrs = neighbors(i)
+        if len(nbrs) &lt; min_pts:
+            labels[i] = -1  # noise (may be reassigned as border later)
+            continue
+        labels[i] = cluster_id
+        queue = deque(nbrs)
+        while queue:
+            j = queue.popleft()
+            if labels[j] == -1:
+                labels[j] = cluster_id  # border point
+            if labels[j] != -2:
+                continue
+            labels[j] = cluster_id
+            nbrs_j = neighbors(j)
+            if len(nbrs_j) &gt;= min_pts:
+                queue.extend(nbrs_j)  # core point: expand
+        cluster_id += 1
+    return labels
+
+from sklearn.datasets import make_moons
+X, y_true = make_moons(n_samples=200, noise=0.08, random_state=42)
+labels = dbscan_naive(X, eps=0.2, min_pts=5)
+n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
+print(f&quot;Found {n_clusters} clusters, {(labels == -1).sum()} noise points&quot;)
+print(f&quot;ARI: {__import__('sklearn.metrics', fromlist=['adjusted_rand_score']).adjusted_rand_score(y_true, labels):.4f}&quot;)
+</code></pre>
+<h2>Choosing ε — The K-Distance Graph</h2>
+<p>The most effective heuristic for choosing ε is the k-distance graph: for each point, compute its distance to its k-th nearest neighbor (where k = minPts) and sort these distances in ascending order. Plot the sorted k-distances; the 'elbow' (point of maximum curvature) suggests a good ε — below this value most points have at least minPts neighbors, forming dense clusters; above it, neighborhoods collapse. The rule of thumb for minPts is 2d (twice the dimensionality), with a minimum of 4 for 2D data.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.neighbors import NearestNeighbors
+from sklearn.datasets import make_moons, make_circles
+
+X_moon, _ = make_moons(n_samples=300, noise=0.07, random_state=0)
+X_circles, _ = make_circles(n_samples=300, noise=0.05, factor=0.5, random_state=0)
+
+for name, X in [('Moons', X_moon), ('Circles', X_circles)]:
+    min_pts = 5
+    nbrs = NearestNeighbors(n_neighbors=min_pts).fit(X)
+    dists, _ = nbrs.kneighbors(X)
+    k_dists = np.sort(dists[:, -1])
+    # Find elbow via maximum second derivative
+    d2 = np.diff(np.diff(k_dists))
+    elbow_idx = np.argmax(d2) + 1
+    suggested_eps = k_dists[elbow_idx]
+    print(f&quot;{name}: suggested eps={suggested_eps:.4f} (from k={min_pts} distance graph)&quot;)
+    print(f&quot;  k-distances range: [{k_dists[0]:.4f}, {k_dists[-1]:.4f}]&quot;)
+    print(f&quot;  Elbow at index {elbow_idx}/{len(k_dists)}&quot;)
+    print()
+</code></pre>
+<h2>DBSCAN on Non-Convex Shapes</h2>
+<p>DBSCAN excels on the canonical non-convex benchmarks where k-means completely fails. For interleaved half-moons and concentric rings, the density-based definition of connectivity correctly traces the geometric structure without needing to know the number of clusters upfront. The key insight is that density-reachability is transitive — a point deep inside a cluster can reach a point far away via a chain of overlapping neighborhoods, so the entire connected dense region forms one cluster regardless of its global shape.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.cluster import DBSCAN, KMeans
+from sklearn.datasets import make_moons, make_circles
+from sklearn.metrics import adjusted_rand_score
+from sklearn.preprocessing import StandardScaler
+
+datasets = [
+    ('Moons',   *make_moons(n_samples=300, noise=0.07, random_state=42)),
+    ('Circles', *make_circles(n_samples=300, noise=0.05, factor=0.5, random_state=42)),
+]
+
+for name, X, y_true in datasets:
+    X = StandardScaler().fit_transform(X)
+    db = DBSCAN(eps=0.3, min_samples=5).fit(X)
+    km = KMeans(n_clusters=2, n_init=10, random_state=42).fit(X)
+    ari_db = adjusted_rand_score(y_true, db.labels_)
+    ari_km = adjusted_rand_score(y_true, km.labels_)
+    n_clusters_db = len(set(db.labels_)) - (1 if -1 in db.labels_ else 0)
+    n_noise = (db.labels_ == -1).sum()
+    print(f&quot;{name}:&quot;)
+    print(f&quot;  DBSCAN  — clusters={n_clusters_db}, noise={n_noise}, ARI={ari_db:.4f}&quot;)
+    print(f&quot;  KMeans  — clusters=2,  noise=0,      ARI={ari_km:.4f}&quot;)
+    print()
+</code></pre>
+<h2>DBSCAN vs K-Means — Head-to-Head on Non-Convex Data</h2>
+<p>The definitive advantage of DBSCAN over k-means is on non-convex data. K-means partitions space via straight Voronoi boundaries, which cannot trace curved cluster geometry. DBSCAN uses local density connectivity and can follow arbitrarily curved boundaries as long as the density is consistently above the threshold. The comparison is most dramatic on interleaved moons and concentric rings, where k-means ARI ≈ 0 and DBSCAN ARI ≈ 1.</p>
+<pre><code class="language-python">import numpy as np
+from sklearn.cluster import DBSCAN, KMeans
+from sklearn.datasets import make_moons, make_circles
+from sklearn.metrics import adjusted_rand_score
+from sklearn.preprocessing import StandardScaler
+
+datasets = [
+    ('Moons',   make_moons(n_samples=400, noise=0.06, random_state=42)),
+    ('Circles', make_circles(n_samples=400, noise=0.04, factor=0.5, random_state=42)),
+]
+
+print(f&quot;{'Dataset':10s} | {'DBSCAN eps':&gt;12} | {'DBSCAN ARI':&gt;12} | {'KMeans ARI':&gt;12} | {'Noise':&gt;6}&quot;)
+for name, (X, y_true) in datasets:
+    X = StandardScaler().fit_transform(X)
+    # Tune eps from k-distance elbow
+    from sklearn.neighbors import NearestNeighbors
+    nn = NearestNeighbors(n_neighbors=5).fit(X)
+    dists, _ = nn.kneighbors(X)
+    k_dists = np.sort(dists[:, -1])
+    d2 = np.diff(np.diff(k_dists))
+    eps = k_dists[np.argmax(d2) + 1]
+    db = DBSCAN(eps=eps, min_samples=5).fit(X)
+    km = KMeans(n_clusters=2, n_init=10, random_state=42).fit(X)
+    ari_db = adjusted_rand_score(y_true, db.labels_)
+    ari_km = adjusted_rand_score(y_true, km.labels_)
+    n_noise = (db.labels_ == -1).sum()
+    print(f&quot;{name:10s} | {eps:&gt;12.4f} | {ari_db:&gt;12.4f} | {ari_km:&gt;12.4f} | {n_noise:&gt;6}&quot;)
+</code></pre>
+<h2>Limitations of DBSCAN</h2>
+<p>DBSCAN's main limitation is its single global density threshold. Clusters with different densities require different ε values, but DBSCAN uses one ε for the entire dataset. A dense cluster and a sparse cluster cannot both be correctly identified unless their density difference is small. In high dimensions (d &gt; 10), the curse of dimensionality causes all pairwise distances to concentrate, making ε selection extremely sensitive — a tiny change in ε changes which points are cores, often drastically. HDBSCAN addresses the variable-density limitation by constructing a hierarchy of density levels.</p>
+<blockquote>
+<p><strong>DBSCAN in High Dimensions</strong>: For d &gt; 10, DBSCAN becomes unreliable because Euclidean distance loses discriminative power — the ratio of max/min pairwise distance approaches 1 as d increases. Before applying DBSCAN to high-dimensional data, reduce dimensionality with PCA or UMAP to 2–10 dimensions, then tune ε on the reduced space. The minPts rule of thumb (2d) also produces very large values in high d, causing everything to be labeled noise.</p>
+</blockquote>
+<table>
+<thead>
+<tr>
+<th>Property</th>
+<th>K-Means</th>
+<th>GMM</th>
+<th>DBSCAN</th>
+<th>HDBSCAN</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Cluster shape</td>
+<td>Convex (spherical)</td>
+<td>Elliptical</td>
+<td>Arbitrary</td>
+<td>Arbitrary</td>
+</tr>
+<tr>
+<td>Outlier handling</td>
+<td>None — all points assigned</td>
+<td>Soft (low responsibility)</td>
+<td>Explicit noise label</td>
+<td>Outlier scores</td>
+</tr>
+<tr>
+<td>k required</td>
+<td>Yes</td>
+<td>Yes</td>
+<td>No</td>
+<td>No</td>
+</tr>
+<tr>
+<td>Variable density</td>
+<td>No</td>
+<td>Partially</td>
+<td>No — single global ε</td>
+<td>Yes — multi-scale</td>
+</tr>
+<tr>
+<td>Complexity</td>
+<td>O(nkdT)</td>
+<td>O(nk²dT)</td>
+<td>O(n log n) with index</td>
+<td>O(n log n)</td>
+</tr>
+</tbody>
+</table>
+<p>When to choose DBSCAN: the data has clear spatial density structure, outliers need explicit identification, cluster count is unknown, and data dimensionality is moderate (d ≤ 20). When to avoid it: variable cluster densities (use HDBSCAN), high dimensions (use UMAP + DBSCAN), or when all points should be assigned to clusters (use k-means or GMM). DBSCAN remains one of the most cited algorithms in clustering literature precisely because of its combination of outlier robustness, arbitrary shape detection, and automatic cluster count determination.</p>
+<hr />
+    </article>
+  </main>
+</body>
+</html>

@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Disaggregated Prefill and Decode | Notes Backup</title>
+  <meta name="description" content="Separating the compute-bound prefill phase from the memory-bandwidth-bound decode phase onto different GPU pools to optimize hardware utilization for each." />
+  <style>
+    :root { color-scheme: light dark; font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    body { margin: 0; background: #0f172a; color: #e2e8f0; }
+    main { max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+    a { color: #7dd3fc; }
+    .back-link { display: inline-block; margin-bottom: 1.5rem; }
+    article { background: #111827; border: 1px solid #334155; border-radius: 14px; padding: 2rem; box-shadow: 0 20px 45px rgba(15, 23, 42, 0.2); }
+    .note-meta { padding-left: 1rem; color: #cbd5e1; }
+    code { background: rgba(255,255,255,0.08); padding: 0.1rem 0.25rem; border-radius: 4px; }
+    pre { background: #020617; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back-link" href="../index.html">← Back to notes index</a>
+    <article>
+      <h1>Disaggregated Prefill and Decode</h1>
+      <ul class='note-meta'><li><strong>description:</strong> Separating the compute-bound prefill phase from the memory-bandwidth-bound decode phase onto different GPU pools to optimize hardware utilization for each.</li><li><strong>topic:</strong> deep-learning</li><li><strong>status:</strong> published</li><li><strong>updated:</strong> 2026-07-10</li></ul>
+      <h1>Disaggregated Prefill and Decode</h1>
+<p>LLM inference has two fundamentally different phases with opposite hardware bottlenecks. Prefill processes the entire prompt in one forward pass — all tokens are computed simultaneously using dense matrix multiplications, making it highly compute-bound and achieving near-peak FLOP utilization. Decode generates one token at a time by attending over the full KV cache — a memory-bandwidth-bound operation where the GPU spends most time loading model weights and KV tensors rather than performing arithmetic. Placing both phases on the same GPU forces a single hardware configuration to serve two opposed workloads, invariably under-utilizing both. Disaggregated architectures route prefill to compute-optimized GPUs and decode to memory-bandwidth-optimized GPUs, unlocking near-optimal utilization of each.</p>
+<h2>Overview</h2>
+<p>In a unified (non-disaggregated) serving system, a single GPU or GPU cluster handles both prefill and decode for every request. The scheduler receives a request, runs the full prompt through the model to populate the KV cache (prefill), then autoregressively generates output tokens (decode) until an EOS token or length limit. This colocation means the GPU alternates between compute-bound and bandwidth-bound operating modes within the same request, achieving neither peak compute throughput nor peak memory bandwidth. Worse, long-prompt prefill jobs interfere with ongoing decode jobs, spiking time-to-first-token (TTFT) for other requests in the batch.</p>
+<p>Disaggregated inference splits the cluster into two pools: a prefill pool and a decode pool. When a request arrives, it is routed to a prefill GPU which computes the KV cache for the full prompt. The KV cache is then transferred to a decode GPU which performs autoregressive generation. The two pools can be independently scaled: more prefill GPUs reduce TTFT, more decode GPUs increase generation throughput. Hardware choices can also differ: the prefill pool benefits from high FLOP/s (A100-80GB, H100), while the decode pool benefits from high memory bandwidth (H100, MI300X, or even CPUs for very small models).</p>
+<h2>Prefill vs Decode Resource Requirements</h2>
+<p>Prefill arithmetic intensity is high: processing a 4096-token prompt through a 70B-parameter model requires roughly 4096 × 70B × 2 = 573 TFLOP of compute (each parameter is accessed once per token). The A100 delivers 312 TFLOP/s in bf16, giving ~1.8 seconds of compute time — and the GPU is fully occupied running matrix multiplications at high utilization (typically 60–80% MFU). Decode arithmetic intensity is low: generating one token accesses all 70B parameters once (140 GB of reads in fp16) but only performs 70B FLOP of compute, giving an arithmetic intensity of 0.5 FLOP/byte — far below the roofline, meaning the GPU is memory-bandwidth-bound and compute units sit idle most of the time.</p>
+<pre><code class="language-python">import torch
+import time
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+def profile_prefill_vs_decode(
+    model_name: str = 'gpt2-medium',
+    prompt_len: int = 256
+) -&gt; None:
+    &quot;&quot;&quot;Measure GPU compute utilization and latency for prefill-only vs decode-only.&quot;&quot;&quot;
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(model_name)
+    model.eval()
+    prompt_ids = torch.randint(100, 50000, (1, prompt_len))
+    # Prefill: forward pass over full prompt, cache KV
+    t0 = time.perf_counter()
+    with torch.no_grad():
+        out = model(prompt_ids, use_cache=True)
+    prefill_ms = (time.perf_counter() - t0) * 1e3
+    past_kv = out.past_key_values
+    # Decode: one token at a time, reading full KV cache each step
+    decode_times = []
+    x = torch.randint(100, 50000, (1, 1))
+    for _ in range(10):
+        t0 = time.perf_counter()
+        with torch.no_grad():
+            out = model(x, past_key_values=past_kv, use_cache=True)
+        decode_times.append((time.perf_counter() - t0) * 1e3)
+        past_kv = out.past_key_values
+        x = out.logits[:, -1:].argmax(-1)
+    avg_decode = sum(decode_times) / len(decode_times)
+    print(f'Prefill ({prompt_len} tokens): {prefill_ms:.1f} ms  -&gt; compute-bound')
+    print(f'Decode  (per token):   {avg_decode:.1f} ms  -&gt; bandwidth-bound')
+    print(f'Prefill tok/s: {prompt_len / (prefill_ms/1e3):.0f}  |  Decode tok/s: {1e3/avg_decode:.0f}')
+
+profile_prefill_vs_decode()
+</code></pre>
+<p>Profiling consistently shows that prefill achieves high tokens-per-second (hundreds to thousands) while decode achieves low tokens-per-second (tens to low hundreds). The ratio of prefill tok/s to decode tok/s is typically 10-100x for medium-length prompts. This asymmetry is precisely why colocation wastes resources: the hardware is simultaneously over-provisioned for compute during decode and under-provisioned for compute during prefill.</p>
+<h2>The Chunked Prefill Solution</h2>
+<p>Before full disaggregation, chunked prefill is a practical intermediate approach. Instead of processing the entire prompt in one large forward pass (which blocks all decode operations for potentially hundreds of milliseconds), the prompt is split into fixed-size chunks of C tokens. Each scheduler step processes one chunk of the prompt and interleaves it with decode steps for other in-flight requests. This dramatically reduces TTFT variance: the worst-case TTFT is bounded by (prompt_len / C) × chunk_latency + scheduling_overhead, rather than prompt_len × per_token_compute_time. The decode throughput of existing requests is maintained because decode steps continue between chunks.</p>
+<pre><code class="language-python">import torch
+import torch.nn as nn
+from typing import List, Tuple
+import time
+
+def chunked_prefill_simulation(
+    prompt_len: int = 4096,
+    chunk_size: int = 512,
+    n_decode_reqs: int = 4,
+    hidden: int = 256
+) -&gt; None:
+    &quot;&quot;&quot;Interleave prefill chunks with decode steps; measure TTFT and TBT.&quot;&quot;&quot;
+    layer = nn.Linear(hidden, hidden)
+    prefill_chunk = torch.randn(chunk_size, hidden)
+    decode_token  = torch.randn(1, hidden)
+    num_chunks = (prompt_len + chunk_size - 1) // chunk_size
+    # Build interleaved schedule: one chunk, then decode steps for all requests
+    schedule: List[Tuple[str, int]] = []
+    for i in range(num_chunks):
+        schedule.append(('prefill', i))
+        for j in range(n_decode_reqs):
+            schedule.append(('decode', j))
+    ttft_ms = None
+    tbt_list: List[float] = []
+    wall_start = time.perf_counter()
+    for step_type, idx in schedule:
+        t_step = time.perf_counter()
+        if step_type == 'prefill':
+            _ = layer(prefill_chunk)
+            if idx == num_chunks - 1:
+                ttft_ms = (time.perf_counter() - wall_start) * 1e3
+        else:
+            _ = layer(decode_token)
+            tbt_list.append((time.perf_counter() - t_step) * 1e3)
+    avg_tbt = sum(tbt_list) / len(tbt_list)
+    print(f'Prompt: {prompt_len} tok  chunk: {chunk_size}  chunks: {num_chunks}')
+    print(f'TTFT:     {ttft_ms:.1f} ms')
+    print(f'Avg TBT:  {avg_tbt:.2f} ms  ({len(tbt_list)} decode steps)')
+    print(f'Decode throughput maintained throughout chunked prefill: YES')
+
+chunked_prefill_simulation()
+</code></pre>
+<p>The key insight of chunked prefill is that it converts a hard TTFT-vs-throughput trade-off into a tunable chunk-size knob. Smaller chunks reduce TTFT variance but add more scheduling overhead. Larger chunks reduce overhead but increase TBT jitter for existing decode requests. Sarathi-Serve empirically finds that chunk sizes of 512–2048 tokens work well across a range of model sizes and request distributions, keeping both TTFT and TBT within acceptable SLO bounds without requiring a separate prefill cluster.</p>
+<h2>Disaggregated Architecture</h2>
+<p>Full disaggregation assigns dedicated GPU pools to prefill and decode. The prefill pool receives incoming requests, computes the full KV cache for the prompt, then hands off the KV tensors to the decode pool over a high-bandwidth interconnect (InfiniBand, RoCE, or NVLink-over-fabric). The decode pool resumes generation from the transferred KV cache, producing tokens until completion. The two pools communicate through a KV cache transfer service (sometimes called a KV transfer proxy or KV router) that manages scheduling, transfer, and reassignment of decode GPUs.</p>
+<p>The architectural benefits of full disaggregation are significant: (1) Prefill GPUs can be tuned for compute — aggressive batching of prompts maximizes FLOP utilization. (2) Decode GPUs can be tuned for memory bandwidth — choosing hardware with high HBM bandwidth or even running smaller models per GPU. (3) Independent scaling: if TTFT is the bottleneck, add prefill GPUs; if throughput is the bottleneck, add decode GPUs. (4) SLO isolation: a large prefill job cannot spike the TBT of ongoing decode streams because they run on separate hardware. The cost is KV cache transfer overhead and the added complexity of the routing and scheduling layer.</p>
+<h2>KV Cache Transfer</h2>
+<p>The KV cache for a single request has size: 2 × n_layers × n_heads × seq_len × head_dim × bytes_per_element. For a 70B Llama-2 model (80 layers, 64 heads, head_dim=128) with a 4096-token prompt in fp16, this is 2 × 80 × 64 × 4096 × 128 × 2 bytes = 10.7 GB. Transferring 10.7 GB over a 400 Gbps InfiniBand link takes about 214 ms — comparable to or longer than the prefill time itself for shorter prompts. This is the key limitation of disaggregation for short prompts. For long prompts (&gt;8K tokens), the prefill time dominates and the transfer cost is proportionally smaller.</p>
+<pre><code class="language-python">import torch
+import io
+import time
+from typing import List, Tuple
+
+KVCache = List[Tuple[torch.Tensor, torch.Tensor]]
+
+def simulate_kv_transfer(
+    n_layers: int = 32,
+    n_heads: int = 16,
+    head_dim: int = 64,
+    seq_len: int = 1024,
+    dtype: torch.dtype = torch.float16
+) -&gt; None:
+    &quot;&quot;&quot;Serialize KV cache and measure transfer overhead vs prefill time.&quot;&quot;&quot;
+    kv_cache: KVCache = [
+        (torch.randn(1, n_heads, seq_len, head_dim, dtype=dtype),
+         torch.randn(1, n_heads, seq_len, head_dim, dtype=dtype))
+        for _ in range(n_layers)
+    ]
+    kv_bytes = sum(k.nbytes + v.nbytes for k, v in kv_cache)
+    print(f'KV cache: {n_layers} layers, shape {kv_cache[0][0].shape}')
+    print(f'Total KV size: {kv_bytes / 1e6:.1f} MB')
+    # Simulate serialization + transfer (in-memory as proxy)
+    t0 = time.perf_counter()
+    buf = io.BytesIO()
+    torch.save(kv_cache, buf)
+    data = buf.getvalue()
+    buf2 = io.BytesIO(data)
+    restored: KVCache = torch.load(buf2, weights_only=False)
+    transfer_ms = (time.perf_counter() - t0) * 1e3
+    # Estimate real NIC transfer time at 400 Gbps
+    nic_ms = (kv_bytes * 8) / (400e9) * 1e3
+    print(f'Simulated local transfer: {transfer_ms:.1f} ms')
+    print(f'Estimated 400 Gbps NIC:   {nic_ms:.1f} ms')
+    print(f'Layers match: {all(torch.allclose(r[0], o[0]) for r,o in zip(restored,kv_cache))}')
+
+simulate_kv_transfer()
+</code></pre>
+<p>To reduce transfer overhead, systems use KV cache quantization (fp8 or int8 compression halves transfer size), prefix caching (shared KV prefixes across requests are transferred once), and pipelined transfer (begin transferring early layers' KV while later layers are still being computed). The DistServe system reports that for prompts longer than 2000 tokens, KV transfer overhead is less than 10% of total request latency, making disaggregation beneficial at that scale.</p>
+<h2>Sarathi-Serve and DistServe</h2>
+<p>Sarathi-Serve (2023) introduces chunked prefill as a practical solution that does not require separate hardware pools. By interleaving fixed-size prefill chunks with decode iterations, it achieves predictable TTFT and TBT without the complexity of KV transfer. The chunk size is the single tunable knob. Sarathi-Serve shows that for most practical SLOs (TTFT &lt; 5 seconds, TBT &lt; 200ms), chunked prefill on unified hardware matches or exceeds the performance of disaggregated systems for moderate prompt lengths (&lt;4K tokens).</p>
+<p>DistServe (2024) implements full disaggregation with a two-pool architecture. It profiles the prefill and decode throughput of candidate hardware configurations, then uses an optimizer to determine the optimal prefill:decode GPU ratio given a workload distribution (prompt length histogram, request rate, SLO targets). DistServe demonstrates 4.8x improvement in goodput (fraction of requests meeting SLO) over vLLM on long-prompt workloads by decoupling prefill scaling from decode scaling. The KV transfer uses RDMA over InfiniBand with custom CUDA kernels that pipeline compute and transfer.</p>
+<pre><code class="language-python">import time
+from dataclasses import dataclass
+from typing import List
+
+@dataclass
+class AllocationResult:
+    n_prefill: int
+    n_decode: int
+    est_ttft_ms: float
+    est_tbt_ms: float
+    meets_slo: bool
+
+def slo_aware_allocation(
+    total_gpus: int = 8,
+    ttft_slo_ms: float = 200.0,
+    tbt_slo_ms: float = 50.0,
+    avg_prompt_len: int = 2048,
+    decode_len: int = 512
+) -&gt; None:
+    &quot;&quot;&quot;Simulate prefill/decode GPU allocation to meet TTFT and TBT SLOs.&quot;&quot;&quot;
+    results: List[AllocationResult] = []
+    for n_pf in range(1, total_gpus):
+        n_dc = total_gpus - n_pf
+        ttft = avg_prompt_len * 0.09 / n_pf   # prefill scales with 1/n_prefill
+        tbt  = 4096 * 2 * 0.0008 / n_dc       # decode bandwidth scales with 1/n_decode
+        ok   = ttft &lt;= ttft_slo_ms and tbt &lt;= tbt_slo_ms
+        r = AllocationResult(n_pf, n_dc, round(ttft, 1), round(tbt, 2), ok)
+        results.append(r)
+        status = 'PASS' if ok else 'FAIL'
+        print(f'PF={n_pf} DC={n_dc}: TTFT={ttft:.1f}ms TBT={tbt:.2f}ms [{status}]')
+    feasible = [r for r in results if r.meets_slo]
+    if feasible:
+        best = min(feasible, key=lambda r: r.n_prefill)
+        print(f'Optimal: {best.n_prefill} prefill + {best.n_decode} decode GPUs')
+
+slo_aware_allocation()
+</code></pre>
+<h2>Scheduling Strategies</h2>
+<p>The scheduling strategy determines which requests go to prefill GPUs, when KV caches are transferred, and how decode GPUs are assigned. Load-balanced scheduling sends requests to the least-loaded prefill GPU and the least-loaded decode GPU, optimizing for average latency but potentially missing tight SLOs under load spikes. SLO-aware scheduling reserves decode GPU capacity based on outstanding decode work and holds back new prefill requests if the decode pool would be saturated. Preemptive scheduling allows the decode pool to preempt (checkpoint and pause) long-running sequences to serve time-sensitive requests first.</p>
+<p>Adaptive allocation goes further by dynamically reassigning GPUs between pools based on real-time load signals. If the prefill queue grows (high TTFT), some decode GPUs are temporarily reassigned to prefill work. If the decode pool is saturated (high TBT), prefill is throttled. This requires GPUs that can switch roles quickly — possible with model replication across pools. Systems like Mooncake (ByteDance, 2024) implement a KV cache-centric scheduler that separates KV cache management from compute scheduling, enabling fine-grained matching of compute resources to the actual memory access patterns of each request.</p>
+<table>
+<thead>
+<tr>
+<th>Architecture</th>
+<th>TTFT</th>
+<th>TBT (inter-token latency)</th>
+<th>GPU utilization</th>
+<th>Best for</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Unified prefill+decode</td>
+<td>High (blocked by decode)</td>
+<td>Stable</td>
+<td>Low (mixed workload)</td>
+<td>Simple deployment, short prompts</td>
+</tr>
+<tr>
+<td>Chunked prefill</td>
+<td>Bounded by chunk_size</td>
+<td>Slightly variable</td>
+<td>Medium (better compute mix)</td>
+<td>Moderate prompts, single cluster</td>
+</tr>
+<tr>
+<td>Disaggregated (DistServe)</td>
+<td>Low (dedicated prefill)</td>
+<td>Low (dedicated decode)</td>
+<td>High (each pool optimized)</td>
+<td>Long prompts, high-throughput SLO</td>
+</tr>
+<tr>
+<td>Sarathi-Serve</td>
+<td>Bounded + predictable</td>
+<td>Near-optimal</td>
+<td>Medium-High</td>
+<td>Balanced SLOs, no extra hardware</td>
+</tr>
+</tbody>
+</table>
+<h2>Key Takeaways</h2>
+<p>Prefill is compute-bound (high arithmetic intensity, high FLOP utilization) while decode is memory-bandwidth-bound (low arithmetic intensity, most time spent on memory reads). Colocating both phases on the same hardware forces a compromise that underutilizes each. Chunked prefill provides a practical improvement — bounded TTFT variance with no additional hardware — and is the right choice for most production deployments serving prompts under 4K tokens. Full disaggregation (DistServe-style) offers the highest efficiency for long-prompt workloads at the cost of KV transfer overhead and system complexity.</p>
+<blockquote>
+<p><strong>Disaggregation overhead for short prompts</strong>: Disaggregation introduces KV cache transfer overhead — for short prompts (&lt;1K tokens) the transfer cost can dominate, since KV size grows with sequence length and the prefill compute time is very short. For these workloads, chunked prefill on unified hardware is often preferable. Full disaggregation becomes clearly beneficial only when average prompt length exceeds roughly 2K-4K tokens and TTFT SLOs are tight.</p>
+</blockquote>
+<ul>
+<li>Prefill arithmetic intensity: ~FLOP_per_token/HBM_bytes ~ 100+ (compute-bound)</li>
+<li>Decode arithmetic intensity: ~2*params/HBM_bytes ~ 0.5 (severely bandwidth-bound)</li>
+<li>KV cache size per request: 2 * layers * heads * seq_len * head_dim * 2 bytes</li>
+<li>Chunked prefill: set chunk_size=512-2048 tokens to balance TTFT and TBT</li>
+<li>DistServe reports 4.8x goodput improvement over vLLM on long-prompt workloads</li>
+<li>KV cache quantization (fp8) halves transfer size with minimal quality degradation</li>
+<li>Optimal prefill:decode GPU ratio depends on prompt length distribution and SLO targets</li>
+</ul>
+    </article>
+  </main>
+</body>
+</html>
