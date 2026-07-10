@@ -1,0 +1,225 @@
+---
+title: "Pipeline Parallelism for LLM Inference"
+slug: "pipeline-parallelism-inference"
+description: "Partitioning transformer layers across GPUs in a pipeline, where each GPU processes one stage while others process subsequent microbatches, reducing per-GPU memory at the cost of pipeline bubbles."
+tags: ["deep-learning", "llm"]
+topic: "deep-learning"
+status: "published"
+updated: "2026-07-10"
+blocks_json: "W3sidHlwZSI6InRleHQiLCJjb250ZW50IjoiUGlwZWxpbmUgcGFyYWxsZWxpc20gaXMgYSBtb2RlbC1wYXJhbGxlbCBzdHJhdGVneSB0aGF0IHBhcnRpdGlvbnMgdGhlIGxheWVycyBvZiBhIGxhcmdlIHRyYW5zZm9ybWVyIG1vZGVsIGFjcm9zcyBtdWx0aXBsZSBHUFVzLCBhc3NpZ25pbmcgZWFjaCBkZXZpY2UgYSBjb250aWd1b3VzIHN1YnNldCBvZiBsYXllcnMgY2FsbGVkIGEgcGlwZWxpbmUgc3RhZ2UuIFVubGlrZSBkYXRhIHBhcmFsbGVsaXNtIOKAlCB3aGVyZSBldmVyeSBHUFUgaG9sZHMgYSBmdWxsIG1vZGVsIHJlcGxpY2Eg4oCUIHBpcGVsaW5lIHBhcmFsbGVsaXNtIGVuYWJsZXMgbW9kZWxzIHRoYXQgZXhjZWVkIHRoZSBWUkFNIGNhcGFjaXR5IG9mIGFueSBzaW5nbGUgR1BVIGJ5IGRpc3RyaWJ1dGluZyBwYXJhbWV0ZXJzIGhvcml6b250YWxseS4gVGhlIGtleSB0cmFkZS1vZmYgaXMgdGhlIHBpcGVsaW5lIGJ1YmJsZTogd2hlbiBwcm9jZXNzaW5nIGEgc2luZ2xlIGJhdGNoLCBlYXJsaWVyIHN0YWdlcyBtdXN0IHdhaXQgZm9yIHRoZSBiYXRjaCB0byBwcm9wYWdhdGUgdG8gdGhlIGZpbmFsIHN0YWdlLCBsZWF2aW5nIG1vc3QgR1BVcyBpZGxlLiBUaGUgc29sdXRpb24gaXMgbWljcm8tYmF0Y2hpbmc6IHNwbGl0dGluZyBlYWNoIGJhdGNoIGludG8gc21hbGxlciBtaWNyby1iYXRjaGVzIHRoYXQgZmlsbCB0aGUgcGlwZWxpbmUgYW5kIGRyYW1hdGljYWxseSByZWR1Y2UgaWRsZSB0aW1lLiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6Ik92ZXJ2aWV3In0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJJbiBhIHBpcGVsaW5lLXBhcmFsbGVsIHNldHVwLCBhIHRyYW5zZm9ybWVyIHdpdGggTCBsYXllcnMgaXMgcGFydGl0aW9uZWQgaW50byBTIHN0YWdlcyBvZiBML1MgbGF5ZXJzIGVhY2guIFN0YWdlIDAgaG9sZHMgdGhlIGVtYmVkZGluZyBsYXllciBhbmQgbGF5ZXJzIDAuLihML1MgLSAxKSwgc3RhZ2UgMSBob2xkcyBsYXllcnMgTC9TLi4oMkwvUyAtIDEpLCBhbmQgc28gb24uIEVhY2ggc3RhZ2UgbGl2ZXMgb24gYSBkZWRpY2F0ZWQgR1BVLiBEdXJpbmcgdGhlIGZvcndhcmQgcGFzcywgc3RhZ2UgMCBjb21wdXRlcyBhY3RpdmF0aW9ucyBmb3IgdGhlIGlucHV0IGFuZCBwYXNzZXMgdGhlbSB0byBzdGFnZSAxIG92ZXIgYW4gaW50ZXJjb25uZWN0IChOVkxpbmsgb3IgRXRoZXJuZXQpLCBzdGFnZSAxIGNvbnRpbnVlcyB0aGUgY29tcHV0YXRpb24gYW5kIHBhc3NlcyB0byBzdGFnZSAyLCBhbmQgc28gb24gdW50aWwgc3RhZ2UgUy0xIHByb2R1Y2VzIHRoZSBmaW5hbCBsb2dpdHMuIER1cmluZyB0aGUgYmFja3dhcmQgcGFzcywgZ3JhZGllbnRzIGZsb3cgaW4gdGhlIHJldmVyc2UgZGlyZWN0aW9uIHRocm91Z2ggdGhlIHNhbWUgY2hhaW4uIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJUaGUgbWVtb3J5IGJlbmVmaXQgaXMgaW1tZWRpYXRlOiBhIDcwQi1wYXJhbWV0ZXIgbW9kZWwgdGhhdCB3b3VsZCByZXF1aXJlIDE0MCBHQiBvZiBWUkFNIGluIGZwMTYgY2FuIGJlIHNwbGl0IGFjcm9zcyA4IEdQVXMgYXQgMTcuNSBHQiBlYWNoIOKAlCBjb21mb3J0YWJseSBmaXR0aW5nIG9uIEExMDAtNDBHQiBoYXJkd2FyZS4gVGhlIGNvbW11bmljYXRpb24gY29zdCBwZXIgc3RhZ2UgYm91bmRhcnkgaXMgcHJvcG9ydGlvbmFsIHRvIHRoZSBhY3RpdmF0aW9uIHRlbnNvciBzaXplOiBiYXRjaF9zaXplIMOXIHNlcXVlbmNlX2xlbmd0aCDDlyBoaWRkZW5fZGltIMOXIGR0eXBlX2J5dGVzLiBGb3IgYSB0eXBpY2FsIGZwMTYgYWN0aXZhdGlvbiB3aXRoIGJhdGNoPTEsIHNlcT0yMDQ4LCBoaWRkZW49ODE5MiwgdGhpcyBpcyByb3VnaGx5IDMyIE1CIHBlciBzdGFnZSBib3VuZGFyeSBwZXIgZm9yd2FyZCBwYXNzLCB3aGljaCBpcyBtYW5hZ2VhYmxlIGV2ZW4gb3ZlciBQQ0llLiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6Ik5haXZlIFBpcGVsaW5lIFBhcnRpdGlvbmluZyJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiVGhlIG5haXZlIGFwcHJvYWNoIGFzc2lnbnMgYW4gZXF1YWwgbnVtYmVyIG9mIGNvbnNlY3V0aXZlIGxheWVycyB0byBlYWNoIEdQVSBhbmQgcHJvY2Vzc2VzIG9uZSBtaWNyb2JhdGNoIGF0IGEgdGltZSBzZXF1ZW50aWFsbHkgdGhyb3VnaCBhbGwgc3RhZ2VzLiBUaGlzIGdpdmVzIGNvcnJlY3QgcmVzdWx0cyBidXQgaXMgaGlnaGx5IGluZWZmaWNpZW50OiBhdCBhbnkgZ2l2ZW4gY2xvY2sgY3ljbGUsIG9ubHkgb25lIEdQVSBpcyBhY3RpdmUuIFRoZSByZW1haW5pbmcgUy0xIEdQVXMgYXJlIGlkbGUsIHdhaXRpbmcgZWl0aGVyIGZvciBhY3RpdmF0aW9ucyB0byBhcnJpdmUgKGZvcndhcmQpIG9yIGZvciBncmFkaWVudHMgdG8gcHJvcGFnYXRlIGJhY2sgKGJhY2t3YXJkKS4gVGhlIGZyYWN0aW9uIG9mIHdhc3RlZCB0aW1lIGlzIChTLTEpL1MsIHdoaWNoIGZvciBTPTggc3RhZ2VzIG1lYW5zIDg3LjUlIG9mIGFsbCBHUFUtY3ljbGVzIGFyZSBpZGxlLiBUaGlzIGJ1YmJsZSBmcmFjdGlvbiBtYWtlcyBuYWl2ZSBwaXBlbGluZSBwYXJhbGxlbGlzbSBpbXByYWN0aWNhbCB3aXRob3V0IG1pY3JvLWJhdGNoaW5nLiJ9LHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiJpbXBvcnQgdG9yY2hcbmltcG9ydCB0b3JjaC5ubiBhcyBublxuaW1wb3J0IHRpbWVcbmZyb20gdHlwaW5nIGltcG9ydCBMaXN0XG5cbmNsYXNzIFBpcGVsaW5lU3RhZ2Uobm4uTW9kdWxlKTpcbiAgICBkZWYgX19pbml0X18oc2VsZiwgbnVtX2xheWVyczogaW50LCBoaWRkZW5fZGltOiBpbnQgPSA1MTIpOlxuICAgICAgICBzdXBlcigpLl9faW5pdF9fKClcbiAgICAgICAgc2VsZi5sYXllcnMgPSBubi5Nb2R1bGVMaXN0KFxuICAgICAgICAgICAgW25uLkxpbmVhcihoaWRkZW5fZGltLCBoaWRkZW5fZGltKSBmb3IgXyBpbiByYW5nZShudW1fbGF5ZXJzKV1cbiAgICAgICAgKVxuXG4gICAgZGVmIGZvcndhcmQoc2VsZiwgeDogdG9yY2guVGVuc29yKSAtXHUwMDNlIHRvcmNoLlRlbnNvcjpcbiAgICAgICAgZm9yIGxheWVyIGluIHNlbGYubGF5ZXJzOlxuICAgICAgICAgICAgeCA9IHRvcmNoLnJlbHUobGF5ZXIoeCkpXG4gICAgICAgIHJldHVybiB4XG5cbmRlZiBuYWl2ZV9waXBlbGluZShudW1fc3RhZ2VzOiBpbnQgPSA0LCBsYXllcnNfcGVyX3N0YWdlOiBpbnQgPSA4LCBkaW06IGludCA9IDUxMik6XG4gICAgXCJcIlwiU3BsaXQgMzItbGF5ZXIgbW9kZWwgYWNyb3NzIDQgR1BVczsgcHJvY2VzcyBvbmUgbWljcm9iYXRjaDsgbWVhc3VyZSBidWJibGUuXCJcIlwiXG4gICAgc3RhZ2VzID0gW1BpcGVsaW5lU3RhZ2UobGF5ZXJzX3Blcl9zdGFnZSwgZGltKSBmb3IgXyBpbiByYW5nZShudW1fc3RhZ2VzKV1cbiAgICB4ID0gdG9yY2gucmFuZG4oMSwgZGltKVxuICAgIHRpbWVzOiBMaXN0W2Zsb2F0XSA9IFtdXG4gICAgZm9yIHN0YWdlIGluIHN0YWdlczpcbiAgICAgICAgdDAgPSB0aW1lLnBlcmZfY291bnRlcigpXG4gICAgICAgIHggPSBzdGFnZSh4KVxuICAgICAgICB0aW1lcy5hcHBlbmQoKHRpbWUucGVyZl9jb3VudGVyKCkgLSB0MCkgKiAxZTMpXG4gICAgYnViYmxlX2ZyYWMgPSAobnVtX3N0YWdlcyAtIDEpIC8gbnVtX3N0YWdlc1xuICAgIHByaW50KGZcdTAwMjdTdGFnZSB0aW1lcyAobXMpOiB7W3JvdW5kKHQsIDIpIGZvciB0IGluIHRpbWVzXX1cdTAwMjcpXG4gICAgcHJpbnQoZlx1MDAyN0J1YmJsZSBmcmFjdGlvbjoge2J1YmJsZV9mcmFjOi4yJX0gICh7bnVtX3N0YWdlcy0xfS97bnVtX3N0YWdlc30gc3RhZ2VzIGlkbGUpXHUwMDI3KVxuICAgIHByaW50KGZcdTAwMjdQaXBlbGluZSBlZmZpY2llbmN5OiB7MSAtIGJ1YmJsZV9mcmFjOi4wJX1cdTAwMjcpXG4gICAgcmV0dXJuIGJ1YmJsZV9mcmFjXG5cbmJ1YmJsZSA9IG5haXZlX3BpcGVsaW5lKClcbnByaW50KGZcdTAwMjdBdCA0IHN0YWdlcywge2J1YmJsZTouMCV9IG9mIGFsbCBjb21wdXRlIGN5Y2xlcyBhcmUgd2FzdGVkIHBpcGVsaW5lIGJ1YmJsZXMuXHUwMDI3KSJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiVGhlIHNpbXVsYXRpb24gYWJvdmUgY29uZmlybXMgdGhlIHRoZW9yZXRpY2FsIGJ1YmJsZSBmcmFjdGlvbiBvZiA3NSUgZm9yIGEgNC1zdGFnZSBwaXBlbGluZSB3aXRoIGEgc2luZ2xlIG1pY3JvYmF0Y2guIEV2ZXJ5IEdQVSBleGNlcHQgdGhlIGN1cnJlbnRseSBhY3RpdmUgb25lIHNpdHMgY29tcGxldGVseSBpZGxlLiBPbmx5IHN0YWdlIDAgaXMgYWN0aXZlIGF0IHQ9MCwgb25seSBzdGFnZSAxIGF0IHQ9MSwgYW5kIHNvIG9uLiBUaGUgdG90YWwgd2FsbC1jbG9jayB0aW1lIGVxdWFscyA0IHN0YWdlLWxhdGVuY2llcyBidXQgb25seSAxLzQgb2YgdGhlIHRoZW9yZXRpY2FsIHBlYWsgdGhyb3VnaHB1dCBpcyBhY2hpZXZlZC4ifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJQaXBlbGluZSBCdWJibGVzIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJUaGUgcGlwZWxpbmUgYnViYmxlIGFyaXNlcyBmcm9tIGRhdGEgZGVwZW5kZW5jeTogc3RhZ2UgayBjYW5ub3QgYmVnaW4gcHJvY2Vzc2luZyBtaWNyb2JhdGNoIG0gdW50aWwgc3RhZ2Ugay0xIGhhcyBmaW5pc2hlZCBpdC4gSW4gYSBwaXBlbGluZSB3aXRoIFMgc3RhZ2VzIGFuZCBNIG1pY3JvYmF0Y2hlcywgdGhlIHRvdGFsIG51bWJlciBvZiBjbG9jayBjeWNsZXMgaXMgTSArIFMgLSAxIChsaWtlIGZpbGxpbmcgYSBGSUZPIHF1ZXVlKS4gVGhlIGJ1YmJsZSBmcmFjdGlvbiDigJQgdGhlIHByb3BvcnRpb24gb2Ygd2FzdGVkIGN5Y2xlcyDigJQgaXMgKFMtMSkvKE0gKyBTIC0gMSkuIEFzIE0gZ3Jvd3MgbGFyZ2UgcmVsYXRpdmUgdG8gUywgdGhlIGJ1YmJsZSBmcmFjdGlvbiBhcHByb2FjaGVzIHplcm8uIFRoaXMgaXMgd2h5IG1pY3JvLWJhdGNoaW5nIGlzIHNvIGVmZmVjdGl2ZTogYnkgc3BsaXR0aW5nIG9uZSBsYXJnZSBiYXRjaCBpbnRvIG1hbnkgc21hbGwgbWljcm9iYXRjaGVzLCB0aGUgcGlwZWxpbmUgc3RheXMgZnVsbCBhbG1vc3QgY29udGludW91c2x5LiJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiRm9ybWFsbHksIGxldCBUX3N0YWdlIGJlIHRoZSBsYXRlbmN5IG9mIG9uZSBzdGFnZSBwcm9jZXNzaW5nIG9uZSBtaWNyb2JhdGNoLiBUaGUgaWRlYWwgdGltZSB0byBwcm9jZXNzIE0gbWljcm9iYXRjaGVzIHRocm91Z2ggUyBzdGFnZXMgd2l0aCBubyBidWJibGVzIGlzIE0gw5cgVF9zdGFnZSAob25seSBvbmUgc3RhZ2UgZXZlciBhY3RpdmUpLiBUaGUgYWN0dWFsIHRpbWUgaXMgKE0gKyBTIC0gMSkgw5cgVF9zdGFnZS4gVGhlIGVmZmljaWVuY3kgaXMgTSAvIChNICsgUyAtIDEpLiBGb3IgTT04IG1pY3JvYmF0Y2hlcyBhbmQgUz00IHN0YWdlcywgZWZmaWNpZW5jeSA9IDgvMTEg4omIIDczJS4gRm9yIE09MzIsIGVmZmljaWVuY3kgPSAzMi8zNSDiiYggOTElLiBUaGUgMUYxQiAob25lLWZvcndhcmQtb25lLWJhY2t3YXJkKSBzY2hlZHVsZSwgdXNlZCBpbiBQaXBlRHJlYW0gYW5kIE1lZ2F0cm9uLUxNLCBhY2hpZXZlcyBzaW1pbGFyIGJ1YmJsZSBmcmFjdGlvbnMgYnV0IHdpdGggbXVjaCBsb3dlciBhY3RpdmF0aW9uIG1lbW9yeSBvdmVyaGVhZCBieSBpbnRlcmxlYXZpbmcgZm9yd2FyZCBhbmQgYmFja3dhcmQgcGFzc2VzLiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6Ik1pY3JvLWJhdGNoaW5nIHRvIEZpbGwgQnViYmxlcyJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiTWljcm8tYmF0Y2hpbmcgc3BsaXRzIGEgZ2xvYmFsIGJhdGNoIG9mIHNpemUgQiBpbnRvIE0gbWljcm8tYmF0Y2hlcyBvZiBzaXplIEIvTS4gRWFjaCBtaWNyby1iYXRjaCBpbmRlcGVuZGVudGx5IHBhc3NlcyB0aHJvdWdoIGFsbCBwaXBlbGluZSBzdGFnZXMuIFdpdGggdGhlIDFGMUIgc2NoZWR1bGUsIG9uY2UgdGhlIHBpcGVsaW5lIGlzIGZ1bGwsIGV2ZXJ5IHN0YWdlIGlzIHNpbXVsdGFuZW91c2x5IHByb2Nlc3NpbmcgYSBkaWZmZXJlbnQgbWljcm8tYmF0Y2g6IHN0YWdlIDAgd29ya3Mgb24gbWljcm9iYXRjaCBtIHdoaWxlIHN0YWdlIDEgd29ya3Mgb24gbS0xLCBzdGFnZSAyIG9uIG0tMiwgYW5kIHN0YWdlIFMtMSBvbiBtLVMrMS4gVGhpcyBrZWVwcyBhbGwgR1BVcyBhY3RpdmUgKGV4Y2VwdCBkdXJpbmcgdGhlIHN0YXJ0dXAgYW5kIGNvb2xkb3duIHBoYXNlcyBhdCB0aGUgYmVnaW5uaW5nIGFuZCBlbmQgb2YgZWFjaCBnbG9iYWwgYmF0Y2gpLiBUaGUgYnViYmxlIGlzIGNvbmZpbmVkIHRvIHRoZSB3YXJtLXVwIGFuZCBjb29sLWRvd24gcGVyaW9kcywgZ2l2aW5nIGJ1YmJsZSBmcmFjdGlvbiAoUy0xKS8oTStTLTEpLiJ9LHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiJpbXBvcnQgdG9yY2hcbmltcG9ydCB0b3JjaC5ubiBhcyBublxuZnJvbSB0eXBpbmcgaW1wb3J0IExpc3QsIFR1cGxlXG5pbXBvcnQgdGltZVxuXG5kZWYgbWljcm9iYXRjaF9waXBlbGluZShcbiAgICBzdGFnZXM6IExpc3Rbbm4uTW9kdWxlXSxcbiAgICBtaWNyb2JhdGNoZXM6IExpc3RbdG9yY2guVGVuc29yXVxuKSAtXHUwMDNlIFR1cGxlW0xpc3RbdG9yY2guVGVuc29yXSwgZmxvYXRdOlxuICAgIFwiXCJcIlNjaGVkdWxlIG1pY3JvYmF0Y2hlcyB0aHJvdWdoIHBpcGVsaW5lIHN0YWdlczsgcmVwb3J0IGJ1YmJsZSBzdGF0cy5cIlwiXCJcbiAgICBTID0gbGVuKHN0YWdlcylcbiAgICBNID0gbGVuKG1pY3JvYmF0Y2hlcylcbiAgICAjIFRoZW9yZXRpY2FsOiBidWJibGUgPSAoUy0xKS8oTStTLTEpXG4gICAgdG90YWxfY3ljbGVzID0gTSArIFMgLSAxXG4gICAgYnViYmxlX2ZyYWMgPSAoUyAtIDEpIC8gdG90YWxfY3ljbGVzXG4gICAgbmFpdmVfYnViYmxlID0gKFMgLSAxKSAvIFNcbiAgICByZXN1bHRzID0gW11cbiAgICBmb3IgbV9pZHggaW4gcmFuZ2UoTSk6XG4gICAgICAgIHggPSBtaWNyb2JhdGNoZXNbbV9pZHhdXG4gICAgICAgIGZvciBzdGFnZSBpbiBzdGFnZXM6XG4gICAgICAgICAgICB4ID0gc3RhZ2UoeClcbiAgICAgICAgcmVzdWx0cy5hcHBlbmQoeClcbiAgICBwcmludChmXHUwMDI3TWljcm9iYXRjaGVzOiB7TX0gIHwgIFN0YWdlczoge1N9XHUwMDI3KVxuICAgIHByaW50KGZcdTAwMjdUb3RhbCBjbG9jayBjeWNsZXM6IHt0b3RhbF9jeWNsZXN9ICAoTStTLTEpXHUwMDI3KVxuICAgIHByaW50KGZcdTAwMjdCdWJibGUgZnJhY3Rpb24gKDFGMUIpOiB7YnViYmxlX2ZyYWM6LjIlfVx1MDAyNylcbiAgICBwcmludChmXHUwMDI3TmFpdmUgYnViYmxlIChNPTEpOiAgICAge25haXZlX2J1YmJsZTouMiV9XHUwMDI3KVxuICAgIHByaW50KGZcdTAwMjdJbXByb3ZlbWVudDogICAgICAgICAgICB7bmFpdmVfYnViYmxlIC8gYnViYmxlX2ZyYWM6LjJmfXggbGVzcyB3YXN0ZVx1MDAyNylcbiAgICByZXR1cm4gcmVzdWx0cywgYnViYmxlX2ZyYWNcblxuc3RhZ2VzID0gW25uLkxpbmVhcigyNTYsIDI1NikgZm9yIF8gaW4gcmFuZ2UoNCldXG5taWNyb3MgPSBbdG9yY2gucmFuZG4oOCwgMjU2KSBmb3IgXyBpbiByYW5nZSg0KV1cbm91dCwgYnViID0gbWljcm9iYXRjaF9waXBlbGluZShzdGFnZXMsIG1pY3JvcylcbnByaW50KGZcdTAwMjdPdXRwdXQgY291bnQ6IHtsZW4ob3V0KX0gIHwgIEJ1YmJsZToge2J1YjouMSV9XHUwMDI3KSJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiV2l0aCBNPTQgbWljcm9iYXRjaGVzIGFuZCBTPTQgc3RhZ2VzLCB0aGUgYnViYmxlIGZyYWN0aW9uIGRyb3BzIGZyb20gNzUlIChuYWl2ZSkgdG8gNDMlIOKAlCBhIG1lYW5pbmdmdWwgaW1wcm92ZW1lbnQuIFdpdGggTT0zMiBtaWNyb2JhdGNoZXMsIGl0IGZhbGxzIHRvIGp1c3QgOSUuIFRoZSB0cmFkZS1vZmYgaXMgbWVtb3J5OiBtb3JlIG1pY3JvYmF0Y2hlcyBtZWFucyBtb3JlIGFjdGl2YXRpb25zIGhlbGQgaW4gbWVtb3J5IHNpbXVsdGFuZW91c2x5IGZvciB0aGUgYmFja3dhcmQgcGFzcy4gR1BpcGUgbWF0ZXJpYWxpemVzIGFsbCBhY3RpdmF0aW9ucyAoaGlnaCBtZW1vcnkpIHdoaWxlIFBpcGVEcmVhbSB1c2VzIGFjdGl2YXRpb24gY2hlY2twb2ludGluZyBwZXIgc3RhZ2UgKGxvd2VyIG1lbW9yeSwgaGlnaGVyIGNvbXB1dGUpLiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IkdQaXBlIHZzIFBpcGVEcmVhbSJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiR1BpcGUgKEdvb2dsZSwgMjAxOSkgdXNlcyBhIHN5bmNocm9ub3VzIGFsbC1mb3J3YXJkLXRoZW4tYWxsLWJhY2t3YXJkIHNjaGVkdWxlLiBBbGwgTSBtaWNyb2JhdGNoZXMgY29tcGxldGUgdGhlaXIgZm9yd2FyZCBwYXNzIGZpcnN0IChhY2N1bXVsYXRpbmcgYWxsIGludGVybWVkaWF0ZSBhY3RpdmF0aW9ucyksIHRoZW4gYWxsIGNvbXBsZXRlIHRoZWlyIGJhY2t3YXJkIHBhc3MgaW4gcmV2ZXJzZSBvcmRlci4gVGhpcyBnaXZlcyBjbGVhbiBncmFkaWVudCBhY2N1bXVsYXRpb24gYWNyb3NzIG1pY3JvYmF0Y2hlcyBhbmQgbWF0Y2hlcyB0aGUgc2VtYW50aWNzIG9mIGEgZnVsbC1iYXRjaCB1cGRhdGUsIGJ1dCByZXF1aXJlcyBzdG9yaW5nIE0gw5cgUyBhY3RpdmF0aW9uIHRlbnNvcnMgc2ltdWx0YW5lb3VzbHkg4oCUIHN1YnN0YW50aWFsIG1lbW9yeSBmb3IgbGFyZ2UgTS4gR1BpcGUgbWl0aWdhdGVzIHRoaXMgd2l0aCByZW1hdGVyaWFsaXphdGlvbiAocmUtY29tcHV0aW5nIGFjdGl2YXRpb25zIGR1cmluZyBiYWNrd2FyZCBpbnN0ZWFkIG9mIHN0b3JpbmcgdGhlbSksIHRyYWRpbmcgY29tcHV0ZSBmb3IgbWVtb3J5LiJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiUGlwZURyZWFtIChNaWNyb3NvZnQsIDIwMTgpIHVzZXMgYW4gYXN5bmNocm9ub3VzIDFGMUIgc2NoZWR1bGU6IGVhY2ggc3RhZ2UgYWx0ZXJuYXRlcyBiZXR3ZWVuIG9uZSBmb3J3YXJkIG1pY3JvYmF0Y2ggYW5kIG9uZSBiYWNrd2FyZCBtaWNyb2JhdGNoLiBUaGlzIGxpbWl0cyB0aGUgbnVtYmVyIG9mIGluLWZsaWdodCBtaWNyb2JhdGNoZXMgdG8gUyAodGhlIG51bWJlciBvZiBzdGFnZXMpLCByYXRoZXIgdGhhbiBNLCBkcmFzdGljYWxseSByZWR1Y2luZyBhY3RpdmF0aW9uIG1lbW9yeS4gSG93ZXZlciwgYXN5bmNocm9ub3VzIHVwZGF0ZXMgbWVhbiBkaWZmZXJlbnQgbWljcm9iYXRjaGVzIHVzZSB3ZWlnaHQgdmVyc2lvbnMgZnJvbSBkaWZmZXJlbnQgdHJhaW5pbmcgc3RlcHMuIFBpcGVEcmVhbSBpbnRyb2R1Y2VzIHdlaWdodCBzdGFzaGluZyDigJQgc3RvcmluZyBtdWx0aXBsZSB2ZXJzaW9ucyBvZiB3ZWlnaHRzIOKAlCB0byBoYW5kbGUgdGhpcyBzdGFsZW5lc3MuIFBpcGVEcmVhbS1GbHVzaCAoMjAyMCkgdXNlcyBhIHN5bmNocm9ub3VzIDFGMUIgd2l0aCBwZXJpb2RpYyBwaXBlbGluZSBmbHVzaGVzLCBlbGltaW5hdGluZyB3ZWlnaHQgc3RhbGVuZXNzIHdoaWxlIHByZXNlcnZpbmcgdGhlIG1lbW9yeSBiZW5lZml0cy4ifSx7InR5cGUiOiJjb2RlIiwibGFuZ3VhZ2UiOiJweXRob24iLCJjb250ZW50IjoiaW1wb3J0IHRvcmNoXG5pbXBvcnQgdGltZVxuZnJvbSB0cmFuc2Zvcm1lcnMgaW1wb3J0IEF1dG9Nb2RlbEZvckNhdXNhbExNLCBBdXRvVG9rZW5pemVyXG5cbmRlZiBoZl9waXBlbGluZV9kZW1vKG1vZGVsX25hbWU6IHN0ciA9IFx1MDAyN2dwdDItbWVkaXVtXHUwMDI3LCBuX25ld190b2tlbnM6IGludCA9IDUwKTpcbiAgICBcIlwiXCJMb2FkIHdpdGggZGV2aWNlX21hcD1cdTAwMjdhdXRvXHUwMDI3LCBpbnNwZWN0IGxheWVyIHBsYWNlbWVudCwgbWVhc3VyZSB0aHJvdWdocHV0LlwiXCJcIlxuICAgIHRva2VuaXplciA9IEF1dG9Ub2tlbml6ZXIuZnJvbV9wcmV0cmFpbmVkKG1vZGVsX25hbWUpXG4gICAgbW9kZWwgPSBBdXRvTW9kZWxGb3JDYXVzYWxMTS5mcm9tX3ByZXRyYWluZWQoXG4gICAgICAgIG1vZGVsX25hbWUsXG4gICAgICAgIGRldmljZV9tYXA9XHUwMDI3YXV0b1x1MDAyNyxcbiAgICAgICAgdG9yY2hfZHR5cGU9dG9yY2guZmxvYXQxNlxuICAgIClcbiAgICBpZiBoYXNhdHRyKG1vZGVsLCBcdTAwMjdoZl9kZXZpY2VfbWFwXHUwMDI3KTpcbiAgICAgICAgcHJpbnQoXHUwMDI3TGF5ZXItdG8tZGV2aWNlIG1hcHBpbmcgKGZpcnN0IDgpOlx1MDAyNylcbiAgICAgICAgZm9yIGssIHYgaW4gbGlzdChtb2RlbC5oZl9kZXZpY2VfbWFwLml0ZW1zKCkpWzo4XTpcbiAgICAgICAgICAgIHByaW50KGZcdTAwMjcgIHtrOjQ1c306IHt2fVx1MDAyNylcbiAgICBwcm9tcHQgPSBcdTAwMjdQaXBlbGluZSBwYXJhbGxlbGlzbSBkaXN0cmlidXRlcyB0cmFuc2Zvcm1lciBsYXllcnMgYWNyb3NzIEdQVXMuXHUwMDI3XG4gICAgaW5wdXRzID0gdG9rZW5pemVyKHByb21wdCwgcmV0dXJuX3RlbnNvcnM9XHUwMDI3cHRcdTAwMjcpXG4gICAgd2l0aCB0b3JjaC5ub19ncmFkKCk6XG4gICAgICAgIG1vZGVsLmdlbmVyYXRlKCoqaW5wdXRzLCBtYXhfbmV3X3Rva2Vucz01KSAgIyB3YXJtdXBcbiAgICB0MCA9IHRpbWUucGVyZl9jb3VudGVyKClcbiAgICB3aXRoIHRvcmNoLm5vX2dyYWQoKTpcbiAgICAgICAgb3V0ID0gbW9kZWwuZ2VuZXJhdGUoKippbnB1dHMsIG1heF9uZXdfdG9rZW5zPW5fbmV3X3Rva2VucywgZG9fc2FtcGxlPUZhbHNlKVxuICAgIGVsYXBzZWQgPSB0aW1lLnBlcmZfY291bnRlcigpIC0gdDBcbiAgICB0cHMgPSBuX25ld190b2tlbnMgLyBlbGFwc2VkXG4gICAgcHJpbnQoZlx1MDAyN0dlbmVyYXRlZCB7bl9uZXdfdG9rZW5zfSB0b2tlbnMgaW4ge2VsYXBzZWQ6LjJmfXMgKHt0cHM6LjFmfSB0b2svcylcdTAwMjcpXG4gICAgcmV0dXJuIHRwc1xuXG5oZl9waXBlbGluZV9kZW1vKCkifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6Ikh1Z2dpbmdGYWNlIEFjY2VsZXJhdGVcdTAwMjdzIGRldmljZV9tYXA9XHUwMDI3YXV0b1x1MDAyNyBpbXBsZW1lbnRzIG5haXZlIHBpcGVsaW5lIHBhcmFsbGVsaXNtIGF1dG9tYXRpY2FsbHk6IGl0IGluc3BlY3RzIHRoZSBtb2RlbFx1MDAyN3MgbGF5ZXIgc3RydWN0dXJlLCBlc3RpbWF0ZXMgcGFyYW1ldGVyIG1lbW9yeSBwZXIgbGF5ZXIsIGFuZCBncmVlZGlseSBhc3NpZ25zIGxheWVycyB0byBHUFVzIHVudGlsIGVhY2ggZGV2aWNlXHUwMDI3cyBWUkFNIGJ1ZGdldCBpcyBleGhhdXN0ZWQgYmVmb3JlIG1vdmluZyB0byB0aGUgbmV4dC4gVGhpcyBpcyBpbmZlcmVuY2Utb25seSBwaXBlbGluZSBwYXJhbGxlbGlzbSB3aXRob3V0IG1pY3JvLWJhdGNoaW5nIOKAlCBzdWl0YWJsZSBmb3Igc2VydmluZyB3aXRoIHRocm91Z2hwdXQtb3B0aW1pemVkIGJhdGNoIHNpemVzLCBidXQgbm90IHRoZSBtb3N0IGVmZmljaWVudCBmb3IgbG93LWxhdGVuY3kgc2luZ2xlLXJlcXVlc3Qgc2VydmluZy4ifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJJbmZlcmVuY2UtU3BlY2lmaWMgU2NoZWR1bGluZyJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiVHJhaW5pbmcgcGlwZWxpbmUgcGFyYWxsZWxpc20gZm9jdXNlcyBvbiB0aHJvdWdocHV0IGFuZCBncmFkaWVudCBjb3JyZWN0bmVzcyBhY3Jvc3MgbWljcm9iYXRjaGVzLiBJbmZlcmVuY2UgcGlwZWxpbmUgcGFyYWxsZWxpc20gaGFzIGRpZmZlcmVudCBwcmlvcml0aWVzOiBtaW5pbWl6ZSB0aW1lLXRvLWZpcnN0LXRva2VuIChUVEZUKSBmb3IgaW50ZXJhY3RpdmUgd29ya2xvYWRzLCBtYXhpbWl6ZSB0b2tlbnMtcGVyLXNlY29uZCBmb3IgYmF0Y2ggdGhyb3VnaHB1dCwgYW5kIGhhbmRsZSB2YXJpYWJsZS1sZW5ndGggcmVxdWVzdHMgZWZmaWNpZW50bHkuIFRoZSBjb250aW51b3VzIGJhdGNoaW5nIHBhcmFkaWdtICh1c2VkIGluIHZMTE0sIFRHSSkgaXMgY29tcGF0aWJsZSB3aXRoIHBpcGVsaW5lIHBhcmFsbGVsaXNtOiB0aGUgc2NoZWR1bGVyIHRyZWF0cyBlYWNoIHBpcGVsaW5lIHN0YWdlIGFzIHByb2Nlc3NpbmcgYSBjb250aW51b3VzIHN0cmVhbSBvZiB0b2tlbnMgZnJvbSBkaWZmZXJlbnQgcmVxdWVzdHMsIHdpdGggbmV3IHJlcXVlc3RzIGVudGVyaW5nIHRoZSBwaXBlbGluZSBhcyBlYXJsaWVyIG9uZXMgZmluaXNoLiBUaGlzIGZpbGxzIHBpcGVsaW5lIGJ1YmJsZXMgd2l0aCB0b2tlbnMgZnJvbSBvdGhlciByZXF1ZXN0cyByYXRoZXIgdGhhbiBwYWRkaW5nLiJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiQWN0aXZhdGlvbiBwaXBlbGluaW5nIGFuZCBwcmVmZXRjaGluZyBhcmUga2V5IG9wdGltaXphdGlvbnM6IHdoaWxlIHN0YWdlIGsgaXMgY29tcHV0aW5nIHRoZSBmb3J3YXJkIHBhc3MgZm9yIG1pY3JvYmF0Y2ggbSwgdGhlIGludGVyY29ubmVjdCBjYW4gYmUgcHJlZmV0Y2hpbmcgc3RhZ2Ugay0xXHUwMDI3cyBhY3RpdmF0aW9uIGZvciBtaWNyb2JhdGNoIG0rMS4gVGhpcyBvdmVybGFwcyBjb21wdXRhdGlvbiBhbmQgY29tbXVuaWNhdGlvbiwgZnVydGhlciByZWR1Y2luZyBlZmZlY3RpdmUgYnViYmxlIHRpbWUuIEZvciBOVkxpbmsgKDYwMCBHQi9zIGJpZGlyZWN0aW9uYWwpLCB0aGUgdHJhbnNmZXIgdGltZSBmb3IgYSB0eXBpY2FsIGZwMTYgYWN0aXZhdGlvbiAoYmF0Y2g9MSwgaGlkZGVuPTgxOTIpIGlzIHVuZGVyIDFtcyDigJQgbmVnbGlnaWJsZSBjb21wYXJlZCB0byBjb21wdXRhdGlvbi4gRm9yIFBDSWUgKDY0IEdCL3MpIG9yIEV0aGVybmV0ICgyNSBHYnBzKSwgdHJhbnNmZXIgbGF0ZW5jeSBjYW4gZG9taW5hdGUgYW5kIHJlcXVpcmVzIGNhcmVmdWwgYWN0aXZhdGlvbiBjb21wcmVzc2lvbiBvciBjaHVua2luZy4ifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJQaXBlbGluZSB2cyBUZW5zb3IgUGFyYWxsZWxpc20ifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IlRlbnNvciBwYXJhbGxlbGlzbSAoVFApIHNwbGl0cyBpbmRpdmlkdWFsIHdlaWdodCBtYXRyaWNlcyBhY3Jvc3MgR1BVczogZWFjaCBHUFUgaG9sZHMgYSBjb2x1bW4tc2hhcmQgb2YgdGhlIE1MUCB3ZWlnaHQgbWF0cml4IGFuZCBwZXJmb3JtcyBwYXJ0aWFsIG1hdHJpeCBtdWx0aXBsaWNhdGlvbnMsIHRoZW4gYW4gYWxsLXJlZHVjZSBjb21iaW5lcyBwYXJ0aWFsIHJlc3VsdHMuIFRQIHJlcXVpcmVzIGFuIGFsbC1yZWR1Y2UgZXZlcnkgbGF5ZXIgKDIgYWxsLXJlZHVjZXMgcGVyIHRyYW5zZm9ybWVyIGJsb2NrKSwgbWFraW5nIGl0IGhpZ2hseSBzZW5zaXRpdmUgdG8gaW50ZXJjb25uZWN0IGJhbmR3aWR0aC4gSXQgcmVkdWNlcyBwZXItbGF5ZXIgbGF0ZW5jeSBieSBhIGZhY3RvciBvZiBUUCBkZWdyZWUgYnV0IG9ubHkgd29ya3MgZWZmaWNpZW50bHkgb24gZmFzdCBOVkxpbmsuIFBpcGVsaW5lIHBhcmFsbGVsaXNtIChQUCksIGJ5IGNvbnRyYXN0LCBvbmx5IHRyYW5zZmVycyBhY3RpdmF0aW9ucyBhdCBzdGFnZSBib3VuZGFyaWVzIOKAlCBtdWNoIGxlc3MgY29tbXVuaWNhdGlvbiBwZXIgdG9rZW4sIG1ha2luZyBpdCB2aWFibGUgb3ZlciBzbG93ZXIgaW50ZXJjb25uZWN0cy4gVGhlIG9wdGltYWwgaHlicmlkIGlzIFBQw5dUUCB3aGVyZSBub2RlcyBhcmUgY29ubmVjdGVkIGJ5IE5WTGluayB3aXRoaW4gYSBzZXJ2ZXIgYW5kIEV0aGVybmV0IGFjcm9zcyBzZXJ2ZXJzLiJ9LHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiJpbXBvcnQgdGltZVxuZnJvbSBkYXRhY2xhc3NlcyBpbXBvcnQgZGF0YWNsYXNzXG5mcm9tIHR5cGluZyBpbXBvcnQgTGlzdFxuXG5AZGF0YWNsYXNzXG5jbGFzcyBQYXJhbGxlbENvbmZpZzpcbiAgICBsYWJlbDogc3RyXG4gICAgcHA6IGludFxuICAgIHRwOiBpbnRcblxuZGVmIGNvbXBhcmVfcGFyYWxsZWxfY29uZmlncyhcbiAgICBuX2xheWVyczogaW50ID0gMzIsXG4gICAgbl9uZXdfdG9rZW5zOiBpbnQgPSA1MCxcbiAgICBsaW5rX3R5cGU6IHN0ciA9IFx1MDAyN252bGlua1x1MDAyN1xuKSAtXHUwMDNlIE5vbmU6XG4gICAgXCJcIlwiRXN0aW1hdGUgbGF0ZW5jeSBhbmQgdGhyb3VnaHB1dCBmb3IgUFA9NCB2cyBUUD00IHZzIFBQPTIrVFA9Mi5cIlwiXCJcbiAgICBhbGxyZWR1Y2VfY29zdCA9IDAuMDUgaWYgbGlua190eXBlID09IFx1MDAyN252bGlua1x1MDAyNyBlbHNlIDAuOCAgIyBtcyBwZXIgYWxsLXJlZHVjZVxuICAgIGNvbmZpZ3MgPSBbXG4gICAgICAgIFBhcmFsbGVsQ29uZmlnKFx1MDAyN1BQPTQsIFRQPTFcdTAwMjcsIHBwPTQsIHRwPTEpLFxuICAgICAgICBQYXJhbGxlbENvbmZpZyhcdTAwMjdQUD0xLCBUUD00XHUwMDI3LCBwcD0xLCB0cD00KSxcbiAgICAgICAgUGFyYWxsZWxDb25maWcoXHUwMDI3UFA9MiwgVFA9Mlx1MDAyNywgcHA9MiwgdHA9MiksXG4gICAgICAgIFBhcmFsbGVsQ29uZmlnKFx1MDAyN1NlcVBhclx1MDAyNywgICAgIHBwPTEsIHRwPTEpLFxuICAgIF1cbiAgICBwcmludChmXHUwMDI3TGluazoge2xpbmtfdHlwZX0gIHwgIGFsbC1yZWR1Y2UgY29zdDoge2FsbHJlZHVjZV9jb3N0fSBtc1xcblx1MDAyNylcbiAgICBwcmludChmXHUwMDI3e1wiQ29uZmlnXCI6XHUwMDNjMTZ9IHtcIkxhdCAobXMpXCI6XHUwMDNlMTB9IHtcIlRwdXQgKHRvay9zKVwiOlx1MDAzZTE0fSB7XCJDb21tL2xheWVyXCI6XHUwMDNlMTJ9XHUwMDI3KVxuICAgIHByaW50KFx1MDAyNy1cdTAwMjcgKiA1NilcbiAgICBmb3IgY2ZnIGluIGNvbmZpZ3M6XG4gICAgICAgIHBwX2NvbW0gID0gY2ZnLnBwICogMC4zICAgICAgICAgICAgICAjIGFjdGl2YXRpb24geGZlciBwZXIgc3RhZ2UgYm91bmRhcnlcbiAgICAgICAgdHBfY29tbSAgPSBjZmcudHAgKiBuX2xheWVycyAqIGFsbHJlZHVjZV9jb3N0ICAjIGFsbC1yZWR1Y2UgZXZlcnkgbGF5ZXJcbiAgICAgICAgY29tcHV0ZSAgPSBuX2xheWVycyAqIDAuMDYgICAgICAgICAgICMgYmFzZSBjb21wdXRlIHBlciBsYXllclxuICAgICAgICBsYXRfbXMgICA9IHBwX2NvbW0gKyB0cF9jb21tICsgY29tcHV0ZVxuICAgICAgICB0cHV0ICAgICA9IChuX25ld190b2tlbnMgKiAxMDAwKSAvIChsYXRfbXMgKiBjZmcucHApXG4gICAgICAgIHByaW50KGZcdTAwMjd7Y2ZnLmxhYmVsOlx1MDAzYzE2fSB7bGF0X21zOlx1MDAzZTEwLjFmfSB7dHB1dDpcdTAwM2UxNC4wZn0ge3RwX2NvbW0vbl9sYXllcnM6XHUwMDNlMTIuM2Z9XHUwMDI3KVxuXG5jb21wYXJlX3BhcmFsbGVsX2NvbmZpZ3MobGlua190eXBlPVx1MDAyN252bGlua1x1MDAyNylcbnByaW50KClcbmNvbXBhcmVfcGFyYWxsZWxfY29uZmlncyhsaW5rX3R5cGU9XHUwMDI3ZXRoZXJuZXRcdTAwMjcpIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJUaGUgcmVzdWx0cyBoaWdobGlnaHQgdGhlIGludGVyY29ubmVjdCBzZW5zaXRpdml0eSBvZiB0ZW5zb3IgcGFyYWxsZWxpc20uIE9uIE5WTGluaywgVFA9NCBhY2hpZXZlcyB0aGUgbG93ZXN0IHBlci10b2tlbiBsYXRlbmN5IGJlY2F1c2UgYWxsLXJlZHVjZXMgYXJlIGZhc3QgYW5kIHRoZSA0eCBjb21wdXRlIHBhcmFsbGVsaXNtIGRvbWluYXRlcy4gT24gRXRoZXJuZXQsIFRQPTQgaXMgZG9taW5hdGVkIGJ5IGFsbC1yZWR1Y2Ugb3ZlcmhlYWQgYW5kIFBQPTQgd2lucyBvbiBib3RoIGxhdGVuY3kgYW5kIHRocm91Z2hwdXQuIFRoZSBoeWJyaWQgUFA9MitUUD0yIGlzIGEgYmFsYW5jZWQgY2hvaWNlIGZvciBtdWx0aS1zZXJ2ZXIgZGVwbG95bWVudHM6IFRQPTIgd2l0aGluIGVhY2ggTlZMaW5rLWNvbm5lY3RlZCBzZXJ2ZXIgbm9kZSwgUFA9MiBhY3Jvc3Mgbm9kZXMgb3ZlciBFdGhlcm5ldC4ifSx7InR5cGUiOiJ0YWJsZSIsImhlYWRlcnMiOlsiU3RyYXRlZ3kiLCJMYXRlbmN5ICgxIHJlcSkiLCJUaHJvdWdocHV0IiwiQ29tbXVuaWNhdGlvbiBwYXR0ZXJuIiwiQmVzdCB1c2UgY2FzZSJdLCJyb3dzIjpbWyJQUD00LCBUUD0xIiwiSGlnaCAoc2VxdWVudGlhbCBzdGFnZXMpIiwiSGlnaCAobWljcm9iYXRjaGluZykiLCJBY3RpdmF0aW9ucyBhdCBzdGFnZSBib3VuZGFyaWVzIG9ubHkiLCJNdWx0aS1ub2RlIHNsb3ctbGluayBzZXJ2aW5nIl0sWyJUUD00LCBQUD0xIiwiTG93IChwYXJhbGxlbCBjb21wdXRlKSIsIk1lZGl1bSAoYWxsLXJlZHVjZSBib3R0bGVuZWNrKSIsIkFsbC1yZWR1Y2UgZXZlcnkgdHJhbnNmb3JtZXIgbGF5ZXIiLCJTaW5nbGUtbm9kZSBOVkxpbmsgaW5mZXJlbmNlIl0sWyJQUD0yK1RQPTIiLCJNZWRpdW0gKGJhbGFuY2VkKSIsIkhpZ2ggKGh5YnJpZCkiLCJUUCBhbGwtcmVkdWNlIHdpdGhpbiBub2RlOyBQUCB4ZmVyIGFjcm9zcyIsIk11bHRpLW5vZGUgTlZMaW5rIGNsdXN0ZXIiXSxbIlNlcXVlbmNlIHBhcmFsbGVsaXNtIiwiTG93IiwiSGlnaCIsIlJpbmcgYWxsLXJlZHVjZSBvdmVyIHNlcXVlbmNlIGRpbWVuc2lvbiIsIlZlcnkgbG9uZyBjb250ZXh0IChcdTAwM2UzMksgdG9rZW5zKSJdLFsiRXhwZXJ0IHBhcmFsbGVsaXNtIChNb0UpIiwiTG93IChzcGFyc2UgY29tcHV0ZSkiLCJWZXJ5IGhpZ2giLCJBbGwtdG8tYWxsIHRva2VuIHJvdXRpbmcgdG8gZXhwZXJ0cyIsIk1peHR1cmUtb2YtRXhwZXJ0cyBtb2RlbHMiXV19LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IktleSBUYWtlYXdheXMifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IlBpcGVsaW5lIHBhcmFsbGVsaXNtIGVuYWJsZXMgZGVwbG95aW5nIG1vZGVscyBsYXJnZXIgdGhhbiBhbnkgc2luZ2xlIEdQVVx1MDAyN3MgVlJBTSBieSBkaXN0cmlidXRpbmcgbGF5ZXJzIGFjcm9zcyBhIGNoYWluIG9mIEdQVXMuIFRoZSBidWJibGUgZnJhY3Rpb24gKFMtMSkvKE0rUy0xKSBzaHJpbmtzIGFzIHRoZSBudW1iZXIgb2YgbWljcm9iYXRjaGVzIE0gZ3Jvd3MsIG1ha2luZyBtaWNyby1iYXRjaGluZyBlc3NlbnRpYWwgZm9yIGVmZmljaWVuY3kuIEZvciBpbmZlcmVuY2Ugc2VydmluZyB3aXRoIGNvbnRpbnVvdXMgYmF0Y2hpbmcsIHBpcGVsaW5lIHN0YWdlcyBjYW4gYWx3YXlzIGJlIGtlcHQgYnVzeSBieSB0b2tlbnMgZnJvbSBkaWZmZXJlbnQgaW4tZmxpZ2h0IHJlcXVlc3RzLCBhcHByb2FjaGluZyB0aGUgaWRlYWwgb2YgemVybyBidWJibGUuIFRoZSBvcHRpbWFsIHBhcmFsbGVsaXNtIHN0cmF0ZWd5IGRlcGVuZHMgb24gaW50ZXJjb25uZWN0IHRvcG9sb2d5OiB0ZW5zb3IgcGFyYWxsZWxpc20gZm9yIGZhc3QgTlZMaW5rIHdpdGhpbiBhIG5vZGUsIHBpcGVsaW5lIHBhcmFsbGVsaXNtIGZvciBzbG93ZXIgaW50ZXItbm9kZSBsaW5rcy4ifSx7InR5cGUiOiJjYWxsb3V0IiwidmFyaWFudCI6ImluZm8iLCJ0aXRsZSI6IldoZW4gdG8gY2hvb3NlIHBpcGVsaW5lIHBhcmFsbGVsaXNtIiwiY29udGVudCI6IlBpcGVsaW5lIHBhcmFsbGVsaXNtIGlzIGlkZWFsIHdoZW4geW91IGhhdmUgbWFueSBHUFVzIGNvbm5lY3RlZCBvdmVyIHNsb3dlciBsaW5rcyAoUENJZSBvciBFdGhlcm5ldCkgc2luY2Ugb25seSBhY3RpdmF0aW9ucyBjcm9zcyBzdGFnZSBib3VuZGFyaWVzLCB1bmxpa2UgdGVuc29yIHBhcmFsbGVsaXNtIHdoaWNoIHJlcXVpcmVzIGFuIGFsbC1yZWR1Y2UgZXZlcnkgbGF5ZXIuIEZvciBOVkxpbmstY29ubmVjdGVkIEdQVXMsIGEgaHlicmlkIG9mIFBQIGFjcm9zcyBub2RlcyBhbmQgVFAgd2l0aGluIG5vZGVzIHR5cGljYWxseSBkZWxpdmVycyB0aGUgYmVzdCBsYXRlbmN5LXRocm91Z2hwdXQgdHJhZGUtb2ZmLiJ9LHsidHlwZSI6Imxpc3QiLCJvcmRlcmVkIjpmYWxzZSwiaXRlbXMiOlsiQnViYmxlIGZyYWN0aW9uID0gKFMtMSkvKE0rUy0xKTogZ3Jvd3Mgd2l0aCBzdGFnZXMsIHNocmlua3Mgd2l0aCBtaWNyb2JhdGNoZXMiLCIxRjFCIHNjaGVkdWxlIChQaXBlRHJlYW0tRmx1c2gpIGtlZXBzIGFjdGl2YXRpb24gbWVtb3J5IGJvdW5kZWQgYXQgTyhTKSBtaWNyb2JhdGNoZXMiLCJIdWdnaW5nRmFjZSBkZXZpY2VfbWFwPVx1MDAyN2F1dG9cdTAwMjcgcHJvdmlkZXMgemVyby1jb2RlIHBpcGVsaW5lIHBhcmFsbGVsaXNtIGZvciBpbmZlcmVuY2UiLCJDb21tdW5pY2F0aW9uIGNvc3QgcGVyIHN0YWdlIGJvdW5kYXJ5ID0gYmF0Y2ggw5cgc2VxX2xlbiDDlyBoaWRkZW4gw5cgMiBieXRlcyAoZnAxNikiLCJUZW5zb3IgcGFyYWxsZWxpc20gYmVhdHMgcGlwZWxpbmUgcGFyYWxsZWxpc20gZm9yIGxhdGVuY3kgb25seSBvbiBmYXN0IE5WTGluayBpbnRlcmNvbm5lY3RzIiwiQ29udGludW91cyBiYXRjaGluZyBmaWxscyBwaXBlbGluZSBzdGFnZXMgd2l0aCB0b2tlbnMgZnJvbSBkaWZmZXJlbnQgcmVxdWVzdHMsIGVsaW1pbmF0aW5nIGJ1YmJsZXMiLCJGb3IgbW9kZWxzIHdpdGggc3Ryb25nIGxvYWQgaW1iYWxhbmNlIGFjcm9zcyBsYXllcnMsIHVuZXF1YWwgc3RhZ2UgcGFydGl0aW9uaW5nIHJlZHVjZXMgcGVyLXN0YWdlIGxhdGVuY3kgdmFyaWFuY2UiXX1d"
+---
+# Pipeline Parallelism for LLM Inference
+
+Pipeline parallelism is a model-parallel strategy that partitions the layers of a large transformer model across multiple GPUs, assigning each device a contiguous subset of layers called a pipeline stage. Unlike data parallelism — where every GPU holds a full model replica — pipeline parallelism enables models that exceed the VRAM capacity of any single GPU by distributing parameters horizontally. The key trade-off is the pipeline bubble: when processing a single batch, earlier stages must wait for the batch to propagate to the final stage, leaving most GPUs idle. The solution is micro-batching: splitting each batch into smaller micro-batches that fill the pipeline and dramatically reduce idle time.
+
+## Overview
+
+In a pipeline-parallel setup, a transformer with L layers is partitioned into S stages of L/S layers each. Stage 0 holds the embedding layer and layers 0..(L/S - 1), stage 1 holds layers L/S..(2L/S - 1), and so on. Each stage lives on a dedicated GPU. During the forward pass, stage 0 computes activations for the input and passes them to stage 1 over an interconnect (NVLink or Ethernet), stage 1 continues the computation and passes to stage 2, and so on until stage S-1 produces the final logits. During the backward pass, gradients flow in the reverse direction through the same chain.
+
+The memory benefit is immediate: a 70B-parameter model that would require 140 GB of VRAM in fp16 can be split across 8 GPUs at 17.5 GB each — comfortably fitting on A100-40GB hardware. The communication cost per stage boundary is proportional to the activation tensor size: batch_size × sequence_length × hidden_dim × dtype_bytes. For a typical fp16 activation with batch=1, seq=2048, hidden=8192, this is roughly 32 MB per stage boundary per forward pass, which is manageable even over PCIe.
+
+## Naive Pipeline Partitioning
+
+The naive approach assigns an equal number of consecutive layers to each GPU and processes one microbatch at a time sequentially through all stages. This gives correct results but is highly inefficient: at any given clock cycle, only one GPU is active. The remaining S-1 GPUs are idle, waiting either for activations to arrive (forward) or for gradients to propagate back (backward). The fraction of wasted time is (S-1)/S, which for S=8 stages means 87.5% of all GPU-cycles are idle. This bubble fraction makes naive pipeline parallelism impractical without micro-batching.
+
+```python
+import torch
+import torch.nn as nn
+import time
+from typing import List
+
+class PipelineStage(nn.Module):
+    def __init__(self, num_layers: int, hidden_dim: int = 512):
+        super().__init__()
+        self.layers = nn.ModuleList(
+            [nn.Linear(hidden_dim, hidden_dim) for _ in range(num_layers)]
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for layer in self.layers:
+            x = torch.relu(layer(x))
+        return x
+
+def naive_pipeline(num_stages: int = 4, layers_per_stage: int = 8, dim: int = 512):
+    """Split 32-layer model across 4 GPUs; process one microbatch; measure bubble."""
+    stages = [PipelineStage(layers_per_stage, dim) for _ in range(num_stages)]
+    x = torch.randn(1, dim)
+    times: List[float] = []
+    for stage in stages:
+        t0 = time.perf_counter()
+        x = stage(x)
+        times.append((time.perf_counter() - t0) * 1e3)
+    bubble_frac = (num_stages - 1) / num_stages
+    print(f'Stage times (ms): {[round(t, 2) for t in times]}')
+    print(f'Bubble fraction: {bubble_frac:.2%}  ({num_stages-1}/{num_stages} stages idle)')
+    print(f'Pipeline efficiency: {1 - bubble_frac:.0%}')
+    return bubble_frac
+
+bubble = naive_pipeline()
+print(f'At 4 stages, {bubble:.0%} of all compute cycles are wasted pipeline bubbles.')
+```
+
+The simulation above confirms the theoretical bubble fraction of 75% for a 4-stage pipeline with a single microbatch. Every GPU except the currently active one sits completely idle. Only stage 0 is active at t=0, only stage 1 at t=1, and so on. The total wall-clock time equals 4 stage-latencies but only 1/4 of the theoretical peak throughput is achieved.
+
+## Pipeline Bubbles
+
+The pipeline bubble arises from data dependency: stage k cannot begin processing microbatch m until stage k-1 has finished it. In a pipeline with S stages and M microbatches, the total number of clock cycles is M + S - 1 (like filling a FIFO queue). The bubble fraction — the proportion of wasted cycles — is (S-1)/(M + S - 1). As M grows large relative to S, the bubble fraction approaches zero. This is why micro-batching is so effective: by splitting one large batch into many small microbatches, the pipeline stays full almost continuously.
+
+Formally, let T_stage be the latency of one stage processing one microbatch. The ideal time to process M microbatches through S stages with no bubbles is M × T_stage (only one stage ever active). The actual time is (M + S - 1) × T_stage. The efficiency is M / (M + S - 1). For M=8 microbatches and S=4 stages, efficiency = 8/11 ≈ 73%. For M=32, efficiency = 32/35 ≈ 91%. The 1F1B (one-forward-one-backward) schedule, used in PipeDream and Megatron-LM, achieves similar bubble fractions but with much lower activation memory overhead by interleaving forward and backward passes.
+
+## Micro-batching to Fill Bubbles
+
+Micro-batching splits a global batch of size B into M micro-batches of size B/M. Each micro-batch independently passes through all pipeline stages. With the 1F1B schedule, once the pipeline is full, every stage is simultaneously processing a different micro-batch: stage 0 works on microbatch m while stage 1 works on m-1, stage 2 on m-2, and stage S-1 on m-S+1. This keeps all GPUs active (except during the startup and cooldown phases at the beginning and end of each global batch). The bubble is confined to the warm-up and cool-down periods, giving bubble fraction (S-1)/(M+S-1).
+
+```python
+import torch
+import torch.nn as nn
+from typing import List, Tuple
+import time
+
+def microbatch_pipeline(
+    stages: List[nn.Module],
+    microbatches: List[torch.Tensor]
+) -> Tuple[List[torch.Tensor], float]:
+    """Schedule microbatches through pipeline stages; report bubble stats."""
+    S = len(stages)
+    M = len(microbatches)
+    # Theoretical: bubble = (S-1)/(M+S-1)
+    total_cycles = M + S - 1
+    bubble_frac = (S - 1) / total_cycles
+    naive_bubble = (S - 1) / S
+    results = []
+    for m_idx in range(M):
+        x = microbatches[m_idx]
+        for stage in stages:
+            x = stage(x)
+        results.append(x)
+    print(f'Microbatches: {M}  |  Stages: {S}')
+    print(f'Total clock cycles: {total_cycles}  (M+S-1)')
+    print(f'Bubble fraction (1F1B): {bubble_frac:.2%}')
+    print(f'Naive bubble (M=1):     {naive_bubble:.2%}')
+    print(f'Improvement:            {naive_bubble / bubble_frac:.2f}x less waste')
+    return results, bubble_frac
+
+stages = [nn.Linear(256, 256) for _ in range(4)]
+micros = [torch.randn(8, 256) for _ in range(4)]
+out, bub = microbatch_pipeline(stages, micros)
+print(f'Output count: {len(out)}  |  Bubble: {bub:.1%}')
+```
+
+With M=4 microbatches and S=4 stages, the bubble fraction drops from 75% (naive) to 43% — a meaningful improvement. With M=32 microbatches, it falls to just 9%. The trade-off is memory: more microbatches means more activations held in memory simultaneously for the backward pass. GPipe materializes all activations (high memory) while PipeDream uses activation checkpointing per stage (lower memory, higher compute).
+
+## GPipe vs PipeDream
+
+GPipe (Google, 2019) uses a synchronous all-forward-then-all-backward schedule. All M microbatches complete their forward pass first (accumulating all intermediate activations), then all complete their backward pass in reverse order. This gives clean gradient accumulation across microbatches and matches the semantics of a full-batch update, but requires storing M × S activation tensors simultaneously — substantial memory for large M. GPipe mitigates this with rematerialization (re-computing activations during backward instead of storing them), trading compute for memory.
+
+PipeDream (Microsoft, 2018) uses an asynchronous 1F1B schedule: each stage alternates between one forward microbatch and one backward microbatch. This limits the number of in-flight microbatches to S (the number of stages), rather than M, drastically reducing activation memory. However, asynchronous updates mean different microbatches use weight versions from different training steps. PipeDream introduces weight stashing — storing multiple versions of weights — to handle this staleness. PipeDream-Flush (2020) uses a synchronous 1F1B with periodic pipeline flushes, eliminating weight staleness while preserving the memory benefits.
+
+```python
+import torch
+import time
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+def hf_pipeline_demo(model_name: str = 'gpt2-medium', n_new_tokens: int = 50):
+    """Load with device_map='auto', inspect layer placement, measure throughput."""
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        device_map='auto',
+        torch_dtype=torch.float16
+    )
+    if hasattr(model, 'hf_device_map'):
+        print('Layer-to-device mapping (first 8):')
+        for k, v in list(model.hf_device_map.items())[:8]:
+            print(f'  {k:45s}: {v}')
+    prompt = 'Pipeline parallelism distributes transformer layers across GPUs.'
+    inputs = tokenizer(prompt, return_tensors='pt')
+    with torch.no_grad():
+        model.generate(**inputs, max_new_tokens=5)  # warmup
+    t0 = time.perf_counter()
+    with torch.no_grad():
+        out = model.generate(**inputs, max_new_tokens=n_new_tokens, do_sample=False)
+    elapsed = time.perf_counter() - t0
+    tps = n_new_tokens / elapsed
+    print(f'Generated {n_new_tokens} tokens in {elapsed:.2f}s ({tps:.1f} tok/s)')
+    return tps
+
+hf_pipeline_demo()
+```
+
+HuggingFace Accelerate's device_map='auto' implements naive pipeline parallelism automatically: it inspects the model's layer structure, estimates parameter memory per layer, and greedily assigns layers to GPUs until each device's VRAM budget is exhausted before moving to the next. This is inference-only pipeline parallelism without micro-batching — suitable for serving with throughput-optimized batch sizes, but not the most efficient for low-latency single-request serving.
+
+## Inference-Specific Scheduling
+
+Training pipeline parallelism focuses on throughput and gradient correctness across microbatches. Inference pipeline parallelism has different priorities: minimize time-to-first-token (TTFT) for interactive workloads, maximize tokens-per-second for batch throughput, and handle variable-length requests efficiently. The continuous batching paradigm (used in vLLM, TGI) is compatible with pipeline parallelism: the scheduler treats each pipeline stage as processing a continuous stream of tokens from different requests, with new requests entering the pipeline as earlier ones finish. This fills pipeline bubbles with tokens from other requests rather than padding.
+
+Activation pipelining and prefetching are key optimizations: while stage k is computing the forward pass for microbatch m, the interconnect can be prefetching stage k-1's activation for microbatch m+1. This overlaps computation and communication, further reducing effective bubble time. For NVLink (600 GB/s bidirectional), the transfer time for a typical fp16 activation (batch=1, hidden=8192) is under 1ms — negligible compared to computation. For PCIe (64 GB/s) or Ethernet (25 Gbps), transfer latency can dominate and requires careful activation compression or chunking.
+
+## Pipeline vs Tensor Parallelism
+
+Tensor parallelism (TP) splits individual weight matrices across GPUs: each GPU holds a column-shard of the MLP weight matrix and performs partial matrix multiplications, then an all-reduce combines partial results. TP requires an all-reduce every layer (2 all-reduces per transformer block), making it highly sensitive to interconnect bandwidth. It reduces per-layer latency by a factor of TP degree but only works efficiently on fast NVLink. Pipeline parallelism (PP), by contrast, only transfers activations at stage boundaries — much less communication per token, making it viable over slower interconnects. The optimal hybrid is PP×TP where nodes are connected by NVLink within a server and Ethernet across servers.
+
+```python
+import time
+from dataclasses import dataclass
+from typing import List
+
+@dataclass
+class ParallelConfig:
+    label: str
+    pp: int
+    tp: int
+
+def compare_parallel_configs(
+    n_layers: int = 32,
+    n_new_tokens: int = 50,
+    link_type: str = 'nvlink'
+) -> None:
+    """Estimate latency and throughput for PP=4 vs TP=4 vs PP=2+TP=2."""
+    allreduce_cost = 0.05 if link_type == 'nvlink' else 0.8  # ms per all-reduce
+    configs = [
+        ParallelConfig('PP=4, TP=1', pp=4, tp=1),
+        ParallelConfig('PP=1, TP=4', pp=1, tp=4),
+        ParallelConfig('PP=2, TP=2', pp=2, tp=2),
+        ParallelConfig('SeqPar',     pp=1, tp=1),
+    ]
+    print(f'Link: {link_type}  |  all-reduce cost: {allreduce_cost} ms\n')
+    print(f'{"Config":<16} {"Lat (ms)":>10} {"Tput (tok/s)":>14} {"Comm/layer":>12}')
+    print('-' * 56)
+    for cfg in configs:
+        pp_comm  = cfg.pp * 0.3              # activation xfer per stage boundary
+        tp_comm  = cfg.tp * n_layers * allreduce_cost  # all-reduce every layer
+        compute  = n_layers * 0.06           # base compute per layer
+        lat_ms   = pp_comm + tp_comm + compute
+        tput     = (n_new_tokens * 1000) / (lat_ms * cfg.pp)
+        print(f'{cfg.label:<16} {lat_ms:>10.1f} {tput:>14.0f} {tp_comm/n_layers:>12.3f}')
+
+compare_parallel_configs(link_type='nvlink')
+print()
+compare_parallel_configs(link_type='ethernet')
+```
+
+The results highlight the interconnect sensitivity of tensor parallelism. On NVLink, TP=4 achieves the lowest per-token latency because all-reduces are fast and the 4x compute parallelism dominates. On Ethernet, TP=4 is dominated by all-reduce overhead and PP=4 wins on both latency and throughput. The hybrid PP=2+TP=2 is a balanced choice for multi-server deployments: TP=2 within each NVLink-connected server node, PP=2 across nodes over Ethernet.
+
+| Strategy | Latency (1 req) | Throughput | Communication pattern | Best use case |
+| --- | --- | --- | --- | --- |
+| PP=4, TP=1 | High (sequential stages) | High (microbatching) | Activations at stage boundaries only | Multi-node slow-link serving |
+| TP=4, PP=1 | Low (parallel compute) | Medium (all-reduce bottleneck) | All-reduce every transformer layer | Single-node NVLink inference |
+| PP=2+TP=2 | Medium (balanced) | High (hybrid) | TP all-reduce within node; PP xfer across | Multi-node NVLink cluster |
+| Sequence parallelism | Low | High | Ring all-reduce over sequence dimension | Very long context (>32K tokens) |
+| Expert parallelism (MoE) | Low (sparse compute) | Very high | All-to-all token routing to experts | Mixture-of-Experts models |
+
+## Key Takeaways
+
+Pipeline parallelism enables deploying models larger than any single GPU's VRAM by distributing layers across a chain of GPUs. The bubble fraction (S-1)/(M+S-1) shrinks as the number of microbatches M grows, making micro-batching essential for efficiency. For inference serving with continuous batching, pipeline stages can always be kept busy by tokens from different in-flight requests, approaching the ideal of zero bubble. The optimal parallelism strategy depends on interconnect topology: tensor parallelism for fast NVLink within a node, pipeline parallelism for slower inter-node links.
+
+> **When to choose pipeline parallelism**: Pipeline parallelism is ideal when you have many GPUs connected over slower links (PCIe or Ethernet) since only activations cross stage boundaries, unlike tensor parallelism which requires an all-reduce every layer. For NVLink-connected GPUs, a hybrid of PP across nodes and TP within nodes typically delivers the best latency-throughput trade-off.
+
+- Bubble fraction = (S-1)/(M+S-1): grows with stages, shrinks with microbatches
+- 1F1B schedule (PipeDream-Flush) keeps activation memory bounded at O(S) microbatches
+- HuggingFace device_map='auto' provides zero-code pipeline parallelism for inference
+- Communication cost per stage boundary = batch × seq_len × hidden × 2 bytes (fp16)
+- Tensor parallelism beats pipeline parallelism for latency only on fast NVLink interconnects
+- Continuous batching fills pipeline stages with tokens from different requests, eliminating bubbles
+- For models with strong load imbalance across layers, unequal stage partitioning reduces per-stage latency variance
+

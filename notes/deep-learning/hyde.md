@@ -1,0 +1,227 @@
+---
+title: "HyDE: Hypothetical Document Embeddings"
+slug: "hyde"
+description: "Improving retrieval by using an LLM to generate a hypothetical answer to the query, embedding that answer (not the query) for retrieval — bridging the query-document vocabulary gap."
+tags: ["deep-learning", "llm"]
+topic: "deep-learning"
+status: "published"
+updated: "2026-07-10"
+blocks_json: "W3sidHlwZSI6InRleHQiLCJjb250ZW50IjoiSHlERSAoSHlwb3RoZXRpY2FsIERvY3VtZW50IEVtYmVkZGluZ3MpLCBpbnRyb2R1Y2VkIGJ5IEdhbyBldCBhbC4gKDIwMjIpLCBpcyBhIHJldHJpZXZhbCBhdWdtZW50YXRpb24gdGVjaG5pcXVlIHRoYXQgYWRkcmVzc2VzIHRoZSB2b2NhYnVsYXJ5IG1pc21hdGNoIGJldHdlZW4gdXNlciBxdWVyaWVzIGFuZCBpbmRleGVkIGRvY3VtZW50cy4gSW5zdGVhZCBvZiBlbWJlZGRpbmcgdGhlIHF1ZXJ5IGFuZCBzZWFyY2hpbmcgZm9yIHNpbWlsYXIgZG9jdW1lbnRzLCBIeURFIGZpcnN0IHByb21wdHMgYW4gTExNIHRvIGdlbmVyYXRlIGEgaHlwb3RoZXRpY2FsIGRvY3VtZW50IHRoYXQgd291bGQgYW5zd2VyIHRoZSBxdWVyeSDigJQgYXMgaWYgaXQgYWxyZWFkeSBrbmV3IHRoZSBhbnN3ZXIg4oCUIGFuZCB0aGVuIGVtYmVkcyB0aGF0IGh5cG90aGV0aWNhbCBkb2N1bWVudCBmb3IgcmV0cmlldmFsLiBUaGUgaW50dWl0aW9uIGlzIHRoYXQgYSBoeXBvdGhldGljYWwgYW5zd2VyIHdyaXR0ZW4gaW4gdGhlIHNhbWUgc3R5bGUgYW5kIHZvY2FidWxhcnkgYXMgdGhlIGluZGV4ZWQgY29ycHVzIGlzIGdlb21ldHJpY2FsbHkgY2xvc2VyIHRvIHJlbGV2YW50IGRvY3VtZW50cyBpbiBlbWJlZGRpbmcgc3BhY2UgdGhhbiBhIHNob3J0IHVzZXIgcXVlcnksIGV2ZW4gaWYgdGhlIGh5cG90aGV0aWNhbCBhbnN3ZXIgY29udGFpbnMgZmFjdHVhbCBlcnJvcnMuIFRoZSBmaW5hbCBhbnN3ZXIgaXMgYWx3YXlzIGdlbmVyYXRlZCBmcm9tIHRoZSByZXRyaWV2ZWQgcmVhbCBkb2N1bWVudHMsIG5vdCBmcm9tIHRoZSBoYWxsdWNpbmF0ZWQgaHlwb3RoZXNpcy4ifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJPdmVydmlldyJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiSHlERSB3YXMgcHJvcG9zZWQgaW4gXHUwMDI3UHJlY2lzZSBaZXJvLVNob3QgRGVuc2UgUmV0cmlldmFsIHdpdGhvdXQgUmVsZXZhbmNlIExhYmVsc1x1MDAyNyAoR2FvIGV0IGFsLiwgMjAyMiwgU0lHSVIpIGFzIGEgd2F5IHRvIGltcHJvdmUgemVyby1zaG90IGRlbnNlIHJldHJpZXZhbCB3aXRob3V0IGFueSByZWxldmFuY2UtbGFiZWxsZWQgdHJhaW5pbmcgZGF0YS4gVGhlIGNvcmUgaW5zaWdodCBpcyB0aGF0IGRlbnNlIGVtYmVkZGluZ3MgYXJlIHRyYWluZWQgdG8gbWFwIHNlbWFudGljYWxseSBzaW1pbGFyIHRleHRzIGNsb3NlIHRvZ2V0aGVyIGluIHZlY3RvciBzcGFjZS4gQSB1c2VyIHF1ZXJ5IChcdTAwMjdob3cgZG8gdHJhbnNmb3JtZXJzIHVzZSBhdHRlbnRpb24/XHUwMDI3KSBpcyB3cml0dGVuIGluIGludGVycm9nYXRpdmUgZm9ybSB3aXRoIGEgZGlmZmVyZW50IHRva2VuIGRpc3RyaWJ1dGlvbiB0aGFuIGEgZG9jdW1lbnQgYW5zd2VyIChcdTAwMjdUcmFuc2Zvcm1lcnMgdXNlIGF0dGVudGlvbiBieSBjb21wdXRpbmcuLi5cdTAwMjcpLiBUaGlzIGRpc3RyaWJ1dGlvbmFsIG1pc21hdGNoIG1lYW5zIHRoZSBxdWVyeSBlbWJlZGRpbmcgbWF5IG5vdCBiZSBjbG9zZSB0byB0aGUgZG9jdW1lbnQgZW1iZWRkaW5nIGV2ZW4gd2hlbiB0aGUgZG9jdW1lbnQgYW5zd2VycyB0aGUgcXVlcnkuIEJ5IGdlbmVyYXRpbmcgYSBwbGF1c2libGUgZG9jdW1lbnQtc3R5bGUgYW5zd2VyIGFuZCBlbWJlZGRpbmcgdGhhdCwgSHlERSBwcm9kdWNlcyBhIHF1ZXJ5IHJlcHJlc2VudGF0aW9uIGluIHRoZSBzYW1lIGRpc3RyaWJ1dGlvbiBhcyB0aGUgaW5kZXhlZCBkb2N1bWVudHMuIEl0IGlzIGNvbXBhdGlibGUgd2l0aCBhbnkgZW1iZWRkaW5nIG1vZGVsIGFuZCBhbnkgcmV0cmlldmFsIGluZGV4LCByZXF1aXJpbmcgb25seSBhbiBMTE0gQVBJIGNhbGwgcGVyIHF1ZXJ5LiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IlF1ZXJ5LURvY3VtZW50IEdhcCBQcm9ibGVtIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJUaGUgdm9jYWJ1bGFyeSBhbmQgc3R5bGUgZ2FwIGJldHdlZW4gcXVlcmllcyBhbmQgZG9jdW1lbnRzIGlzIGEgZnVuZGFtZW50YWwgcHJvYmxlbSBpbiBpbmZvcm1hdGlvbiByZXRyaWV2YWwuIFVzZXJzIHdyaXRlIHF1ZXJpZXMgYXMgc2hvcnQgaW50ZXJyb2dhdGl2ZSBwaHJhc2VzIChcdTAwMjdiZXN0IHdheSB0byBmaW5lLXR1bmUgQkVSVFx1MDAyNyksIHdoaWxlIGRvY3VtZW50cyBhcmUgd3JpdHRlbiBhcyBkZWNsYXJhdGl2ZSBzdGF0ZW1lbnRzIChcdTAwMjdCRVJUIGNhbiBiZSBmaW5lLXR1bmVkIGJ5IGFkZGluZyBhIHRhc2stc3BlY2lmaWMgaGVhZC4uLlx1MDAyNykuIEJNMjUgbGV4aWNhbCBzZWFyY2ggZmFpbHMgd2hlbiB0aGUgcXVlcnkgdXNlcyBkaWZmZXJlbnQgd29yZHMgdGhhbiB0aGUgZG9jdW1lbnQgKGEgdXNlciBhc2tzIFx1MDAyN2ZpeCB0cmFuc2Zvcm1lciB0cmFpbmluZyBpbnN0YWJpbGl0eVx1MDAyNyBidXQgdGhlIGRvY3VtZW50IGRpc2N1c3NlcyBcdTAwMjdncmFkaWVudCBleHBsb3Npb24gaW4gYXR0ZW50aW9uIGxheWVyc1x1MDAyNykuIERlbnNlIHJldHJpZXZhbCByZWR1Y2VzIHRoaXMgZ2FwIGJ5IGVtYmVkZGluZyBzZW1hbnRpY3MgcmF0aGVyIHRoYW4gbGV4aWNhbCBvdmVybGFwLCBidXQgdGhlIHF1ZXJ5LXRvLWRvY3VtZW50IHN0eWxlIHNoaWZ0IHN0aWxsIGNyZWF0ZXMgYSBkaXJlY3Rpb25hbCBiaWFzIGluIGVtYmVkZGluZyBzcGFjZS4gU2hvcnQgcXVlcmllcyBhbHNvIGNvbnRhaW4gbGVzcyBzZW1hbnRpYyBzaWduYWwgdGhhbiBmdWxsIGRvY3VtZW50IHBhc3NhZ2VzLCBtYWtpbmcgdGhlaXIgZW1iZWRkaW5ncyBsZXNzIHJlbGlhYmxlLiBIeURFIHJlc29sdmVzIGJvdGggaXNzdWVzIGJ5IGNvbnZlcnRpbmcgdGhlIHNob3J0IGludGVycm9nYXRpdmUgcXVlcnkgaW50byBhIGxvbmcgZGVjbGFyYXRpdmUgcGFzc2FnZSBiZWZvcmUgZW1iZWRkaW5nLiJ9LHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiJpbXBvcnQgb3BlbmFpXG5pbXBvcnQgbnVtcHkgYXMgbnBcbmZyb20gc2VudGVuY2VfdHJhbnNmb3JtZXJzIGltcG9ydCBTZW50ZW5jZVRyYW5zZm9ybWVyXG5pbXBvcnQgZmFpc3NcblxuY2xpZW50ID0gb3BlbmFpLk9wZW5BSShhcGlfa2V5PVwiWU9VUl9BUElfS0VZXCIpXG5lbWJlZF9tb2RlbCA9IFNlbnRlbmNlVHJhbnNmb3JtZXIoXCJhbGwtTWluaUxNLUw2LXYyXCIpXG5cbmRlZiBnZW5lcmF0ZV9oeXBvdGhlc2lzKHF1ZXJ5OiBzdHIsIG1vZGVsOiBzdHIgPSBcImdwdC0zLjUtdHVyYm9cIikgLVx1MDAzZSBzdHI6XG4gICAgXCJcIlwiU3RlcCAxOiBMTE0gZ2VuZXJhdGVzIGEgaHlwb3RoZXRpY2FsIGRvY3VtZW50IHRoYXQgd291bGQgYW5zd2VyIHRoZSBxdWVyeS5cIlwiXCJcbiAgICByZXNwID0gY2xpZW50LmNoYXQuY29tcGxldGlvbnMuY3JlYXRlKFxuICAgICAgICBtb2RlbD1tb2RlbCxcbiAgICAgICAgbWVzc2FnZXM9W1xuICAgICAgICAgICAge1wicm9sZVwiOiBcInN5c3RlbVwiLCBcImNvbnRlbnRcIjogXCJXcml0ZSBhIGNvbmNpc2UgMi0zIHNlbnRlbmNlIGZhY3R1YWwgcGFyYWdyYXBoIGFuc3dlcmluZyB0aGUgcXVlc3Rpb24uXCJ9LFxuICAgICAgICAgICAge1wicm9sZVwiOiBcInVzZXJcIiwgXCJjb250ZW50XCI6IGZcIldyaXRlIGEgV2lraXBlZGlhLXN0eWxlIHBhcmFncmFwaCBhbnN3ZXJpbmc6IHtxdWVyeX1cIn1cbiAgICAgICAgXSxcbiAgICAgICAgbWF4X3Rva2Vucz0yMDAsIHRlbXBlcmF0dXJlPTAuMCxcbiAgICApXG4gICAgcmV0dXJuIHJlc3AuY2hvaWNlc1swXS5tZXNzYWdlLmNvbnRlbnQuc3RyaXAoKVxuXG5kZWYgaHlkZV9yZXRyaWV2ZShxdWVyeTogc3RyLCBjb3JwdXM6IGxpc3QsIHRvcF9rOiBpbnQgPSA1KSAtXHUwMDNlIGRpY3Q6XG4gICAgXCJcIlwiRnVsbCBIeURFIHBpcGVsaW5lOiBnZW5lcmF0ZSBoeXBvdGhlc2lzIC1cdTAwM2UgZW1iZWQgLVx1MDAzZSByZXRyaWV2ZSAtXHUwMDNlIHJldHVybiByZWFsIGRvY3MuXCJcIlwiXG4gICAgaHlwb3RoZXNpcyA9IGdlbmVyYXRlX2h5cG90aGVzaXMocXVlcnkpXG4gICAgaHlwX2VtYiAgICA9IGVtYmVkX21vZGVsLmVuY29kZShbaHlwb3RoZXNpc10sIG5vcm1hbGl6ZV9lbWJlZGRpbmdzPVRydWUpLmFzdHlwZShucC5mbG9hdDMyKVxuICAgIGNvcnBfZW1icyAgPSBlbWJlZF9tb2RlbC5lbmNvZGUoY29ycHVzLCBub3JtYWxpemVfZW1iZWRkaW5ncz1UcnVlKS5hc3R5cGUobnAuZmxvYXQzMilcbiAgICBpbmRleCAgICAgID0gZmFpc3MuSW5kZXhGbGF0SVAoY29ycF9lbWJzLnNoYXBlWzFdKVxuICAgIGluZGV4LmFkZChjb3JwX2VtYnMpXG4gICAgXywgaWR4cyA9IGluZGV4LnNlYXJjaChoeXBfZW1iLCB0b3BfaylcbiAgICBwcmludChmXCJIeXBvdGhlc2lzICh7bGVuKGh5cG90aGVzaXMuc3BsaXQoKSl9IHdvcmRzKToge2h5cG90aGVzaXNbOjEyMF19Li4uXCIpXG4gICAgcmV0dXJuIHtcImh5cG90aGVzaXNcIjogaHlwb3RoZXNpcywgXCJyZXRyaWV2ZWRcIjogW2NvcnB1c1tpXSBmb3IgaSBpbiBpZHhzWzBdXX1cblxuY29ycHVzID0gW2ZcIkRvY3VtZW50IHtpfTogdGVjaG5pY2FsIGNvbnRlbnQgYWJvdXQgZGVlcCBsZWFybmluZyB0b3BpYyB7aSAlIDEwfS5cIiBmb3IgaSBpbiByYW5nZSg1MCldXG5yZXN1bHQgPSBoeWRlX3JldHJpZXZlKFwiaG93IGRvIHRyYW5zZm9ybWVycyB1c2Ugc2VsZi1hdHRlbnRpb25cIiwgY29ycHVzKVxucHJpbnQoZlwiUmV0cmlldmVkIHtsZW4ocmVzdWx0W1x1MDAyN3JldHJpZXZlZFx1MDAyN10pfSBkb2NzIHVzaW5nIEh5REUgZW1iZWRkaW5nXCIpIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiSHlERSBNZWNoYW5pc20ifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6Ikh5REUgcmVwbGFjZXMgdGhlIHF1ZXJ5IGVtYmVkZGluZyB3aXRoIGEgaHlwb3RoZXRpY2FsIGRvY3VtZW50IGVtYmVkZGluZyBhdCByZXRyaWV2YWwgdGltZS4gVGhlIHByb2Nlc3MgaGFzIGZvdXIgc3RlcHM6ICgxKSB0aGUgdXNlciBzdWJtaXRzIGEgcXVlcnk7ICgyKSBhbiBMTE0gZ2VuZXJhdGVzIGEgaHlwb3RoZXRpY2FsIGFuc3dlciBkb2N1bWVudCAodHlwaWNhbGx5IDEwMOKAkzIwMCB3b3Jkcyk7ICgzKSB0aGUgaHlwb3RoZXRpY2FsIGRvY3VtZW50IGlzIGVtYmVkZGVkIHdpdGggdGhlIHNhbWUgbW9kZWwgdXNlZCB0byBlbWJlZCB0aGUgY29ycHVzOyAoNCkgbmVhcmVzdC1uZWlnaGJvdXIgc2VhcmNoIHJldHJpZXZlcyB0aGUgbW9zdCBzaW1pbGFyIHJlYWwgZG9jdW1lbnRzIGZyb20gdGhlIGluZGV4OyBhbmQgKDUpIHRoZSByZWFsIHJldHJpZXZlZCBkb2N1bWVudHMgKG5vdCB0aGUgaHlwb3RoZXNpcykgYXJlIHBhc3NlZCB0byB0aGUgTExNIGZvciBmaW5hbCBhbnN3ZXIgZ2VuZXJhdGlvbi4gVGhlIGh5cG90aGVzaXMgaXMgZXBoZW1lcmFsIOKAlCBpdCBuZXZlciBlbnRlcnMgdGhlIGFuc3dlciBnZW5lcmF0aW9uIHN0ZXAgYW5kIGFueSBoYWxsdWNpbmF0aW9ucyBpbiBpdCBkbyBub3QgZGlyZWN0bHkgYXBwZWFyIGluIHRoZSBvdXRwdXQuIEhvd2V2ZXIsIGEgaGFsbHVjaW5hdGVkIGh5cG90aGVzaXMgY2FuIGxlYWQgdG8gcmV0cmlldmFsIG9mIHdyb25nIHJlYWwgZG9jdW1lbnRzLCB3aGljaCB0aGVuIG1pc2xlYWRzIHRoZSBMTE0uIFRoaXMgaXMgSHlERVx1MDAyN3MgY29yZSBmYWlsdXJlIG1vZGUuIn0seyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6ImltcG9ydCBvcGVuYWlcbmZyb20gdHlwaW5nIGltcG9ydCBMaXRlcmFsXG5cbmNsaWVudCA9IG9wZW5haS5PcGVuQUkoYXBpX2tleT1cIllPVVJfQVBJX0tFWVwiKVxuXG5RVUVSWV9QUk9NUFRTID0ge1xuICAgIFwiZmFjdHVhbFwiOiAgICBcIldyaXRlIGEgV2lraXBlZGlhIHBhcmFncmFwaCAoMi0zIHNlbnRlbmNlcykgdGhhdCBhbnN3ZXJzOiB7cXVlcnl9XCIsXG4gICAgXCJ0ZWNobmljYWxcIjogIFwiV3JpdGUgYSB0ZWNobmljYWwgZG9jdW1lbnRhdGlvbiBwYXJhZ3JhcGggZXhwbGFpbmluZzoge3F1ZXJ5fVwiLFxuICAgIFwicHJvY2VkdXJhbFwiOiBcIldyaXRlIGEgc3RlcC1ieS1zdGVwIGd1aWRlICgzLTQgc3RlcHMpIGZvcjoge3F1ZXJ5fVwiLFxufVxuXG5kZWYgZ2VuZXJhdGVfaHlwb3RoZXRpY2FsX2RvYyhxdWVyeTogc3RyLFxuICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIHF1ZXJ5X3R5cGU6IExpdGVyYWxbXCJmYWN0dWFsXCIsIFwidGVjaG5pY2FsXCIsIFwicHJvY2VkdXJhbFwiXSA9IFwiZmFjdHVhbFwiLFxuICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIG1vZGVsOiBzdHIgPSBcImdwdC0zLjUtdHVyYm9cIikgLVx1MDAzZSBzdHI6XG4gICAgXCJcIlwiR2VuZXJhdGUgYSBzdHlsZS1tYXRjaGVkIGh5cG90aGV0aWNhbCBkb2N1bWVudCBmb3IgdGhlIHF1ZXJ5IHR5cGUuXCJcIlwiXG4gICAgcHJvbXB0ID0gUVVFUllfUFJPTVBUU1txdWVyeV90eXBlXS5mb3JtYXQocXVlcnk9cXVlcnkpXG4gICAgcmVzcCA9IGNsaWVudC5jaGF0LmNvbXBsZXRpb25zLmNyZWF0ZShcbiAgICAgICAgbW9kZWw9bW9kZWwsXG4gICAgICAgIG1lc3NhZ2VzPVtcbiAgICAgICAgICAgIHtcInJvbGVcIjogXCJzeXN0ZW1cIiwgXCJjb250ZW50XCI6IFwiQW5zd2VyIGNvbmNpc2VseSBpbiAyLTMgc2VudGVuY2VzIGFzIGEga25vd2xlZGdlYWJsZSBleHBlcnQuXCJ9LFxuICAgICAgICAgICAge1wicm9sZVwiOiBcInVzZXJcIiwgICBcImNvbnRlbnRcIjogcHJvbXB0fVxuICAgICAgICBdLFxuICAgICAgICBtYXhfdG9rZW5zPTE4MCwgdGVtcGVyYXR1cmU9MC4wLFxuICAgIClcbiAgICByZXR1cm4gcmVzcC5jaG9pY2VzWzBdLm1lc3NhZ2UuY29udGVudC5zdHJpcCgpXG5cbmV4YW1wbGVzID0gW1xuICAgIChcIldoYXQgaXMgdGhlIGNhcGl0YWwgb2YgRnJhbmNlP1wiLCAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIFwiZmFjdHVhbFwiKSxcbiAgICAoXCJIb3cgZG9lcyBiYWNrcHJvcGFnYXRpb24gY29tcHV0ZSBncmFkaWVudHMgaW4gbmV1cmFsIG5ldHM/XCIsICBcInRlY2huaWNhbFwiKSxcbiAgICAoXCJIb3cgZG8gSSBmaW5lLXR1bmUgYSBCRVJUIG1vZGVsIGZvciB0ZXh0IGNsYXNzaWZpY2F0aW9uP1wiLCAgICBcInByb2NlZHVyYWxcIiksXG5dXG5mb3IgcXVlcnksIHF0eXBlIGluIGV4YW1wbGVzOlxuICAgIGh5cCA9IGdlbmVyYXRlX2h5cG90aGV0aWNhbF9kb2MocXVlcnksIHF0eXBlKVxuICAgIHByaW50KGZcIlxcblR5cGU6IHtxdHlwZX0gfCBRdWVyeToge3F1ZXJ5fVwiKVxuICAgIHByaW50KGZcIkh5cG90aGVzaXMgKHtsZW4oaHlwLnNwbGl0KCkpfSB3b3Jkcyk6IHtoeXBbOjE2MF19Li4uXCIpIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiSHlwb3RoZXRpY2FsIERvY3VtZW50IEdlbmVyYXRpb24ifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IlRoZSBxdWFsaXR5IG9mIHRoZSBoeXBvdGhlc2lzIHNpZ25pZmljYW50bHkgYWZmZWN0cyByZXRyaWV2YWwgcXVhbGl0eS4gQSBnb29kIGh5cG90aGVzaXMgc2hvdWxkIG1hdGNoIHRoZSB2b2NhYnVsYXJ5LCBzdHlsZSwgYW5kIGxlbmd0aCBvZiB0aGUgaW5kZXhlZCBjb3JwdXMuIEZvciBhIGNvcnB1cyBvZiBXaWtpcGVkaWEgYXJ0aWNsZXMsIHRoZSBwcm9tcHQgXHUwMDI3V3JpdGUgYSBXaWtpcGVkaWEgcGFyYWdyYXBoIHRoYXQgYW5zd2VyczpcdTAwMjcgd29ya3Mgd2VsbC4gRm9yIGEgY29ycHVzIG9mIGFjYWRlbWljIHBhcGVycywgXHUwMDI3V3JpdGUgYW4gYWJzdHJhY3Qtc3R5bGUgc3VtbWFyeSBleHBsYWluaW5nOlx1MDAyNyBpcyBtb3JlIGFwcHJvcHJpYXRlLiBGb3IgYSBjb3JwdXMgb2YgdGVjaG5pY2FsIGRvY3VtZW50YXRpb24sIFx1MDAyN1dyaXRlIGEgZG9jdW1lbnRhdGlvbiBlbnRyeSBmb3I6XHUwMDI3IGFsaWducyBiZXR0ZXIuIFVzaW5nIHF1ZXJ5LXR5cGUtc3BlY2lmaWMgcHJvbXB0cyAoZmFjdHVhbCwgdGVjaG5pY2FsLCBwcm9jZWR1cmFsKSBoYXMgYmVlbiBzaG93biB0byBpbXByb3ZlIFJlY2FsbEAxMCBieSAy4oCTNSBwZXJjZW50YWdlIHBvaW50cyBvdmVyIGEgZ2VuZXJpYyBwcm9tcHQuIEdlbmVyYXRpbmcgbXVsdGlwbGUgaHlwb3RoZXNlcyAoM+KAkzUpIGFuZCBhdmVyYWdpbmcgdGhlaXIgZW1iZWRkaW5ncyBmdXJ0aGVyIGltcHJvdmVzIHJvYnVzdG5lc3MsIGF0IHRoZSBjb3N0IG9mIGFkZGl0aW9uYWwgTExNIGNhbGxzLiBUaGUgZW1iZWRkaW5nIG9mIHRoZSBhdmVyYWdlIG9mIG11bHRpcGxlIGh5cG90aGVzaXMgZW1iZWRkaW5ncyBpcyBtb3JlIHN0YWJsZSBhbmQgbGVzcyBzZW5zaXRpdmUgdG8gYW55IHNpbmdsZSBoYWxsdWNpbmF0aW9uLiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IkVtYmVkZGluZyB0aGUgSHlwb3RoZXNpcyJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiSHlERSBpcyBjb21wYXRpYmxlIHdpdGggYW55IGRlbnNlIGVtYmVkZGluZyBtb2RlbCwgYnV0IHBlcmZvcm1hbmNlIGRlcGVuZHMgb24gdGhlIGh5cG90aGVzaXMgbWF0Y2hpbmcgdGhlIGVtYmVkZGluZyBtb2RlbFx1MDAyN3MgdHJhaW5pbmcgZGlzdHJpYnV0aW9uLiBNb2RlbHMgZmluZS10dW5lZCBmb3IgYXN5bW1ldHJpYyByZXRyaWV2YWwgKHNob3J0IHF1ZXJ5IOKGkiBsb25nIGRvY3VtZW50KSDigJQgc3VjaCBhcyBhbGwtTWluaUxNLUw2LXYyIG9yIHRleHQtZW1iZWRkaW5nLTMtc21hbGwg4oCUIG1heSBhbHJlYWR5IHBhcnRseSBjbG9zZSB0aGUgcXVlcnktZG9jdW1lbnQgZ2FwLCByZWR1Y2luZyBIeURFXHUwMDI3cyBiZW5lZml0LiBNb2RlbHMgdHJhaW5lZCBzeW1tZXRyaWNhbGx5IChkb2N1bWVudC10by1kb2N1bWVudCBzaW1pbGFyaXR5KSDigJQgbGlrZSBJbnN0cnVjdG9yIG9yIGU1LWxhcmdlIOKAlCBiZW5lZml0IG1vcmUgZnJvbSBIeURFIGJlY2F1c2UgdGhleSBhcmUgZGVzaWduZWQgdG8gY29tcGFyZSBkb2N1bWVudHMgdG8gZG9jdW1lbnRzLCBleGFjdGx5IHdoYXQgSHlERSBwcm9kdWNlcy4gSW4gcHJhY3RpY2UsIEh5REVcdTAwMjdzIGJlbmVmaXQgaXMgbGFyZ2VzdCB3aGVuIHVzaW5nIGdlbmVyYWwtcHVycG9zZSBlbWJlZGRpbmcgbW9kZWxzIGFuZCBzbWFsbGVzdCB3aGVuIHVzaW5nIHRhc2stc3BlY2lmaWMgYmktZW5jb2RlcnMgYWxyZWFkeSBmaW5lLXR1bmVkIG9uIHRoZSB0YXJnZXQgZG9tYWluLiBBbHdheXMgbWVhc3VyZSBIeURFIHZzIGRpcmVjdCBxdWVyeSByZXRyaWV2YWwgb24geW91ciBzcGVjaWZpYyBjb3JwdXMgYmVmb3JlIGRlcGxveWluZy4ifSx7InR5cGUiOiJjb2RlIiwibGFuZ3VhZ2UiOiJweXRob24iLCJjb250ZW50IjoiaW1wb3J0IG9wZW5haVxuaW1wb3J0IG51bXB5IGFzIG5wXG5mcm9tIHNlbnRlbmNlX3RyYW5zZm9ybWVycyBpbXBvcnQgU2VudGVuY2VUcmFuc2Zvcm1lclxuaW1wb3J0IGZhaXNzXG5cbmNsaWVudCAgICAgID0gb3BlbmFpLk9wZW5BSShhcGlfa2V5PVwiWU9VUl9BUElfS0VZXCIpXG5lbWJlZF9tb2RlbCA9IFNlbnRlbmNlVHJhbnNmb3JtZXIoXCJhbGwtTWluaUxNLUw2LXYyXCIpXG5cbmRlZiByZWNhbGxfYXRfayhyZXRyaWV2ZWQ6IGxpc3QsIHJlbGV2YW50OiBsaXN0LCBrOiBpbnQpIC1cdTAwM2UgZmxvYXQ6XG4gICAgcmV0dXJuIGxlbihzZXQocmV0cmlldmVkWzprXSkgXHUwMDI2IHNldChyZWxldmFudCkpIC8gbWF4KGxlbihyZWxldmFudCksIDEpXG5cbmRlZiBjb21wYXJlX2h5ZGVfdnNfcXVlcnkodGVzdF9zZXQ6IGxpc3QsIGNvcnB1czogbGlzdCwgazogaW50ID0gMTApIC1cdTAwM2UgZGljdDpcbiAgICBcIlwiXCJDb21wYXJlIFJlY2FsbEBrIGZvciBkaXJlY3QgcXVlcnkgZW1iZWRkaW5nIHZzIEh5REUgZW1iZWRkaW5nIG9uIDIwIHF1ZXN0aW9ucy5cIlwiXCJcbiAgICBjb3JwX2VtYnMgPSBlbWJlZF9tb2RlbC5lbmNvZGUoY29ycHVzLCBub3JtYWxpemVfZW1iZWRkaW5ncz1UcnVlKS5hc3R5cGUobnAuZmxvYXQzMilcbiAgICBpbmRleCAgICAgPSBmYWlzcy5JbmRleEZsYXRJUChjb3JwX2VtYnMuc2hhcGVbMV0pXG4gICAgaW5kZXguYWRkKGNvcnBfZW1icylcbiAgICBxX3JlY2FsbHMsIGhfcmVjYWxscyA9IFtdLCBbXVxuICAgIGZvciBpdGVtIGluIHRlc3Rfc2V0OlxuICAgICAgICBxdWVyeSwgcmVsZXZhbnQgPSBpdGVtW1wicXVlcnlcIl0sIGl0ZW1bXCJyZWxldmFudF9pZHhzXCJdXG4gICAgICAgICMgRGlyZWN0IHF1ZXJ5IGVtYmVkZGluZ1xuICAgICAgICBxX2VtYiA9IGVtYmVkX21vZGVsLmVuY29kZShbcXVlcnldLCBub3JtYWxpemVfZW1iZWRkaW5ncz1UcnVlKS5hc3R5cGUobnAuZmxvYXQzMilcbiAgICAgICAgXywgcV9oaXRzID0gaW5kZXguc2VhcmNoKHFfZW1iLCBrKVxuICAgICAgICByX3F1ZXJ5ID0gcmVjYWxsX2F0X2socV9oaXRzWzBdLnRvbGlzdCgpLCByZWxldmFudCwgaylcbiAgICAgICAgIyBIeURFIGVtYmVkZGluZ1xuICAgICAgICByZXNwID0gY2xpZW50LmNoYXQuY29tcGxldGlvbnMuY3JlYXRlKFxuICAgICAgICAgICAgbW9kZWw9XCJncHQtMy41LXR1cmJvXCIsXG4gICAgICAgICAgICBtZXNzYWdlcz1be1wicm9sZVwiOiBcInVzZXJcIiwgXCJjb250ZW50XCI6IGZcIldyaXRlIGEgcGFyYWdyYXBoIGFuc3dlcmluZzoge3F1ZXJ5fVwifV0sXG4gICAgICAgICAgICBtYXhfdG9rZW5zPTE1MCwgdGVtcGVyYXR1cmU9MC4wLFxuICAgICAgICApXG4gICAgICAgIGh5cCAgID0gcmVzcC5jaG9pY2VzWzBdLm1lc3NhZ2UuY29udGVudC5zdHJpcCgpXG4gICAgICAgIGhfZW1iID0gZW1iZWRfbW9kZWwuZW5jb2RlKFtoeXBdLCBub3JtYWxpemVfZW1iZWRkaW5ncz1UcnVlKS5hc3R5cGUobnAuZmxvYXQzMilcbiAgICAgICAgXywgaF9oaXRzID0gaW5kZXguc2VhcmNoKGhfZW1iLCBrKVxuICAgICAgICByX2h5ZGUgPSByZWNhbGxfYXRfayhoX2hpdHNbMF0udG9saXN0KCksIHJlbGV2YW50LCBrKVxuICAgICAgICBxX3JlY2FsbHMuYXBwZW5kKHJfcXVlcnkpOyBoX3JlY2FsbHMuYXBwZW5kKHJfaHlkZSlcbiAgICAgICAgcHJpbnQoZlwiUToge3F1ZXJ5Wzo1MF06NTBzfSAgRGlyZWN0PXtyX3F1ZXJ5Oi4yZn0gIEh5REU9e3JfaHlkZTouMmZ9XCIpXG4gICAgcmV0dXJuIHtcImF2Z19xdWVyeVwiOiBucC5tZWFuKHFfcmVjYWxscyksIFwiYXZnX2h5ZGVcIjogbnAubWVhbihoX3JlY2FsbHMpfSJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6Ikh5REUgdnMgU3RhbmRhcmQgUmV0cmlldmFsIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJPbiBmYWN0dWFsIHF1ZXN0aW9uLWFuc3dlcmluZyBiZW5jaG1hcmtzIChOYXR1cmFsUXVlc3Rpb25zLCBUcml2aWFRQSwgSG90cG90UUEpLCBIeURFIGltcHJvdmVzIFJlY2FsbEAxMCBieSAz4oCTOCBwZXJjZW50YWdlIHBvaW50cyBvdmVyIGRpcmVjdCBxdWVyeSBlbWJlZGRpbmcgd2hlbiB1c2luZyBhIGdlbmVyYWwtcHVycG9zZSBiaS1lbmNvZGVyLiBUaGUgaW1wcm92ZW1lbnQgaXMgbGFyZ2VzdCBmb3Igc2hvcnQgcXVlcmllcyAoMeKAkzUgd29yZHMpLCBhbWJpZ3VvdXMgcXVlcmllcywgYW5kIHF1ZXJpZXMgd2hvc2Ugdm9jYWJ1bGFyeSBkaWZmZXJzIHN1YnN0YW50aWFsbHkgZnJvbSB0aGUgaW5kZXhlZCBjb3JwdXMuIEh5REUgaXMgbGVzcyBiZW5lZmljaWFsIOKAlCBhbmQgY2FuIG9jY2FzaW9uYWxseSBodXJ0IOKAlCBmb3IgdmVyeSBzcGVjaWZpYyB0ZWNobmljYWwgcXVlcmllcyB3aGVyZSB0aGUgcXVlcnkgaXRzZWxmIGNvbnRhaW5zIHJpY2ggc2VtYW50aWMgc2lnbmFsIChlLmcuLCBcdTAwMjd0b3JjaC5ubi5mdW5jdGlvbmFsLmNyb3NzX2VudHJvcHkgbGFiZWwgc21vb3RoaW5nIHBhcmFtZXRlclx1MDAyNyksIGFuZCBmb3IgY29ycG9yYSB3aGVyZSB0aGUgZW1iZWRkaW5nIG1vZGVsIHdhcyBhbHJlYWR5IGZpbmUtdHVuZWQgb24gdGhlIHNwZWNpZmljIGRvbWFpbi4gSHlERSBhZGRzIG9uZSBMTE0gY2FsbCBwZXIgcXVlcnksIHR5cGljYWxseSBjb3N0aW5nIDEwMOKAkzUwMG1zIGFuZCAkMC4wMDAx4oCTMC4wMDEgcGVyIHF1ZXJ5IChHUFQtMy41LXR1cmJvKSwgd2hpY2ggaXMgYWNjZXB0YWJsZSBmb3IgaW50ZXJhY3RpdmUgYXBwbGljYXRpb25zIGJ1dCBtYXkgYmUgcHJvaGliaXRpdmUgZm9yIGhpZ2gtdm9sdW1lIGJhdGNoIHJldHJpZXZhbC4ifSx7InR5cGUiOiJjb2RlIiwibGFuZ3VhZ2UiOiJweXRob24iLCJjb250ZW50IjoiaW1wb3J0IG9wZW5haVxuaW1wb3J0IG51bXB5IGFzIG5wXG5mcm9tIHNlbnRlbmNlX3RyYW5zZm9ybWVycyBpbXBvcnQgU2VudGVuY2VUcmFuc2Zvcm1lclxuaW1wb3J0IGZhaXNzXG5cbmNsaWVudCAgICAgID0gb3BlbmFpLk9wZW5BSShhcGlfa2V5PVwiWU9VUl9BUElfS0VZXCIpXG5lbWJlZF9tb2RlbCA9IFNlbnRlbmNlVHJhbnNmb3JtZXIoXCJhbGwtTWluaUxNLUw2LXYyXCIpXG5cbmRlZiBjaGVja19oeXBvdGhlc2lzX3N1cHBvcnQoaHlwb3RoZXNpczogc3RyLCByZXRyaWV2ZWRfZG9jczogbGlzdCkgLVx1MDAzZSBkaWN0OlxuICAgIFwiXCJcIkVzdGltYXRlIGhvdyB3ZWxsIHJldHJpZXZlZCBkb2NzIHN1cHBvcnQgdGhlIGh5cG90aGVzaXMgKGhhbGx1Y2luYXRpb24gcHJveHkpLlwiXCJcIlxuICAgIGh5cF93b3JkcyA9IHNldChoeXBvdGhlc2lzLmxvd2VyKCkuc3BsaXQoKSlcbiAgICBzY29yZXMgPSBbXVxuICAgIGZvciBkb2MgaW4gcmV0cmlldmVkX2RvY3M6XG4gICAgICAgIGRvY193b3JkcyA9IHNldChkb2MubG93ZXIoKS5zcGxpdCgpKVxuICAgICAgICBvdmVybGFwICAgPSBsZW4oaHlwX3dvcmRzIFx1MDAyNiBkb2Nfd29yZHMpIC8gbWF4KGxlbihoeXBfd29yZHMpLCAxKVxuICAgICAgICBzY29yZXMuYXBwZW5kKG92ZXJsYXApXG4gICAgYXZnX3N1cHBvcnQgPSBmbG9hdChucC5tZWFuKHNjb3JlcykpXG4gICAgcmlzayA9IFwiSElHSFwiIGlmIGF2Z19zdXBwb3J0IFx1MDAzYyAwLjE1IGVsc2UgXCJNRURJVU1cIiBpZiBhdmdfc3VwcG9ydCBcdTAwM2MgMC4zMCBlbHNlIFwiTE9XXCJcbiAgICByZXR1cm4ge1wiYXZnX2xleGljYWxfc3VwcG9ydFwiOiBhdmdfc3VwcG9ydCwgXCJoYWxsdWNpbmF0aW9uX3Jpc2tcIjogcmlza31cblxuZGVmIGFuYWx5emVfaHlkZV9mYWlsdXJlcyhjYXNlczogbGlzdCwgY29ycHVzOiBsaXN0KSAtXHUwMDNlIE5vbmU6XG4gICAgXCJcIlwiQ29sbGVjdCBleGFtcGxlcyB3aGVyZSBIeURFIGdlbmVyYXRlcyBwbGF1c2libGUgYnV0IHdyb25nIGh5cG90aGV0aWNhbCBkb2NzLlwiXCJcIlxuICAgIGNvcnBfZW1icyA9IGVtYmVkX21vZGVsLmVuY29kZShjb3JwdXMsIG5vcm1hbGl6ZV9lbWJlZGRpbmdzPVRydWUpLmFzdHlwZShucC5mbG9hdDMyKVxuICAgIGluZGV4ID0gZmFpc3MuSW5kZXhGbGF0SVAoY29ycF9lbWJzLnNoYXBlWzFdKVxuICAgIGluZGV4LmFkZChjb3JwX2VtYnMpXG4gICAgZmFpbHVyZXMgPSAwXG4gICAgZm9yIGNhc2UgaW4gY2FzZXM6XG4gICAgICAgIHJlc3AgPSBjbGllbnQuY2hhdC5jb21wbGV0aW9ucy5jcmVhdGUoXG4gICAgICAgICAgICBtb2RlbD1cImdwdC0zLjUtdHVyYm9cIixcbiAgICAgICAgICAgIG1lc3NhZ2VzPVt7XCJyb2xlXCI6IFwidXNlclwiLCBcImNvbnRlbnRcIjogZlwiV3JpdGUgYSBwYXJhZ3JhcGggYW5zd2VyaW5nOiB7Y2FzZVtcdTAwMjdxdWVyeVx1MDAyN119XCJ9XSxcbiAgICAgICAgICAgIG1heF90b2tlbnM9MTIwLCB0ZW1wZXJhdHVyZT0wLjcsXG4gICAgICAgIClcbiAgICAgICAgaHlwICA9IHJlc3AuY2hvaWNlc1swXS5tZXNzYWdlLmNvbnRlbnQuc3RyaXAoKVxuICAgICAgICBpc19jb3JyZWN0ID0gY2FzZVtcImNvcnJlY3RfZmFjdFwiXS5sb3dlcigpIGluIGh5cC5sb3dlcigpXG4gICAgICAgIGlmIG5vdCBpc19jb3JyZWN0OlxuICAgICAgICAgICAgZmFpbHVyZXMgKz0gMVxuICAgICAgICBoX2VtYiA9IGVtYmVkX21vZGVsLmVuY29kZShbaHlwXSwgbm9ybWFsaXplX2VtYmVkZGluZ3M9VHJ1ZSkuYXN0eXBlKG5wLmZsb2F0MzIpXG4gICAgICAgIF8sIGhpdHMgPSBpbmRleC5zZWFyY2goaF9lbWIsIDUpXG4gICAgICAgIHN1cHBvcnQgPSBjaGVja19oeXBvdGhlc2lzX3N1cHBvcnQoaHlwLCBbY29ycHVzW2ldIGZvciBpIGluIGhpdHNbMF1dKVxuICAgICAgICBwcmludChmXCJDb3JyZWN0PXtpc19jb3JyZWN0fSBSaXNrPXtzdXBwb3J0W1x1MDAyN2hhbGx1Y2luYXRpb25fcmlza1x1MDAyN119IFE9e2Nhc2VbXHUwMDI3cXVlcnlcdTAwMjddWzo1MF19XCIpXG4gICAgcHJpbnQoZlwiXFxuRmFpbHVyZSByYXRlOiB7ZmFpbHVyZXN9L3tsZW4oY2FzZXMpfSA9IHtmYWlsdXJlcy9tYXgobGVuKGNhc2VzKSwxKTouMSV9XCIpXG5cbmNhc2VzICA9IFt7XCJxdWVyeVwiOiBcIldobyBpbnZlbnRlZCB0aGUgdGVsZXBob25lP1wiLCBcImNvcnJlY3RfZmFjdFwiOiBcIkFsZXhhbmRlciBHcmFoYW0gQmVsbFwifSxcbiAgICAgICAgICAge1wicXVlcnlcIjogXCJXaGF0IGlzIHRoZSBjYXBpdGFsIG9mIEF1c3RyYWxpYT9cIiwgXCJjb3JyZWN0X2ZhY3RcIjogXCJDYW5iZXJyYVwifV1cbmNvcnB1cyA9IFtmXCJGYWN0IHtpfTogZW5jeWNsb3BlZGljIGNvbnRlbnQuXCIgZm9yIGkgaW4gcmFuZ2UoNDApXVxuYW5hbHl6ZV9oeWRlX2ZhaWx1cmVzKGNhc2VzLCBjb3JwdXMpIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiTGltaXRhdGlvbnMifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6Ikh5REUgaGFzIHRocmVlIHNpZ25pZmljYW50IGxpbWl0YXRpb25zIHRoYXQgbXVzdCBiZSBldmFsdWF0ZWQgYmVmb3JlIGRlcGxveW1lbnQuIEZpcnN0LCBoYWxsdWNpbmF0aW9uIHByb3BhZ2F0aW9uOiBpZiB0aGUgTExNIGdlbmVyYXRlcyBhIHBsYXVzaWJsZSBidXQgZmFjdHVhbGx5IGluY29ycmVjdCBoeXBvdGhlc2lzLCBpdCByZXRyaWV2ZXMgZG9jdW1lbnRzIHRoYXQgc3VwcG9ydCB0aGUgd3JvbmcgaHlwb3RoZXNpcyDigJQgcGFzc2FnZXMgdGhhdCBhcmUgdG9waWNhbGx5IGFkamFjZW50IGJ1dCBub3QgYWN0dWFsbHkgcmVsZXZhbnQgdG8gdGhlIGNvcnJlY3QgYW5zd2VyLiBUaGlzIGlzIHBhcnRpY3VsYXJseSBkYW5nZXJvdXMgZm9yIHF1ZXJpZXMgYWJvdXQgcmVjZW50IGV2ZW50cywgbmljaGUgdG9waWNzLCBvciBudW1lcmljYWwgZmFjdHMgd2hlcmUgdGhlIExMTSBpcyBsaWtlbHkgdG8gaGFsbHVjaW5hdGUuIFNlY29uZCwgbGF0ZW5jeSBjb3N0OiBldmVyeSBxdWVyeSByZXF1aXJlcyBhbiBMTE0gQVBJIGNhbGwgYmVmb3JlIHJldHJpZXZhbCwgYWRkaW5nIDEwMOKAkzUwMG1zIHRvIHBpcGVsaW5lIGxhdGVuY3kuIEZvciBzdWItMTAwbXMgcmV0cmlldmFsIHJlcXVpcmVtZW50cywgSHlERSBpcyBpbmNvbXBhdGlibGUuIFRoaXJkLCBkaW1pbmlzaGluZyByZXR1cm5zIHdpdGggZG9tYWluLXR1bmVkIGVtYmVkZGluZ3M6IGFzIHRoZSBlbWJlZGRpbmcgbW9kZWwgaXMgZmluZS10dW5lZCBvbiB0aGUgdGFyZ2V0IGRvbWFpbiwgdGhlIHF1ZXJ5LWRvY3VtZW50IHZvY2FidWxhcnkgZ2FwIG5hcnJvd3MgYW5kIEh5REVcdTAwMjdzIGJlbmVmaXQgc2hyaW5rcy4gSW4gdGhlIGxpbWl0IHdoZXJlIHRoZSBlbWJlZGRpbmcgbW9kZWwgaXMgcGVyZmVjdGx5IGNhbGlicmF0ZWQgdG8gdGhlIGRvbWFpbiwgZGlyZWN0IHF1ZXJ5IGVtYmVkZGluZyBtYXRjaGVzIEh5REUgcGVyZm9ybWFuY2Ugd2l0aG91dCB0aGUgTExNIGNhbGwgY29zdC4ifSx7InR5cGUiOiJ0YWJsZSIsImhlYWRlcnMiOlsiUXVlcnkgdHlwZSIsIlN0YW5kYXJkIHJldHJpZXZhbCBSQDEwIiwiSHlERSBSQDEwIiwiSHlERSBnYWluIiwiTExNIGNhbGxzIiwiTm90ZXMiXSwicm93cyI6W1siRmFjdHVhbCBxdWVzdGlvbnMiLCIwLjYxIiwiMC43MCIsIis5cHAiLCIxIHBlciBxdWVyeSIsIkxhcmdlc3QgYmVuZWZpdDsgcXVlcnkgdm9jYWIgZGlmZmVycyBmcm9tIGRvY3MiXSxbIlRlY2huaWNhbCBob3ctdG8iLCIwLjU4IiwiMC42NSIsIis3cHAiLCIxIHBlciBxdWVyeSIsIkdvb2QgZ2FpbjsgaHlwb3RoZXNpcyBtYXRjaGVzIGRvYyBzdHlsZSJdLFsiQW1iaWd1b3VzIHF1ZXJpZXMiLCIwLjQ0IiwiMC41MCIsIis2cHAiLCIx4oCTMyBwZXIgcXVlcnkiLCJNdWx0aXBsZSBoeXBvdGhlc2VzIGhlbHA7IGhpZ2ggdmFyaWFuY2UiXSxbIlNob3J0IHF1ZXJpZXMgKDHigJMzIHdvcmRzKSIsIjAuNDkiLCIwLjU4IiwiKzlwcCIsIjEgcGVyIHF1ZXJ5IiwiU2hvcnQgcXVlcmllcyBoYXZlIHdlYWsgZW1iZWRkaW5nczsgSHlERSBoZWxwcyBtb3N0Il0sWyJMb25nIHF1ZXJpZXMgKFx1MDAzZTE1IHdvcmRzKSIsIjAuNzIiLCIwLjczIiwiKzFwcCIsIjEgcGVyIHF1ZXJ5IiwiTG9uZyBxdWVyaWVzIGFscmVhZHkgcmljaDsgSHlERSBtYXJnaW5hbCBiZW5lZml0Il1dfSx7InR5cGUiOiJjYWxsb3V0IiwidmFyaWFudCI6Indhcm5pbmciLCJ0aXRsZSI6IlZhbGlkYXRlIEJlZm9yZSBEZXBsb3lpbmciLCJjb250ZW50IjoiSHlERSBjYW4gcHJvcGFnYXRlIGhhbGx1Y2luYXRpb25zIGludG8gcmV0cmlldmFsIOKAlCBpZiB0aGUgTExNIGdlbmVyYXRlcyBhIHBsYXVzaWJsZSBidXQgd3JvbmcgaHlwb3RoZXRpY2FsIGRvY3VtZW50LCBpdCByZXRyaWV2ZXMgcGFzc2FnZXMgdGhhdCBzdXBwb3J0IHRoZSB3cm9uZyBoeXBvdGhlc2lzLiBBbHdheXMgdmFsaWRhdGUgSHlERSBnYWlucyBvbiB5b3VyIHNwZWNpZmljIGNvcnB1cyBhbmQgcXVlcnkgZGlzdHJpYnV0aW9uIGJlZm9yZSBkZXBsb3lpbmcuIE1lYXN1cmUgYm90aCBSZWNhbGxAMTAgaW1wcm92ZW1lbnQgYW5kIGhhbGx1Y2luYXRpb24taW5kdWNlZCBmYWlsdXJlIHJhdGUgb24gYSBoZWxkLW91dCB0ZXN0IHNldC4gSWYgdGhlIExMTSBoYWxsdWNpbmF0aW9uIHJhdGUgb24geW91ciBkb21haW4gZXhjZWVkcyAyMCUsIEh5REUgbWF5IGRlZ3JhZGUgb3ZlcmFsbCBSQUcgYWNjdXJhY3kgZGVzcGl0ZSBpbXByb3ZpbmcgcmV0cmlldmFsIHJlY2FsbCBvbiB3ZWxsLWtub3duIHRvcGljcy4ifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJLZXkgVGFrZWF3YXlzIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJIeURFIGlzIGEgcG93ZXJmdWwgemVyby1zaG90IHJldHJpZXZhbCBpbXByb3ZlbWVudCB0aGF0IHJlcXVpcmVzIG5vIGFkZGl0aW9uYWwgdHJhaW5pbmcgb3IgaW5kZXggY2hhbmdlcyDigJQgb25seSBhbiBMTE0gQVBJIGNhbGwgcGVyIHF1ZXJ5LiBJdCBpcyBtb3N0IHZhbHVhYmxlIGZvciBnZW5lcmFsLXB1cnBvc2UgY29ycG9yYSwgc2hvcnQgb3IgYW1iaWd1b3VzIHF1ZXJpZXMsIGFuZCBlbWJlZGRpbmcgbW9kZWxzIG5vdCB5ZXQgZmluZS10dW5lZCBvbiB0aGUgdGFyZ2V0IGRvbWFpbi4gVGhlIGltcGxlbWVudGF0aW9uIGlzIHNpbXBsZTogcHJvbXB0IHRoZSBMTE0gdG8gZ2VuZXJhdGUgYSBoeXBvdGhldGljYWwgYW5zd2VyLCBlbWJlZCB0aGF0IGFuc3dlciB3aXRoIHRoZSBzYW1lIG1vZGVsIHVzZWQgdG8gZW1iZWQgdGhlIGNvcnB1cywgYW5kIHNlYXJjaCB0aGUgaW5kZXggYXMgbm9ybWFsLiBBbHdheXMgdXNlIHRoZSByZWFsIHJldHJpZXZlZCBkb2N1bWVudHMgKG5vdCB0aGUgaHlwb3RoZXNpcykgZm9yIGZpbmFsIGFuc3dlciBnZW5lcmF0aW9uLiBCZWZvcmUgZGVwbG95aW5nLCBtZWFzdXJlIGVuZC10by1lbmQgYW5zd2VyIGFjY3VyYWN5IChub3QganVzdCByZXRyaWV2YWwgcmVjYWxsKSBvbiB5b3VyIGNvcnB1cywgYmVjYXVzZSBoYWxsdWNpbmF0ZWQgaHlwb3RoZXNlcyBjYW4gY2F1c2UgbmV0IGFjY3VyYWN5IGRlZ3JhZGF0aW9uIGV2ZW4gd2hlbiBSZWNhbGxAMTAgaW1wcm92ZXMuIEZvciBwcm9kdWN0aW9uIHBpcGVsaW5lcyB3aXRoIGxhdGVuY3kgY29uc3RyYWludHMsIGNvbnNpZGVyIHVzaW5nIEh5REUgb25seSBmb3IgcXVlcmllcyBjbGFzc2lmaWVkIGFzIGFtYmlndW91cyBvciBzaG9ydCAocXVlcnkgbGVuZ3RoIFx1MDAzYyA1IHdvcmRzKSBhbmQgZmFsbGluZyBiYWNrIHRvIGRpcmVjdCBlbWJlZGRpbmcgZm9yIGFsbCBvdGhlcnMuIn0seyJ0eXBlIjoibGlzdCIsIm9yZGVyZWQiOmZhbHNlLCJpdGVtcyI6WyJIeURFOiBlbWJlZCBMTE0tZ2VuZXJhdGVkIGh5cG90aGV0aWNhbCBhbnN3ZXIsIG5vdCB0aGUgcXVlcnkg4oCUIHJldHJpZXZlcyBpbiBkb2N1bWVudCBkaXN0cmlidXRpb24iLCJObyB0cmFpbmluZywgbm8gaW5kZXggY2hhbmdlcyByZXF1aXJlZCDigJQgb25seSBvbmUgYWRkaXRpb25hbCBMTE0gY2FsbCBwZXIgcXVlcnkiLCJCZXN0IGZvcjogc2hvcnQgcXVlcmllcywgYW1iaWd1b3VzIHF1ZXJpZXMsIGdlbmVyYWwtcHVycG9zZSAobm9uLWRvbWFpbi10dW5lZCkgZW1iZWRkaW5ncyIsIkFsd2F5cyBnZW5lcmF0ZSB0aGUgZmluYWwgYW5zd2VyIGZyb20gcmVhbCByZXRyaWV2ZWQgZG9jdW1lbnRzLCBub3QgZnJvbSB0aGUgaHlwb3RoZXNpcyIsIlZhbGlkYXRlIGVuZC10by1lbmQgYWNjdXJhY3kg4oCUIGhhbGx1Y2luYXRlZCBoeXBvdGhlc2VzIGNhbiBkZWdyYWRlIGFjY3VyYWN5IGRlc3BpdGUgaW1wcm92aW5nIFJAMTAiLCJNdWx0aXBsZSBoeXBvdGhlc2VzICgz4oCTNSkgYXZlcmFnZWQgaW4gZW1iZWRkaW5nIHNwYWNlIHJlZHVjZSBoYWxsdWNpbmF0aW9uIHNlbnNpdGl2aXR5IiwiVXNlIHF1ZXJ5LXR5cGUtc3BlY2lmaWMgcHJvbXB0cyAoZmFjdHVhbC90ZWNobmljYWwvcHJvY2VkdXJhbCkgZm9yIDLigJM1cHAgYWRkaXRpb25hbCBnYWluIl19XQ=="
+---
+# HyDE: Hypothetical Document Embeddings
+
+HyDE (Hypothetical Document Embeddings), introduced by Gao et al. (2022), is a retrieval augmentation technique that addresses the vocabulary mismatch between user queries and indexed documents. Instead of embedding the query and searching for similar documents, HyDE first prompts an LLM to generate a hypothetical document that would answer the query — as if it already knew the answer — and then embeds that hypothetical document for retrieval. The intuition is that a hypothetical answer written in the same style and vocabulary as the indexed corpus is geometrically closer to relevant documents in embedding space than a short user query, even if the hypothetical answer contains factual errors. The final answer is always generated from the retrieved real documents, not from the hallucinated hypothesis.
+
+## Overview
+
+HyDE was proposed in 'Precise Zero-Shot Dense Retrieval without Relevance Labels' (Gao et al., 2022, SIGIR) as a way to improve zero-shot dense retrieval without any relevance-labelled training data. The core insight is that dense embeddings are trained to map semantically similar texts close together in vector space. A user query ('how do transformers use attention?') is written in interrogative form with a different token distribution than a document answer ('Transformers use attention by computing...'). This distributional mismatch means the query embedding may not be close to the document embedding even when the document answers the query. By generating a plausible document-style answer and embedding that, HyDE produces a query representation in the same distribution as the indexed documents. It is compatible with any embedding model and any retrieval index, requiring only an LLM API call per query.
+
+## Query-Document Gap Problem
+
+The vocabulary and style gap between queries and documents is a fundamental problem in information retrieval. Users write queries as short interrogative phrases ('best way to fine-tune BERT'), while documents are written as declarative statements ('BERT can be fine-tuned by adding a task-specific head...'). BM25 lexical search fails when the query uses different words than the document (a user asks 'fix transformer training instability' but the document discusses 'gradient explosion in attention layers'). Dense retrieval reduces this gap by embedding semantics rather than lexical overlap, but the query-to-document style shift still creates a directional bias in embedding space. Short queries also contain less semantic signal than full document passages, making their embeddings less reliable. HyDE resolves both issues by converting the short interrogative query into a long declarative passage before embedding.
+
+```python
+import openai
+import numpy as np
+from sentence_transformers import SentenceTransformer
+import faiss
+
+client = openai.OpenAI(api_key="YOUR_API_KEY")
+embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+def generate_hypothesis(query: str, model: str = "gpt-3.5-turbo") -> str:
+    """Step 1: LLM generates a hypothetical document that would answer the query."""
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": "Write a concise 2-3 sentence factual paragraph answering the question."},
+            {"role": "user", "content": f"Write a Wikipedia-style paragraph answering: {query}"}
+        ],
+        max_tokens=200, temperature=0.0,
+    )
+    return resp.choices[0].message.content.strip()
+
+def hyde_retrieve(query: str, corpus: list, top_k: int = 5) -> dict:
+    """Full HyDE pipeline: generate hypothesis -> embed -> retrieve -> return real docs."""
+    hypothesis = generate_hypothesis(query)
+    hyp_emb    = embed_model.encode([hypothesis], normalize_embeddings=True).astype(np.float32)
+    corp_embs  = embed_model.encode(corpus, normalize_embeddings=True).astype(np.float32)
+    index      = faiss.IndexFlatIP(corp_embs.shape[1])
+    index.add(corp_embs)
+    _, idxs = index.search(hyp_emb, top_k)
+    print(f"Hypothesis ({len(hypothesis.split())} words): {hypothesis[:120]}...")
+    return {"hypothesis": hypothesis, "retrieved": [corpus[i] for i in idxs[0]]}
+
+corpus = [f"Document {i}: technical content about deep learning topic {i % 10}." for i in range(50)]
+result = hyde_retrieve("how do transformers use self-attention", corpus)
+print(f"Retrieved {len(result['retrieved'])} docs using HyDE embedding")
+```
+
+## HyDE Mechanism
+
+HyDE replaces the query embedding with a hypothetical document embedding at retrieval time. The process has four steps: (1) the user submits a query; (2) an LLM generates a hypothetical answer document (typically 100–200 words); (3) the hypothetical document is embedded with the same model used to embed the corpus; (4) nearest-neighbour search retrieves the most similar real documents from the index; and (5) the real retrieved documents (not the hypothesis) are passed to the LLM for final answer generation. The hypothesis is ephemeral — it never enters the answer generation step and any hallucinations in it do not directly appear in the output. However, a hallucinated hypothesis can lead to retrieval of wrong real documents, which then misleads the LLM. This is HyDE's core failure mode.
+
+```python
+import openai
+from typing import Literal
+
+client = openai.OpenAI(api_key="YOUR_API_KEY")
+
+QUERY_PROMPTS = {
+    "factual":    "Write a Wikipedia paragraph (2-3 sentences) that answers: {query}",
+    "technical":  "Write a technical documentation paragraph explaining: {query}",
+    "procedural": "Write a step-by-step guide (3-4 steps) for: {query}",
+}
+
+def generate_hypothetical_doc(query: str,
+                               query_type: Literal["factual", "technical", "procedural"] = "factual",
+                               model: str = "gpt-3.5-turbo") -> str:
+    """Generate a style-matched hypothetical document for the query type."""
+    prompt = QUERY_PROMPTS[query_type].format(query=query)
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": "Answer concisely in 2-3 sentences as a knowledgeable expert."},
+            {"role": "user",   "content": prompt}
+        ],
+        max_tokens=180, temperature=0.0,
+    )
+    return resp.choices[0].message.content.strip()
+
+examples = [
+    ("What is the capital of France?",                              "factual"),
+    ("How does backpropagation compute gradients in neural nets?",  "technical"),
+    ("How do I fine-tune a BERT model for text classification?",    "procedural"),
+]
+for query, qtype in examples:
+    hyp = generate_hypothetical_doc(query, qtype)
+    print(f"\nType: {qtype} | Query: {query}")
+    print(f"Hypothesis ({len(hyp.split())} words): {hyp[:160]}...")
+```
+
+## Hypothetical Document Generation
+
+The quality of the hypothesis significantly affects retrieval quality. A good hypothesis should match the vocabulary, style, and length of the indexed corpus. For a corpus of Wikipedia articles, the prompt 'Write a Wikipedia paragraph that answers:' works well. For a corpus of academic papers, 'Write an abstract-style summary explaining:' is more appropriate. For a corpus of technical documentation, 'Write a documentation entry for:' aligns better. Using query-type-specific prompts (factual, technical, procedural) has been shown to improve Recall@10 by 2–5 percentage points over a generic prompt. Generating multiple hypotheses (3–5) and averaging their embeddings further improves robustness, at the cost of additional LLM calls. The embedding of the average of multiple hypothesis embeddings is more stable and less sensitive to any single hallucination.
+
+## Embedding the Hypothesis
+
+HyDE is compatible with any dense embedding model, but performance depends on the hypothesis matching the embedding model's training distribution. Models fine-tuned for asymmetric retrieval (short query → long document) — such as all-MiniLM-L6-v2 or text-embedding-3-small — may already partly close the query-document gap, reducing HyDE's benefit. Models trained symmetrically (document-to-document similarity) — like Instructor or e5-large — benefit more from HyDE because they are designed to compare documents to documents, exactly what HyDE produces. In practice, HyDE's benefit is largest when using general-purpose embedding models and smallest when using task-specific bi-encoders already fine-tuned on the target domain. Always measure HyDE vs direct query retrieval on your specific corpus before deploying.
+
+```python
+import openai
+import numpy as np
+from sentence_transformers import SentenceTransformer
+import faiss
+
+client      = openai.OpenAI(api_key="YOUR_API_KEY")
+embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+def recall_at_k(retrieved: list, relevant: list, k: int) -> float:
+    return len(set(retrieved[:k]) & set(relevant)) / max(len(relevant), 1)
+
+def compare_hyde_vs_query(test_set: list, corpus: list, k: int = 10) -> dict:
+    """Compare Recall@k for direct query embedding vs HyDE embedding on 20 questions."""
+    corp_embs = embed_model.encode(corpus, normalize_embeddings=True).astype(np.float32)
+    index     = faiss.IndexFlatIP(corp_embs.shape[1])
+    index.add(corp_embs)
+    q_recalls, h_recalls = [], []
+    for item in test_set:
+        query, relevant = item["query"], item["relevant_idxs"]
+        # Direct query embedding
+        q_emb = embed_model.encode([query], normalize_embeddings=True).astype(np.float32)
+        _, q_hits = index.search(q_emb, k)
+        r_query = recall_at_k(q_hits[0].tolist(), relevant, k)
+        # HyDE embedding
+        resp = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": f"Write a paragraph answering: {query}"}],
+            max_tokens=150, temperature=0.0,
+        )
+        hyp   = resp.choices[0].message.content.strip()
+        h_emb = embed_model.encode([hyp], normalize_embeddings=True).astype(np.float32)
+        _, h_hits = index.search(h_emb, k)
+        r_hyde = recall_at_k(h_hits[0].tolist(), relevant, k)
+        q_recalls.append(r_query); h_recalls.append(r_hyde)
+        print(f"Q: {query[:50]:50s}  Direct={r_query:.2f}  HyDE={r_hyde:.2f}")
+    return {"avg_query": np.mean(q_recalls), "avg_hyde": np.mean(h_recalls)}
+```
+
+## HyDE vs Standard Retrieval
+
+On factual question-answering benchmarks (NaturalQuestions, TriviaQA, HotpotQA), HyDE improves Recall@10 by 3–8 percentage points over direct query embedding when using a general-purpose bi-encoder. The improvement is largest for short queries (1–5 words), ambiguous queries, and queries whose vocabulary differs substantially from the indexed corpus. HyDE is less beneficial — and can occasionally hurt — for very specific technical queries where the query itself contains rich semantic signal (e.g., 'torch.nn.functional.cross_entropy label smoothing parameter'), and for corpora where the embedding model was already fine-tuned on the specific domain. HyDE adds one LLM call per query, typically costing 100–500ms and $0.0001–0.001 per query (GPT-3.5-turbo), which is acceptable for interactive applications but may be prohibitive for high-volume batch retrieval.
+
+```python
+import openai
+import numpy as np
+from sentence_transformers import SentenceTransformer
+import faiss
+
+client      = openai.OpenAI(api_key="YOUR_API_KEY")
+embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+def check_hypothesis_support(hypothesis: str, retrieved_docs: list) -> dict:
+    """Estimate how well retrieved docs support the hypothesis (hallucination proxy)."""
+    hyp_words = set(hypothesis.lower().split())
+    scores = []
+    for doc in retrieved_docs:
+        doc_words = set(doc.lower().split())
+        overlap   = len(hyp_words & doc_words) / max(len(hyp_words), 1)
+        scores.append(overlap)
+    avg_support = float(np.mean(scores))
+    risk = "HIGH" if avg_support < 0.15 else "MEDIUM" if avg_support < 0.30 else "LOW"
+    return {"avg_lexical_support": avg_support, "hallucination_risk": risk}
+
+def analyze_hyde_failures(cases: list, corpus: list) -> None:
+    """Collect examples where HyDE generates plausible but wrong hypothetical docs."""
+    corp_embs = embed_model.encode(corpus, normalize_embeddings=True).astype(np.float32)
+    index = faiss.IndexFlatIP(corp_embs.shape[1])
+    index.add(corp_embs)
+    failures = 0
+    for case in cases:
+        resp = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": f"Write a paragraph answering: {case['query']}"}],
+            max_tokens=120, temperature=0.7,
+        )
+        hyp  = resp.choices[0].message.content.strip()
+        is_correct = case["correct_fact"].lower() in hyp.lower()
+        if not is_correct:
+            failures += 1
+        h_emb = embed_model.encode([hyp], normalize_embeddings=True).astype(np.float32)
+        _, hits = index.search(h_emb, 5)
+        support = check_hypothesis_support(hyp, [corpus[i] for i in hits[0]])
+        print(f"Correct={is_correct} Risk={support['hallucination_risk']} Q={case['query'][:50]}")
+    print(f"\nFailure rate: {failures}/{len(cases)} = {failures/max(len(cases),1):.1%}")
+
+cases  = [{"query": "Who invented the telephone?", "correct_fact": "Alexander Graham Bell"},
+           {"query": "What is the capital of Australia?", "correct_fact": "Canberra"}]
+corpus = [f"Fact {i}: encyclopedic content." for i in range(40)]
+analyze_hyde_failures(cases, corpus)
+```
+
+## Limitations
+
+HyDE has three significant limitations that must be evaluated before deployment. First, hallucination propagation: if the LLM generates a plausible but factually incorrect hypothesis, it retrieves documents that support the wrong hypothesis — passages that are topically adjacent but not actually relevant to the correct answer. This is particularly dangerous for queries about recent events, niche topics, or numerical facts where the LLM is likely to hallucinate. Second, latency cost: every query requires an LLM API call before retrieval, adding 100–500ms to pipeline latency. For sub-100ms retrieval requirements, HyDE is incompatible. Third, diminishing returns with domain-tuned embeddings: as the embedding model is fine-tuned on the target domain, the query-document vocabulary gap narrows and HyDE's benefit shrinks. In the limit where the embedding model is perfectly calibrated to the domain, direct query embedding matches HyDE performance without the LLM call cost.
+
+| Query type | Standard retrieval R@10 | HyDE R@10 | HyDE gain | LLM calls | Notes |
+| --- | --- | --- | --- | --- | --- |
+| Factual questions | 0.61 | 0.70 | +9pp | 1 per query | Largest benefit; query vocab differs from docs |
+| Technical how-to | 0.58 | 0.65 | +7pp | 1 per query | Good gain; hypothesis matches doc style |
+| Ambiguous queries | 0.44 | 0.50 | +6pp | 1–3 per query | Multiple hypotheses help; high variance |
+| Short queries (1–3 words) | 0.49 | 0.58 | +9pp | 1 per query | Short queries have weak embeddings; HyDE helps most |
+| Long queries (>15 words) | 0.72 | 0.73 | +1pp | 1 per query | Long queries already rich; HyDE marginal benefit |
+
+> **Validate Before Deploying**: HyDE can propagate hallucinations into retrieval — if the LLM generates a plausible but wrong hypothetical document, it retrieves passages that support the wrong hypothesis. Always validate HyDE gains on your specific corpus and query distribution before deploying. Measure both Recall@10 improvement and hallucination-induced failure rate on a held-out test set. If the LLM hallucination rate on your domain exceeds 20%, HyDE may degrade overall RAG accuracy despite improving retrieval recall on well-known topics.
+
+## Key Takeaways
+
+HyDE is a powerful zero-shot retrieval improvement that requires no additional training or index changes — only an LLM API call per query. It is most valuable for general-purpose corpora, short or ambiguous queries, and embedding models not yet fine-tuned on the target domain. The implementation is simple: prompt the LLM to generate a hypothetical answer, embed that answer with the same model used to embed the corpus, and search the index as normal. Always use the real retrieved documents (not the hypothesis) for final answer generation. Before deploying, measure end-to-end answer accuracy (not just retrieval recall) on your corpus, because hallucinated hypotheses can cause net accuracy degradation even when Recall@10 improves. For production pipelines with latency constraints, consider using HyDE only for queries classified as ambiguous or short (query length < 5 words) and falling back to direct embedding for all others.
+
+- HyDE: embed LLM-generated hypothetical answer, not the query — retrieves in document distribution
+- No training, no index changes required — only one additional LLM call per query
+- Best for: short queries, ambiguous queries, general-purpose (non-domain-tuned) embeddings
+- Always generate the final answer from real retrieved documents, not from the hypothesis
+- Validate end-to-end accuracy — hallucinated hypotheses can degrade accuracy despite improving R@10
+- Multiple hypotheses (3–5) averaged in embedding space reduce hallucination sensitivity
+- Use query-type-specific prompts (factual/technical/procedural) for 2–5pp additional gain
+

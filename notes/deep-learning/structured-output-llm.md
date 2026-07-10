@@ -1,0 +1,246 @@
+---
+title: "Structured Output from LLMs"
+slug: "structured-output-llm"
+description: "Techniques for reliably extracting JSON, XML, and typed data from LLMs — covering prompt engineering, constrained decoding, function calling APIs, and output parsing with Pydantic."
+tags: ["deep-learning", "llm"]
+topic: "deep-learning"
+status: "published"
+updated: "2026-07-10"
+blocks_json: "W3sidHlwZSI6InRleHQiLCJjb250ZW50IjoiU3RydWN0dXJlZCBvdXRwdXQg4oCUIEpTT04sIFhNTCwgb3IgdHlwZWQgZGF0YSBmcm9tIGFuIExMTSDigJQgaXMgYSBmb3VuZGF0aW9uYWwgcmVxdWlyZW1lbnQgZm9yIGludGVncmF0aW5nIGxhbmd1YWdlIG1vZGVscyBpbnRvIHByb2R1Y3Rpb24gc3lzdGVtcy4gUHJvc2UgcmVzcG9uc2VzIGNhbm5vdCBiZSByZWxpYWJseSBwYXJzZWQsIHN0b3JlZCwgb3IgYWN0ZWQgdXBvbiBieSBkb3duc3RyZWFtIGNvZGU7IHN0cnVjdHVyZWQgb3V0cHV0IGVuYWJsZXMgZGV0ZXJtaW5pc3RpYyBpbnRlZ3JhdGlvbi4gVGhlIGNoYWxsZW5nZSBpcyB0aGF0IHN0YW5kYXJkIExMTXMgYXJlIHRyYWluZWQgdG8gZ2VuZXJhdGUgZmx1ZW50IG5hdHVyYWwgbGFuZ3VhZ2UsIG5vdCBzeW50YWN0aWNhbGx5IHZhbGlkIHN0cnVjdHVyZWQgZGF0YSwgc28gdGhleSBwcm9kdWNlIG1hbGZvcm1lZCBKU09OLCB0cmFpbGluZyBjb21tYXMsIHVuY2xvc2VkIGJyYWNrZXRzLCBhbmQgdHJ1bmNhdGVkIGZpZWxkcyBhdCByYXRlcyBvZiA14oCTMjAlIGluIHByb2R1Y3Rpb24uIE11bHRpcGxlIGNvbXBsZW1lbnRhcnkgdGVjaG5pcXVlcyBleGlzdCB0byBjbG9zZSB0aGlzIGdhcDogcHJvbXB0IGVuZ2luZWVyaW5nLCBmdW5jdGlvbiBjYWxsaW5nLCBjb25zdHJhaW5lZCBkZWNvZGluZywgYW5kIG91dHB1dCB2YWxpZGF0aW9uIHdpdGggcmV0cnkuIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiT3ZlcnZpZXcifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IlN0cnVjdHVyZWQgb3V0cHV0IHJlbGlhYmlsaXR5IGV4aXN0cyBvbiBhIHNwZWN0cnVtLiBBdCB0aGUgbG93ZXN0IHJlbGlhYmlsaXR5IGVuZCwgYSBwbGFpbiBwcm9tcHQgYXNraW5nIGZvciBKU09OIHByb2R1Y2VzIHZhbGlkIG91dHB1dCByb3VnaGx5IDgw4oCTOTUlIG9mIHRoZSB0aW1lIGZvciBzaW1wbGUgc2NoZW1hcywgZGVncmFkaW5nIHRvIDYw4oCTNzUlIGZvciBkZWVwbHkgbmVzdGVkIHNjaGVtYXMuIEZ1bmN0aW9uIGNhbGxpbmcgQVBJcyBpbXByb3ZlIHRoaXMgdG8gOTXigJM5OSUgYnkgY29uc3RyYWluaW5nIHRoZSBtb2RlbCBhdCB0aGUgbG9naXQgbGV2ZWwgdG8gZm9sbG93IGEgZGVjbGFyZWQgc2NoZW1hLiBDb25zdHJhaW5lZCBkZWNvZGluZyAob3V0bGluZXMsIGd1aWRhbmNlLCBsbGFtYS5jcHAgR0JORikgcHVzaGVzIHRvIDEwMCUgc3ludGFjdGljIHZhbGlkaXR5IGJ5IG1hc2tpbmcgaW52YWxpZCB0b2tlbnMgYXQgZXZlcnkgZGVjb2Rpbmcgc3RlcC4gVGhlIEluc3RydWN0b3IgbGlicmFyeSBjb21iaW5lcyBQeWRhbnRpYyB2YWxpZGF0aW9uIHdpdGggYXV0b21hdGljIHJldHJ5LCBhY2hpZXZpbmcgbmVhci0xMDAlIHNlbWFudGljIHZhbGlkaXR5IGluIGFkZGl0aW9uIHRvIHN5bnRhY3RpYyB2YWxpZGl0eS4ifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IlRoZSBjaG9pY2Ugb2YgdGVjaG5pcXVlIGRlcGVuZHMgb24gdGhlIGRlcGxveW1lbnQgY29udGV4dC4gRm9yIGhvc3RlZCBBUEkgbW9kZWxzIChPcGVuQUksIEFudGhyb3BpYywgR29vZ2xlKSwgZnVuY3Rpb24gY2FsbGluZyBpcyB0aGUgbW9zdCBwcmFjdGljYWwgcGF0aCB0byBoaWdoIHJlbGlhYmlsaXR5IHdpdGhvdXQgaW5mcmFzdHJ1Y3R1cmUgY2hhbmdlcy4gRm9yIHNlbGYtaG9zdGVkIG9wZW4gbW9kZWxzIChMbGFtYSwgTWlzdHJhbCwgUXdlbiksIGNvbnN0cmFpbmVkIGRlY29kaW5nIHZpYSBvdXRsaW5lcyBvciBsbGFtYS5jcHAgZ3JhbW1hciBtb2RlIHByb3ZpZGVzIDEwMCUgc3ludGFjdGljIGd1YXJhbnRlZXMuIEluc3RydWN0b3Igd29ya3Mgd2l0aCBhbnkgT3BlbkFJLWNvbXBhdGlibGUgZW5kcG9pbnQgYW5kIGFkZHMgc2VtYW50aWMgdmFsaWRhdGlvbiAoUHlkYW50aWMgdmFsaWRhdG9ycykgb24gdG9wIG9mIHdoaWNoZXZlciB1bmRlcmx5aW5nIG1ldGhvZCBwcm9kdWNlcyB0aGUgcmF3IG91dHB1dC4ifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJQcm9tcHQtQmFzZWQgSlNPTiBFeHRyYWN0aW9uIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJUaGUgc2ltcGxlc3QgYXBwcm9hY2ggdG8gc3RydWN0dXJlZCBvdXRwdXQgaXMgcHJvbXB0IGVuZ2luZWVyaW5nOiBpbnN0cnVjdCB0aGUgbW9kZWwgdG8gcmV0dXJuIEpTT04gaW4gdGhlIHN5c3RlbSBwcm9tcHQsIHByb3ZpZGUgdGhlIHNjaGVtYSBhcyBhIHR5cGUgYW5ub3RhdGlvbiBvciBleGFtcGxlLCBhbmQgZm9yYmlkIHByb3NlIHdyYXBwZXJzLiBUaGlzIHdvcmtzIHdlbGwgZm9yIHNpbXBsZSBmbGF0IHNjaGVtYXMgYW5kIGNhcGFibGUgbW9kZWxzIGxpa2UgR1BULTRvLiBSZWxpYWJpbGl0eSBpbXByb3ZlcyBzdWJzdGFudGlhbGx5IHdpdGggZmV3LXNob3QgZXhhbXBsZXMgdGhhdCBzaG93IGV4YWN0IGZpZWxkIG5hbWVzLCB0eXBlcywgYW5kIHRoZSBhYnNlbmNlIG9mIG1hcmtkb3duIGZlbmNlcy4gVGhlIG1vc3QgY29tbW9uIGZhaWx1cmUgbW9kZXMgYXJlIHRyYWlsaW5nIGNvbW1hcyAobm90IHZhbGlkIEpTT04gYnV0IHZhbGlkIEphdmFTY3JpcHQpLCB1bmVzY2FwZWQgZG91YmxlIHF1b3RlcyBpbiBzdHJpbmcgdmFsdWVzLCBhbmQgcmVzcG9uc2UgdHJ1bmNhdGlvbiB3aGVuIHRoZSBzY2hlbWEgaXMgY29tcGxleCBhbmQgdGhlIG1vZGVsIGV4Y2VlZHMgaXRzIG1heGltdW0gb3V0cHV0IHRva2VuIGxpbWl0LiJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiRmV3LXNob3QgZXhhbXBsZXMgYXJlIHRoZSBoaWdoZXN0LWxldmVyYWdlIHByb21wdC1vbmx5IHRlY2huaXF1ZSBmb3IgaW1wcm92aW5nIEpTT04gdmFsaWRpdHkgcmF0ZXMuIEFkZGluZyB0d28gdG8gdGhyZWUgaW5wdXQtb3V0cHV0IGV4YW1wbGVzIHRoYXQgZGVtb25zdHJhdGUgdGhlIGV4YWN0IHNjaGVtYSByYWlzZXMgcGFyc2Ugc3VjY2VzcyByYXRlcyBmcm9tIDgw4oCTODUlIHRvIDkw4oCTOTUlIGZvciBjYXBhYmxlIG1vZGVscyBvbiBtb2RlcmF0ZS1jb21wbGV4aXR5IHNjaGVtYXMuIFRoZSBleGFtcGxlcyBtdXN0IHNob3cgbm90IGp1c3QgdGhlIHNjaGVtYSBzdHJ1Y3R1cmUgYnV0IGFsc28gcmVhbGlzdGljIHN0cmluZyB2YWx1ZXMg4oCUIG1vZGVscyBsZWFybiBmb3JtYXR0aW5nIGNvbnZlbnRpb25zIGZyb20gdGhlIGNvbnRlbnQgb2YgZXhhbXBsZXMsIG5vdCBqdXN0IHRoZWlyIHN0cnVjdHVyZS4gSW5jbHVkaW5nIGFuIGV4YW1wbGUgd2l0aCBhIGxpc3QgZmllbGQgY29udGFpbmluZyBtdWx0aXBsZSBpdGVtcywgYW5kIGFuIGV4YW1wbGUgd2l0aCBhIG51bGwgZmllbGQsIGNvdmVycyB0aGUgZWRnZSBjYXNlcyBtb3N0IGxpa2VseSB0byBjYXVzZSBmb3JtYXQgZGV2aWF0aW9ucy4ifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJGdW5jdGlvbiBDYWxsaW5nIC8gVG9vbCBVc2UifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkZ1bmN0aW9uIGNhbGxpbmcgKGFsc28gY2FsbGVkIHRvb2wgdXNlKSBpcyB0aGUgbW9zdCBwcmFjdGljYWwgcGF0aCB0byBoaWdoLXJlbGlhYmlsaXR5IHN0cnVjdHVyZWQgb3V0cHV0IHdoZW4gdXNpbmcgaG9zdGVkIEFQSSBtb2RlbHMuIFRoZSBkZXZlbG9wZXIgZGVjbGFyZXMgb25lIG9yIG1vcmUgZnVuY3Rpb24gc2NoZW1hcyBhcyBKU09OIFNjaGVtYSBvYmplY3RzIGluIHRoZSBBUEkgcmVxdWVzdC4gVGhlIG1vZGVsIGdlbmVyYXRlcyBhIGZ1bmN0aW9uIGNhbGwgb2JqZWN0IHRoYXQgbXVzdCBjb25mb3JtIHRvIHRoZSBkZWNsYXJlZCBzY2hlbWEsIHZhbGlkYXRlZCBhdCB0aGUgQVBJIGxldmVsLiBUaGlzIGVsaW1pbmF0ZXMgdGhlIG1vc3QgY29tbW9uIHByb21wdC1vbmx5IGZhaWx1cmUgbW9kZXM6IHRyYWlsaW5nIGNvbW1hcywgbWFya2Rvd24gZmVuY2VzLCBhbmQgcHJvc2Ugd3JhcHBlcnMuIFRoZSBtb2RlbCBzdGlsbCBjb250cm9scyB0aGUgY29udGVudCBvZiBmaWVsZCB2YWx1ZXMsIHNvIHNlbWFudGljIGVycm9ycyAoaGFsbHVjaW5hdGVkIGVudGl0aWVzLCB3cm9uZyB0eXBlcyBpbiBzdHJpbmctdHlwZWQgZmllbGRzKSBzdGlsbCByZXF1aXJlIGFwcGxpY2F0aW9uLWxldmVsIHZhbGlkYXRpb24uIn0seyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6ImltcG9ydCBvcGVuYWlcbmltcG9ydCBqc29uXG5mcm9tIHR5cGluZyBpbXBvcnQgQW55XG5cbmNsaWVudCA9IG9wZW5haS5PcGVuQUkoKVxuXG5FTlRJVFlfVE9PTCA9IHtcbiAgICBcdTAwMjd0eXBlXHUwMDI3OiBcdTAwMjdmdW5jdGlvblx1MDAyNyxcbiAgICBcdTAwMjdmdW5jdGlvblx1MDAyNzoge1xuICAgICAgICBcdTAwMjduYW1lXHUwMDI3OiBcdTAwMjdleHRyYWN0X2VudGl0aWVzXHUwMDI3LFxuICAgICAgICBcdTAwMjdkZXNjcmlwdGlvblx1MDAyNzogXHUwMDI3RXh0cmFjdCBuYW1lZCBlbnRpdGllcyBmcm9tIHRleHQuXHUwMDI3LFxuICAgICAgICBcdTAwMjdwYXJhbWV0ZXJzXHUwMDI3OiB7XG4gICAgICAgICAgICBcdTAwMjd0eXBlXHUwMDI3OiBcdTAwMjdvYmplY3RcdTAwMjcsXG4gICAgICAgICAgICBcdTAwMjdwcm9wZXJ0aWVzXHUwMDI3OiB7XG4gICAgICAgICAgICAgICAgXHUwMDI3ZW50aXRpZXNcdTAwMjc6IHtcbiAgICAgICAgICAgICAgICAgICAgXHUwMDI3dHlwZVx1MDAyNzogXHUwMDI3YXJyYXlcdTAwMjcsXG4gICAgICAgICAgICAgICAgICAgIFx1MDAyN2l0ZW1zXHUwMDI3OiB7XG4gICAgICAgICAgICAgICAgICAgICAgICBcdTAwMjd0eXBlXHUwMDI3OiBcdTAwMjdvYmplY3RcdTAwMjcsXG4gICAgICAgICAgICAgICAgICAgICAgICBcdTAwMjdwcm9wZXJ0aWVzXHUwMDI3OiB7XG4gICAgICAgICAgICAgICAgICAgICAgICAgICAgXHUwMDI3bmFtZVx1MDAyNzogICAgICAge1x1MDAyN3R5cGVcdTAwMjc6IFx1MDAyN3N0cmluZ1x1MDAyN30sXG4gICAgICAgICAgICAgICAgICAgICAgICAgICAgXHUwMDI3dHlwZVx1MDAyNzogICAgICAge1x1MDAyN3R5cGVcdTAwMjc6IFx1MDAyN3N0cmluZ1x1MDAyNywgXHUwMDI3ZW51bVx1MDAyNzogW1x1MDAyN1BFUlNPTlx1MDAyNywgXHUwMDI3T1JHXHUwMDI3LCBcdTAwMjdMT0NcdTAwMjcsIFx1MDAyN0RBVEVcdTAwMjddfSxcbiAgICAgICAgICAgICAgICAgICAgICAgICAgICBcdTAwMjdjb25maWRlbmNlXHUwMDI3OiB7XHUwMDI3dHlwZVx1MDAyNzogXHUwMDI3bnVtYmVyXHUwMDI3LCBcdTAwMjdtaW5pbXVtXHUwMDI3OiAwLjAsIFx1MDAyN21heGltdW1cdTAwMjc6IDEuMH0sXG4gICAgICAgICAgICAgICAgICAgICAgICB9LFxuICAgICAgICAgICAgICAgICAgICAgICAgXHUwMDI3cmVxdWlyZWRcdTAwMjc6IFtcdTAwMjduYW1lXHUwMDI3LCBcdTAwMjd0eXBlXHUwMDI3LCBcdTAwMjdjb25maWRlbmNlXHUwMDI3XSxcbiAgICAgICAgICAgICAgICAgICAgfSxcbiAgICAgICAgICAgICAgICB9LFxuICAgICAgICAgICAgfSxcbiAgICAgICAgICAgIFx1MDAyN3JlcXVpcmVkXHUwMDI3OiBbXHUwMDI3ZW50aXRpZXNcdTAwMjddLFxuICAgICAgICB9LFxuICAgIH0sXG59XG5cbmRlZiBleHRyYWN0X2VudGl0aWVzKHRleHQ6IHN0cikgLVx1MDAzZSBsaXN0W2RpY3Rbc3RyLCBBbnldXTpcbiAgICByZXNwID0gY2xpZW50LmNoYXQuY29tcGxldGlvbnMuY3JlYXRlKFxuICAgICAgICBtb2RlbD1cdTAwMjdncHQtNG8tbWluaVx1MDAyNyxcbiAgICAgICAgbWVzc2FnZXM9W3tcdTAwMjdyb2xlXHUwMDI3OiBcdTAwMjd1c2VyXHUwMDI3LCBcdTAwMjdjb250ZW50XHUwMDI3OiBmXHUwMDI3RXh0cmFjdCBuYW1lZCBlbnRpdGllcyBmcm9tOiB7dGV4dH1cdTAwMjd9XSxcbiAgICAgICAgdG9vbHM9W0VOVElUWV9UT09MXSxcbiAgICAgICAgdG9vbF9jaG9pY2U9e1x1MDAyN3R5cGVcdTAwMjc6IFx1MDAyN2Z1bmN0aW9uXHUwMDI3LCBcdTAwMjdmdW5jdGlvblx1MDAyNzoge1x1MDAyN25hbWVcdTAwMjc6IFx1MDAyN2V4dHJhY3RfZW50aXRpZXNcdTAwMjd9fSxcbiAgICApXG4gICAgYXJncyA9IHJlc3AuY2hvaWNlc1swXS5tZXNzYWdlLnRvb2xfY2FsbHNbMF0uZnVuY3Rpb24uYXJndW1lbnRzXG4gICAgcmV0dXJuIGpzb24ubG9hZHMoYXJncylbXHUwMDI3ZW50aXRpZXNcdTAwMjddXG5cbnJlc3VsdCA9IGV4dHJhY3RfZW50aXRpZXMoXHUwMDI3QXBwbGUgSW5jLiB3YXMgZm91bmRlZCBieSBTdGV2ZSBKb2JzIGluIEN1cGVydGlubyBpbiAxOTc2Llx1MDAyNylcbmZvciBlbnRpdHkgaW4gcmVzdWx0OlxuICAgIHByaW50KGZcdTAwMjd7ZW50aXR5W1wibmFtZVwiXToyMHN9ICB0eXBlPXtlbnRpdHlbXCJ0eXBlXCJdOjZzfSAgY29uZj17ZW50aXR5W1wiY29uZmlkZW5jZVwiXTouMmZ9XHUwMDI3KSJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiVGhlIGB0b29sX2Nob2ljZWAgcGFyYW1ldGVyIGZvcmNlcyB0aGUgbW9kZWwgdG8gY2FsbCB0aGUgc3BlY2lmaWVkIGZ1bmN0aW9uIHJhdGhlciB0aGFuIGdlbmVyYXRpbmcgYSB0ZXh0IHJlc3BvbnNlLCBlbGltaW5hdGluZyB0aGUgcG9zc2liaWxpdHkgb2YgYSBwcm9zZSBmYWxsYmFjay4gU2V0dGluZyBgdG9vbF9jaG9pY2VgIHRvIGByZXF1aXJlZGAgKG9yIHRoZSBzcGVjaWZpYyBmdW5jdGlvbiBuYW1lKSBpcyBlc3NlbnRpYWwgZm9yIHByb2R1Y3Rpb24gdXNlIOKAlCB3aXRob3V0IGl0LCB0aGUgbW9kZWwgbWF5IGNob29zZSBub3QgdG8gY2FsbCB0aGUgdG9vbCBvbiBhbWJpZ3VvdXMgaW5wdXRzLCByZXZlcnRpbmcgdG8gdGV4dCBvdXRwdXQgdGhhdCBicmVha3MgdGhlIHBhcnNlci4gVGhlIHBhcnNlIHN1Y2Nlc3MgcmF0ZSB3aXRoIGZvcmNlZCBmdW5jdGlvbiBjYWxsaW5nIGlzIHR5cGljYWxseSA5N+KAkzk5LjUlLCB3aXRoIHJlbWFpbmluZyBmYWlsdXJlcyBjYXVzZWQgYnkgcmVzcG9uc2UgdHJ1bmNhdGlvbiBhdCB0aGUgbWF4aW11bSB0b2tlbiBsaW1pdC4ifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJDb25zdHJhaW5lZCBEZWNvZGluZyJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiQ29uc3RyYWluZWQgZGVjb2RpbmcgZWxpbWluYXRlcyBmb3JtYXQgZXJyb3JzIGF0IHRoZSB0b2tlbiBsZXZlbDogYXQgZWFjaCBkZWNvZGluZyBzdGVwLCBhIGZpbml0ZSBzdGF0ZSBtYWNoaW5lIG9yIGdyYW1tYXIgcGFyc2VyIGRldGVybWluZXMgd2hpY2ggdG9rZW5zIGFyZSB2YWxpZCBjb250aW51YXRpb25zIG9mIHRoZSBwYXJ0aWFsIG91dHB1dCBzbyBmYXIsIGFuZCBhbGwgb3RoZXIgdG9rZW5zIGFyZSBtYXNrZWQgdG8gbmVnYXRpdmUgaW5maW5pdHkgbG9naXQuIFRoaXMgZ3VhcmFudGVlcyAxMDAlIHN5bnRhY3RpYyB2YWxpZGl0eSBmb3IgdGhlIGRlY2xhcmVkIGdyYW1tYXIg4oCUIHRoZSBtb2RlbCBwaHlzaWNhbGx5IGNhbm5vdCBnZW5lcmF0ZSBpbnZhbGlkIEpTT04sIGFuIGludmFsaWQgcmVnZXggbWF0Y2gsIG9yIGEgcmVzcG9uc2UgdGhhdCB2aW9sYXRlcyBhIGRlY2xhcmVkIHNjaGVtYS4gVGhlIGdyYW1tYXIgY29uc3RyYWludCBydW5zIGluIHBhcmFsbGVsIHdpdGggdGhlIG1vZGVsXHUwMDI3cyBmb3J3YXJkIHBhc3MgYW5kIGFkZHMgNeKAkzMwJSBsYXRlbmN5IG92ZXJoZWFkIGRlcGVuZGluZyBvbiBncmFtbWFyIGNvbXBsZXhpdHkgYW5kIEZTTSBzdGF0ZSBjb3VudC4ifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IlRoZSBrZXkgbGltaXRhdGlvbiBvZiBjb25zdHJhaW5lZCBkZWNvZGluZyBpcyB0aGF0IGl0IGd1YXJhbnRlZXMgc3ludGFjdGljIHZhbGlkaXR5LCBub3Qgc2VtYW50aWMgY29ycmVjdG5lc3MuIFRoZSBvdXRwdXQgd2lsbCBhbHdheXMgYmUgdmFsaWQgSlNPTiwgYnV0IHRoZSB2YWx1ZXMgd2l0aGluIGl0IG1heSBzdGlsbCBiZSBmYWN0dWFsbHkgd3JvbmcsIHNlbWFudGljYWxseSBpbmNvbnNpc3RlbnQsIG9yIGZhaWwgYnVzaW5lc3MgbG9naWMgcnVsZXMuIENvbWJpbmluZyBjb25zdHJhaW5lZCBkZWNvZGluZyB3aXRoIFB5ZGFudGljIHZhbGlkYXRvcnMgdGhhdCBjaGVjayB2YWx1ZSByYW5nZXMsIGNyb3NzLWZpZWxkIGRlcGVuZGVuY2llcywgYW5kIGJ1c2luZXNzIHJ1bGVzIHByb3ZpZGVzIGJvdGggc3ludGFjdGljIGFuZCBzZW1hbnRpYyBndWFyYW50ZWVzLiBUaGlzIGNvbWJpbmF0aW9uIGlzIHRoZSBzdGF0ZSBvZiB0aGUgYXJ0IGZvciBzZWxmLWhvc3RlZCBtb2RlbCBkZXBsb3ltZW50LiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IlB5ZGFudGljIGFuZCBJbnN0cnVjdG9yIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJUaGUgSW5zdHJ1Y3RvciBsaWJyYXJ5IHBhdGNoZXMgYW55IE9wZW5BSS1jb21wYXRpYmxlIGNsaWVudCB0byBhZGQgUHlkYW50aWMtYmFzZWQgcmVzcG9uc2UgdmFsaWRhdGlvbiB3aXRoIGF1dG9tYXRpYyByZXRyeS4gVGhlIGRldmVsb3BlciBkZWZpbmVzIGEgUHlkYW50aWMgbW9kZWwgYXMgdGhlIGV4cGVjdGVkIHJlc3BvbnNlIHR5cGU7IEluc3RydWN0b3IgY29udmVydHMgaXQgdG8gYSBmdW5jdGlvbiBjYWxsaW5nIHNjaGVtYSwgY2FsbHMgdGhlIG1vZGVsLCBwYXJzZXMgdGhlIHJlc3BvbnNlLCBhbmQgaWYgUHlkYW50aWMgdmFsaWRhdGlvbiBmYWlscywgYXV0b21hdGljYWxseSByZXRyaWVzIHdpdGggdGhlIHZhbGlkYXRpb24gZXJyb3IgaW5jbHVkZWQgaW4gdGhlIG5leHQgcHJvbXB0IHNvIHRoZSBtb2RlbCBjYW4gc2VsZi1jb3JyZWN0LiBUaGlzIGNsb3NlZC1sb29wIGFwcHJvYWNoIGFjaGlldmVzIG5lYXItMTAwJSBzZW1hbnRpYyB2YWxpZGl0eSByYXRlcyBmb3Igc2NoZW1hcyB3aXRoIG5vbi10cml2aWFsIHZhbGlkYXRpb24gbG9naWMsIGF0IHRoZSBjb3N0IG9mIGFkZGl0aW9uYWwgQVBJIGNhbGxzIG9uIHRoZSByZXRyeSBwYXRoICgy4oCTMyBjYWxscyBwZXIgcmVxdWVzdCBhdCB0eXBpY2FsIHByb2R1Y3Rpb24gZXJyb3IgcmF0ZXMpLiJ9LHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiJpbXBvcnQgaW5zdHJ1Y3RvclxuaW1wb3J0IG9wZW5haVxuZnJvbSBweWRhbnRpYyBpbXBvcnQgQmFzZU1vZGVsLCBGaWVsZCwgZmllbGRfdmFsaWRhdG9yXG5mcm9tIHR5cGluZyBpbXBvcnQgTGlzdFxuXG5jbGllbnQgPSBpbnN0cnVjdG9yLmZyb21fb3BlbmFpKG9wZW5haS5PcGVuQUkoKSlcblxuY2xhc3MgRW50aXR5KEJhc2VNb2RlbCk6XG4gICAgbmFtZTogICAgICAgc3RyICAgPSBGaWVsZChkZXNjcmlwdGlvbj1cdTAwMjdUaGUgZW50aXR5IHN1cmZhY2UgZm9ybSBhcyBpdCBhcHBlYXJzIGluIHRoZSB0ZXh0XHUwMDI3KVxuICAgIGVudGl0eV90eXBlOiBzdHIgID0gRmllbGQoZGVzY3JpcHRpb249XHUwMDI3T25lIG9mOiBQRVJTT04sIE9SRywgTE9DLCBEQVRFXHUwMDI3KVxuICAgIGNvbmZpZGVuY2U6IGZsb2F0ID0gRmllbGQoZ2U9MC4wLCBsZT0xLjAsIGRlc2NyaXB0aW9uPVx1MDAyN0V4dHJhY3Rpb24gY29uZmlkZW5jZSBzY29yZVx1MDAyNylcblxuICAgIEBmaWVsZF92YWxpZGF0b3IoXHUwMDI3ZW50aXR5X3R5cGVcdTAwMjcpXG4gICAgQGNsYXNzbWV0aG9kXG4gICAgZGVmIHZhbGlkYXRlX3R5cGUoY2xzLCB2OiBzdHIpIC1cdTAwM2Ugc3RyOlxuICAgICAgICBhbGxvd2VkID0ge1x1MDAyN1BFUlNPTlx1MDAyNywgXHUwMDI3T1JHXHUwMDI3LCBcdTAwMjdMT0NcdTAwMjcsIFx1MDAyN0RBVEVcdTAwMjd9XG4gICAgICAgIGlmIHYudXBwZXIoKSBub3QgaW4gYWxsb3dlZDpcbiAgICAgICAgICAgIHJhaXNlIFZhbHVlRXJyb3IoZlx1MDAyN2VudGl0eV90eXBlIG11c3QgYmUgb25lIG9mIHthbGxvd2VkfSwgZ290IHt2IXJ9XHUwMDI3KVxuICAgICAgICByZXR1cm4gdi51cHBlcigpXG5cbmNsYXNzIEV4dHJhY3Rpb25SZXN1bHQoQmFzZU1vZGVsKTpcbiAgICBlbnRpdGllczogTGlzdFtFbnRpdHldXG4gICAgc291cmNlX2xhbmd1YWdlOiBzdHIgPSBGaWVsZChkZXNjcmlwdGlvbj1cdTAwMjdJU08gNjM5LTEgbGFuZ3VhZ2UgY29kZSBvZiB0aGUgaW5wdXQgdGV4dFx1MDAyNylcblxucmVzdWx0ID0gY2xpZW50LmNoYXQuY29tcGxldGlvbnMuY3JlYXRlKFxuICAgIG1vZGVsPVx1MDAyN2dwdC00by1taW5pXHUwMDI3LFxuICAgIHJlc3BvbnNlX21vZGVsPUV4dHJhY3Rpb25SZXN1bHQsXG4gICAgbWF4X3JldHJpZXM9MyxcbiAgICBtZXNzYWdlcz1bXG4gICAgICAgIHtcdTAwMjdyb2xlXHUwMDI3OiBcdTAwMjd1c2VyXHUwMDI3LCBcdTAwMjdjb250ZW50XHUwMDI3OiBcdTAwMjdFeHRyYWN0IGVudGl0aWVzOiBBcHBsZSBJbmMuIGhpcmVkIFN1bmRhciBQaWNoYWkgaW4gMjAyNCBhdCBpdHMgQ3VwZXJ0aW5vIGNhbXB1cy5cdTAwMjd9LFxuICAgIF0sXG4pXG5wcmludChmXHUwMDI3TGFuZ3VhZ2U6IHtyZXN1bHQuc291cmNlX2xhbmd1YWdlfVx1MDAyNylcbmZvciBlIGluIHJlc3VsdC5lbnRpdGllczpcbiAgICBwcmludChmXHUwMDI3ICB7ZS5uYW1lOjI1c30ge2UuZW50aXR5X3R5cGU6OHN9IGNvbmY9e2UuY29uZmlkZW5jZTouMmZ9XHUwMDI3KSJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiVGhlIGBtYXhfcmV0cmllcz0zYCBwYXJhbWV0ZXIgdGVsbHMgSW5zdHJ1Y3RvciB0byByZXRyeSB1cCB0byB0aHJlZSB0aW1lcyBvbiB2YWxpZGF0aW9uIGZhaWx1cmUsIGVhY2ggdGltZSBpbmNsdWRpbmcgdGhlIHByZXZpb3VzIGZhaWxlZCByZXNwb25zZSBhbmQgdGhlIFB5ZGFudGljIHZhbGlkYXRpb24gZXJyb3IgaW4gdGhlIG5ldyBwcm9tcHQuIFRoaXMgc2VsZi1jb3JyZWN0aW9uIGxvb3AgaXMgc3VycHJpc2luZ2x5IGVmZmVjdGl2ZTogR1BULTRvLW1pbmkgY29ycmVjdHMgaXRzIG93biBlcnJvcnMgb24gcmV0cnkgaW4gYXBwcm94aW1hdGVseSA4NSUgb2YgY2FzZXMgd2hlbiB0aGUgdmFsaWRhdGlvbiBlcnJvciBtZXNzYWdlIGlzIGluZm9ybWF0aXZlICh3aGljaCBQeWRhbnRpY1x1MDAyN3MgbWVzc2FnZXMgdHlwaWNhbGx5IGFyZSkuIFRvdGFsIHJldHJ5IHJhdGUgaW4gcHJvZHVjdGlvbiB3aXRoIEdQVC00by1taW5pIG9uIG1vZGVyYXRlLWNvbXBsZXhpdHkgc2NoZW1hcyBpcyB0eXBpY2FsbHkgNeKAkzEwJSwgbWFraW5nIHRoZSBhdmVyYWdlIGNhbGxzLXBlci1yZXF1ZXN0IHJvdWdobHkgMS4wNeKAkzEuMTAuIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiUmV0cnkgYW5kIFJlcGFpciBTdHJhdGVnaWVzIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJXaGVuIGZ1bmN0aW9uIGNhbGxpbmcgYW5kIGNvbnN0cmFpbmVkIGRlY29kaW5nIGFyZSB1bmF2YWlsYWJsZSAob2xkZXIgbW9kZWxzLCBjdXN0b20gaW5mZXJlbmNlIHNlcnZlcnMpLCBleHBsaWNpdCByZXRyeS1hbmQtcmVwYWlyIGxvb3BzIGFyZSB0aGUgbmV4dCBiZXN0IG9wdGlvbi4gVGhlIHJlcGFpciBwcm9tcHQgcHJlc2VudHMgdGhlIG1vZGVsIHdpdGggaXRzIG93biBtYWxmb3JtZWQgb3V0cHV0IGFuZCB0aGUgc3BlY2lmaWMgcGFyc2UgZXJyb3IsIGFza2luZyBpdCB0byBmaXggb25seSB0aGUgSlNPTiBmb3JtYXR0aW5nIHdpdGhvdXQgY2hhbmdpbmcgdGhlIGNvbnRlbnQuIFRoaXMgdGFyZ2V0ZWQgcmVwYWlyIGFwcHJvYWNoIHdvcmtzIGJlY2F1c2UgSlNPTiBmb3JtYXR0aW5nIGVycm9ycyBhcmUgc3ludGFjdGljIOKAlCB0cmFpbGluZyBjb21tYXMsIHVuZXNjYXBlZCBxdW90ZXMg4oCUIGFuZCB0aGUgbW9kZWwgY2FuIHVzdWFsbHkgY29ycmVjdCB0aGVtIHdoZW4gaXQgc2VlcyB0aGUgc3BlY2lmaWMgZXJyb3IgbWVzc2FnZSByYXRoZXIgdGhhbiBiZWluZyBhc2tlZCB0byByZWdlbmVyYXRlIHRoZSBlbnRpcmUgcmVzcG9uc2UuIn0seyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6ImltcG9ydCBvcGVuYWlcbmltcG9ydCBqc29uXG5mcm9tIHR5cGluZyBpbXBvcnQgQW55LCBPcHRpb25hbFxuXG5jbGllbnQgPSBvcGVuYWkuT3BlbkFJKClcblxuZGVmIGNhbGxfd2l0aF9qc29uX3JlcGFpcihcbiAgICBzeXN0ZW1fcHJvbXB0OiBzdHIsXG4gICAgdXNlcl9tZXNzYWdlOiAgc3RyLFxuICAgIG1vZGVsOiAgICAgICAgIHN0ciA9IFx1MDAyN2dwdC00by1taW5pXHUwMDI3LFxuICAgIG1heF9yZXRyaWVzOiAgIGludCA9IDMsXG4pIC1cdTAwM2UgT3B0aW9uYWxbQW55XTpcbiAgICBcIlwiXCJDYWxsIHRoZSBtb2RlbCBhbmQgcmVwYWlyIEpTT04gcGFyc2UgZmFpbHVyZXMgdXAgdG8gbWF4X3JldHJpZXMgdGltZXMuXCJcIlwiXG4gICAgbWVzc2FnZXMgPSBbXG4gICAgICAgIHtcdTAwMjdyb2xlXHUwMDI3OiBcdTAwMjdzeXN0ZW1cdTAwMjcsIFx1MDAyN2NvbnRlbnRcdTAwMjc6IHN5c3RlbV9wcm9tcHR9LFxuICAgICAgICB7XHUwMDI3cm9sZVx1MDAyNzogXHUwMDI3dXNlclx1MDAyNywgICBcdTAwMjdjb250ZW50XHUwMDI3OiB1c2VyX21lc3NhZ2V9LFxuICAgIF1cbiAgICBmb3IgYXR0ZW1wdCBpbiByYW5nZShtYXhfcmV0cmllcyk6XG4gICAgICAgIHJlc3AgPSBjbGllbnQuY2hhdC5jb21wbGV0aW9ucy5jcmVhdGUoXG4gICAgICAgICAgICBtb2RlbD1tb2RlbCwgdGVtcGVyYXR1cmU9MC4wLCBtZXNzYWdlcz1tZXNzYWdlcyxcbiAgICAgICAgKVxuICAgICAgICByYXcgPSByZXNwLmNob2ljZXNbMF0ubWVzc2FnZS5jb250ZW50XG4gICAgICAgIHRyeTpcbiAgICAgICAgICAgIHJldHVybiBqc29uLmxvYWRzKHJhdylcbiAgICAgICAgZXhjZXB0IGpzb24uSlNPTkRlY29kZUVycm9yIGFzIGU6XG4gICAgICAgICAgICBpZiBhdHRlbXB0ID09IG1heF9yZXRyaWVzIC0gMTpcbiAgICAgICAgICAgICAgICByZXR1cm4gTm9uZVxuICAgICAgICAgICAgbWVzc2FnZXMuYXBwZW5kKHtcdTAwMjdyb2xlXHUwMDI3OiBcdTAwMjdhc3Npc3RhbnRcdTAwMjcsIFx1MDAyN2NvbnRlbnRcdTAwMjc6IHJhd30pXG4gICAgICAgICAgICBtZXNzYWdlcy5hcHBlbmQoe1x1MDAyN3JvbGVcdTAwMjc6IFx1MDAyN3VzZXJcdTAwMjcsIFx1MDAyN2NvbnRlbnRcdTAwMjc6XG4gICAgICAgICAgICAgICAgZlx1MDAyN1RoYXQgcmVzcG9uc2UgaGFkIGEgSlNPTiBwYXJzZSBlcnJvcjoge2V9XFxuXHUwMDI3XG4gICAgICAgICAgICAgICAgZlx1MDAyN0ZpeCB0aGUgSlNPTiBmb3JtYXR0aW5nIG9ubHkg4oCUIGRvIG5vdCBjaGFuZ2UgdmFsdWVzLiBSZXR1cm4gb25seSB0aGUgY29ycmVjdGVkIEpTT04uXHUwMDI3fSlcbiAgICByZXR1cm4gTm9uZVxuXG5TWVNURU0gPSBcdTAwMjdSZXR1cm4gYSBKU09OIG9iamVjdCB3aXRoIGtleXM6IHN1bW1hcnkgKHN0ciksIHNlbnRpbWVudCAoc3RyOiBwb3N8bmVnfG5ldSksIHNjb3JlIChmbG9hdCAwLTEpLlx1MDAyN1xucmVzdWx0ID0gY2FsbF93aXRoX2pzb25fcmVwYWlyKFNZU1RFTSwgXHUwMDI3UmV2aWV3OiBcIlRoZSBwcm9kdWN0IGlzIGZhbnRhc3RpYywgd29ya3MgcGVyZmVjdGx5IVwiXHUwMDI3KVxucHJpbnQoZlx1MDAyN1BhcnNlIHJlc3VsdDoge3Jlc3VsdH1cdTAwMjcpXG5wcmludChmXHUwMDI3VHlwZToge3R5cGUocmVzdWx0KS5fX25hbWVfX31cdTAwMjcpIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJUaGUgY29udmVyc2F0aW9uLWhpc3RvcnkgYXBwcm9hY2ggdG8gcmVwYWlyIGlzIG1vcmUgZWZmZWN0aXZlIHRoYW4gYSBjbGVhbiByZXRyeSBiZWNhdXNlIGl0IGdpdmVzIHRoZSBtb2RlbCBhY2Nlc3MgdG8gYm90aCBpdHMgb3JpZ2luYWwgYXR0ZW1wdCBhbmQgdGhlIHNwZWNpZmljIGVycm9yLiBTdHVkaWVzIG9uIHJlcGFpciByYXRlIHNob3cgdGhhdCBpbmNsdWRpbmcgdGhlIGVycm9yIG1lc3NhZ2UgaW4gdGhlIHJlcGFpciBwcm9tcHQgYWNoaWV2ZXMgfjg1JSBzdWNjZXNzIHJhdGUgcGVyIHJldHJ5LCBjb21wYXJlZCB0byB+NjAlIGZvciBjbGVhbiByZXRyaWVzIHdpdGhvdXQgZXJyb3IgY29udGV4dC4gVGhyZWUgcmV0cnkgYXR0ZW1wdHMgd2l0aCBlcnJvciBjb250ZXh0IGFjaGlldmUgYSBjdW11bGF0aXZlIHN1Y2Nlc3MgcmF0ZSBvZiBhcHByb3hpbWF0ZWx5IDk34oCTOTklIHN0YXJ0aW5nIGZyb20gYW4gODAlIGJhc2Ugc3VjY2VzcyByYXRlLCBtYWtpbmcgdGhpcyBhIHByYWN0aWNhbCBmYWxsYmFjayBmb3IgbW9kZWxzIG9yIGRlcGxveW1lbnRzIHdoZXJlIGZ1bmN0aW9uIGNhbGxpbmcgaXMgdW5hdmFpbGFibGUuIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiUmVsaWFiaWxpdHkgYXQgU2NhbGUifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkF0IHNjYWxlIOKAlCB0aG91c2FuZHMgb2YgcmVxdWVzdHMgcGVyIGRheSDigJQgZXZlbiBhIDIlIGZhaWx1cmUgcmF0ZSBiZWNvbWVzIG9wZXJhdGlvbmFsbHkgc2lnbmlmaWNhbnQuIEEgc3lzdGVtIHByb2Nlc3NpbmcgMTAsMDAwIHJlcXVlc3RzL2RheSB3aXRoIGEgMiUgZmFpbHVyZSByYXRlIHByb2R1Y2VzIDIwMCBmYWlsZWQgcGFyc2VzIHBlciBkYXkgcmVxdWlyaW5nIG1hbnVhbCBpbnRlcnZlbnRpb24gb3IgcmV0cnkuIFJlbGlhYmlsaXR5IGJlbmNobWFya2luZyBhY3Jvc3MgbWV0aG9kcyBpcyBlc3NlbnRpYWwgZm9yIGNob29zaW5nIHRoZSByaWdodCB0ZWNobmlxdWUgZm9yIGEgZ2l2ZW4gc2NoZW1hIGNvbXBsZXhpdHkgYW5kIG1vZGVsIGNvbWJpbmF0aW9uLiBUaGUgYmVuY2htYXJrIHNob3VsZCBtZWFzdXJlIHBhcnNlIHN1Y2Nlc3MgcmF0ZSwgc2VtYW50aWMgdmFsaWRpdHkgcmF0ZSAodmFsdWVzIHBhc3MgUHlkYW50aWMgdmFsaWRhdGlvbiksIG1lZGlhbiBhbmQgcDk5IGxhdGVuY3ksIGFuZCBjb3N0IHBlciBzdWNjZXNzZnVsbHkgcGFyc2VkIHJlc3BvbnNlLiJ9LHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiJpbXBvcnQgb3BlbmFpXG5pbXBvcnQganNvblxuaW1wb3J0IHRpbWVcbmZyb20gZGF0YWNsYXNzZXMgaW1wb3J0IGRhdGFjbGFzcywgZmllbGRcbmZyb20gdHlwaW5nIGltcG9ydCBMaXN0LCBDYWxsYWJsZVxuXG5AZGF0YWNsYXNzXG5jbGFzcyBCZW5jaFJlc3VsdDpcbiAgICBtZXRob2Q6ICAgICAgIHN0clxuICAgIHBhcnNlX29rOiAgICAgTGlzdFtib29sXSAgID0gZmllbGQoZGVmYXVsdF9mYWN0b3J5PWxpc3QpXG4gICAgbGF0ZW5jaWVzX21zOiBMaXN0W2Zsb2F0XSAgPSBmaWVsZChkZWZhdWx0X2ZhY3Rvcnk9bGlzdClcblxuICAgIGRlZiBwYXJzZV9yYXRlKHNlbGYpIC1cdTAwM2UgZmxvYXQ6ICAgcmV0dXJuIHN1bShzZWxmLnBhcnNlX29rKSAvIGxlbihzZWxmLnBhcnNlX29rKSBpZiBzZWxmLnBhcnNlX29rIGVsc2UgMFxuICAgIGRlZiBtZWRpYW5fbXMoc2VsZikgIC1cdTAwM2UgZmxvYXQ6XG4gICAgICAgIHMgPSBzb3J0ZWQoc2VsZi5sYXRlbmNpZXNfbXMpXG4gICAgICAgIHJldHVybiBzW2xlbihzKS8vMl0gaWYgcyBlbHNlIDBcblxuY2xpZW50ID0gb3BlbmFpLk9wZW5BSSgpXG5TWVNURU0gPSBcdTAwMjdSZXR1cm4gSlNPTiBvbmx5OiB7XCJzZW50aW1lbnRcIjogXCJwb3N8bmVnfG5ldVwiLCBcInNjb3JlXCI6IGZsb2F0LCBcImtleXdvcmRzXCI6IFtzdHJdfVx1MDAyN1xuSU5QVVRTID0gW1xuICAgIFx1MDAyN1RoZSBwcm9kdWN0IHF1YWxpdHkgaXMgb3V0c3RhbmRpbmcgYW5kIGRlbGl2ZXJ5IHdhcyBmYXN0Llx1MDAyNyxcbiAgICBcdTAwMjdUZXJyaWJsZSBleHBlcmllbmNlLCB3b3VsZCBub3QgcmVjb21tZW5kIHRvIGFueW9uZS5cdTAwMjcsXG4gICAgXHUwMDI3RGVjZW50IHByb2R1Y3QsIG5vdGhpbmcgc3BlY2lhbCwgZG9lcyB0aGUgam9iLlx1MDAyNyxcbl0gKiA1ICAjIDE1IHNhbXBsZXMgdG90YWxcblxucmVzdWx0cyA9IHtcdTAwMjdwcm9tcHRfb25seVx1MDAyNzogQmVuY2hSZXN1bHQoXHUwMDI3cHJvbXB0X29ubHlcdTAwMjcpfVxuZm9yIG1zZyBpbiBJTlBVVFM6XG4gICAgdDAgICA9IHRpbWUudGltZSgpXG4gICAgcmVzcCA9IGNsaWVudC5jaGF0LmNvbXBsZXRpb25zLmNyZWF0ZShcbiAgICAgICAgbW9kZWw9XHUwMDI3Z3B0LTRvLW1pbmlcdTAwMjcsIHRlbXBlcmF0dXJlPTAuMCxcbiAgICAgICAgbWVzc2FnZXM9W3tcdTAwMjdyb2xlXHUwMDI3OiBcdTAwMjdzeXN0ZW1cdTAwMjcsIFx1MDAyN2NvbnRlbnRcdTAwMjc6IFNZU1RFTX0sXG4gICAgICAgICAgICAgICAgICB7XHUwMDI3cm9sZVx1MDAyNzogXHUwMDI3dXNlclx1MDAyNywgICBcdTAwMjdjb250ZW50XHUwMDI3OiBtc2d9XSxcbiAgICApXG4gICAgbGF0ID0gKHRpbWUudGltZSgpIC0gdDApICogMTAwMFxuICAgIHJhdyA9IHJlc3AuY2hvaWNlc1swXS5tZXNzYWdlLmNvbnRlbnRcbiAgICB0cnk6ICAgIGpzb24ubG9hZHMocmF3KTsgcmVzdWx0c1tcdTAwMjdwcm9tcHRfb25seVx1MDAyN10ucGFyc2Vfb2suYXBwZW5kKFRydWUpXG4gICAgZXhjZXB0OiByZXN1bHRzW1x1MDAyN3Byb21wdF9vbmx5XHUwMDI3XS5wYXJzZV9vay5hcHBlbmQoRmFsc2UpXG4gICAgcmVzdWx0c1tcdTAwMjdwcm9tcHRfb25seVx1MDAyN10ubGF0ZW5jaWVzX21zLmFwcGVuZChsYXQpXG5cbmZvciBtZXRob2QsIGJyIGluIHJlc3VsdHMuaXRlbXMoKTpcbiAgICBwcmludChmXHUwMDI3e21ldGhvZDoyMHN9OiBwYXJzZV9yYXRlPXtici5wYXJzZV9yYXRlKCk6LjAlfSAgbWVkaWFuX2xhdD17YnIubWVkaWFuX21zKCk6LjBmfW1zXHUwMDI3KSJ9LHsidHlwZSI6InRhYmxlIiwiaGVhZGVycyI6WyJNZXRob2QiLCJQYXJzZSBzdWNjZXNzIHJhdGUiLCJMYXRlbmN5IG92ZXJoZWFkIiwiU3VwcG9ydHMgbmVzdGluZyIsIlJlcXVpcmVzIHNwZWNpYWwgbW9kZWwiXSwicm93cyI6W1siUHJvbXB0IG9ubHkiLCI4MOKAkzkwJSIsIk5vbmUiLCJZZXMsIGRlZ3JhZGVzIHdpdGggZGVwdGgiLCJObyDigJQgYW55IGluc3RydWN0aW9uLXR1bmVkIG1vZGVsIl0sWyJGZXctc2hvdCBmb3JtYXQgZXhhbXBsZXMiLCI5MOKAkzk1JSIsIk5vbmUgKHByb21wdCB0b2tlbnMpIiwiWWVzLCB3aXRoIGV4YW1wbGUgY292ZXJhZ2UiLCJObyDigJQgYW55IGluc3RydWN0aW9uLXR1bmVkIG1vZGVsIl0sWyJGdW5jdGlvbiBjYWxsaW5nIiwiOTfigJM5OSUiLCJ+NSUgKHNjaGVtYSB2YWxpZGF0aW9uKSIsIlllcyDigJQgZnVsbCBKU09OIFNjaGVtYSBzdXBwb3J0IiwiWWVzIOKAlCBPcGVuQUkvQW50aHJvcGljIEFQSSByZXF1aXJlZCJdLFsiQ29uc3RyYWluZWQgZGVjb2RpbmciLCIxMDAlIHN5bnRhY3RpYyIsIjXigJMzMCUgKEZTTSBvdmVyaGVhZCkiLCJZZXMg4oCUIGdyYW1tYXIgY292ZXJzIGFueSBKU09OIiwiWWVzIOKAlCBzZWxmLWhvc3RlZCBvciBjb21wYXRpYmxlIGluZmVyZW5jZSBzZXJ2ZXIiXSxbIkluc3RydWN0b3IgKyByZXRyeSIsIjk44oCTOTkuOSUiLCI14oCTMTUlIChyZXRyeSBwYXRoIGNvc3QpIiwiWWVzIOKAlCBQeWRhbnRpYyBoYW5kbGVzIGFyYml0cmFyeSBuZXN0aW5nIiwiTm8g4oCUIGFueSBPcGVuQUktY29tcGF0aWJsZSBlbmRwb2ludCJdXX0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiS2V5IFRha2Vhd2F5cyJ9LHsidHlwZSI6ImNhbGxvdXQiLCJ2YXJpYW50Ijoid2FybmluZyIsInRpdGxlIjoiSlNPTiBPdXRwdXQgZnJvbSBQcm9tcHQtT25seSBMTE1zIEZhaWxzIDXigJMyMCUgb2YgdGhlIFRpbWUiLCJjb250ZW50IjoiSlNPTiBvdXRwdXQgZnJvbSBwcm9tcHQtb25seSBMTE1zIGZhaWxzIDXigJMyMCUgb2YgdGhlIHRpbWUgZHVlIHRvIGludmFsaWQgZXNjYXBpbmcsIHRyYWlsaW5nIGNvbW1hcywgb3IgdHJ1bmNhdGlvbiDigJQgYWx3YXlzIGltcGxlbWVudCBhIHJldHJ5L3JlcGFpciBsb29wIG9yIHVzZSBmdW5jdGlvbiBjYWxsaW5nIGZvciBwcm9kdWN0aW9uIHN0cnVjdHVyZWQgb3V0cHV0LiJ9LHsidHlwZSI6Imxpc3QiLCJvcmRlcmVkIjpmYWxzZSwiaXRlbXMiOlsiUHJvbXB0LW9ubHkgSlNPTiBleHRyYWN0aW9uIGFjaGlldmVzIDgw4oCTOTAlIHBhcnNlIHJhdGUgZm9yIHNpbXBsZSBzY2hlbWFzIOKAlCBhbHdheXMgc3VwcGxlbWVudCB3aXRoIGEgZmFsbGJhY2sgZXh0cmFjdGlvbiBvciByZXRyeSBsb29wIGZvciBwcm9kdWN0aW9uIHVzZS4iLCJGdW5jdGlvbiBjYWxsaW5nIHJhaXNlcyBwYXJzZSBzdWNjZXNzIHRvIDk34oCTOTklIGFuZCBlbGltaW5hdGVzIG1hcmtkb3duIGZlbmNlcyBhbmQgcHJvc2Ugd3JhcHBlcnMgYnkgZGVzaWduIOKAlCB1c2UgaXQgZm9yIGFsbCBPcGVuQUkvQW50aHJvcGljIGRlcGxveW1lbnRzLiIsIkNvbnN0cmFpbmVkIGRlY29kaW5nIChvdXRsaW5lcywgbGxhbWEuY3BwIEdCTkYpIHByb3ZpZGVzIDEwMCUgc3ludGFjdGljIHZhbGlkaXR5IGZvciBzZWxmLWhvc3RlZCBtb2RlbHMgYXQgNeKAkzMwJSBsYXRlbmN5IG92ZXJoZWFkLiIsIkluc3RydWN0b3IgKyBQeWRhbnRpYyBhZGRzIHNlbWFudGljIHZhbGlkYXRpb24gb24gdG9wIG9mIGFueSBtZXRob2QgYW5kIHNlbGYtY29ycmVjdHMgdmlhIGNvbnZlcnNhdGlvbi1oaXN0b3J5IHJldHJ5LCBhY2hpZXZpbmcgbmVhci0xMDAlIGVuZC10by1lbmQgdmFsaWRpdHkuIiwiU2VtYW50aWMgdmFsaWRpdHkgcmVxdWlyZXMgYXBwbGljYXRpb24tbGV2ZWwgdmFsaWRhdG9ycyDigJQgZnVuY3Rpb24gY2FsbGluZyBhbmQgY29uc3RyYWluZWQgZGVjb2RpbmcgZ3VhcmFudGVlIHN5bnRheCwgbm90IGNvcnJlY3QgZmllbGQgdmFsdWVzLiIsIkJlbmNobWFyayBwYXJzZSByYXRlLCBzZW1hbnRpYyB2YWxpZGl0eSwgbGF0ZW5jeSwgYW5kIGNvc3QtcGVyLXZhbGlkLXJlc3BvbnNlIHRvZ2V0aGVyIOKAlCBwYXJzZSByYXRlIGFsb25lIGRvZXMgbm90IG1lYXN1cmUgd2hldGhlciB2YWx1ZXMgc2F0aXNmeSBidXNpbmVzcyBsb2dpYy4iLCJBdCAxMCwwMDAgcmVxdWVzdHMvZGF5LCBhIDIlIGZhaWx1cmUgcmF0ZSBwcm9kdWNlcyAyMDAgZmFpbGVkIHBhcnNlcyByZXF1aXJpbmcgaW50ZXJ2ZW50aW9uOyBpbnZlc3QgaW4gaGlnaGVyLXJlbGlhYmlsaXR5IG1ldGhvZHMgYmVmb3JlIHNjYWxpbmcuIl19LHsidHlwZSI6ImRpdmlkZXIifV0="
+---
+# Structured Output from LLMs
+
+Structured output — JSON, XML, or typed data from an LLM — is a foundational requirement for integrating language models into production systems. Prose responses cannot be reliably parsed, stored, or acted upon by downstream code; structured output enables deterministic integration. The challenge is that standard LLMs are trained to generate fluent natural language, not syntactically valid structured data, so they produce malformed JSON, trailing commas, unclosed brackets, and truncated fields at rates of 5–20% in production. Multiple complementary techniques exist to close this gap: prompt engineering, function calling, constrained decoding, and output validation with retry.
+
+## Overview
+
+Structured output reliability exists on a spectrum. At the lowest reliability end, a plain prompt asking for JSON produces valid output roughly 80–95% of the time for simple schemas, degrading to 60–75% for deeply nested schemas. Function calling APIs improve this to 95–99% by constraining the model at the logit level to follow a declared schema. Constrained decoding (outlines, guidance, llama.cpp GBNF) pushes to 100% syntactic validity by masking invalid tokens at every decoding step. The Instructor library combines Pydantic validation with automatic retry, achieving near-100% semantic validity in addition to syntactic validity.
+
+The choice of technique depends on the deployment context. For hosted API models (OpenAI, Anthropic, Google), function calling is the most practical path to high reliability without infrastructure changes. For self-hosted open models (Llama, Mistral, Qwen), constrained decoding via outlines or llama.cpp grammar mode provides 100% syntactic guarantees. Instructor works with any OpenAI-compatible endpoint and adds semantic validation (Pydantic validators) on top of whichever underlying method produces the raw output.
+
+## Prompt-Based JSON Extraction
+
+The simplest approach to structured output is prompt engineering: instruct the model to return JSON in the system prompt, provide the schema as a type annotation or example, and forbid prose wrappers. This works well for simple flat schemas and capable models like GPT-4o. Reliability improves substantially with few-shot examples that show exact field names, types, and the absence of markdown fences. The most common failure modes are trailing commas (not valid JSON but valid JavaScript), unescaped double quotes in string values, and response truncation when the schema is complex and the model exceeds its maximum output token limit.
+
+Few-shot examples are the highest-leverage prompt-only technique for improving JSON validity rates. Adding two to three input-output examples that demonstrate the exact schema raises parse success rates from 80–85% to 90–95% for capable models on moderate-complexity schemas. The examples must show not just the schema structure but also realistic string values — models learn formatting conventions from the content of examples, not just their structure. Including an example with a list field containing multiple items, and an example with a null field, covers the edge cases most likely to cause format deviations.
+
+## Function Calling / Tool Use
+
+Function calling (also called tool use) is the most practical path to high-reliability structured output when using hosted API models. The developer declares one or more function schemas as JSON Schema objects in the API request. The model generates a function call object that must conform to the declared schema, validated at the API level. This eliminates the most common prompt-only failure modes: trailing commas, markdown fences, and prose wrappers. The model still controls the content of field values, so semantic errors (hallucinated entities, wrong types in string-typed fields) still require application-level validation.
+
+```python
+import openai
+import json
+from typing import Any
+
+client = openai.OpenAI()
+
+ENTITY_TOOL = {
+    'type': 'function',
+    'function': {
+        'name': 'extract_entities',
+        'description': 'Extract named entities from text.',
+        'parameters': {
+            'type': 'object',
+            'properties': {
+                'entities': {
+                    'type': 'array',
+                    'items': {
+                        'type': 'object',
+                        'properties': {
+                            'name':       {'type': 'string'},
+                            'type':       {'type': 'string', 'enum': ['PERSON', 'ORG', 'LOC', 'DATE']},
+                            'confidence': {'type': 'number', 'minimum': 0.0, 'maximum': 1.0},
+                        },
+                        'required': ['name', 'type', 'confidence'],
+                    },
+                },
+            },
+            'required': ['entities'],
+        },
+    },
+}
+
+def extract_entities(text: str) -> list[dict[str, Any]]:
+    resp = client.chat.completions.create(
+        model='gpt-4o-mini',
+        messages=[{'role': 'user', 'content': f'Extract named entities from: {text}'}],
+        tools=[ENTITY_TOOL],
+        tool_choice={'type': 'function', 'function': {'name': 'extract_entities'}},
+    )
+    args = resp.choices[0].message.tool_calls[0].function.arguments
+    return json.loads(args)['entities']
+
+result = extract_entities('Apple Inc. was founded by Steve Jobs in Cupertino in 1976.')
+for entity in result:
+    print(f'{entity["name"]:20s}  type={entity["type"]:6s}  conf={entity["confidence"]:.2f}')
+```
+
+The `tool_choice` parameter forces the model to call the specified function rather than generating a text response, eliminating the possibility of a prose fallback. Setting `tool_choice` to `required` (or the specific function name) is essential for production use — without it, the model may choose not to call the tool on ambiguous inputs, reverting to text output that breaks the parser. The parse success rate with forced function calling is typically 97–99.5%, with remaining failures caused by response truncation at the maximum token limit.
+
+## Constrained Decoding
+
+Constrained decoding eliminates format errors at the token level: at each decoding step, a finite state machine or grammar parser determines which tokens are valid continuations of the partial output so far, and all other tokens are masked to negative infinity logit. This guarantees 100% syntactic validity for the declared grammar — the model physically cannot generate invalid JSON, an invalid regex match, or a response that violates a declared schema. The grammar constraint runs in parallel with the model's forward pass and adds 5–30% latency overhead depending on grammar complexity and FSM state count.
+
+The key limitation of constrained decoding is that it guarantees syntactic validity, not semantic correctness. The output will always be valid JSON, but the values within it may still be factually wrong, semantically inconsistent, or fail business logic rules. Combining constrained decoding with Pydantic validators that check value ranges, cross-field dependencies, and business rules provides both syntactic and semantic guarantees. This combination is the state of the art for self-hosted model deployment.
+
+## Pydantic and Instructor
+
+The Instructor library patches any OpenAI-compatible client to add Pydantic-based response validation with automatic retry. The developer defines a Pydantic model as the expected response type; Instructor converts it to a function calling schema, calls the model, parses the response, and if Pydantic validation fails, automatically retries with the validation error included in the next prompt so the model can self-correct. This closed-loop approach achieves near-100% semantic validity rates for schemas with non-trivial validation logic, at the cost of additional API calls on the retry path (2–3 calls per request at typical production error rates).
+
+```python
+import instructor
+import openai
+from pydantic import BaseModel, Field, field_validator
+from typing import List
+
+client = instructor.from_openai(openai.OpenAI())
+
+class Entity(BaseModel):
+    name:       str   = Field(description='The entity surface form as it appears in the text')
+    entity_type: str  = Field(description='One of: PERSON, ORG, LOC, DATE')
+    confidence: float = Field(ge=0.0, le=1.0, description='Extraction confidence score')
+
+    @field_validator('entity_type')
+    @classmethod
+    def validate_type(cls, v: str) -> str:
+        allowed = {'PERSON', 'ORG', 'LOC', 'DATE'}
+        if v.upper() not in allowed:
+            raise ValueError(f'entity_type must be one of {allowed}, got {v!r}')
+        return v.upper()
+
+class ExtractionResult(BaseModel):
+    entities: List[Entity]
+    source_language: str = Field(description='ISO 639-1 language code of the input text')
+
+result = client.chat.completions.create(
+    model='gpt-4o-mini',
+    response_model=ExtractionResult,
+    max_retries=3,
+    messages=[
+        {'role': 'user', 'content': 'Extract entities: Apple Inc. hired Sundar Pichai in 2024 at its Cupertino campus.'},
+    ],
+)
+print(f'Language: {result.source_language}')
+for e in result.entities:
+    print(f'  {e.name:25s} {e.entity_type:8s} conf={e.confidence:.2f}')
+```
+
+The `max_retries=3` parameter tells Instructor to retry up to three times on validation failure, each time including the previous failed response and the Pydantic validation error in the new prompt. This self-correction loop is surprisingly effective: GPT-4o-mini corrects its own errors on retry in approximately 85% of cases when the validation error message is informative (which Pydantic's messages typically are). Total retry rate in production with GPT-4o-mini on moderate-complexity schemas is typically 5–10%, making the average calls-per-request roughly 1.05–1.10.
+
+## Retry and Repair Strategies
+
+When function calling and constrained decoding are unavailable (older models, custom inference servers), explicit retry-and-repair loops are the next best option. The repair prompt presents the model with its own malformed output and the specific parse error, asking it to fix only the JSON formatting without changing the content. This targeted repair approach works because JSON formatting errors are syntactic — trailing commas, unescaped quotes — and the model can usually correct them when it sees the specific error message rather than being asked to regenerate the entire response.
+
+```python
+import openai
+import json
+from typing import Any, Optional
+
+client = openai.OpenAI()
+
+def call_with_json_repair(
+    system_prompt: str,
+    user_message:  str,
+    model:         str = 'gpt-4o-mini',
+    max_retries:   int = 3,
+) -> Optional[Any]:
+    """Call the model and repair JSON parse failures up to max_retries times."""
+    messages = [
+        {'role': 'system', 'content': system_prompt},
+        {'role': 'user',   'content': user_message},
+    ]
+    for attempt in range(max_retries):
+        resp = client.chat.completions.create(
+            model=model, temperature=0.0, messages=messages,
+        )
+        raw = resp.choices[0].message.content
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as e:
+            if attempt == max_retries - 1:
+                return None
+            messages.append({'role': 'assistant', 'content': raw})
+            messages.append({'role': 'user', 'content':
+                f'That response had a JSON parse error: {e}\n'
+                f'Fix the JSON formatting only — do not change values. Return only the corrected JSON.'})
+    return None
+
+SYSTEM = 'Return a JSON object with keys: summary (str), sentiment (str: pos|neg|neu), score (float 0-1).'
+result = call_with_json_repair(SYSTEM, 'Review: "The product is fantastic, works perfectly!"')
+print(f'Parse result: {result}')
+print(f'Type: {type(result).__name__}')
+```
+
+The conversation-history approach to repair is more effective than a clean retry because it gives the model access to both its original attempt and the specific error. Studies on repair rate show that including the error message in the repair prompt achieves ~85% success rate per retry, compared to ~60% for clean retries without error context. Three retry attempts with error context achieve a cumulative success rate of approximately 97–99% starting from an 80% base success rate, making this a practical fallback for models or deployments where function calling is unavailable.
+
+## Reliability at Scale
+
+At scale — thousands of requests per day — even a 2% failure rate becomes operationally significant. A system processing 10,000 requests/day with a 2% failure rate produces 200 failed parses per day requiring manual intervention or retry. Reliability benchmarking across methods is essential for choosing the right technique for a given schema complexity and model combination. The benchmark should measure parse success rate, semantic validity rate (values pass Pydantic validation), median and p99 latency, and cost per successfully parsed response.
+
+```python
+import openai
+import json
+import time
+from dataclasses import dataclass, field
+from typing import List, Callable
+
+@dataclass
+class BenchResult:
+    method:       str
+    parse_ok:     List[bool]   = field(default_factory=list)
+    latencies_ms: List[float]  = field(default_factory=list)
+
+    def parse_rate(self) -> float:   return sum(self.parse_ok) / len(self.parse_ok) if self.parse_ok else 0
+    def median_ms(self)  -> float:
+        s = sorted(self.latencies_ms)
+        return s[len(s)//2] if s else 0
+
+client = openai.OpenAI()
+SYSTEM = 'Return JSON only: {"sentiment": "pos|neg|neu", "score": float, "keywords": [str]}'
+INPUTS = [
+    'The product quality is outstanding and delivery was fast.',
+    'Terrible experience, would not recommend to anyone.',
+    'Decent product, nothing special, does the job.',
+] * 5  # 15 samples total
+
+results = {'prompt_only': BenchResult('prompt_only')}
+for msg in INPUTS:
+    t0   = time.time()
+    resp = client.chat.completions.create(
+        model='gpt-4o-mini', temperature=0.0,
+        messages=[{'role': 'system', 'content': SYSTEM},
+                  {'role': 'user',   'content': msg}],
+    )
+    lat = (time.time() - t0) * 1000
+    raw = resp.choices[0].message.content
+    try:    json.loads(raw); results['prompt_only'].parse_ok.append(True)
+    except: results['prompt_only'].parse_ok.append(False)
+    results['prompt_only'].latencies_ms.append(lat)
+
+for method, br in results.items():
+    print(f'{method:20s}: parse_rate={br.parse_rate():.0%}  median_lat={br.median_ms():.0f}ms')
+```
+
+| Method | Parse success rate | Latency overhead | Supports nesting | Requires special model |
+| --- | --- | --- | --- | --- |
+| Prompt only | 80–90% | None | Yes, degrades with depth | No — any instruction-tuned model |
+| Few-shot format examples | 90–95% | None (prompt tokens) | Yes, with example coverage | No — any instruction-tuned model |
+| Function calling | 97–99% | ~5% (schema validation) | Yes — full JSON Schema support | Yes — OpenAI/Anthropic API required |
+| Constrained decoding | 100% syntactic | 5–30% (FSM overhead) | Yes — grammar covers any JSON | Yes — self-hosted or compatible inference server |
+| Instructor + retry | 98–99.9% | 5–15% (retry path cost) | Yes — Pydantic handles arbitrary nesting | No — any OpenAI-compatible endpoint |
+
+## Key Takeaways
+
+> **JSON Output from Prompt-Only LLMs Fails 5–20% of the Time**: JSON output from prompt-only LLMs fails 5–20% of the time due to invalid escaping, trailing commas, or truncation — always implement a retry/repair loop or use function calling for production structured output.
+
+- Prompt-only JSON extraction achieves 80–90% parse rate for simple schemas — always supplement with a fallback extraction or retry loop for production use.
+- Function calling raises parse success to 97–99% and eliminates markdown fences and prose wrappers by design — use it for all OpenAI/Anthropic deployments.
+- Constrained decoding (outlines, llama.cpp GBNF) provides 100% syntactic validity for self-hosted models at 5–30% latency overhead.
+- Instructor + Pydantic adds semantic validation on top of any method and self-corrects via conversation-history retry, achieving near-100% end-to-end validity.
+- Semantic validity requires application-level validators — function calling and constrained decoding guarantee syntax, not correct field values.
+- Benchmark parse rate, semantic validity, latency, and cost-per-valid-response together — parse rate alone does not measure whether values satisfy business logic.
+- At 10,000 requests/day, a 2% failure rate produces 200 failed parses requiring intervention; invest in higher-reliability methods before scaling.
+
+---
+
