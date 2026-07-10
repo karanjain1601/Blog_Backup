@@ -12,3 +12,15 @@
 | [Understanding Transformers](notes/ai-ml/understanding-transformers.md) | published | ai-ml | 2026-07-09 |
 | [Building a Second Brain](notes/productivity/building-a-second-brain.md) | evergreen | productivity | 2026-07-09 |
 | [Raw Thoughts on AI Agents](notes/_uncategorized/raw-thoughts-on-ai-agents.md) | draft | — | 2026-07-09 |
+
+## GitHub Pages deployment
+
+A workflow in [.github/workflows/deploy-pages.yml](.github/workflows/deploy-pages.yml) converts the markdown notes into static HTML and publishes the generated site from the gh-pages branch.
+
+To enable GitHub Pages for the repository:
+
+1. Open the repository Settings → Pages.
+2. Choose Deploy from a branch.
+3. Select the gh-pages branch and the / (root) folder.
+
+The build step runs automatically on pushes to main and can also be triggered manually from the Actions tab.
