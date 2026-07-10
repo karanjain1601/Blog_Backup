@@ -1,0 +1,124 @@
+---
+title: "LLaVA: Large Language and Vision Assistant via Instruction Tuning"
+slug: "llava-instruction-tuning"
+description: ""
+tags: ["llava", "instruction-tuning", "multimodal", "llm", "visual-qa"]
+topic: ""
+status: ""
+updated: ""
+blocks_json: "W3sidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6Ik92ZXJ2aWV3In0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJMTGFWQSAoTGFyZ2UgTGFuZ3VhZ2UgYW5kIFZpc2lvbiBBc3Npc3RhbnQpIGNvbm5lY3RzIGEgZnJvemVuIENMSVAgdmlzdWFsIGVuY29kZXIgdG8gYSBsYXJnZSBsYW5ndWFnZSBtb2RlbCB1c2luZyBhIGxpZ2h0d2VpZ2h0IHByb2plY3Rpb24gbGF5ZXIuIFRyYWluZWQgb24gR1BULTQtZ2VuZXJhdGVkIHZpc3VhbCBpbnN0cnVjdGlvbiBkYXRhLCBMTGFWQSBhY2hpZXZlcyBzdHJvbmcgbXVsdGltb2RhbCBjb252ZXJzYXRpb24gY2FwYWJpbGl0aWVzIHdpdGggbWluaW1hbCBjb21wdXRlIGNvbXBhcmVkIHRvIHByb3ByaWV0YXJ5IHN5c3RlbXMuIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJUaGUgY29yZSBhcmNoaXRlY3R1cmUgaXMgc2ltcGxlOiBDTElQIGVuY29kZXMgdGhlIGltYWdlIGludG8gcGF0Y2gtbGV2ZWwgZmVhdHVyZXMsIGEgbGluZWFyIHByb2plY3Rpb24gbWFwcyB0aGVzZSB0byB0aGUgTExNXHUwMDI3cyB0b2tlbiBlbWJlZGRpbmcgc3BhY2UsIGFuZCB0aGUgTExNIGF1dG9yZWdyZXNzaXZlbHkgZ2VuZXJhdGVzIHRleHQuIFRoZSB2aXN1YWwgdG9rZW5zIGFyZSBwcmVwZW5kZWQgdG8gdGhlIHRleHQgcHJvbXB0LCBhbGxvd2luZyB0aGUgTExNIHRvIGF0dGVuZCB0byB2aXN1YWwgY29udGV4dCB0aHJvdWdob3V0IGdlbmVyYXRpb24uIn0seyJ0eXBlIjoiY2FsbG91dCIsInZhcmlhbnQiOiJ0aXAiLCJjb250ZW50IjoiTExhVkFcdTAwMjdzIHR3by1zdGFnZSB0cmFpbmluZyBpcyBrZXk6IHN0YWdlLTEgYWxpZ25zIHZpc3VhbCB0b2tlbnMgdG8gdGhlIExMTVx1MDAyN3MgZW1iZWRkaW5nIHNwYWNlIHVzaW5nIG9ubHkgY2FwdGlvbnMgKGNoZWFwKS4gU3RhZ2UtMiB0ZWFjaGVzIGluc3RydWN0aW9uLWZvbGxvd2luZyB1c2luZyByaWNoZXIgUUEgZGF0YS4gU2tpcHBpbmcgc3RhZ2UtMSBsZWFkcyB0byBwb29yIHZpc3VhbCBncm91bmRpbmcgaW4gc3RhZ2UtMi4ifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkxMYVZBIHdhcyBhbW9uZyB0aGUgZmlyc3Qgb3Blbi1zb3VyY2UgbW9kZWxzIHRvIGRlbW9uc3RyYXRlIGNvbXBldGl0aXZlIG11bHRpbW9kYWwgaW5zdHJ1Y3Rpb24tZm9sbG93aW5nLiBVc2luZyBvbmx5IDE1MEsgR1BULTQtZ2VuZXJhdGVkIFFBIHBhaXJzIGZvciBpbnN0cnVjdGlvbiB0dW5pbmcsIGl0IGFjaGlldmVkIDg1LjElIHJlbGF0aXZlIHBlcmZvcm1hbmNlIGNvbXBhcmVkIHRvIEdQVC00ViBvbiB0aGUgTExhVkEgYmVuY2htYXJrIOKAlCBzaG93aW5nIGRhdGEgcXVhbGl0eSBtYXR0ZXJzIG1vcmUgdGhhbiBxdWFudGl0eS4ifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJWaXN1YWwgSW5zdHJ1Y3Rpb24gVHVuaW5nIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJWaXN1YWwgaW5zdHJ1Y3Rpb24gdHVuaW5nIGFkYXB0cyBsYW5ndWFnZSBtb2RlbCBpbnN0cnVjdGlvbi1mb2xsb3dpbmcgdG8gdGhlIG11bHRpbW9kYWwgc2V0dGluZy4gVGhlIHRyYWluaW5nIGRhdGEgY29uc2lzdHMgb2YgaW1hZ2UtcXVlc3Rpb24tYW5zd2VyIHRyaXBsZXRzIHdoZXJlIHRoZSBMTE0gaXMgdHJhaW5lZCB0byBwcm9kdWNlIHRoZSBjb3JyZWN0IGFuc3dlciBnaXZlbiB0aGUgaW1hZ2UgY29udGV4dCBhbmQgYSBuYXR1cmFsIGxhbmd1YWdlIHF1ZXN0aW9uLCB1c2luZyBzdGFuZGFyZCBuZXh0LXRva2VuIHByZWRpY3Rpb24gbG9zcy4ifSx7InR5cGUiOiJjb2RlIiwibGFuZ3VhZ2UiOiJweXRob24iLCJjb250ZW50IjoiZGVmIGxsYXZhX2ZvcndhcmQoaW1hZ2UsIGlucHV0X2lkcywgYXR0ZW50aW9uX21hc2ssIG1vZGVsKTpcbiAgICAjIEVuY29kZSBpbWFnZSB3aXRoIGZyb3plbiBDTElQXG4gICAgaW1hZ2VfZmVhdHVyZXMgPSBtb2RlbC52aXNpb25fZW5jb2RlcihpbWFnZSkgICMgKEIsIE5fcGF0Y2hlcywgRF9jbGlwKVxuICAgICMgUHJvamVjdCB0byBMTE0gZW1iZWRkaW5nIHNwYWNlXG4gICAgdmlzdWFsX3Rva2VucyA9IG1vZGVsLnByb2plY3Rpb24oaW1hZ2VfZmVhdHVyZXMpICAjIChCLCBOX3BhdGNoZXMsIERfbGxtKVxuICAgICMgR2V0IHRleHQgZW1iZWRkaW5nc1xuICAgIHRleHRfZW1iZWRzID0gbW9kZWwubGxtLmdldF9pbnB1dF9lbWJlZGRpbmdzKCkoaW5wdXRfaWRzKVxuICAgICMgQ29uY2F0ZW5hdGU6IFt2aXN1YWwgfCB0ZXh0XVxuICAgIGlucHV0c19lbWJlZHMgPSB0b3JjaC5jYXQoW3Zpc3VhbF90b2tlbnMsIHRleHRfZW1iZWRzXSwgZGltPTEpXG4gICAgIyBGb3J3YXJkIHRocm91Z2ggTExNXG4gICAgb3V0cHV0cyA9IG1vZGVsLmxsbShpbnB1dHNfZW1iZWRzPWlucHV0c19lbWJlZHMsXG4gICAgICAgICAgICAgICAgICAgICAgICBhdHRlbnRpb25fbWFzaz1hdHRlbnRpb25fbWFzaylcbiAgICByZXR1cm4gb3V0cHV0cy5sb2dpdHMifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IlRyYWluaW5nIGRhdGEgd2FzIGdlbmVyYXRlZCBieSBwcm9tcHRpbmcgR1BULTQgd2l0aCBpbWFnZSBjYXB0aW9ucyBhbmQgYm91bmRpbmcgYm94IGFubm90YXRpb25zIGZyb20gQ09DTywgYXNraW5nIGl0IHRvIHByb2R1Y2UgZGl2ZXJzZSBpbnN0cnVjdGlvbi1yZXNwb25zZSBwYWlyczogY29udmVyc2F0aW9ucywgZGV0YWlsZWQgZGVzY3JpcHRpb25zLCBhbmQgY29tcGxleCByZWFzb25pbmcgdGFza3MuIFRoaXMgcGlwZWxpbmUgY29udmVydHMgZXhpc3RpbmcgYW5ub3RhdGlvbnMgaW50byByaWNoIGluc3RydWN0aW9uIGRhdGEgd2l0aG91dCBodW1hbiBsYWJlbGVycy4ifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJQcm9qZWN0aW9uIExheWVyIGFuZCBGZWF0dXJlIEFsaWdubWVudCJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiVGhlIHByb2plY3Rpb24gbGF5ZXIgYnJpZGdlcyB0aGUgQ0xJUCBlbWJlZGRpbmcgc3BhY2UgKEQ9NzY4IGZvciBWaVQtTC8xNCkgYW5kIHRoZSBMTE0gZW1iZWRkaW5nIHNwYWNlIChEPTQwOTYgZm9yIExMYU1BLTEzQikuIFRoZSBvcmlnaW5hbCBMTGFWQSB1c2VzIGEgc2luZ2xlIGxpbmVhciBsYXllcjsgTExhVkEtMS41IHVwZ3JhZGVzIHRvIGEgdHdvLWxheWVyIE1MUCwgd2hpY2ggc3Vic3RhbnRpYWxseSBpbXByb3ZlcyBhbGlnbm1lbnQgcXVhbGl0eSBhbmQgZG93bnN0cmVhbSB0YXNrIHBlcmZvcm1hbmNlLiJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiQ0xJUCBWaVQtTC8xNCBwcm9kdWNlcyAyNTYgcGF0Y2ggdG9rZW5zIChmb3IgMjI0w5cyMjQgaW5wdXQgYXQgMTTDlzE0IHBhdGNoZXMpLiBFYWNoIHRva2VuIGlzIHByb2plY3RlZCB0byB0aGUgTExNIGRpbWVuc2lvbiBpbmRlcGVuZGVudGx5LiBUaGVzZSAyNTYgdmlzdWFsIHRva2VucyBpbmNyZWFzZSBzZXF1ZW5jZSBsZW5ndGggYnkgMjU2IHRva2VucyBwZXIgaW1hZ2UsIHdoaWNoIGhhcyBtZWFuaW5nZnVsIGltcGFjdHMgb24gdHJhaW5pbmcgYW5kIGluZmVyZW5jZSBtZW1vcnkgYW5kIHNwZWVkLiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IlR3by1TdGFnZSBUcmFpbmluZyJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiU3RhZ2UtMSBwcmV0cmFpbmluZyBmcmVlemVzIGJvdGggQ0xJUCBhbmQgdGhlIExMTSwgdHJhaW5pbmcgb25seSB0aGUgcHJvamVjdGlvbiBsYXllciBvbiA1NThLIGltYWdlLWNhcHRpb24gcGFpcnMgZnJvbSBDQzNNIChmaWx0ZXJlZCkuIFRoZSBtb2RlbCBsZWFybnMgYSBiYXNpYyBtYXBwaW5nIGZyb20gdmlzdWFsIHBhdGNoIGZlYXR1cmVzIHRvIExMTSB0b2tlbiBzcGFjZS4gVGhpcyBzdGFnZSB0YWtlcyByb3VnaGx5IDQgaG91cnMgb24gOMOXIEExMDAgR1BVcyBhbmQgcmVxdWlyZXMgbm8gaW5zdHJ1Y3Rpb24gZGF0YS4ifSx7InR5cGUiOiJjb2RlIiwibGFuZ3VhZ2UiOiJweXRob24iLCJjb250ZW50IjoiIyBTdGFnZS0xOiBGZWF0dXJlIGFsaWdubWVudCBwcmV0cmFpbmluZ1xuZGVmIHN0YWdlMV9zdGVwKGJhdGNoLCBtb2RlbCwgb3B0aW1pemVyKTpcbiAgICBpbWFnZXMsIGNhcHRpb25zLCBjYXBfaW5wdXRfaWRzLCBjYXBfbGFiZWxzID0gYmF0Y2hcbiAgICAjIE9ubHkgcHJvamVjdGlvbiBpcyB0cmFpbmFibGVcbiAgICBtb2RlbC52aXNpb25fZW5jb2Rlci5yZXF1aXJlc19ncmFkXyhGYWxzZSlcbiAgICBtb2RlbC5sbG0ucmVxdWlyZXNfZ3JhZF8oRmFsc2UpXG4gICAgbW9kZWwucHJvamVjdGlvbi5yZXF1aXJlc19ncmFkXyhUcnVlKVxuICAgIGxvZ2l0cyA9IGxsYXZhX2ZvcndhcmQoaW1hZ2VzLCBjYXBfaW5wdXRfaWRzLCBtb2RlbClcbiAgICAjIE9ubHkgc3VwZXJ2aXNlIGNhcHRpb24gdG9rZW5zLCBub3QgdmlzdWFsIHByZWZpeFxuICAgIGxvc3MgPSBGLmNyb3NzX2VudHJvcHkobG9naXRzWzosIDI1NjosIDpdLnJlc2hhcGUoLTEsIGxvZ2l0cy5zaXplKC0xKSksXG4gICAgICAgICAgICAgICAgICAgICAgICAgICBjYXBfbGFiZWxzLnJlc2hhcGUoLTEpLCBpZ25vcmVfaW5kZXg9LTEwMClcbiAgICBvcHRpbWl6ZXIuemVyb19ncmFkKCk7IGxvc3MuYmFja3dhcmQoKTsgb3B0aW1pemVyLnN0ZXAoKVxuICAgIHJldHVybiBsb3NzLml0ZW0oKSJ9LHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiIjIFN0YWdlLTI6IEluc3RydWN0aW9uIGZpbmUtdHVuaW5nXG5kZWYgc3RhZ2UyX3N0ZXAoYmF0Y2gsIG1vZGVsLCBvcHRpbWl6ZXIpOlxuICAgIGltYWdlcywgaW5zdF9pZHMsIGluc3RfbGFiZWxzID0gYmF0Y2hcbiAgICAjIFVuZnJlZXplIExMTTsgQ0xJUCBzdGF5cyBmcm96ZW5cbiAgICBtb2RlbC52aXNpb25fZW5jb2Rlci5yZXF1aXJlc19ncmFkXyhGYWxzZSlcbiAgICBtb2RlbC5sbG0ucmVxdWlyZXNfZ3JhZF8oVHJ1ZSkgICAjIG9yIExvUkEgYWRhcHRlcnNcbiAgICBtb2RlbC5wcm9qZWN0aW9uLnJlcXVpcmVzX2dyYWRfKFRydWUpXG4gICAgbG9naXRzID0gbGxhdmFfZm9yd2FyZChpbWFnZXMsIGluc3RfaWRzLCBtb2RlbClcbiAgICAjIFN1cGVydmlzZSBvbiBhc3Npc3RhbnQgcmVzcG9uc2UgdG9rZW5zIG9ubHlcbiAgICBsb3NzID0gRi5jcm9zc19lbnRyb3B5KGxvZ2l0cy5yZXNoYXBlKC0xLCBsb2dpdHMuc2l6ZSgtMSkpLFxuICAgICAgICAgICAgICAgICAgICAgICAgICAgaW5zdF9sYWJlbHMucmVzaGFwZSgtMSksIGlnbm9yZV9pbmRleD0tMTAwKVxuICAgIG9wdGltaXplci56ZXJvX2dyYWQoKTsgbG9zcy5iYWNrd2FyZCgpOyBvcHRpbWl6ZXIuc3RlcCgpXG4gICAgcmV0dXJuIGxvc3MuaXRlbSgpIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJTdGFnZS0yIGluc3RydWN0aW9uIHR1bmluZyB1bmZyZWV6ZXMgdGhlIExMTSBhbmQgdHJhaW5zIG9uIDY2NUsgbWl4ZWQgdmlzdWFsIGluc3RydWN0aW9uIGRhdGE6IExMYVZBLUluc3RydWN0LTE1MEssIFZRQXYyLCBHUUEsIE9DUi1WUUEsIGFuZCBUZXh0Q2Fwcy4gVHJhaW5pbmcgdXNlcyBhIGNvc2luZSBsZWFybmluZyByYXRlIHNjaGVkdWxlIHdpdGggYSBzaG9ydCB3YXJtdXAuIExvUkEgcmVkdWNlcyBHUFUgbWVtb3J5IGZyb20gfjgwR0IgdG8gfjI0R0IgcGVyIGRldmljZS4ifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJMTGFWQS0xLjUgYW5kIEJleW9uZCJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiTExhVkEtMS41IGludHJvZHVjZWQgdGhyZWUga2V5IGNoYW5nZXM6ICgxKSBNTFAgcHJvamVjdGlvbiBpbnN0ZWFkIG9mIGxpbmVhciwgKDIpIGFjYWRlbWljIHRhc2sgZGF0YSBtaXhlZCBpbnRvIHN0YWdlLTIsIGFuZCAoMykgaGlnaGVyLXJlc29sdXRpb24gaW5wdXQgKDMzNsOXMzM2IHZpYSBDTElQIFZpVC1MLzE0QDMzNnB4KS4gVGhlc2UgY2hhbmdlcyBpbXByb3ZlZCBWUUF2MiBmcm9tIDc4LjUlIHRvIDgwLjAlIGFuZCBNTUJlbmNoIGZyb20gNjQuMyUgdG8gNzYuMyUgZm9yIHRoZSAxM0IgbW9kZWwuIn0seyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6ImZyb20gdHJhbnNmb3JtZXJzIGltcG9ydCBMbGF2YU5leHRQcm9jZXNzb3IsIExsYXZhTmV4dEZvckNvbmRpdGlvbmFsR2VuZXJhdGlvblxuZnJvbSBQSUwgaW1wb3J0IEltYWdlXG5pbXBvcnQgcmVxdWVzdHNcblxubW9kZWwgPSBMbGF2YU5leHRGb3JDb25kaXRpb25hbEdlbmVyYXRpb24uZnJvbV9wcmV0cmFpbmVkKFxuICAgIFwibGxhdmEtaGYvbGxhdmEtdjEuNi1taXN0cmFsLTdiLWhmXCIsIHRvcmNoX2R0eXBlPVwiYXV0b1wiLCBkZXZpY2VfbWFwPVwiYXV0b1wiKVxucHJvY2Vzc29yID0gTGxhdmFOZXh0UHJvY2Vzc29yLmZyb21fcHJldHJhaW5lZChcImxsYXZhLWhmL2xsYXZhLXYxLjYtbWlzdHJhbC03Yi1oZlwiKVxuXG5pbWFnZSA9IEltYWdlLm9wZW4ocmVxdWVzdHMuZ2V0KFwiaHR0cHM6Ly9leGFtcGxlLmNvbS9pbWcuanBnXCIsIHN0cmVhbT1UcnVlKS5yYXcpXG5wcm9tcHQgPSBcIltJTlNUXSBcdTAwM2NpbWFnZVx1MDAzZVxcbkRlc2NyaWJlIHRoaXMgaW1hZ2UgaW4gZGV0YWlsLiBbL0lOU1RdXCJcbmlucHV0cyA9IHByb2Nlc3Nvcihwcm9tcHQsIGltYWdlLCByZXR1cm5fdGVuc29ycz1cInB0XCIpLnRvKG1vZGVsLmRldmljZSlcbm91dHB1dCA9IG1vZGVsLmdlbmVyYXRlKCoqaW5wdXRzLCBtYXhfbmV3X3Rva2Vucz0yNTYpXG5wcmludChwcm9jZXNzb3IuZGVjb2RlKG91dHB1dFswXSwgc2tpcF9zcGVjaWFsX3Rva2Vucz1UcnVlKSkifSx7InR5cGUiOiJ0YWJsZSIsImhlYWRlcnMiOlsiTW9kZWwiLCJWaXN1YWwgRW5jb2RlciIsIkxMTSBTaXplIiwiVlFBdjIgJSIsIk1NQmVuY2ggJSIsIlRyYWluaW5nIERhdGEiXSwicm93cyI6W1siTExhVkEtMS4wIiwiQ0xJUCBWaVQtTC8xNCIsIkxMYU1BLTEzQiIsIjc4LjUiLCI2NC4zIiwiNjY1SyJdLFsiTExhVkEtMS41IDdCIiwiQ0xJUCBWaVQtTC8xNEAzMzYiLCJWaWN1bmEtN0IiLCI3OC41IiwiNjQuMyIsIjY2NUsgbWl4Il0sWyJMTGFWQS0xLjUgMTNCIiwiQ0xJUCBWaVQtTC8xNEAzMzYiLCJWaWN1bmEtMTNCIiwiODAuMCIsIjc2LjMiLCI2NjVLIG1peCJdLFsiTExhVkEtTmVYVCIsIkNMSVAgVmlULUwvMTRAMzM2IiwiTWlzdHJhbC03QiIsIjgxLjgiLCI3Mi44IiwiMS4yTSBtaXgiXSxbIkluc3RydWN0QkxJUCIsIlZpVC1HLzE0IEVWQSIsIlZpY3VuYS0xM0IiLCI3OC45IiwiMzYuMCIsIjE2IGRhdGFzZXRzIl1dfSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJLZXkgVGFrZWF3YXlzIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJMTGFWQSBkZW1vbnN0cmF0ZWQgdGhhdCBjb25uZWN0aW5nIHByZXRyYWluZWQgdmlzaW9uIGFuZCBsYW5ndWFnZSBtb2RlbHMgd2l0aCBhIG1pbmltYWwgcHJvamVjdGlvbiBsYXllciBhbmQgaGlnaC1xdWFsaXR5IGluc3RydWN0aW9uIGRhdGEgaXMgc3VmZmljaWVudCBmb3Igc3Ryb25nIG11bHRpbW9kYWwgcGVyZm9ybWFuY2UuIFRoZSBhcmNoaXRlY3R1cmVcdTAwMjdzIHNpbXBsaWNpdHkgaXMgYSBmZWF0dXJlOiBlYWNoIGNvbXBvbmVudCBjYW4gYmUgdXBncmFkZWQgaW5kZXBlbmRlbnRseSBhcyBiZXR0ZXIgYmFzZSBtb2RlbHMgZW1lcmdlLiJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiVGhlIEdQVC00LWdlbmVyYXRlZCBpbnN0cnVjdGlvbiBkYXRhIHBpcGVsaW5lIGlzIHJlcHJvZHVjaWJsZSBhbmQgc2NhbGFibGUuIEJ5IHRyZWF0aW5nIGltYWdlIGFubm90YXRpb25zIGFzIGNvbnRleHQgZm9yIEdQVC00IHRvIGdlbmVyYXRlIGRpdmVyc2UgcXVlc3Rpb25zIGFuZCBhbnN3ZXJzLCBMTGFWQSBzaWRlc3RlcHMgdGhlIGV4cGVuc2l2ZSBodW1hbiBhbm5vdGF0aW9uIGJvdHRsZW5lY2sgd2hpbGUgcHJvZHVjaW5nIHJpY2hlciB0cmFpbmluZyBzaWduYWwgdGhhbiBzaW1wbGUgY2FwdGlvbiBwYWlycy4ifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkxMYVZBLU5lWFQgYW5kIHN1YnNlcXVlbnQgdmFyaWFudHMgYWRkcmVzcyB0aGUgcmVzb2x1dGlvbiBsaW1pdGF0aW9uIGJ5IHNwbGl0dGluZyBoaWdoLXJlc29sdXRpb24gaW1hZ2VzIGludG8gdGlsZXMsIGVuY29kaW5nIGVhY2ggc2VwYXJhdGVseSwgYW5kIGNvbmNhdGVuYXRpbmcgcGF0Y2ggZmVhdHVyZXMuIFRoaXMgZW5hYmxlcyByZWFkaW5nIGZpbmUgdGV4dCBpbiBkb2N1bWVudHMgYW5kIHVuZGVyc3RhbmRpbmcgZGVuc2UgdmlzdWFsIHNjZW5lcyB3aXRob3V0IHJldHJhaW5pbmcgdGhlIENMSVAgZW5jb2Rlci4ifV0="
+---
+# LLaVA: Large Language and Vision Assistant via Instruction Tuning
+
+## Overview
+
+LLaVA (Large Language and Vision Assistant) connects a frozen CLIP visual encoder to a large language model using a lightweight projection layer. Trained on GPT-4-generated visual instruction data, LLaVA achieves strong multimodal conversation capabilities with minimal compute compared to proprietary systems.
+
+The core architecture is simple: CLIP encodes the image into patch-level features, a linear projection maps these to the LLM's token embedding space, and the LLM autoregressively generates text. The visual tokens are prepended to the text prompt, allowing the LLM to attend to visual context throughout generation.
+
+> **tip**: LLaVA's two-stage training is key: stage-1 aligns visual tokens to the LLM's embedding space using only captions (cheap). Stage-2 teaches instruction-following using richer QA data. Skipping stage-1 leads to poor visual grounding in stage-2.
+
+LLaVA was among the first open-source models to demonstrate competitive multimodal instruction-following. Using only 150K GPT-4-generated QA pairs for instruction tuning, it achieved 85.1% relative performance compared to GPT-4V on the LLaVA benchmark — showing data quality matters more than quantity.
+
+## Visual Instruction Tuning
+
+Visual instruction tuning adapts language model instruction-following to the multimodal setting. The training data consists of image-question-answer triplets where the LLM is trained to produce the correct answer given the image context and a natural language question, using standard next-token prediction loss.
+
+```python
+def llava_forward(image, input_ids, attention_mask, model):
+    # Encode image with frozen CLIP
+    image_features = model.vision_encoder(image)  # (B, N_patches, D_clip)
+    # Project to LLM embedding space
+    visual_tokens = model.projection(image_features)  # (B, N_patches, D_llm)
+    # Get text embeddings
+    text_embeds = model.llm.get_input_embeddings()(input_ids)
+    # Concatenate: [visual | text]
+    inputs_embeds = torch.cat([visual_tokens, text_embeds], dim=1)
+    # Forward through LLM
+    outputs = model.llm(inputs_embeds=inputs_embeds,
+                        attention_mask=attention_mask)
+    return outputs.logits
+```
+
+Training data was generated by prompting GPT-4 with image captions and bounding box annotations from COCO, asking it to produce diverse instruction-response pairs: conversations, detailed descriptions, and complex reasoning tasks. This pipeline converts existing annotations into rich instruction data without human labelers.
+
+## Projection Layer and Feature Alignment
+
+The projection layer bridges the CLIP embedding space (D=768 for ViT-L/14) and the LLM embedding space (D=4096 for LLaMA-13B). The original LLaVA uses a single linear layer; LLaVA-1.5 upgrades to a two-layer MLP, which substantially improves alignment quality and downstream task performance.
+
+CLIP ViT-L/14 produces 256 patch tokens (for 224×224 input at 14×14 patches). Each token is projected to the LLM dimension independently. These 256 visual tokens increase sequence length by 256 tokens per image, which has meaningful impacts on training and inference memory and speed.
+
+## Two-Stage Training
+
+Stage-1 pretraining freezes both CLIP and the LLM, training only the projection layer on 558K image-caption pairs from CC3M (filtered). The model learns a basic mapping from visual patch features to LLM token space. This stage takes roughly 4 hours on 8× A100 GPUs and requires no instruction data.
+
+```python
+# Stage-1: Feature alignment pretraining
+def stage1_step(batch, model, optimizer):
+    images, captions, cap_input_ids, cap_labels = batch
+    # Only projection is trainable
+    model.vision_encoder.requires_grad_(False)
+    model.llm.requires_grad_(False)
+    model.projection.requires_grad_(True)
+    logits = llava_forward(images, cap_input_ids, model)
+    # Only supervise caption tokens, not visual prefix
+    loss = F.cross_entropy(logits[:, 256:, :].reshape(-1, logits.size(-1)),
+                           cap_labels.reshape(-1), ignore_index=-100)
+    optimizer.zero_grad(); loss.backward(); optimizer.step()
+    return loss.item()
+```
+
+```python
+# Stage-2: Instruction fine-tuning
+def stage2_step(batch, model, optimizer):
+    images, inst_ids, inst_labels = batch
+    # Unfreeze LLM; CLIP stays frozen
+    model.vision_encoder.requires_grad_(False)
+    model.llm.requires_grad_(True)   # or LoRA adapters
+    model.projection.requires_grad_(True)
+    logits = llava_forward(images, inst_ids, model)
+    # Supervise on assistant response tokens only
+    loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)),
+                           inst_labels.reshape(-1), ignore_index=-100)
+    optimizer.zero_grad(); loss.backward(); optimizer.step()
+    return loss.item()
+```
+
+Stage-2 instruction tuning unfreezes the LLM and trains on 665K mixed visual instruction data: LLaVA-Instruct-150K, VQAv2, GQA, OCR-VQA, and TextCaps. Training uses a cosine learning rate schedule with a short warmup. LoRA reduces GPU memory from ~80GB to ~24GB per device.
+
+## LLaVA-1.5 and Beyond
+
+LLaVA-1.5 introduced three key changes: (1) MLP projection instead of linear, (2) academic task data mixed into stage-2, and (3) higher-resolution input (336×336 via CLIP ViT-L/14@336px). These changes improved VQAv2 from 78.5% to 80.0% and MMBench from 64.3% to 76.3% for the 13B model.
+
+```python
+from transformers import LlavaNextProcessor, LlavaNextForConditionalGeneration
+from PIL import Image
+import requests
+
+model = LlavaNextForConditionalGeneration.from_pretrained(
+    "llava-hf/llava-v1.6-mistral-7b-hf", torch_dtype="auto", device_map="auto")
+processor = LlavaNextProcessor.from_pretrained("llava-hf/llava-v1.6-mistral-7b-hf")
+
+image = Image.open(requests.get("https://example.com/img.jpg", stream=True).raw)
+prompt = "[INST] <image>\nDescribe this image in detail. [/INST]"
+inputs = processor(prompt, image, return_tensors="pt").to(model.device)
+output = model.generate(**inputs, max_new_tokens=256)
+print(processor.decode(output[0], skip_special_tokens=True))
+```
+
+| Model | Visual Encoder | LLM Size | VQAv2 % | MMBench % | Training Data |
+| --- | --- | --- | --- | --- | --- |
+| LLaVA-1.0 | CLIP ViT-L/14 | LLaMA-13B | 78.5 | 64.3 | 665K |
+| LLaVA-1.5 7B | CLIP ViT-L/14@336 | Vicuna-7B | 78.5 | 64.3 | 665K mix |
+| LLaVA-1.5 13B | CLIP ViT-L/14@336 | Vicuna-13B | 80.0 | 76.3 | 665K mix |
+| LLaVA-NeXT | CLIP ViT-L/14@336 | Mistral-7B | 81.8 | 72.8 | 1.2M mix |
+| InstructBLIP | ViT-G/14 EVA | Vicuna-13B | 78.9 | 36.0 | 16 datasets |
+
+## Key Takeaways
+
+LLaVA demonstrated that connecting pretrained vision and language models with a minimal projection layer and high-quality instruction data is sufficient for strong multimodal performance. The architecture's simplicity is a feature: each component can be upgraded independently as better base models emerge.
+
+The GPT-4-generated instruction data pipeline is reproducible and scalable. By treating image annotations as context for GPT-4 to generate diverse questions and answers, LLaVA sidesteps the expensive human annotation bottleneck while producing richer training signal than simple caption pairs.
+
+LLaVA-NeXT and subsequent variants address the resolution limitation by splitting high-resolution images into tiles, encoding each separately, and concatenating patch features. This enables reading fine text in documents and understanding dense visual scenes without retraining the CLIP encoder.
+

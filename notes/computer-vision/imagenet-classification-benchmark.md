@@ -1,0 +1,118 @@
+---
+title: "ImageNet Classification: Benchmark and Protocol"
+slug: "imagenet-classification-benchmark"
+description: "The ImageNet ILSVRC dataset — 1.28M training images, 1000 classes, top-1/top-5 evaluation, training protocol, and how accuracy milestones drove deep learning progress."
+tags: ["computer-vision"]
+topic: "computer-vision"
+status: "published"
+updated: "2026-07-10"
+blocks_json: "W3sidHlwZSI6ImgyIiwiY29udGVudCI6Ik92ZXJ2aWV3In0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJJbWFnZU5ldCBMYXJnZSBTY2FsZSBWaXN1YWwgUmVjb2duaXRpb24gQ2hhbGxlbmdlIChJTFNWUkMpIHJhbiBmcm9tIDIwMTAgdG8gMjAxNyBhbmQgZGVmaW5lZCBhIGdlbmVyYXRpb24gb2YgY29tcHV0ZXIgdmlzaW9uIHJlc2VhcmNoLiBUaGUgY2hhbGxlbmdlIGJlbmNobWFya2VkIG9iamVjdCBjbGFzc2lmaWNhdGlvbiBhbmQgZGV0ZWN0aW9uIG9uIGEgY3VyYXRlZCBzdWJzZXQgb2YgdGhlIEltYWdlTmV0IGRhdGFiYXNlLCBmb3JjaW5nIHRoZSBmaWVsZCB0byBkZXZlbG9wIHNjYWxhYmxlIGRlZXAgbGVhcm5pbmcgcGlwZWxpbmVzIHRoYXQgZ2VuZXJhbGl6ZSBhY3Jvc3MgZGl2ZXJzZSB2aXN1YWwgY2F0ZWdvcmllcy4ifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkFsZXhOZXRcdTAwMjdzIDIwMTIgdmljdG9yeSDigJQgY3V0dGluZyB0b3AtNSBlcnJvciBmcm9tIDI2JSB0byAxNSUg4oCUIG1hcmtlZCB0aGUgaW5mbGVjdGlvbiBwb2ludCB3aGVyZSBHUFVzIGFuZCBkZWVwIGNvbnZvbHV0aW9uYWwgbmV0d29ya3MgYmVjYW1lIHRoZSBkb21pbmFudCBwYXJhZGlnbS4gRWFjaCBzdWJzZXF1ZW50IHllYXIgYnJvdWdodCBuZXcgYXJjaGl0ZWN0dXJlczogVkdHIGRlZXBlbmVkIHRoZSBzdGFjaywgSW5jZXB0aW9uTmV0IHdpZGVuZWQgaXQsIFJlc05ldHMgaW50cm9kdWNlZCBza2lwIGNvbm5lY3Rpb25zLCBhbmQgdHJhbnNmb3JtZXJzIGV2ZW50dWFsbHkgbWF0Y2hlZCBvciBzdXJwYXNzZWQgQ05OIGJhc2VsaW5lcy4ifSx7InR5cGUiOiJoMiIsImNvbnRlbnQiOiJEYXRhc2V0IFN0YXRpc3RpY3MifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IklMU1ZSQy0yMDEyIOKAlCB0aGUgY2Fub25pY2FsIEltYWdlTmV0LTFLIHNwbGl0IOKAlCBjb250YWlucyAxLDI4MSwxNjcgdHJhaW5pbmcgaW1hZ2VzLCA1MCwwMDAgdmFsaWRhdGlvbiBpbWFnZXMsIGFuZCAxMDAsMDAwIHRlc3QgaW1hZ2VzIGRpc3RyaWJ1dGVkIGFjcm9zcyAxLDAwMCBXb3JkTmV0IHN5bnNldCBjbGFzc2VzLiBUaGUgY2xhc3MgaGllcmFyY2h5IHJhbmdlcyBmcm9tIGZpbmUtZ3JhaW5lZCBhbmltYWwgc3BlY2llcyB0byB2ZWhpY2xlcyBhbmQgaG91c2Vob2xkIG9iamVjdHMsIHdpdGggcm91Z2hseSA3MzIgdG8gMSwzMDAgaW1hZ2VzIHBlciB0cmFpbmluZyBjbGFzcy4ifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkltYWdlcyB2YXJ5IGluIHJlc29sdXRpb247IHRoZSBzdGFuZGFyZCBwcmVwcm9jZXNzaW5nIHBpcGVsaW5lIHJlc2l6ZXMgdGhlIHNob3J0ZXIgZWRnZSB0byAyNTYgcGl4ZWxzLCB0aGVuIHRha2VzIGEgMjI0eDIyNCBjZW50ZXIgY3JvcCBmb3IgdmFsaWRhdGlvbiBvciBhIHJhbmRvbSBjcm9wIGZvciB0cmFpbmluZy4gTWVhbi1hbmQtc3RkIG5vcm1hbGl6YXRpb24gdXNlcyBJbWFnZU5ldCBjaGFubmVsIHN0YXRpc3RpY3M6IG1lYW49WzAuNDg1LCAwLjQ1NiwgMC40MDZdLCBzdGQ9WzAuMjI5LCAwLjIyNCwgMC4yMjVdLCBlbmFibGluZyBmYWlyIGNyb3NzLXBhcGVyIGNvbXBhcmlzb24uIn0seyJ0eXBlIjoidGFibGUiLCJoZWFkZXJzIjpbIk1vZGVsIiwiVG9wLTEgJSIsIlRvcC01ICUiLCJQYXJhbXMgKE0pIiwiWWVhciJdLCJyb3dzIjpbWyJBbGV4TmV0IiwiNTYuNSIsIjc5LjEiLCI2MSIsIjIwMTIiXSxbIlZHRy0xNiIsIjcxLjYiLCI5MC40IiwiMTM4IiwiMjAxNCJdLFsiUmVzTmV0LTUwIiwiNzYuMCIsIjkyLjkiLCIyNSIsIjIwMTUiXSxbIkVmZmljaWVudE5ldC1CNCIsIjgzLjAiLCI5Ni4zIiwiMTkiLCIyMDE5Il0sWyJWaVQtTC8xNiIsIjg3LjgiLCI5OC4zIiwiMzA3IiwiMjAyMSJdLFsiQ29udk5lWHQtTCIsIjg3LjUiLCI5OC41IiwiMTk4IiwiMjAyMiJdXX0seyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6ImltcG9ydCB0b3JjaHZpc2lvbi5kYXRhc2V0cyBhcyBkc2V0c1xuaW1wb3J0IHRvcmNodmlzaW9uLnRyYW5zZm9ybXMgYXMgVFxuZnJvbSB0b3JjaC51dGlscy5kYXRhIGltcG9ydCBEYXRhTG9hZGVyXG5mcm9tIGNvbGxlY3Rpb25zIGltcG9ydCBDb3VudGVyXG5cbnRyYW5zZm9ybSA9IFQuQ29tcG9zZShbVC5SZXNpemUoMjU2KSwgVC5DZW50ZXJDcm9wKDIyNCksIFQuVG9UZW5zb3IoKV0pXG5kcyA9IGRzZXRzLkltYWdlTmV0KHJvb3Q9XCIvZGF0YS9pbWFnZW5ldFwiLCBzcGxpdD1cInRyYWluXCIsIHRyYW5zZm9ybT10cmFuc2Zvcm0pXG5sb2FkZXIgPSBEYXRhTG9hZGVyKGRzLCBiYXRjaF9zaXplPTY0LCBzaHVmZmxlPVRydWUsIG51bV93b3JrZXJzPTQpXG5cbnByaW50KGZcIkNsYXNzZXM6IHtsZW4oZHMuY2xhc3Nlcyl9XCIpXG5sYWJlbHMgPSBbZHMudGFyZ2V0c1tpXSBmb3IgaSBpbiByYW5nZSgxMDAwKV1cbmRpc3QgPSBDb3VudGVyKGxhYmVscylcbnByaW50KGZcIk1pbi9NYXggcGVyIGNsYXNzOiB7bWluKGRpc3QudmFsdWVzKCkpfS97bWF4KGRpc3QudmFsdWVzKCkpfVwiKSJ9LHsidHlwZSI6ImgyIiwiY29udGVudCI6IlRvcC0xIGFuZCBUb3AtNSBBY2N1cmFjeSJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiVG9wLTEgYWNjdXJhY3kgbWVhc3VyZXMgd2hldGhlciB0aGUgbW9kZWxcdTAwMjdzIHNpbmdsZSBoaWdoZXN0LWNvbmZpZGVuY2UgcHJlZGljdGlvbiBtYXRjaGVzIHRoZSBncm91bmQtdHJ1dGggbGFiZWwuIFRvcC01IGFjY3VyYWN5IGNoZWNrcyB3aGV0aGVyIHRoZSBjb3JyZWN0IGxhYmVsIGFwcGVhcnMgaW4gdGhlIGZpdmUgaGlnaGVzdC1zY29yaW5nIHByZWRpY3Rpb25zLiBCZWNhdXNlIG1hbnkgSW1hZ2VOZXQgY2xhc3NlcyBhcmUgdmlzdWFsbHkgc2ltaWxhciBvciBzZW1hbnRpY2FsbHkgb3ZlcmxhcHBpbmcsIHRvcC01IGhhcyBoaXN0b3JpY2FsbHkgYmVlbiB0aGUgcHJpbWFyeSBsZWFkZXJib2FyZCBtZXRyaWMuIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJIdW1hbi1sZXZlbCB0b3AtNSBlcnJvciBvbiBJbWFnZU5ldC0xSyBpcyBlc3RpbWF0ZWQgYXQgYXJvdW5kIDUlLCBhIHRocmVzaG9sZCBSZXNOZXRzIGNyb3NzZWQgaW4gMjAxNS4gVG9wLTEgYWNjdXJhY3kgY2xpbWJlZCBtb3JlIHNsb3dseSDigJQgZnJvbSBBbGV4TmV0XHUwMDI3cyA1Ni41JSB0byBtb2Rlcm4gVmlUIGFuZCBDb252TmVYdCBtb2RlbHMgYWJvdmUgODclIOKAlCBkcml2ZW4gYnkgaW1wcm92ZWQgcmVndWxhcml6YXRpb24sIGxhcmdlciBtb2RlbCBjYXBhY2l0eSwgYW5kIGJldHRlciB0cmFpbmluZyByZWNpcGVzIGluY2x1ZGluZyBtaXh1cCwgUmFuZEF1Z21lbnQsIGFuZCByZXBlYXRlZCBhdWdtZW50YXRpb24uIn0seyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6ImltcG9ydCB0b3JjaFxuXG5kZWYgYWNjdXJhY3kobG9naXRzLCB0YXJnZXRzLCB0b3BrPSgxLCA1KSk6XG4gICAgbWF4ayA9IG1heCh0b3BrKVxuICAgIGJhdGNoID0gdGFyZ2V0cy5zaXplKDApXG4gICAgXywgcHJlZCA9IGxvZ2l0cy50b3BrKG1heGssIGRpbT0xLCBsYXJnZXN0PVRydWUsIHNvcnRlZD1UcnVlKVxuICAgIHByZWQgPSBwcmVkLnQoKVxuICAgIGNvcnJlY3QgPSBwcmVkLmVxKHRhcmdldHMudmlldygxLCAtMSkuZXhwYW5kX2FzKHByZWQpKVxuICAgIHJlc3VsdHMgPSB7fVxuICAgIGZvciBrIGluIHRvcGs6XG4gICAgICAgIGNvcnJlY3RfayA9IGNvcnJlY3RbOmtdLnJlc2hhcGUoLTEpLmZsb2F0KCkuc3VtKClcbiAgICAgICAgcmVzdWx0c1trXSA9IChjb3JyZWN0X2sgLyBiYXRjaCkuaXRlbSgpXG4gICAgcmV0dXJuIHJlc3VsdHNcblxuIyBhY2MgPSBhY2N1cmFjeShsb2dpdHMsIHRhcmdldHMpOyBwcmludChhY2NbMV0sIGFjY1s1XSkifSx7InR5cGUiOiJoMiIsImNvbnRlbnQiOiJUcmFpbmluZyBQcm90b2NvbCJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiVGhlIHN0YW5kYXJkIEltYWdlTmV0IHRyYWluaW5nIHByb3RvY29sIHVzZXMgU0dEIHdpdGggbW9tZW50dW0gMC45LCBpbml0aWFsIGxlYXJuaW5nIHJhdGUgMC4xLCBhbmQgYSBjb3NpbmUgb3Igc3RlcCBkZWNheSBzY2hlZHVsZSBvdmVyIDkwIHRvIDMwMCBlcG9jaHMuIEJhdGNoIHNpemUgaXMgdHlwaWNhbGx5IDI1NiBwZXIgR1BVOyBtdWx0aS1HUFUgdHJhaW5pbmcgc2NhbGVzIHRoZSBsZWFybmluZyByYXRlIGxpbmVhcmx5IHdpdGggZWZmZWN0aXZlIGJhdGNoIHNpemUgZm9sbG93aW5nIHRoZSB3aWRlbHkgYWRvcHRlZCBsaW5lYXIgc2NhbGluZyBydWxlLiJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiRGF0YSBhdWdtZW50YXRpb24gaXMgY3JpdGljYWw6IHJhbmRvbSByZXNpemVkIGNyb3AgdG8gMjI0eDIyNCwgcmFuZG9tIGhvcml6b250YWwgZmxpcCwgY29sb3Igaml0dGVyLCBhbmQgb3B0aW9uYWwgUmFuZEF1Z21lbnQgb3IgQXV0b0F1Z21lbnQgcG9saWNpZXMgYXJlIHN0YW5kYXJkLiBXZWlnaHQgZGVjYXkgb2YgMWUtNCBhbmQgZHJvcG91dCBpbiBkZW5zZSBsYXllcnMgZ3VhcmQgYWdhaW5zdCBvdmVyZml0dGluZyBvbiB0aGUgMS4yOE0gdHJhaW5pbmcgZXhhbXBsZXMuIE1vZGVybiByZWNpcGVzIGFkZCBtaXh1cCAoYWxwaGE9MC44KSBhbmQgQ3V0TWl4IGZvciBhZGRpdGlvbmFsIHJlZ3VsYXJpemF0aW9uLiJ9LHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiJpbXBvcnQgdG9yY2hcbmltcG9ydCB0b3JjaC5ubi5mdW5jdGlvbmFsIGFzIEZcblxuZGVmIGxhYmVsX3Ntb290aF9sb3NzKGxvZ2l0cywgdGFyZ2V0cywgbnVtX2NsYXNzZXM9MTAwMCwgZXBzPTAuMSk6XG4gICAgXCJcIlwiQ3Jvc3MtZW50cm9weSB3aXRoIGxhYmVsIHNtb290aGluZyAoZXBzPTAuMSkuXCJcIlwiXG4gICAgbG9nX3Byb2JzID0gRi5sb2dfc29mdG1heChsb2dpdHMsIGRpbT0tMSlcbiAgICAjIEhhcmQgdGFyZ2V0cyAtXHUwMDNlIHNvZnQgdGFyZ2V0c1xuICAgIHNvZnQgPSB0b3JjaC5mdWxsX2xpa2UobG9nX3Byb2JzLCBlcHMgLyAobnVtX2NsYXNzZXMgLSAxKSlcbiAgICBzb2Z0LnNjYXR0ZXJfKDEsIHRhcmdldHMudW5zcXVlZXplKDEpLCAxLjAgLSBlcHMpXG4gICAgbG9zcyA9IC0oc29mdCAqIGxvZ19wcm9icykuc3VtKGRpbT0tMSkubWVhbigpXG4gICAgcmV0dXJuIGxvc3NcblxuIyBsb2dpdHM6IChCLCAxMDAwKSwgdGFyZ2V0czogKEIsKSBpbnRlZ2VyIGNsYXNzIGluZGljZXNcbiMgbG9zcyA9IGxhYmVsX3Ntb290aF9sb3NzKGxvZ2l0cywgdGFyZ2V0cykifSx7InR5cGUiOiJjb2RlIiwibGFuZ3VhZ2UiOiJweXRob24iLCJjb250ZW50IjoiaW1wb3J0IGNvcHksIHRvcmNoXG5cbmNsYXNzIE1vZGVsRU1BOlxuICAgIGRlZiBfX2luaXRfXyhzZWxmLCBtb2RlbCwgZGVjYXk9MC45OTk5KTpcbiAgICAgICAgc2VsZi5lbWEgPSBjb3B5LmRlZXBjb3B5KG1vZGVsKS5ldmFsKClcbiAgICAgICAgc2VsZi5kZWNheSA9IGRlY2F5XG5cbiAgICBAdG9yY2gubm9fZ3JhZCgpXG4gICAgZGVmIHVwZGF0ZShzZWxmLCBtb2RlbCk6XG4gICAgICAgICMgdGhldGFfZW1hIFx1MDAzYy0gZGVjYXkgKiB0aGV0YV9lbWEgKyAoMSAtIGRlY2F5KSAqIHRoZXRhXG4gICAgICAgIGZvciBlbWFfcCwgcCBpbiB6aXAoc2VsZi5lbWEucGFyYW1ldGVycygpLCBtb2RlbC5wYXJhbWV0ZXJzKCkpOlxuICAgICAgICAgICAgZW1hX3AuZGF0YS5tdWxfKHNlbGYuZGVjYXkpLmFkZF8ocC5kYXRhLCBhbHBoYT0xIC0gc2VsZi5kZWNheSlcblxuIyBDYWxsIGVtYS51cGRhdGUobW9kZWwpIGFmdGVyIGVhY2ggb3B0aW1pemVyIHN0ZXBcbiMgRXZhbHVhdGUgd2l0aCBlbWEuZW1hIGZvciBiZXR0ZXIgYWNjdXJhY3kifSx7InR5cGUiOiJoMiIsImNvbnRlbnQiOiJCZXlvbmQgSW1hZ2VOZXQtMUsifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkltYWdlTmV0LTFLIHRvcC0xIGFjY3VyYWN5IGhhcyBwbGF0ZWF1ZWQgbmVhciA5MCUsIG1ha2luZyBpdCBhIHBvb3IgZGlzY3JpbWluYXRvciBiZXR3ZWVuIHN0YXRlLW9mLXRoZS1hcnQgbW9kZWxzLiBIYXJkZXIgdmFyaWFudHMgZXhwb3NlIHJvYnVzdG5lc3MgZ2FwcyB0aGF0IHN0YW5kYXJkIGFjY3VyYWN5IGhpZGVzLiBJbWFnZU5ldC1BIGNvbnRhaW5zIG5hdHVyYWwgYWR2ZXJzYXJpYWwgZXhhbXBsZXMg4oCUIGltYWdlcyB3aGVyZSBSZXNOZXQtNTAgZmFpbHMgYnV0IGh1bWFucyBzdWNjZWVkIOKAlCB3aGlsZSBJbWFnZU5ldC1SIGNvdmVycyBhcnRpc3RpYyByZW5kaXRpb25zLCBza2V0Y2hlcywgYW5kIGNhcnRvb25zLiJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiT2JqZWN0TmV0IHRlc3RzIG91dC1vZi1kaXN0cmlidXRpb24gZ2VuZXJhbGl6YXRpb24gYnkgY29sbGVjdGluZyBpbWFnZXMgd2l0aCBjb250cm9sbGVkIHZpZXdwb2ludHMgYW5kIGJhY2tncm91bmRzIG5vdCBzZWVuIGR1cmluZyB0cmFpbmluZy4gSW1hZ2VOZXQtQyBiZW5jaG1hcmtzIGNvcnJ1cHRpb24gcm9idXN0bmVzcyBhY3Jvc3MgMTkgcGVydHVyYmF0aW9uIHR5cGVzIGF0IDUgc2V2ZXJpdHkgbGV2ZWxzLiBQZXJmb3JtYW5jZSBvbiB0aGVzZSB2YXJpYW50cywgcmF0aGVyIHRoYW4gY2xlYW4gSW1hZ2VOZXQtMUssIGlzIGluY3JlYXNpbmdseSB1c2VkIHRvIHJhbmsgbW9kZWxzIGluIHByb2R1Y3Rpb24tcmVhZGluZXNzIGFzc2Vzc21lbnRzLiJ9LHsidHlwZSI6ImNhbGxvdXQiLCJ2YXJpYW50IjoiaW5mbyIsImNvbnRlbnQiOiJUb3AtMSBvbiBJbWFnZU5ldC0xSyBpcyBuZWFyLXNhdHVyYXRlZCBhdCB+OTAlLiBNb2Rlcm4gYmVuY2htYXJrcyDigJQgSW1hZ2VOZXQtQSAoYWR2ZXJzYXJpYWwpLCBJbWFnZU5ldC1SIChyZW5kaXRpb25zKSwgT2JqZWN0TmV0IOKAlCBiZXR0ZXIgcmV2ZWFsIHJlYWwtd29ybGQgcm9idXN0bmVzcyBnYXBzLiJ9LHsidHlwZSI6ImgyIiwiY29udGVudCI6IktleSBUYWtlYXdheXMifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkltYWdlTmV0LTFLIGVzdGFibGlzaGVkIHRoZSBmaXJzdCByZXByb2R1Y2libGUgbGFyZ2Utc2NhbGUgYmVuY2htYXJrIGZvciB2aXN1YWwgcmVjb2duaXRpb24sIGNhdGFseXppbmcgdGhlIGRlZXAgbGVhcm5pbmcgZXJhLiBUaGUgdG9wLTEvdG9wLTUgcHJvdG9jb2wsIDIyNHgyMjQgY3JvcCBjb252ZW50aW9uLCBhbmQgY2hhbm5lbC1ub3JtYWxpemF0aW9uIHN0YXRpc3RpY3MgcmVtYWluIGVtYmVkZGVkIGluIHZpcnR1YWxseSBldmVyeSBwcmV0cmFpbmVkIHZpc2lvbiBtb2RlbCByZWxlYXNlZCB0b2RheSwgbWFraW5nIEltYWdlTmV0IG5vdCBqdXN0IGEgZGF0YXNldCBidXQgYSBkZSBmYWN0byBpbnRlcmZhY2Ugc3RhbmRhcmQuIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJNb2Rlcm4gdHJhaW5pbmcgcmVjaXBlcyDigJQgbGFiZWwgc21vb3RoaW5nLCBFTUEgZXZhbHVhdGlvbiwgbWl4dXAsIFJhbmRBdWdtZW50LCBjb3NpbmUgc2NoZWR1bGVzIOKAlCBjb2xsZWN0aXZlbHkgY29udHJpYnV0ZSAzLTUgcGVyY2VudGFnZSBwb2ludHMgYmV5b25kIHRoZSBhcmNoaXRlY3R1cmUgY2hhbmdlIGFsb25lLiBTZXBhcmF0aW5nIHJlY2lwZSBpbXByb3ZlbWVudHMgZnJvbSBhcmNoaXRlY3R1cmFsIGFkdmFuY2VzIGlzIGVzc2VudGlhbCB3aGVuIGludGVycHJldGluZyBiZW5jaG1hcmsgY2xhaW1zLCBhcyBhIHN0cm9uZyByZWNpcGUgb24gYW4gb2xkZXIgYXJjaGl0ZWN0dXJlIG9mdGVuIG91dHBlcmZvcm1zIGEgd2VhayByZWNpcGUgb24gYSBuZXdlciBvbmUuIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJUbyBtZWFuaW5nZnVsbHkgY29tcGFyZSBtb2RlbHMsIHJlcG9ydCBJbWFnZU5ldC0xSyB0b3AtMSBhbmQgdG9wLTUsIGJ1dCBzdXBwbGVtZW50IHdpdGggYXQgbGVhc3Qgb25lIHJvYnVzdG5lc3MgYmVuY2htYXJrIHN1Y2ggYXMgSW1hZ2VOZXQtQSBvciBJbWFnZU5ldC1DIG1DRS4gU3RhbmRhcmRpemUgb24gdGhlIHNhbWUgaW5wdXQgcmVzb2x1dGlvbiBhbmQgY3JvcCByYXRpby4gV2hlbiBmaW5lLXR1bmluZyBvbiBkb3duc3RyZWFtIHRhc2tzLCBJbWFnZU5ldCBwcmV0cmFpbmluZyByZW1haW5zIGEgc3Ryb25nIGRlZmF1bHQsIHRob3VnaCBzZWxmLXN1cGVydmlzZWQgYW5kIENMSVAtc3R5bGUgcHJldHJhaW5pbmcgaW5jcmVhc2luZ2x5IGNoYWxsZW5nZSBpdHMgZG9taW5hbmNlLiJ9XQ=="
+---
+# ImageNet Classification: Benchmark and Protocol
+
+ImageNet Large Scale Visual Recognition Challenge (ILSVRC) ran from 2010 to 2017 and defined a generation of computer vision research. The challenge benchmarked object classification and detection on a curated subset of the ImageNet database, forcing the field to develop scalable deep learning pipelines that generalize across diverse visual categories.
+
+AlexNet's 2012 victory — cutting top-5 error from 26% to 15% — marked the inflection point where GPUs and deep convolutional networks became the dominant paradigm. Each subsequent year brought new architectures: VGG deepened the stack, InceptionNet widened it, ResNets introduced skip connections, and transformers eventually matched or surpassed CNN baselines.
+
+ILSVRC-2012 — the canonical ImageNet-1K split — contains 1,281,167 training images, 50,000 validation images, and 100,000 test images distributed across 1,000 WordNet synset classes. The class hierarchy ranges from fine-grained animal species to vehicles and household objects, with roughly 732 to 1,300 images per training class.
+
+Images vary in resolution; the standard preprocessing pipeline resizes the shorter edge to 256 pixels, then takes a 224x224 center crop for validation or a random crop for training. Mean-and-std normalization uses ImageNet channel statistics: mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225], enabling fair cross-paper comparison.
+
+| Model | Top-1 % | Top-5 % | Params (M) | Year |
+| --- | --- | --- | --- | --- |
+| AlexNet | 56.5 | 79.1 | 61 | 2012 |
+| VGG-16 | 71.6 | 90.4 | 138 | 2014 |
+| ResNet-50 | 76.0 | 92.9 | 25 | 2015 |
+| EfficientNet-B4 | 83.0 | 96.3 | 19 | 2019 |
+| ViT-L/16 | 87.8 | 98.3 | 307 | 2021 |
+| ConvNeXt-L | 87.5 | 98.5 | 198 | 2022 |
+
+```python
+import torchvision.datasets as dsets
+import torchvision.transforms as T
+from torch.utils.data import DataLoader
+from collections import Counter
+
+transform = T.Compose([T.Resize(256), T.CenterCrop(224), T.ToTensor()])
+ds = dsets.ImageNet(root="/data/imagenet", split="train", transform=transform)
+loader = DataLoader(ds, batch_size=64, shuffle=True, num_workers=4)
+
+print(f"Classes: {len(ds.classes)}")
+labels = [ds.targets[i] for i in range(1000)]
+dist = Counter(labels)
+print(f"Min/Max per class: {min(dist.values())}/{max(dist.values())}")
+```
+
+Top-1 accuracy measures whether the model's single highest-confidence prediction matches the ground-truth label. Top-5 accuracy checks whether the correct label appears in the five highest-scoring predictions. Because many ImageNet classes are visually similar or semantically overlapping, top-5 has historically been the primary leaderboard metric.
+
+Human-level top-5 error on ImageNet-1K is estimated at around 5%, a threshold ResNets crossed in 2015. Top-1 accuracy climbed more slowly — from AlexNet's 56.5% to modern ViT and ConvNeXt models above 87% — driven by improved regularization, larger model capacity, and better training recipes including mixup, RandAugment, and repeated augmentation.
+
+```python
+import torch
+
+def accuracy(logits, targets, topk=(1, 5)):
+    maxk = max(topk)
+    batch = targets.size(0)
+    _, pred = logits.topk(maxk, dim=1, largest=True, sorted=True)
+    pred = pred.t()
+    correct = pred.eq(targets.view(1, -1).expand_as(pred))
+    results = {}
+    for k in topk:
+        correct_k = correct[:k].reshape(-1).float().sum()
+        results[k] = (correct_k / batch).item()
+    return results
+
+# acc = accuracy(logits, targets); print(acc[1], acc[5])
+```
+
+The standard ImageNet training protocol uses SGD with momentum 0.9, initial learning rate 0.1, and a cosine or step decay schedule over 90 to 300 epochs. Batch size is typically 256 per GPU; multi-GPU training scales the learning rate linearly with effective batch size following the widely adopted linear scaling rule.
+
+Data augmentation is critical: random resized crop to 224x224, random horizontal flip, color jitter, and optional RandAugment or AutoAugment policies are standard. Weight decay of 1e-4 and dropout in dense layers guard against overfitting on the 1.28M training examples. Modern recipes add mixup (alpha=0.8) and CutMix for additional regularization.
+
+```python
+import torch
+import torch.nn.functional as F
+
+def label_smooth_loss(logits, targets, num_classes=1000, eps=0.1):
+    """Cross-entropy with label smoothing (eps=0.1)."""
+    log_probs = F.log_softmax(logits, dim=-1)
+    # Hard targets -> soft targets
+    soft = torch.full_like(log_probs, eps / (num_classes - 1))
+    soft.scatter_(1, targets.unsqueeze(1), 1.0 - eps)
+    loss = -(soft * log_probs).sum(dim=-1).mean()
+    return loss
+
+# logits: (B, 1000), targets: (B,) integer class indices
+# loss = label_smooth_loss(logits, targets)
+```
+
+```python
+import copy, torch
+
+class ModelEMA:
+    def __init__(self, model, decay=0.9999):
+        self.ema = copy.deepcopy(model).eval()
+        self.decay = decay
+
+    @torch.no_grad()
+    def update(self, model):
+        # theta_ema <- decay * theta_ema + (1 - decay) * theta
+        for ema_p, p in zip(self.ema.parameters(), model.parameters()):
+            ema_p.data.mul_(self.decay).add_(p.data, alpha=1 - self.decay)
+
+# Call ema.update(model) after each optimizer step
+# Evaluate with ema.ema for better accuracy
+```
+
+ImageNet-1K top-1 accuracy has plateaued near 90%, making it a poor discriminator between state-of-the-art models. Harder variants expose robustness gaps that standard accuracy hides. ImageNet-A contains natural adversarial examples — images where ResNet-50 fails but humans succeed — while ImageNet-R covers artistic renditions, sketches, and cartoons.
+
+ObjectNet tests out-of-distribution generalization by collecting images with controlled viewpoints and backgrounds not seen during training. ImageNet-C benchmarks corruption robustness across 19 perturbation types at 5 severity levels. Performance on these variants, rather than clean ImageNet-1K, is increasingly used to rank models in production-readiness assessments.
+
+> **info**: Top-1 on ImageNet-1K is near-saturated at ~90%. Modern benchmarks — ImageNet-A (adversarial), ImageNet-R (renditions), ObjectNet — better reveal real-world robustness gaps.
+
+ImageNet-1K established the first reproducible large-scale benchmark for visual recognition, catalyzing the deep learning era. The top-1/top-5 protocol, 224x224 crop convention, and channel-normalization statistics remain embedded in virtually every pretrained vision model released today, making ImageNet not just a dataset but a de facto interface standard.
+
+Modern training recipes — label smoothing, EMA evaluation, mixup, RandAugment, cosine schedules — collectively contribute 3-5 percentage points beyond the architecture change alone. Separating recipe improvements from architectural advances is essential when interpreting benchmark claims, as a strong recipe on an older architecture often outperforms a weak recipe on a newer one.
+
+To meaningfully compare models, report ImageNet-1K top-1 and top-5, but supplement with at least one robustness benchmark such as ImageNet-A or ImageNet-C mCE. Standardize on the same input resolution and crop ratio. When fine-tuning on downstream tasks, ImageNet pretraining remains a strong default, though self-supervised and CLIP-style pretraining increasingly challenge its dominance.
+

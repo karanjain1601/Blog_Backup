@@ -1,0 +1,126 @@
+---
+title: "DenseNet: Densely Connected Convolutional Networks"
+slug: "densenet-dense-connectivity"
+description: "Dense connections where each layer receives feature maps from all preceding layers — feature reuse, reduced redundancy, improved gradient flow, and comparison to ResNet."
+tags: ["computer-vision"]
+topic: "computer-vision"
+status: "published"
+updated: "2026-07-10"
+blocks_json: "W3sidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6Ik92ZXJ2aWV3In0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJEZW5zZU5ldCwgaW50cm9kdWNlZCBieSBIdWFuZyBldCBhbC4gaW4gMjAxNywgZXN0YWJsaXNoZXMgZGVuc2UgY29ubmVjdGl2aXR5IHdoZXJlIGVhY2ggbGF5ZXIgcmVjZWl2ZXMgZmVhdHVyZSBtYXBzIGZyb20gYWxsIHByZWNlZGluZyBsYXllcnMuIEZvciBhbiBMLWxheWVyIG5ldHdvcmsgdGhpcyBjcmVhdGVzIEwoTCsxKS8yIGNvbm5lY3Rpb25zLiBVbmxpa2UgUmVzTmV0cyB0aGF0IGFkZCByZXNpZHVhbCBzaG9ydGN1dHMsIERlbnNlTmV0IGNvbmNhdGVuYXRlcyBmZWF0dXJlIG1hcHMsIHByZXNlcnZpbmcgYWxsIGxlYXJuZWQgcmVwcmVzZW50YXRpb25zIHRocm91Z2hvdXQgdGhlIG5ldHdvcmsuIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJUaGUga2V5IGluc2lnaHQgaXMgYWdncmVzc2l2ZSBmZWF0dXJlIHJldXNlOiBiZWNhdXNlIGFsbCBwcmV2aW91cyBmZWF0dXJlIG1hcHMgYXJlIGRpcmVjdGx5IGFjY2Vzc2libGUsIGluZGl2aWR1YWwgbGF5ZXJzIGNhbiBiZSBuYXJyb3dlciwgbGVhcm5pbmcgb25seSBpbmNyZW1lbnRhbCBpbXByb3ZlbWVudHMuIFRoaXMgZHJhbWF0aWNhbGx5IHJlZHVjZXMgdG90YWwgcGFyYW1ldGVyIGNvdW50IGNvbXBhcmVkIHRvIG5ldHdvcmtzIHRoYXQgbXVzdCByZWxlYXJuIHJlcHJlc2VudGF0aW9ucyBhdCBlYWNoIHN0YWdlLCB3aGlsZSBhbHNvIGNvbWJhdGluZyB2YW5pc2hpbmcgZ3JhZGllbnRzIHRocm91Z2hvdXQgdHJhaW5pbmcuIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiRGVuc2UgQmxvY2sgQXJjaGl0ZWN0dXJlIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJBIERlbnNlQmxvY2sgZ3JvdXBzIGxheWVycyB0aGF0IHNoYXJlIHRoZSBzYW1lIHNwYXRpYWwgcmVzb2x1dGlvbi4gV2l0aGluIHRoZSBibG9jaywgZWFjaCBEZW5zZUxheWVyIHJlY2VpdmVzIHRoZSBjb25jYXRlbmF0aW9uIG9mIGFsbCBwcmVjZWRpbmcgbGF5ZXIgb3V0cHV0cyBhcyBpbnB1dCDigJQgbm90IGp1c3QgdGhlIGltbWVkaWF0ZWx5IHByZXZpb3VzIGxheWVyLiBUaGUgaW5wdXQgdG8gbGF5ZXIgbCBpcyBbeDAsIHgxLCAuLi4sIHgobC0xKV0sIGEgY29uY2F0ZW5hdGlvbiBhY3Jvc3MgdGhlIGNoYW5uZWwgZGltZW5zaW9uIChkaW09MSBpbiBQeVRvcmNoKS4ifSx7InR5cGUiOiJjb2RlIiwibGFuZ3VhZ2UiOiJweXRob24iLCJjb250ZW50IjoiaW1wb3J0IHRvcmNoXG5pbXBvcnQgdG9yY2gubm4gYXMgbm5cblxuY2xhc3MgRGVuc2VMYXllcihubi5Nb2R1bGUpOlxuICAgIGRlZiBfX2luaXRfXyhzZWxmLCBpbl9jaGFubmVscywgZ3Jvd3RoX3JhdGUpOlxuICAgICAgICBzdXBlcigpLl9faW5pdF9fKClcbiAgICAgICAgc2VsZi5ibjEgPSBubi5CYXRjaE5vcm0yZChpbl9jaGFubmVscylcbiAgICAgICAgc2VsZi5jb252MSA9IG5uLkNvbnYyZChpbl9jaGFubmVscywgNCAqIGdyb3d0aF9yYXRlLCBrZXJuZWxfc2l6ZT0xLCBiaWFzPUZhbHNlKVxuICAgICAgICBzZWxmLmJuMiA9IG5uLkJhdGNoTm9ybTJkKDQgKiBncm93dGhfcmF0ZSlcbiAgICAgICAgc2VsZi5jb252MiA9IG5uLkNvbnYyZCg0ICogZ3Jvd3RoX3JhdGUsIGdyb3d0aF9yYXRlLCBrZXJuZWxfc2l6ZT0zLCBwYWRkaW5nPTEsIGJpYXM9RmFsc2UpXG5cbiAgICBkZWYgZm9yd2FyZChzZWxmLCBpbnB1dHMpOlxuICAgICAgICB4ID0gdG9yY2guY2F0KGlucHV0cywgZGltPTEpXG4gICAgICAgIHggPSBzZWxmLmNvbnYxKHRvcmNoLnJlbHUoc2VsZi5ibjEoeCkpKVxuICAgICAgICByZXR1cm4gc2VsZi5jb252Mih0b3JjaC5yZWx1KHNlbGYuYm4yKHgpKSkifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkVhY2ggRGVuc2VMYXllciBmb2xsb3dzIHRoZSBCTuKGklJlTFXihpJDb252McOXMeKGkkJO4oaSUmVMVeKGkkNvbnYzw5czIHBhdHRlcm4uIFRoZSBib3R0bGVuZWNrIENvbnYxw5cxIHJlZHVjZXMgY2hhbm5lbHMgdG8gNMOXZ3Jvd3RoX3JhdGUgYmVmb3JlIHRoZSAzw5czIGNvbnZvbHV0aW9uLiBUaGlzIGJvdHRsZW5lY2sgZGVzaWduIChEZW5zZU5ldC1CKSBjdXRzIGNvbXB1dGF0aW9uIHdoaWxlIG1haW50YWluaW5nIGV4cHJlc3NpdmVuZXNzLiBUaGUgb3V0cHV0IG9mIGVhY2ggbGF5ZXIgYWRkcyBleGFjdGx5IGdyb3d0aF9yYXRlIGNoYW5uZWxzIHRvIHRoZSBjb25jYXRlbmF0ZWQgZmVhdHVyZSBtYXAuIn0seyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6ImNsYXNzIERlbnNlQmxvY2sobm4uTW9kdWxlKTpcbiAgICBkZWYgX19pbml0X18oc2VsZiwgbnVtX2xheWVycywgaW5fY2hhbm5lbHMsIGdyb3d0aF9yYXRlKTpcbiAgICAgICAgc3VwZXIoKS5fX2luaXRfXygpXG4gICAgICAgIHNlbGYubGF5ZXJzID0gbm4uTW9kdWxlTGlzdCgpXG4gICAgICAgIGZvciBpIGluIHJhbmdlKG51bV9sYXllcnMpOlxuICAgICAgICAgICAgc2VsZi5sYXllcnMuYXBwZW5kKFxuICAgICAgICAgICAgICAgIERlbnNlTGF5ZXIoaW5fY2hhbm5lbHMgKyBpICogZ3Jvd3RoX3JhdGUsIGdyb3d0aF9yYXRlKVxuICAgICAgICAgICAgKVxuXG4gICAgZGVmIGZvcndhcmQoc2VsZiwgeCk6XG4gICAgICAgIGZlYXR1cmVzID0gW3hdXG4gICAgICAgIGZvciBsYXllciBpbiBzZWxmLmxheWVyczpcbiAgICAgICAgICAgIGZlYXR1cmVzLmFwcGVuZChsYXllcihmZWF0dXJlcykpXG4gICAgICAgIHJldHVybiB0b3JjaC5jYXQoZmVhdHVyZXMsIGRpbT0xKSJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiVGhlIERlbnNlQmxvY2sgc3RhY2tzIGsgRGVuc2VMYXllcnMuIEFmdGVyIGsgbGF5ZXJzIHN0YXJ0aW5nIGZyb20gaW5fY2hhbm5lbHMsIHRoZSBvdXRwdXQgaGFzIGluX2NoYW5uZWxzICsga8OXZ3Jvd3RoX3JhdGUgY2hhbm5lbHMuIEVhY2ggbmV3IGxheWVyIHJlY2VpdmVzIGFsbCBwcmlvciBmZWF0dXJlIG1hcHMgdmlhIGxpc3QgY29uY2F0ZW5hdGlvbiBiZWZvcmUgdGhlIGZvcndhcmQgcGFzcywgZW5hYmxpbmcgZ3JhZGllbnRzIHRvIGZsb3cgZGlyZWN0bHkgdG8gYWxsIGVhcmxpZXIgbGF5ZXJzIHdpdGhvdXQgYW55IHRyYW5zZm9ybWF0aW9uIG9yIGdhdGluZy4ifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJHcm93dGggUmF0ZSBhbmQgQ29uY2F0ZW5hdGlvbiJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiVGhlIGdyb3d0aCByYXRlIGsgaXMgYSBrZXkgaHlwZXJwYXJhbWV0ZXIgY29udHJvbGxpbmcgaG93IG1hbnkgbmV3IGZlYXR1cmUgbWFwcyBlYWNoIGxheWVyIGNvbnRyaWJ1dGVzIHRvIHRoZSBjb2xsZWN0aXZlIGtub3dsZWRnZS4gQSBzbWFsbCBrIChlLmcuLCAxMiBvciAzMikga2VlcHMgaW5kaXZpZHVhbCBsYXllcnMgbmFycm93LiBCZWNhdXNlIGVhY2ggbGF5ZXIgaGFzIHJlYWQgYWNjZXNzIHRvIGFsbCBwcmlvciBmZWF0dXJlIG1hcHMsIHRoZSBuZXR3b3JrIGNhbiBiZSB2ZXJ5IGluZm9ybWF0aXZlIHdpdGhvdXQgcmVkdW5kYW5jeSDigJQgZWFjaCBsYXllciBhZGRzIGEgZm9jdXNlZCwgbm9uLXJlZHVuZGFudCBjb250cmlidXRpb24uIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJJbnB1dCB0byBsYXllciBsIGluIGEgRGVuc2VCbG9jazogeF9sID0gSF9sKFt4XzAsIHhfMSwg4oCmLCB4XyhsLTEpXSkgd2hlcmUgSF9sIGlzIHRoZSBjb21wb3NpdGUgZnVuY3Rpb24gQk7ihpJSZUxV4oaSQ29udi4gQWZ0ZXIgbCBsYXllcnMgdGhlIGNoYW5uZWwgY291bnQgaXMga18wICsgbMOXaywgd2hlcmUga18wIGlzIHRoZSBpbml0aWFsIGNoYW5uZWwgY291bnQuIENvbmNhdGVuYXRpb24gYWNyb3NzIGNoYW5uZWxzIHByZXNlcnZlcyBzcGF0aWFsIHJlc29sdXRpb24gd2l0aGluIGEgYmxvY2ssIGtlZXBpbmcgc3BhdGlhbCBpbmZvcm1hdGlvbiBpbnRhY3QgZm9yIGFsbCBzdWJzZXF1ZW50IGxheWVycy4ifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJUcmFuc2l0aW9uIExheWVycyJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiQmV0d2VlbiBEZW5zZUJsb2NrcywgdHJhbnNpdGlvbiBsYXllcnMgcGVyZm9ybSBkb3duc2FtcGxpbmcgYW5kIGNoYW5uZWwgY29tcHJlc3Npb24uIFRoZXkgY29uc2lzdCBvZiBCTuKGklJlTFXihpJDb252McOXMeKGkkF2Z1Bvb2wyZCgyKS4gVGhlIENvbnYxw5cxIGFwcGxpZXMgYSBjb21wcmVzc2lvbiBmYWN0b3Igzrgg4oiIICgwLCAxXSB0byByZWR1Y2UgY2hhbm5lbHMgZnJvbSBDIHRvIGZsb29yKM64w5dDKS4gRGVuc2VOZXQtQyB1c2VzIM64XHUwMDNjMSBmb3IgY29tcHJlc3Npb247IERlbnNlTmV0LUJDIGNvbWJpbmVzIGJvdGggYm90dGxlbmVjayBsYXllcnMgYW5kIGNvbXByZXNzaW9uIGZvciBtYXhpbXVtIGVmZmljaWVuY3kuIn0seyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6ImNsYXNzIFRyYW5zaXRpb25MYXllcihubi5Nb2R1bGUpOlxuICAgIGRlZiBfX2luaXRfXyhzZWxmLCBpbl9jaGFubmVscywgY29tcHJlc3Npb249MC41KTpcbiAgICAgICAgc3VwZXIoKS5fX2luaXRfXygpXG4gICAgICAgIG91dF9jaGFubmVscyA9IGludChpbl9jaGFubmVscyAqIGNvbXByZXNzaW9uKVxuICAgICAgICBzZWxmLmJsb2NrID0gbm4uU2VxdWVudGlhbChcbiAgICAgICAgICAgIG5uLkJhdGNoTm9ybTJkKGluX2NoYW5uZWxzKSxcbiAgICAgICAgICAgIG5uLlJlTFUoaW5wbGFjZT1UcnVlKSxcbiAgICAgICAgICAgIG5uLkNvbnYyZChpbl9jaGFubmVscywgb3V0X2NoYW5uZWxzLCBrZXJuZWxfc2l6ZT0xLCBiaWFzPUZhbHNlKSxcbiAgICAgICAgICAgIG5uLkF2Z1Bvb2wyZChrZXJuZWxfc2l6ZT0yLCBzdHJpZGU9MilcbiAgICAgICAgKVxuXG4gICAgZGVmIGZvcndhcmQoc2VsZiwgeCk6XG4gICAgICAgIHJldHVybiBzZWxmLmJsb2NrKHgpIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJXaXRoIM64PTAuNSwgZWFjaCB0cmFuc2l0aW9uIGxheWVyIGhhbHZlcyB0aGUgY2hhbm5lbCBjb3VudCwgcHJldmVudGluZyB0aGUgY2hhbm5lbCBkaW1lbnNpb24gZnJvbSBncm93aW5nIHRvbyBsYXJnZSBhcyBmZWF0dXJlcyBhY2N1bXVsYXRlIGFjcm9zcyBEZW5zZUJsb2Nrcy4gVGhlIEF2Z1Bvb2wyZCB3aXRoIHN0cmlkZSAyIGhhbHZlcyBzcGF0aWFsIGRpbWVuc2lvbnMuIFRvZ2V0aGVyLCB0aGVzZSB0d28gcmVkdWN0aW9ucyBiYWxhbmNlIHRoZSBjaGFubmVsIGdyb3d0aCBmcm9tIGRlbnNlIGNvbm5lY3Rpdml0eSBhbmQga2VlcCB0aGUgbmV0d29yayBjb21wdXRhdGlvbmFsbHkgdHJhY3RhYmxlIGF0IGRlZXBlciBzdGFnZXMuIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiRGVuc2VOZXQgdnMgUmVzTmV0In0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJSZXNOZXQgdXNlcyBhZGRpdGl2ZSBzaG9ydGN1dHM6IHkgPSBGKHgpICsgeCwgd2hpY2ggcmVxdWlyZXMgbWF0Y2hpbmcgZGltZW5zaW9ucyBhbmQgbGltaXRzIGRpcmVjdCBncmFkaWVudCBhY2Nlc3MgdG8gZWFybGllciBsYXllcnMuIERlbnNlTmV0IHVzZXMgY29uY2F0ZW5hdGl2ZSBzaG9ydGN1dHM6IHkgPSBjYXQoeF8wLC4uLix4X2wpLCBwcmVzZXJ2aW5nIGFsbCBvcmlnaW5hbCBmZWF0dXJlcyB3aXRob3V0IGxvc3MuIFRoaXMgZGlzdGluY3Rpb24gZHJpdmVzIERlbnNlTmV0XHUwMDI3cyBzdXBlcmlvciBwYXJhbWV0ZXIgZWZmaWNpZW5jeSBhbmQgcmljaGVyIGdyYWRpZW50IHByb3BhZ2F0aW9uIGluIHZlcnkgZGVlcCBuZXR3b3Jrcy4ifSx7InR5cGUiOiJjb2RlIiwibGFuZ3VhZ2UiOiJweXRob24iLCJjb250ZW50IjoiZGVmIG1lYXN1cmVfZ3JhZGllbnRfbm9ybXMobW9kZWwsIHgsIHksIGNyaXRlcmlvbik6XG4gICAgZ3JhZF9ub3JtcyA9IHt9XG4gICAgZGVmIG1ha2VfaG9vayhuYW1lKTpcbiAgICAgICAgZGVmIGhvb2tfZm4oZ3JhZCk6XG4gICAgICAgICAgICBncmFkX25vcm1zW25hbWVdID0gZ3JhZC5ub3JtKCkuaXRlbSgpXG4gICAgICAgIHJldHVybiBob29rX2ZuXG4gICAgaGFuZGxlcyA9IFtdXG4gICAgZm9yIG5hbWUsIHBhcmFtIGluIG1vZGVsLm5hbWVkX3BhcmFtZXRlcnMoKTpcbiAgICAgICAgaWYgcGFyYW0ucmVxdWlyZXNfZ3JhZDpcbiAgICAgICAgICAgIGhhbmRsZXMuYXBwZW5kKHBhcmFtLnJlZ2lzdGVyX2hvb2sobWFrZV9ob29rKG5hbWUpKSlcbiAgICBsb3NzID0gY3JpdGVyaW9uKG1vZGVsKHgpLCB5KVxuICAgIGxvc3MuYmFja3dhcmQoKVxuICAgIGZvciBoIGluIGhhbmRsZXM6XG4gICAgICAgIGgucmVtb3ZlKClcbiAgICByZXR1cm4gZ3JhZF9ub3JtcyJ9LHsidHlwZSI6InRhYmxlIiwiY29udGVudCI6InwgTW9kZWwgfCBHcm93dGggUmF0ZSB8IENvbXByZXNzaW9uIM64IHwgVG9wLTEgJSB8IFBhcmFtcyAoTSkgfCBGTE9QcyAoRykgfFxufC0tLXwtLS18LS0tfC0tLXwtLS18LS0tfFxufCBEZW5zZU5ldC0xMjEgfCAzMiB8IDAuNSB8IDc0Ljk4IHwgOC4wIHwgMi45IHxcbnwgRGVuc2VOZXQtMTY5IHwgMzIgfCAwLjUgfCA3Ni4yMCB8IDE0LjEgfCAzLjQgfFxufCBEZW5zZU5ldC0yMDEgfCAzMiB8IDAuNSB8IDc3LjQyIHwgMjAuMCB8IDQuMyB8XG58IERlbnNlTmV0LTI2NCB8IDMyIHwgMC41IHwgNzcuODUgfCAzMy4zIHwgNS44IHxcbnwgUmVzTmV0LTUwIHwg4oCUIHwg4oCUIHwgNzYuMDEgfCAyNS42IHwgNC4xIHwifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkRlbnNlTmV0LTEyMSBhY2hpZXZlcyA3NC45OCUgVG9wLTEgd2l0aCBvbmx5IDhNIHBhcmFtZXRlcnMgYW5kIDIuOUcgRkxPUHMsIHdoaWxlIFJlc05ldC01MCBuZWVkcyAyNS42TSBwYXJhbWV0ZXJzIGZvciBjb21wYXJhYmxlIGFjY3VyYWN5LiBEZW5zZU5ldC0yMDEgc3VycGFzc2VzIFJlc05ldC01MCBieSAxLjQlIHdpdGggZmV3ZXIgRkxPUHMgYW5kIHBhcmFtZXRlcnMuIFRoaXMgZGVtb25zdHJhdGVzIHRoYXQgZGVuc2UgY29ubmVjdGl2aXR5IGlzIGEgbW9yZSBwYXJhbWV0ZXItZWZmaWNpZW50IGFyY2hpdGVjdHVyYWwgc3RyYXRlZ3kgdGhhbiByZXNpZHVhbCBjb25uZWN0aW9ucyBmb3IgSW1hZ2VOZXQgY2xhc3NpZmljYXRpb24uIn0seyJ0eXBlIjoiY2FsbG91dCIsInZhcmlhbnQiOiJ0aXAiLCJjb250ZW50IjoiRGVuc2VOZXRcdTAwMjdzIGRlbnNlIGNvbm5lY3Rpb25zIGFjdCBhcyBkZWVwIHN1cGVydmlzaW9uIOKAlCBldmVyeSBsYXllciByZWNlaXZlcyBncmFkaWVudCBkaXJlY3RseSBmcm9tIHRoZSBsb3NzIHRocm91Z2ggbXVsdGlwbGUgcGF0aHMuIFRoaXMgbWFrZXMgaXQgcGFydGljdWxhcmx5IGVmZmVjdGl2ZSB3aGVuIHRyYWluaW5nIGRhdGEgaXMgbGltaXRlZC4ifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJLZXkgVGFrZWF3YXlzIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJEZW5zZSBjb25uZWN0aXZpdHkgbWF4aW1pemVzIGZlYXR1cmUgcmV1c2U6IGV2ZXJ5IGxheWVyIGhhcyBkaXJlY3QgYWNjZXNzIHRvIHRoZSBpbnB1dCBpbWFnZSBhbmQgYWxsIGludGVybWVkaWF0ZSByZXByZXNlbnRhdGlvbnMuIFRoaXMgYWxsZXZpYXRlcyB2YW5pc2hpbmcgZ3JhZGllbnRzLCBzdHJlbmd0aGVucyBmZWF0dXJlIHByb3BhZ2F0aW9uLCBhbmQgZW5jb3VyYWdlcyByZXVzZSwgbGVhZGluZyB0byBzdWJzdGFudGlhbGx5IG1vcmUgY29tcGFjdCBtb2RlbHMuIFRoZSBncm93dGggcmF0ZSBrIGFuZCBjb21wcmVzc2lvbiBmYWN0b3IgzrggYXJlIHRoZSBwcmltYXJ5IGtub2JzIGZvciB0cmFkaW5nIG9mZiBhY2N1cmFjeSBhZ2FpbnN0IGNvbXB1dGF0aW9uYWwgY29zdC4ifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkRlbnNlTmV0IGV4Y2VscyBpbiBsb3ctZGF0YSByZWdpbWVzIGR1ZSB0byBpbXBsaWNpdCBkZWVwIHN1cGVydmlzaW9uIGZyb20gZGVuc2UgZ3JhZGllbnQgcGF0aHMuIEl0IGlzIHdpZGVseSB1c2VkIGluIG1lZGljYWwgaW1hZ2luZyB3aGVyZSBsYWJlbGVkIGRhdGEgaXMgc2NhcmNlLiBUaGUgRGVuc2VOZXQtQkMgdmFyaWFudCAoYm90dGxlbmVjayArIGNvbXByZXNzaW9uKSBpcyB0aGUgcmVjb21tZW5kZWQgY29uZmlndXJhdGlvbiBmb3IgSW1hZ2VOZXQtc2NhbGUgdGFza3MsIGRlbGl2ZXJpbmcgc3Ryb25nIGFjY3VyYWN5LXRvLXBhcmFtZXRlciByYXRpb3MgYWNyb3NzIERlbnNlTmV0LTEyMSB0aHJvdWdoIERlbnNlTmV0LTI2NC4ifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkNvbXBhcmVkIHRvIFJlc05ldCwgRGVuc2VOZXQgYWNoaWV2ZXMgZXF1aXZhbGVudCBvciBiZXR0ZXIgYWNjdXJhY3kgd2l0aCBzaWduaWZpY2FudGx5IGZld2VyIHBhcmFtZXRlcnMgYW5kIEZMT1BzLCBtYWtpbmcgaXQgcHJlZmVyYWJsZSBmb3IgcmVzb3VyY2UtY29uc3RyYWluZWQgZGVwbG95bWVudC4gSG93ZXZlciwgY29uY2F0ZW5hdGlvbiBvZiBncm93aW5nIGZlYXR1cmUgbWFwcyBpbmNyZWFzZXMgR1BVIG1lbW9yeSBkdXJpbmcgdHJhaW5pbmcuIEdyYWRpZW50IGNoZWNrcG9pbnRpbmcgaXMgY29tbW9ubHkgYXBwbGllZCB0byBEZW5zZU5ldCB0byB0cmFkZSBjb21wdXRlIGZvciBtZW1vcnkgaW4gcHJhY3RpY2UuIn1d"
+---
+# DenseNet: Densely Connected Convolutional Networks
+
+## Overview
+
+DenseNet, introduced by Huang et al. in 2017, establishes dense connectivity where each layer receives feature maps from all preceding layers. For an L-layer network this creates L(L+1)/2 connections. Unlike ResNets that add residual shortcuts, DenseNet concatenates feature maps, preserving all learned representations throughout the network.
+
+The key insight is aggressive feature reuse: because all previous feature maps are directly accessible, individual layers can be narrower, learning only incremental improvements. This dramatically reduces total parameter count compared to networks that must relearn representations at each stage, while also combating vanishing gradients throughout training.
+
+## Dense Block Architecture
+
+A DenseBlock groups layers that share the same spatial resolution. Within the block, each DenseLayer receives the concatenation of all preceding layer outputs as input — not just the immediately previous layer. The input to layer l is [x0, x1, ..., x(l-1)], a concatenation across the channel dimension (dim=1 in PyTorch).
+
+```python
+import torch
+import torch.nn as nn
+
+class DenseLayer(nn.Module):
+    def __init__(self, in_channels, growth_rate):
+        super().__init__()
+        self.bn1 = nn.BatchNorm2d(in_channels)
+        self.conv1 = nn.Conv2d(in_channels, 4 * growth_rate, kernel_size=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(4 * growth_rate)
+        self.conv2 = nn.Conv2d(4 * growth_rate, growth_rate, kernel_size=3, padding=1, bias=False)
+
+    def forward(self, inputs):
+        x = torch.cat(inputs, dim=1)
+        x = self.conv1(torch.relu(self.bn1(x)))
+        return self.conv2(torch.relu(self.bn2(x)))
+```
+
+Each DenseLayer follows the BN→ReLU→Conv1×1→BN→ReLU→Conv3×3 pattern. The bottleneck Conv1×1 reduces channels to 4×growth_rate before the 3×3 convolution. This bottleneck design (DenseNet-B) cuts computation while maintaining expressiveness. The output of each layer adds exactly growth_rate channels to the concatenated feature map.
+
+```python
+class DenseBlock(nn.Module):
+    def __init__(self, num_layers, in_channels, growth_rate):
+        super().__init__()
+        self.layers = nn.ModuleList()
+        for i in range(num_layers):
+            self.layers.append(
+                DenseLayer(in_channels + i * growth_rate, growth_rate)
+            )
+
+    def forward(self, x):
+        features = [x]
+        for layer in self.layers:
+            features.append(layer(features))
+        return torch.cat(features, dim=1)
+```
+
+The DenseBlock stacks k DenseLayers. After k layers starting from in_channels, the output has in_channels + k×growth_rate channels. Each new layer receives all prior feature maps via list concatenation before the forward pass, enabling gradients to flow directly to all earlier layers without any transformation or gating.
+
+## Growth Rate and Concatenation
+
+The growth rate k is a key hyperparameter controlling how many new feature maps each layer contributes to the collective knowledge. A small k (e.g., 12 or 32) keeps individual layers narrow. Because each layer has read access to all prior feature maps, the network can be very informative without redundancy — each layer adds a focused, non-redundant contribution.
+
+Input to layer l in a DenseBlock: x_l = H_l([x_0, x_1, …, x_(l-1)]) where H_l is the composite function BN→ReLU→Conv. After l layers the channel count is k_0 + l×k, where k_0 is the initial channel count. Concatenation across channels preserves spatial resolution within a block, keeping spatial information intact for all subsequent layers.
+
+## Transition Layers
+
+Between DenseBlocks, transition layers perform downsampling and channel compression. They consist of BN→ReLU→Conv1×1→AvgPool2d(2). The Conv1×1 applies a compression factor θ ∈ (0, 1] to reduce channels from C to floor(θ×C). DenseNet-C uses θ<1 for compression; DenseNet-BC combines both bottleneck layers and compression for maximum efficiency.
+
+```python
+class TransitionLayer(nn.Module):
+    def __init__(self, in_channels, compression=0.5):
+        super().__init__()
+        out_channels = int(in_channels * compression)
+        self.block = nn.Sequential(
+            nn.BatchNorm2d(in_channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False),
+            nn.AvgPool2d(kernel_size=2, stride=2)
+        )
+
+    def forward(self, x):
+        return self.block(x)
+```
+
+With θ=0.5, each transition layer halves the channel count, preventing the channel dimension from growing too large as features accumulate across DenseBlocks. The AvgPool2d with stride 2 halves spatial dimensions. Together, these two reductions balance the channel growth from dense connectivity and keep the network computationally tractable at deeper stages.
+
+## DenseNet vs ResNet
+
+ResNet uses additive shortcuts: y = F(x) + x, which requires matching dimensions and limits direct gradient access to earlier layers. DenseNet uses concatenative shortcuts: y = cat(x_0,...,x_l), preserving all original features without loss. This distinction drives DenseNet's superior parameter efficiency and richer gradient propagation in very deep networks.
+
+```python
+def measure_gradient_norms(model, x, y, criterion):
+    grad_norms = {}
+    def make_hook(name):
+        def hook_fn(grad):
+            grad_norms[name] = grad.norm().item()
+        return hook_fn
+    handles = []
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            handles.append(param.register_hook(make_hook(name)))
+    loss = criterion(model(x), y)
+    loss.backward()
+    for h in handles:
+        h.remove()
+    return grad_norms
+```
+
+|  |
+| --- |
+
+DenseNet-121 achieves 74.98% Top-1 with only 8M parameters and 2.9G FLOPs, while ResNet-50 needs 25.6M parameters for comparable accuracy. DenseNet-201 surpasses ResNet-50 by 1.4% with fewer FLOPs and parameters. This demonstrates that dense connectivity is a more parameter-efficient architectural strategy than residual connections for ImageNet classification.
+
+> **tip**: DenseNet's dense connections act as deep supervision — every layer receives gradient directly from the loss through multiple paths. This makes it particularly effective when training data is limited.
+
+## Key Takeaways
+
+Dense connectivity maximizes feature reuse: every layer has direct access to the input image and all intermediate representations. This alleviates vanishing gradients, strengthens feature propagation, and encourages reuse, leading to substantially more compact models. The growth rate k and compression factor θ are the primary knobs for trading off accuracy against computational cost.
+
+DenseNet excels in low-data regimes due to implicit deep supervision from dense gradient paths. It is widely used in medical imaging where labeled data is scarce. The DenseNet-BC variant (bottleneck + compression) is the recommended configuration for ImageNet-scale tasks, delivering strong accuracy-to-parameter ratios across DenseNet-121 through DenseNet-264.
+
+Compared to ResNet, DenseNet achieves equivalent or better accuracy with significantly fewer parameters and FLOPs, making it preferable for resource-constrained deployment. However, concatenation of growing feature maps increases GPU memory during training. Gradient checkpointing is commonly applied to DenseNet to trade compute for memory in practice.
+

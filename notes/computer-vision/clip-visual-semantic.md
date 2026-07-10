@@ -1,0 +1,135 @@
+---
+title: "CLIP: Contrastive Language-Image Pretraining"
+slug: "clip-visual-semantic"
+description: "CLIP learns visual representations by aligning image and text embeddings via contrastive loss on 400M image-text pairs — enabling zero-shot classification, retrieval, and open-vocabulary tasks."
+tags: ["computer-vision"]
+topic: "computer-vision"
+status: "published"
+updated: "2026-07-10"
+blocks_json: "W3sidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6Ik92ZXJ2aWV3In0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJDTElQIChDb250cmFzdGl2ZSBMYW5ndWFnZS1JbWFnZSBQcmV0cmFpbmluZykgZnJvbSBPcGVuQUkgam9pbnRseSB0cmFpbnMgYW4gaW1hZ2UgZW5jb2RlciBhbmQgYSB0ZXh0IGVuY29kZXIgb24gNDAwIG1pbGxpb24gaW1hZ2UtdGV4dCBwYWlycyBzY3JhcGVkIGZyb20gdGhlIHdlYi4gVGhlIG9iamVjdGl2ZSBpcyB0byBtYXhpbWl6ZSBzaW1pbGFyaXR5IGJldHdlZW4gbWF0Y2hpbmcgcGFpcnMgYW5kIG1pbmltaXplIGl0IGZvciBub24tbWF0Y2hpbmcgcGFpcnMgaW4gYSBzaGFyZWQgZW1iZWRkaW5nIHNwYWNlLiBUaGUgcmVzdWx0IGlzIGEgbW9kZWwgdGhhdCB1bmRlcnN0YW5kcyBpbWFnZXMgdGhyb3VnaCBsYW5ndWFnZS4ifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkNMSVBcdTAwMjdzIGtleSBpbm5vdmF0aW9uIGlzIHVzaW5nIG5hdHVyYWwgbGFuZ3VhZ2UgYXMgYSBzdXBlcnZpc2lvbiBzaWduYWwgYXQgc2NhbGUsIHJlcGxhY2luZyBmaXhlZCBsYWJlbCBzZXRzIHdpdGggb3Blbi12b2NhYnVsYXJ5IHRleHQgZGVzY3JpcHRpb25zLiBUaGlzIGVuYWJsZXMgemVyby1zaG90IHRyYW5zZmVyOiBjbGFzc2lmeSBpbWFnZXMgaW50byBhbnkgY2F0ZWdvcnkgYnkgZW5jb2RpbmcgdGhlIGNhdGVnb3J5IG5hbWVzIGFzIHRleHQgYW5kIGZpbmRpbmcgdGhlIGNsb3Nlc3QgaW1hZ2UgZW1iZWRkaW5nIOKAlCBubyB0YXNrLXNwZWNpZmljIHRyYWluaW5nIHJlcXVpcmVkLiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IkNvbnRyYXN0aXZlIFRyYWluaW5nIE9iamVjdGl2ZSJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiR2l2ZW4gYSBiYXRjaCBvZiBOIGltYWdlLXRleHQgcGFpcnMsIENMSVAgY29tcHV0ZXMgYW4gTsOXTiBjb3NpbmUgc2ltaWxhcml0eSBtYXRyaXguIFRoZSBkaWFnb25hbCBjb250YWlucyBjb3JyZWN0IHBhaXJzOyB0aGUgb2ZmLWRpYWdvbmFsIGFyZSBuZWdhdGl2ZXMgZHJhd24gZnJvbSB0aGUgc2FtZSBiYXRjaC4gQSBzeW1tZXRyaWMgY3Jvc3MtZW50cm9weSBsb3NzIGlzIGFwcGxpZWQ6IGVhY2ggaW1hZ2UgZW1iZWRkaW5nIG11c3QgaWRlbnRpZnkgaXRzIGNvcnJlY3QgdGV4dCBhbW9uZyBOIGNhbmRpZGF0ZXMsIGFuZCB2aWNlIHZlcnNhLiBMYXJnZSBiYXRjaCBzaXplcyAoMzJrKykgYXJlIGNyaXRpY2FsIGZvciBwcm92aWRpbmcgc3VmZmljaWVudCBuZWdhdGl2ZXMuIn0seyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6ImltcG9ydCB0b3JjaFxuaW1wb3J0IHRvcmNoLm5uLmZ1bmN0aW9uYWwgYXMgRlxuXG5kZWYgY2xpcF9sb3NzKGltYWdlX2VtYmVkcywgdGV4dF9lbWJlZHMsIGxvZ2l0X3NjYWxlKTpcbiAgICAjIG5vcm1hbGl6ZSBlbWJlZGRpbmdzXG4gICAgaW1hZ2VfZW1iZWRzID0gRi5ub3JtYWxpemUoaW1hZ2VfZW1iZWRzLCBkaW09LTEpXG4gICAgdGV4dF9lbWJlZHMgPSBGLm5vcm1hbGl6ZSh0ZXh0X2VtYmVkcywgZGltPS0xKVxuICAgICMgc2NhbGVkIGNvc2luZSBzaW1pbGFyaXR5IG1hdHJpeCBbTiwgTl1cbiAgICBsb2dpdHMgPSBsb2dpdF9zY2FsZS5leHAoKSAqIGltYWdlX2VtYmVkcyBAIHRleHRfZW1iZWRzLlRcbiAgICBOID0gbG9naXRzLnNoYXBlWzBdXG4gICAgbGFiZWxzID0gdG9yY2guYXJhbmdlKE4sIGRldmljZT1sb2dpdHMuZGV2aWNlKVxuICAgIGxvc3NfaSA9IEYuY3Jvc3NfZW50cm9weShsb2dpdHMsIGxhYmVscylcbiAgICBsb3NzX3QgPSBGLmNyb3NzX2VudHJvcHkobG9naXRzLlQsIGxhYmVscylcbiAgICByZXR1cm4gKGxvc3NfaSArIGxvc3NfdCkgLyAyIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJUaGUgbGVhcm5lZCB0ZW1wZXJhdHVyZSBwYXJhbWV0ZXIgbG9naXRfc2NhbGUgKGluaXRpYWxpemVkIHRvIGxvZygxLzAuMDcpKSBzY2FsZXMgdGhlIGNvc2luZSBzaW1pbGFyaXRpZXMgYmVmb3JlIHNvZnRtYXguIFRoaXMgaXMgYSBjcml0aWNhbCBoeXBlcnBhcmFtZXRlciDigJQgdG9vIGxvdyBtYWtlcyB0aGUgZGlzdHJpYnV0aW9uIHRvbyBmbGF0IChwb29yIGRpc2NyaW1pbmF0aW9uKSwgdG9vIGhpZ2ggY2F1c2VzIHRyYWluaW5nIGluc3RhYmlsaXR5LiBDTElQIGxlYXJucyB0byBjYWxpYnJhdGUgdGhpcyBhdXRvbWF0aWNhbGx5IGR1cmluZyB0cmFpbmluZywgdHlwaWNhbGx5IGNvbnZlcmdpbmcgdG8gdmFsdWVzIGFyb3VuZCAxMDAuIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiWmVyby1TaG90IENsYXNzaWZpY2F0aW9uIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJaZXJvLXNob3QgY2xhc3NpZmljYXRpb24gaW4gQ0xJUCB3b3JrcyBieSBlbmNvZGluZyBjbGFzcyBuYW1lcyBhcyBuYXR1cmFsIGxhbmd1YWdlIHByb21wdHMgKGUuZy4sIFx1MDAyN2EgcGhvdG8gb2YgYSBjYXRcdTAwMjcpIGFuZCBjb21wdXRpbmcgY29zaW5lIHNpbWlsYXJpdHkgYmV0d2VlbiB0aGUgaW1hZ2UgZW1iZWRkaW5nIGFuZCBlYWNoIGNsYXNzIHRleHQgZW1iZWRkaW5nLiBUaGUgY2xhc3Mgd2l0aCB0aGUgaGlnaGVzdCBzaW1pbGFyaXR5IGlzIHRoZSBwcmVkaWN0aW9uLiBObyBsYWJlbGVkIGltYWdlcyBvciBncmFkaWVudCB1cGRhdGVzIGFyZSBuZWVkZWQg4oCUIHRoZSBtb2RlbCB0cmFuc2ZlcnMgZGlyZWN0bHkgZnJvbSBwcmV0cmFpbmluZy4ifSx7InR5cGUiOiJjb2RlIiwibGFuZ3VhZ2UiOiJweXRob24iLCJjb250ZW50IjoiaW1wb3J0IHRvcmNoXG5mcm9tIHRyYW5zZm9ybWVycyBpbXBvcnQgQ0xJUFByb2Nlc3NvciwgQ0xJUE1vZGVsXG5cbmRlZiB6ZXJvX3Nob3RfY2xhc3NpZnkobW9kZWwsIHByb2Nlc3NvciwgaW1hZ2UsIGNsYXNzX25hbWVzKTpcbiAgICBwcm9tcHRzID0gW2ZcImEgcGhvdG8gb2YgYSB7Y31cIiBmb3IgYyBpbiBjbGFzc19uYW1lc11cbiAgICBpbnB1dHMgPSBwcm9jZXNzb3IodGV4dD1wcm9tcHRzLCBpbWFnZXM9aW1hZ2UsXG4gICAgICAgICAgICAgICAgICAgICAgIHJldHVybl90ZW5zb3JzPVwicHRcIiwgcGFkZGluZz1UcnVlKVxuICAgIHdpdGggdG9yY2gubm9fZ3JhZCgpOlxuICAgICAgICBvdXRwdXRzID0gbW9kZWwoKippbnB1dHMpXG4gICAgICAgICMgaW1hZ2VfZW1iZWRzOiBbMSwgRF0sIHRleHRfZW1iZWRzOiBbQywgRF1cbiAgICAgICAgbG9naXRzID0gb3V0cHV0cy5sb2dpdHNfcGVyX2ltYWdlICAjIFsxLCBDXVxuICAgIHByb2JzID0gbG9naXRzLnNvZnRtYXgoZGltPS0xKVxuICAgIHByZWQgPSBjbGFzc19uYW1lc1twcm9icy5hcmdtYXgoKS5pdGVtKCldXG4gICAgcmV0dXJuIHByZWQsIHByb2JzIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiSW1hZ2UtVGV4dCBSZXRyaWV2YWwifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkNMSVAgaXMgaGlnaGx5IGVmZmVjdGl2ZSBmb3IgaW1hZ2UtdGV4dCByZXRyaWV2YWwgdGFza3Mgc3VjaCBhcyBmaW5kaW5nIGltYWdlcyBtYXRjaGluZyBhIHRleHQgcXVlcnkgKHRleHQtdG8taW1hZ2UpIG9yIGZpbmRpbmcgY2FwdGlvbnMgZm9yIGFuIGltYWdlIChpbWFnZS10by10ZXh0KS4gR2l2ZW4gYSBnYWxsZXJ5IG9mIHByZS1lbmNvZGVkIGltYWdlIGVtYmVkZGluZ3MsIHJldHJpZXZhbCBpcyBhIHNpbXBsZSBuZWFyZXN0LW5laWdoYm9yIHNlYXJjaCBpbiB0aGUgc2hhcmVkIGVtYmVkZGluZyBzcGFjZSB1c2luZyBjb3NpbmUgc2ltaWxhcml0eS4gVGhpcyBzY2FsZXMgdG8gbWlsbGlvbnMgb2YgaXRlbXMgd2l0aCBhcHByb3hpbWF0ZSBuZWFyZXN0LW5laWdoYm9yIGluZGljZXMuIn0seyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6ImltcG9ydCB0b3JjaFxuaW1wb3J0IHRvcmNoLm5uLmZ1bmN0aW9uYWwgYXMgRlxuZnJvbSB0cmFuc2Zvcm1lcnMgaW1wb3J0IENMSVBNb2RlbCwgQ0xJUFByb2Nlc3NvclxuXG5kZWYgY2xpcF9yZXRyaWV2YWwobW9kZWwsIHByb2Nlc3NvciwgcXVlcnlfdGV4dCwgaW1hZ2VfZ2FsbGVyeSk6XG4gICAgIyBlbmNvZGUgcXVlcnkgdGV4dFxuICAgIHRleHRfaW5wdXRzID0gcHJvY2Vzc29yKHRleHQ9W3F1ZXJ5X3RleHRdLCByZXR1cm5fdGVuc29ycz1cInB0XCIsIHBhZGRpbmc9VHJ1ZSlcbiAgICB3aXRoIHRvcmNoLm5vX2dyYWQoKTpcbiAgICAgICAgdGV4dF9lbWJlZCA9IG1vZGVsLmdldF90ZXh0X2ZlYXR1cmVzKCoqdGV4dF9pbnB1dHMpXG4gICAgICAgIHRleHRfZW1iZWQgPSBGLm5vcm1hbGl6ZSh0ZXh0X2VtYmVkLCBkaW09LTEpXG4gICAgICAgICMgaW1hZ2VfZ2FsbGVyeTogcHJlLWVuY29kZWQgW04sIERdIG5vcm1hbGl6ZWQgZW1iZWRkaW5nc1xuICAgICAgICBzY29yZXMgPSAodGV4dF9lbWJlZCBAIGltYWdlX2dhbGxlcnkuVCkuc3F1ZWV6ZSgwKSAgIyBbTl1cbiAgICB0b3BfayA9IHNjb3Jlcy50b3BrKDUpLmluZGljZXNcbiAgICByZXR1cm4gdG9wX2ssIHNjb3Jlc1t0b3Bfa10ifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJDTElQIExpbWl0YXRpb25zIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJEZXNwaXRlIGltcHJlc3NpdmUgemVyby1zaG90IHRyYW5zZmVyLCBDTElQIGhhcyBub3RhYmxlIGxpbWl0YXRpb25zLiBJdCBzdHJ1Z2dsZXMgd2l0aCBmaW5lLWdyYWluZWQgdmlzdWFsIHRhc2tzIChjb3VudGluZyBvYmplY3RzLCBkaXN0aW5ndWlzaGluZyBzcGF0aWFsIHJlbGF0aW9ucywgcmVhZGluZyB0ZXh0IGluIGltYWdlcykuIFBlcmZvcm1hbmNlIG9uIG91dC1vZi1kaXN0cmlidXRpb24gaW1hZ2VzIG9yIHNwZWNpYWxpemVkIGRvbWFpbnMgKG1lZGljYWwgaW1hZ2luZywgc2F0ZWxsaXRlIGltYWdlcnkpIGlzIG9mdGVuIHBvb3IuIEJpYXNlcyBpbiB0aGUgd2ViLXNjcmFwZWQgdHJhaW5pbmcgZGF0YSBwcm9wYWdhdGUgaW50byB0aGUgZW1iZWRkaW5ncyBhbmQgZG93bnN0cmVhbSBwcmVkaWN0aW9ucy4ifSx7InR5cGUiOiJjYWxsb3V0IiwiY2FsbG91dF90eXBlIjoid2FybmluZyIsImNvbnRlbnQiOiJDTElQXHUwMDI3cyB6ZXJvLXNob3QgcGVyZm9ybWFuY2UgaXMgc2Vuc2l0aXZlIHRvIHByb21wdCBlbmdpbmVlcmluZyDigJQgXHUwMDI3YSBwaG90byBvZiBhIHtsYWJlbH1cdTAwMjcgdnMganVzdCBcdTAwMjd7bGFiZWx9XHUwMDI3IGNhbiBkaWZmZXIgYnkgM+KAkzUlLiBVc2UgcHJvbXB0IGVuc2VtYmxpbmcgKGF2ZXJhZ2Ugb3ZlciBtdWx0aXBsZSB0ZW1wbGF0ZXMpIGZvciBiZXN0IHJlc3VsdHMuIn0seyJ0eXBlIjoidGFibGUiLCJoZWFkZXJzIjpbIkNMSVAgVmFyaWFudCIsIkltYWdlIEVuY29kZXIiLCJUZXh0IEVuY29kZXIiLCJaZXJvLXNob3QgSW1hZ2VOZXQgKCUpIiwiUGFyYW1zIl0sInJvd3MiOltbIkNMSVAtQi8zMiIsIlZpVC1CLzMyIiwiVHJhbnNmb3JtZXIgNjNNIiwiNjMuNCIsIjE1MU0iXSxbIkNMSVAtQi8xNiIsIlZpVC1CLzE2IiwiVHJhbnNmb3JtZXIgNjNNIiwiNjguMyIsIjE0OU0iXSxbIkNMSVAtTC8xNCIsIlZpVC1MLzE0IiwiVHJhbnNmb3JtZXIgMTIzTSIsIjc1LjUiLCI0MjhNIl0sWyJTaWdMSVAtQi8xNiIsIlZpVC1CLzE2IiwiVHJhbnNmb3JtZXIiLCI3Ni4xIiwiMjAzTSJdLFsiU2lnTElQLUwvMTYiLCJWaVQtTC8xNiIsIlRyYW5zZm9ybWVyIiwiODAuMSIsIjY1Mk0iXSxbIk9wZW5DTElQLUciLCJWaVQtRy8xNCIsIlRyYW5zZm9ybWVyIiwiODAuMSIsIjEuOEIiXV19LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IktleSBUYWtlYXdheXMifSx7InR5cGUiOiJjb2RlIiwibGFuZ3VhZ2UiOiJweXRob24iLCJjb250ZW50IjoiaW1wb3J0IHRvcmNoXG5mcm9tIHRyYW5zZm9ybWVycyBpbXBvcnQgQ0xJUE1vZGVsLCBDTElQUHJvY2Vzc29yXG5mcm9tIHNrbGVhcm4ubGluZWFyX21vZGVsIGltcG9ydCBMb2dpc3RpY1JlZ3Jlc3Npb25cbmltcG9ydCBudW1weSBhcyBucFxuXG5kZWYgY2xpcF9saW5lYXJfcHJvYmUobW9kZWwsIHByb2Nlc3NvciwgdHJhaW5fbG9hZGVyLCB2YWxfbG9hZGVyKTpcbiAgICBtb2RlbC5ldmFsKClcbiAgICBmZWF0cywgbGFiZWxzID0gW10sIFtdXG4gICAgd2l0aCB0b3JjaC5ub19ncmFkKCk6XG4gICAgICAgIGZvciBpbWdzLCBsYmxzIGluIHRyYWluX2xvYWRlcjpcbiAgICAgICAgICAgIGlucHV0cyA9IHByb2Nlc3NvcihpbWFnZXM9bGlzdChpbWdzKSwgcmV0dXJuX3RlbnNvcnM9XCJwdFwiKVxuICAgICAgICAgICAgZW1iID0gbW9kZWwuZ2V0X2ltYWdlX2ZlYXR1cmVzKCoqaW5wdXRzKVxuICAgICAgICAgICAgZmVhdHMuYXBwZW5kKGVtYi5jcHUoKS5udW1weSgpKVxuICAgICAgICAgICAgbGFiZWxzLmFwcGVuZChsYmxzLm51bXB5KCkpXG4gICAgWCA9IG5wLmNvbmNhdGVuYXRlKGZlYXRzKVxuICAgIHkgPSBucC5jb25jYXRlbmF0ZShsYWJlbHMpXG4gICAgY2xmID0gTG9naXN0aWNSZWdyZXNzaW9uKG1heF9pdGVyPTEwMDApLmZpdChYLCB5KVxuICAgIHJldHVybiBjbGYifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkNMSVAgZXN0YWJsaXNoZWQgdGhlIHBhcmFkaWdtIG9mIHZpc2lvbi1sYW5ndWFnZSBwcmV0cmFpbmluZyBhdCBzY2FsZS4gS2V5IGxlc3NvbnM6ICgxKSBjb250cmFzdGl2ZSBsZWFybmluZyBvbiBkaXZlcnNlIHdlYiBkYXRhIHRyYW5zZmVycyBicm9hZGx5LCAoMikgbmF0dXJhbCBsYW5ndWFnZSBzdXBlcnZpc2lvbiBwcm92aWRlcyByaWNoZXIgc2lnbmFsIHRoYW4gZml4ZWQgY2F0ZWdvcmljYWwgbGFiZWxzLCAoMykgcHJvbXB0IGVuZ2luZWVyaW5nIG1hdHRlcnMgc2lnbmlmaWNhbnRseSBmb3IgemVyby1zaG90IHBlcmZvcm1hbmNlLCAoNCkgbGFyZ2UgYmF0Y2ggc2l6ZXMgYW5kIGNvbXB1dGUgYXJlIG5lY2Vzc2FyeSBmb3IgdGhlIGNvbnRyYXN0aXZlIG9iamVjdGl2ZSB0byB3b3JrIHdlbGwuIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJTaWdMSVAgKFNpZ21vaWQgTG9zcyBmb3IgTGFuZ3VhZ2UtSW1hZ2UgUHJlLXRyYWluaW5nKSBpbXByb3ZlcyBDTElQIGJ5IHJlcGxhY2luZyB0aGUgc29mdG1heCBjb250cmFzdGl2ZSBsb3NzIHdpdGggYSBzaWdtb2lkIGxvc3MgdGhhdCB0cmVhdHMgZWFjaCBwYWlyIGluZGVwZW5kZW50bHksIHJlbW92aW5nIHRoZSBuZWVkIGZvciBhIGdsb2JhbCBub3JtYWxpemF0aW9uIGNvbnN0YW50IGFuZCBlbmFibGluZyBzbWFsbGVyIGVmZmVjdGl2ZSBiYXRjaCBzaXplcyB3aXRoIHNpbWlsYXIgb3IgYmV0dGVyIHBlcmZvcm1hbmNlLiBTaWdMSVAtTC8xNiBtYXRjaGVzIENMSVAtTC8xNCBhdCBsb3dlciBjb21wdXRlLiJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiT3BlbkNMSVAgcmVwcm9kdWNlcyBhbmQgc2NhbGVzIENMSVAgdXNpbmcgb3BlbiBkYXRhIChMQUlPTi00MDBNLCBMQUlPTi01Qikgd2l0aCBmdWxseSBvcGVuIHdlaWdodHMgYW5kIHRyYWluaW5nIGNvZGUuIFRoaXMgZW5hYmxlcyB0aGUgcmVzZWFyY2ggY29tbXVuaXR5IHRvIHN0dWR5IHNjYWxpbmcgbGF3cywgZmluZS10dW5pbmcgc3RyYXRlZ2llcywgYW5kIGRvbWFpbiBhZGFwdGF0aW9uIHdpdGhvdXQgcHJvcHJpZXRhcnkgZGF0YSBvciBtb2RlbCBhY2Nlc3MgcmVzdHJpY3Rpb25zLiBPcGVuQ0xJUC1HIGFjaGlldmVzIDgwLjElIHplcm8tc2hvdCBJbWFnZU5ldCBhY2N1cmFjeS4ifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkZvciBwcmFjdGl0aW9uZXJzOiB1c2UgQ0xJUC1MLzE0IG9yIFNpZ0xJUC1MLzE2IGZvciBnZW5lcmFsLXB1cnBvc2UgdmlzdWFsIGZlYXR1cmVzLiBGb3IgcmV0cmlldmFsIGF0IHNjYWxlLCBwcmUtZW5jb2RlIGEgZ2FsbGVyeSB1c2luZyB0aGUgaW1hZ2UgZW5jb2RlciBhbmQgaW5kZXggd2l0aCBGQUlTUy4gRm9yIGNsYXNzaWZpY2F0aW9uLCBwcm9tcHQgZW5zZW1ibGluZyBvdmVyIDgwIEltYWdlTmV0IHRlbXBsYXRlcyAoZnJvbSB0aGUgQ0xJUCBwYXBlcikgcHJvdmlkZXMgcmVsaWFibGUgZ2FpbnMgb3ZlciBhIHNpbmdsZSBwcm9tcHQsIGVzcGVjaWFsbHkgZm9yIGFic3RyYWN0IG9yIGFtYmlndW91cyBjYXRlZ29yaWVzLiJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiRG9tYWluIGFkYXB0YXRpb24gc3RyYXRlZ2llczogKDEpIGxpbmVhciBwcm9iaW5nIG9uIENMSVAgZmVhdHVyZXMgb2Z0ZW4gb3V0cGVyZm9ybXMgemVyby1zaG90IG9uIHNwZWNpYWxpemVkIGRvbWFpbnMsICgyKSBzb2Z0IHByb21wdCB0dW5pbmcgKENvT3AsIENvQ29PcCkgbGVhcm5zIHRhc2stc3BlY2lmaWMgY29udGV4dCB0b2tlbnMgd2hpbGUga2VlcGluZyB0aGUgYmFja2JvbmUgZnJvemVuLCAoMykgZnVsbCBmaW5lLXR1bmluZyB3aXRoIGEgc21hbGwgbGVhcm5pbmcgcmF0ZSBwcmVzZXJ2ZXMgZ2VuZXJhbGl6YXRpb24sICg0KSBXaVNFLUZUIGludGVycG9sYXRlcyB6ZXJvLXNob3QgYW5kIGZpbmUtdHVuZWQgd2VpZ2h0cyB0byBiYWxhbmNlIGFjY3VyYWN5IGFuZCByb2J1c3RuZXNzLiJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiQ0xJUCB2YXJpYW50cyBoYXZlIGJlZW4gZXh0ZW5kZWQgdG8gdmlkZW8gKFZpZGVvQ0xJUCksIGF1ZGlvLXZpc3VhbCBsZWFybmluZyAoQXVkaW9DTElQKSwgYW5kIDNEIHBvaW50IGNsb3VkcyAoUG9pbnRDTElQKS4gSW4gbXVsdGltb2RhbCBMTE1zIChMTGFWQSwgRmxhbWluZ28sIEdQVC00ViksIGEgZnJvemVuIENMSVAgaW1hZ2UgZW5jb2RlciBwcm92aWRlcyB2aXN1YWwgdG9rZW5zIHRvIHRoZSBsYW5ndWFnZSBtb2RlbC4gQ0xJUFx1MDAyN3MgaW1hZ2UgZW5jb2RlciBpcyBub3cgYSBzdGFuZGFyZCBjb21wb25lbnQgaW4gbXVsdGltb2RhbCBBSSBzeXN0ZW1zLCBtYWtpbmcgZmFtaWxpYXJpdHkgd2l0aCBpdHMgcHJvcGVydGllcyBlc3NlbnRpYWwuIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJFdmFsdWF0aW9uIGJlbmNobWFya3M6IEltYWdlTmV0IHplcm8tc2hvdCAoc3RhbmRhcmQpLCBWVEFCIChkaXZlcnNlIHRhc2sgdHJhbnNmZXIpLCBDT0NPIHJldHJpZXZhbCAoaW1hZ2UtdGV4dCBhbGlnbm1lbnQpLCBPYmplY3ROZXQgKG91dC1vZi1kaXN0cmlidXRpb24gcm9idXN0bmVzcyksIFdpbm9ncm91bmQgKGNvbXBvc2l0aW9uYWwgcmVhc29uaW5nKS4gQ0xJUCBzY29yZXMgd2VsbCBvbiB0aGUgZmlyc3QgdGhyZWUgYnV0IHN0cnVnZ2xlcyB3aXRoIFdpbm9ncm91bmQsIHJldmVhbGluZyB0aGF0IHNwYXRpYWwgYW5kIHJlbGF0aW9uYWwgcmVhc29uaW5nIHJlbWFpbnMgYSBjaGFsbGVuZ2UgZm9yIGNvbnRyYXN0aXZlIHZpc2lvbi1sYW5ndWFnZSBtb2RlbHMuIn1d"
+---
+# CLIP: Contrastive Language-Image Pretraining
+
+## Overview
+
+CLIP (Contrastive Language-Image Pretraining) from OpenAI jointly trains an image encoder and a text encoder on 400 million image-text pairs scraped from the web. The objective is to maximize similarity between matching pairs and minimize it for non-matching pairs in a shared embedding space. The result is a model that understands images through language.
+
+CLIP's key innovation is using natural language as a supervision signal at scale, replacing fixed label sets with open-vocabulary text descriptions. This enables zero-shot transfer: classify images into any category by encoding the category names as text and finding the closest image embedding — no task-specific training required.
+
+## Contrastive Training Objective
+
+Given a batch of N image-text pairs, CLIP computes an N×N cosine similarity matrix. The diagonal contains correct pairs; the off-diagonal are negatives drawn from the same batch. A symmetric cross-entropy loss is applied: each image embedding must identify its correct text among N candidates, and vice versa. Large batch sizes (32k+) are critical for providing sufficient negatives.
+
+```python
+import torch
+import torch.nn.functional as F
+
+def clip_loss(image_embeds, text_embeds, logit_scale):
+    # normalize embeddings
+    image_embeds = F.normalize(image_embeds, dim=-1)
+    text_embeds = F.normalize(text_embeds, dim=-1)
+    # scaled cosine similarity matrix [N, N]
+    logits = logit_scale.exp() * image_embeds @ text_embeds.T
+    N = logits.shape[0]
+    labels = torch.arange(N, device=logits.device)
+    loss_i = F.cross_entropy(logits, labels)
+    loss_t = F.cross_entropy(logits.T, labels)
+    return (loss_i + loss_t) / 2
+```
+
+The learned temperature parameter logit_scale (initialized to log(1/0.07)) scales the cosine similarities before softmax. This is a critical hyperparameter — too low makes the distribution too flat (poor discrimination), too high causes training instability. CLIP learns to calibrate this automatically during training, typically converging to values around 100.
+
+## Zero-Shot Classification
+
+Zero-shot classification in CLIP works by encoding class names as natural language prompts (e.g., 'a photo of a cat') and computing cosine similarity between the image embedding and each class text embedding. The class with the highest similarity is the prediction. No labeled images or gradient updates are needed — the model transfers directly from pretraining.
+
+```python
+import torch
+from transformers import CLIPProcessor, CLIPModel
+
+def zero_shot_classify(model, processor, image, class_names):
+    prompts = [f"a photo of a {c}" for c in class_names]
+    inputs = processor(text=prompts, images=image,
+                       return_tensors="pt", padding=True)
+    with torch.no_grad():
+        outputs = model(**inputs)
+        # image_embeds: [1, D], text_embeds: [C, D]
+        logits = outputs.logits_per_image  # [1, C]
+    probs = logits.softmax(dim=-1)
+    pred = class_names[probs.argmax().item()]
+    return pred, probs
+```
+
+## Image-Text Retrieval
+
+CLIP is highly effective for image-text retrieval tasks such as finding images matching a text query (text-to-image) or finding captions for an image (image-to-text). Given a gallery of pre-encoded image embeddings, retrieval is a simple nearest-neighbor search in the shared embedding space using cosine similarity. This scales to millions of items with approximate nearest-neighbor indices.
+
+```python
+import torch
+import torch.nn.functional as F
+from transformers import CLIPModel, CLIPProcessor
+
+def clip_retrieval(model, processor, query_text, image_gallery):
+    # encode query text
+    text_inputs = processor(text=[query_text], return_tensors="pt", padding=True)
+    with torch.no_grad():
+        text_embed = model.get_text_features(**text_inputs)
+        text_embed = F.normalize(text_embed, dim=-1)
+        # image_gallery: pre-encoded [N, D] normalized embeddings
+        scores = (text_embed @ image_gallery.T).squeeze(0)  # [N]
+    top_k = scores.topk(5).indices
+    return top_k, scores[top_k]
+```
+
+## CLIP Limitations
+
+Despite impressive zero-shot transfer, CLIP has notable limitations. It struggles with fine-grained visual tasks (counting objects, distinguishing spatial relations, reading text in images). Performance on out-of-distribution images or specialized domains (medical imaging, satellite imagery) is often poor. Biases in the web-scraped training data propagate into the embeddings and downstream predictions.
+
+> ****: CLIP's zero-shot performance is sensitive to prompt engineering — 'a photo of a {label}' vs just '{label}' can differ by 3–5%. Use prompt ensembling (average over multiple templates) for best results.
+
+| CLIP Variant | Image Encoder | Text Encoder | Zero-shot ImageNet (%) | Params |
+| --- | --- | --- | --- | --- |
+| CLIP-B/32 | ViT-B/32 | Transformer 63M | 63.4 | 151M |
+| CLIP-B/16 | ViT-B/16 | Transformer 63M | 68.3 | 149M |
+| CLIP-L/14 | ViT-L/14 | Transformer 123M | 75.5 | 428M |
+| SigLIP-B/16 | ViT-B/16 | Transformer | 76.1 | 203M |
+| SigLIP-L/16 | ViT-L/16 | Transformer | 80.1 | 652M |
+| OpenCLIP-G | ViT-G/14 | Transformer | 80.1 | 1.8B |
+
+## Key Takeaways
+
+```python
+import torch
+from transformers import CLIPModel, CLIPProcessor
+from sklearn.linear_model import LogisticRegression
+import numpy as np
+
+def clip_linear_probe(model, processor, train_loader, val_loader):
+    model.eval()
+    feats, labels = [], []
+    with torch.no_grad():
+        for imgs, lbls in train_loader:
+            inputs = processor(images=list(imgs), return_tensors="pt")
+            emb = model.get_image_features(**inputs)
+            feats.append(emb.cpu().numpy())
+            labels.append(lbls.numpy())
+    X = np.concatenate(feats)
+    y = np.concatenate(labels)
+    clf = LogisticRegression(max_iter=1000).fit(X, y)
+    return clf
+```
+
+CLIP established the paradigm of vision-language pretraining at scale. Key lessons: (1) contrastive learning on diverse web data transfers broadly, (2) natural language supervision provides richer signal than fixed categorical labels, (3) prompt engineering matters significantly for zero-shot performance, (4) large batch sizes and compute are necessary for the contrastive objective to work well.
+
+SigLIP (Sigmoid Loss for Language-Image Pre-training) improves CLIP by replacing the softmax contrastive loss with a sigmoid loss that treats each pair independently, removing the need for a global normalization constant and enabling smaller effective batch sizes with similar or better performance. SigLIP-L/16 matches CLIP-L/14 at lower compute.
+
+OpenCLIP reproduces and scales CLIP using open data (LAION-400M, LAION-5B) with fully open weights and training code. This enables the research community to study scaling laws, fine-tuning strategies, and domain adaptation without proprietary data or model access restrictions. OpenCLIP-G achieves 80.1% zero-shot ImageNet accuracy.
+
+For practitioners: use CLIP-L/14 or SigLIP-L/16 for general-purpose visual features. For retrieval at scale, pre-encode a gallery using the image encoder and index with FAISS. For classification, prompt ensembling over 80 ImageNet templates (from the CLIP paper) provides reliable gains over a single prompt, especially for abstract or ambiguous categories.
+
+Domain adaptation strategies: (1) linear probing on CLIP features often outperforms zero-shot on specialized domains, (2) soft prompt tuning (CoOp, CoCoOp) learns task-specific context tokens while keeping the backbone frozen, (3) full fine-tuning with a small learning rate preserves generalization, (4) WiSE-FT interpolates zero-shot and fine-tuned weights to balance accuracy and robustness.
+
+CLIP variants have been extended to video (VideoCLIP), audio-visual learning (AudioCLIP), and 3D point clouds (PointCLIP). In multimodal LLMs (LLaVA, Flamingo, GPT-4V), a frozen CLIP image encoder provides visual tokens to the language model. CLIP's image encoder is now a standard component in multimodal AI systems, making familiarity with its properties essential.
+
+Evaluation benchmarks: ImageNet zero-shot (standard), VTAB (diverse task transfer), COCO retrieval (image-text alignment), ObjectNet (out-of-distribution robustness), Winoground (compositional reasoning). CLIP scores well on the first three but struggles with Winoground, revealing that spatial and relational reasoning remains a challenge for contrastive vision-language models.
+

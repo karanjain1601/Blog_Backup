@@ -1,0 +1,111 @@
+---
+title: "NeRF: Neural Radiance Fields for Novel View Synthesis"
+slug: "nerf-volume-rendering"
+description: ""
+tags: ["computer-vision", "nerf", "volume-rendering", "neural-rendering", "novel-view-synthesis"]
+topic: ""
+status: ""
+updated: ""
+blocks_json: "W3sidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6Ik92ZXJ2aWV3In0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJOZXVyYWwgUmFkaWFuY2UgRmllbGRzIChOZVJGKSByZXByZXNlbnQgYSAzRCBzY2VuZSBhcyBhIGNvbnRpbnVvdXMgdm9sdW1ldHJpYyBmdW5jdGlvbiBtYXBwaW5nIDVEIGlucHV0cyAoM0QgcG9zaXRpb24geCBhbmQgMkQgdmlld2luZyBkaXJlY3Rpb24gZCkgdG8gY29sb3VyIChyLGcsYikgYW5kIHZvbHVtZSBkZW5zaXR5IM+DLiBUaGUgZnVuY3Rpb24gaXMgcGFyYW1ldGVyaXNlZCBieSBhbiBNTFAsIGFuZCBub3ZlbCB2aWV3cyBhcmUgc3ludGhlc2lzZWQgdmlhIGRpZmZlcmVudGlhYmxlIHZvbHVtZSByZW5kZXJpbmcgYWxvbmcgcmF5cyBjYXN0IHRocm91Z2ggdGhlIHNjZW5lIGZyb20gYW55IGNhbWVyYSBwb3NlLiJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiTmVSRiB3YXMgaW50cm9kdWNlZCBieSBNaWxkZW5oYWxsIGV0IGFsLiAoRUNDViAyMDIwKSBhbmQgZGVtb25zdHJhdGVkIHBob3RvLXJlYWxpc3RpYyBub3ZlbCB2aWV3IHN5bnRoZXNpcyBvbiBib3VuZGVkIGluZG9vciBhbmQgZm9yd2FyZC1mYWNpbmcgb3V0ZG9vciBzY2VuZXMuIEl0IHJlcXVpcmVzIDIw4oCTMTAwIHBvc2VkIGltYWdlcyBwZXIgc2NlbmUsIHJ1bnMgaG91cnMtbG9uZyBwZXItc2NlbmUgdHJhaW5pbmcsIGFuZCByZW5kZXJzIGF0IHVuZGVyIDEgRlBTLiBTdWJzZXF1ZW50IHdvcmsgYWNjZWxlcmF0ZXMgdHJhaW5pbmcgKEluc3RhbnQtTkdQLCBUZW5zb1JGKSBhbmQgcmVuZGVyaW5nICgzRCBHYXVzc2lhbiBTcGxhdHRpbmcpLiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IlZvbHVtZSBSZW5kZXJpbmcgRXF1YXRpb24ifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IlRvIHJlbmRlciBhIHBpeGVsLCBOZVJGIGNhc3RzIGEgcmF5IGZyb20gdGhlIGNhbWVyYSB0aHJvdWdoIHRoZSBwaXhlbCBhbmQgc2FtcGxlcyBOIHBvaW50cyBhbG9uZyB0aGUgcmF5LiBBdCBlYWNoIHBvaW50IHRoZSBNTFAgcHJlZGljdHMgY29sb3VyIGFuZCBkZW5zaXR5LiBUaGUgZmluYWwgcGl4ZWwgY29sb3VyIGlzIGNvbXB1dGVkIGJ5IGludGVncmF0aW5nIGNvbG91ciB3ZWlnaHRlZCBieSB0cmFuc21pdHRhbmNlIOKAlCBob3cgbXVjaCBsaWdodCBzdXJ2aXZlcyBmcm9tIHRoYXQgc2FtcGxlIHRvIHRoZSBjYW1lcmEg4oCUIGRpcmVjdGx5IG1pbWlja2luZyBwaHlzaWNhbGx5LWJhc2VkIGxpZ2h0IHRyYW5zcG9ydCB0aHJvdWdoIHBhcnRpY2lwYXRpbmcgbWVkaWEuIn0seyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6ImRlZiB2b2x1bWVfcmVuZGVyKG5lcmZfbWxwLCByYXlzX28sIHJheXNfZCwgdF92YWxzKTpcbiAgICBULCBjb2xvciA9IDEuMCwgdG9yY2guemVyb3MoMylcbiAgICBmb3IgaSBpbiByYW5nZShsZW4odF92YWxzKSAtIDEpOlxuICAgICAgICBkZWx0YSA9IHRfdmFsc1tpKzFdIC0gdF92YWxzW2ldXG4gICAgICAgIHhfaSA9IHJheXNfbyArIHRfdmFsc1tpXSAqIHJheXNfZFxuICAgICAgICBzaWdtYSwgcmdiID0gbmVyZl9tbHAoeF9pLCByYXlzX2QpXG4gICAgICAgIGFscGhhID0gMSAtIHRvcmNoLmV4cCgtc2lnbWEgKiBkZWx0YSlcbiAgICAgICAgY29sb3IgPSBjb2xvciArIFQgKiBhbHBoYSAqIHJnYlxuICAgICAgICBUID0gVCAqICgxIC0gYWxwaGEpXG4gICAgcmV0dXJuIGNvbG9yIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJUaGUgZGlzY3JldGUgYWNjdW11bGF0aW9uIGlzIGZ1bGx5IGRpZmZlcmVudGlhYmxlLiBUcmFuc21pdHRhbmNlIFQgc3RhcnRzIGF0IDEgYW5kIGlzIG11bHRpcGxpZWQgYnkgKDHiiJLOsSkgYXQgZWFjaCBzdGVwLCB3aGVyZSDOsSBpcyBkZXJpdmVkIGZyb20gZGVuc2l0eSBhbmQgc2VnbWVudCBsZW5ndGguIFRoaXMgcGh5c2ljYWxseS1ncm91bmRlZCBmb3JtdWxhdGlvbiBsZXRzIGdyYWRpZW50cyBmbG93IGJhY2sgdGhyb3VnaCB0aGUgcmVuZGVyaW5nIGxvb3AgdG8gdGhlIE1MUCB3ZWlnaHRzLCBlbmFibGluZyBzY2VuZSBvcHRpbWlzYXRpb24gcHVyZWx5IGZyb20gMkQgaW1hZ2Ugb2JzZXJ2YXRpb25zIHdpdGhvdXQgYW55IGV4cGxpY2l0IDNEIHN1cGVydmlzaW9uLiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6Ik1MUCBSYWRpYW5jZSBGaWVsZCJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiVGhlIE5lUkYgTUxQIHByb2Nlc3NlcyAzRCBwb3NpdGlvbiB0aHJvdWdoIDggZnVsbHktY29ubmVjdGVkIFJlTFUgbGF5ZXJzICh3aWR0aCAyNTYpLiBWaWV3aW5nIGRpcmVjdGlvbiBpcyBpbmplY3RlZCBhZnRlciB0aGUgNXRoIGxheWVyIGFzIGEgc2tpcC1jb25uZWN0aW9uIGlucHV0LCBzZXBhcmF0aW5nIHZpZXctaW5kZXBlbmRlbnQgZ2VvbWV0cnkgKGRlbnNpdHkgz4MpIGZyb20gdmlldy1kZXBlbmRlbnQgYXBwZWFyYW5jZSAocmdiKS4gVGhpcyBhcmNoaXRlY3R1cmUgbGV0cyB0aGUgbmV0d29yayBtb2RlbCBzcGVjdWxhciBoaWdobGlnaHRzIGFuZCByZWZsZWN0aW9ucyB0aGF0IGNoYW5nZSB3aXRoIHZpZXdwb2ludCB3aXRob3V0IGNvbmZ1c2luZyB0aGVtIHdpdGggZ2VvbWV0cnkuIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJUaGUgc2FtZSBNTFAgaXMgc2hhcmVkIGFjcm9zcyBhbGwgcG9pbnRzIGluIHRoZSBzY2VuZSwgbWFraW5nIE5lUkYgYSBjb21wYWN0IGltcGxpY2l0IG5ldXJhbCByZXByZXNlbnRhdGlvbiB3aXRoIG5vIHZveGVsLWdyaWQgZGlzY3JldGlzYXRpb24gYXJ0ZWZhY3RzLiBVbmxpbWl0ZWQgc3BhdGlhbCByZXNvbHV0aW9uIGlzIHRoZW9yZXRpY2FsbHkgYXZhaWxhYmxlLCBidXQgaW5mZXJlbmNlIGlzIHNsb3cgYmVjYXVzZSBldmVyeSBwb2ludCBhbG9uZyBldmVyeSByYXkgcmVxdWlyZXMgYSBzZXBhcmF0ZSBNTFAgZm9yd2FyZCBwYXNzLiBUaGUgc2NlbmUgbXVzdCBiZSBib3VuZGVkLCBvciBtaXAtTmVSRiAzNjAgZXh0ZW5kcyBpdCBmb3IgdW5ib3VuZGVkIGJhY2tncm91bmRzLiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IlBvc2l0aW9uYWwgRW5jb2RpbmcifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6Ik5ldXJhbCBuZXR3b3JrcyBhcHByb3hpbWF0ZSBsb3ctZnJlcXVlbmN5IGZ1bmN0aW9ucyBieSBkZWZhdWx0IGR1ZSB0byBzcGVjdHJhbCBiaWFzLCBmYWlsaW5nIHRvIHJlcHJlc2VudCBoaWdoLWZyZXF1ZW5jeSBnZW9tZXRyeSBhbmQgdGV4dHVyZS4gUG9zaXRpb25hbCBlbmNvZGluZyBsaWZ0cyAzRCBjb29yZGluYXRlcyBhbmQgdmlld2luZyBkaXJlY3Rpb25zIGludG8gYSBoaWdoLWRpbWVuc2lvbmFsIEZvdXJpZXIgZmVhdHVyZSBzcGFjZSwgbWFraW5nIGl0IGVhc3kgZm9yIHRoZSBNTFAgdG8gbGVhcm4gZmluZS1ncmFpbmVkIGRldGFpbC4gV2l0aG91dCBpdCwgTmVSRiBwcm9kdWNlcyBibHVycnkgcmVjb25zdHJ1Y3Rpb25zIHRoYXQgbWlzcyBzaGFycCBlZGdlcyBhbmQgZmluZSB0ZXh0dXJlLiJ9LHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiJpbXBvcnQgdG9yY2gsIG1hdGhcblxuZGVmIHBvc2l0aW9uYWxfZW5jb2RpbmcoeCwgTD0xMCk6XG4gICAgZnJlcXMgPSBbMioqaSAqIG1hdGgucGkgZm9yIGkgaW4gcmFuZ2UoTCldXG4gICAgZW5jb2RlZCA9IFt4XVxuICAgIGZvciBmIGluIGZyZXFzOlxuICAgICAgICBlbmNvZGVkICs9IFt0b3JjaC5zaW4oZiAqIHgpLCB0b3JjaC5jb3MoZiAqIHgpXVxuICAgIHJldHVybiB0b3JjaC5jYXQoZW5jb2RlZCwgZGltPS0xKVxuIyBNYXBzIFJeMyAtXHUwMDNlIFJeKDMqKDJMKzEpKSA9IFJeNjMgZm9yIEw9MTAifSx7InR5cGUiOiJjb2RlIiwibGFuZ3VhZ2UiOiJweXRob24iLCJjb250ZW50IjoiZGVmIGhpZXJhcmNoaWNhbF9zYW1wbGUocmF5cywgY29hcnNlX25ldCwgTl9maW5lPTEyOCk6XG4gICAgIyBDb2Fyc2UgcGFzczogc3RyYXRpZmllZCB1bmlmb3JtIHNhbXBsZXNcbiAgICB0X2NvYXJzZSA9IHNhbXBsZV91bmlmb3JtKHJheXMsIE5fY29hcnNlPTY0KVxuICAgIHJnYl9jLCB3ZWlnaHRzID0gcmVuZGVyX2NvYXJzZShjb2Fyc2VfbmV0LCByYXlzLCB0X2NvYXJzZSlcbiAgICAjIEZpbmUgcGFzczogaW1wb3J0YW5jZSBzYW1wbGUgZnJvbSBjb2Fyc2Ugd2VpZ2h0c1xuICAgIHRfZmluZSA9IHNhbXBsZV9wZGYodF9jb2Fyc2UsIHdlaWdodHMsIE5fZmluZSlcbiAgICB0X2FsbCA9IHRvcmNoLmNhdChbdF9jb2Fyc2UsIHRfZmluZV0sIGRpbT0tMSkuc29ydCgpLnZhbHVlc1xuICAgIHJnYl9mID0gcmVuZGVyX2ZpbmUoZmluZV9uZXQsIHJheXMsIHRfYWxsKVxuICAgIHJldHVybiByZ2JfYywgcmdiX2YifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkhpZ2hlciBMIGluIHBvc2l0aW9uYWwgZW5jb2RpbmcgY2FwdHVyZXMgZmluZXIgZGV0YWlsIGJ1dCByaXNrcyBvdmVyZml0dGluZyB0byB0cmFpbmluZyB2aWV3cy4gTWlwLU5lUkYgYWRkcmVzc2VzIGFsaWFzaW5nIGJ5IGVuY29kaW5nIGludGVncmF0ZWQgcG9zaXRpb25hbCBlbmNvZGluZ3MgKElQRSkgb3ZlciBjb25pY2FsIGZydXN0dW1zIHJhdGhlciB0aGFuIHBvaW50IHNhbXBsZXMsIHByb2R1Y2luZyBhbnRpLWFsaWFzZWQgcmVuZGVyaW5ncyBhdCBtdWx0aXBsZSBzY2FsZXMgYW5kIGVsaW1pbmF0aW5nIHRoZSBmbG9hdGVyIGFydGVmYWN0cyBhbmQgYmx1cnJpbmcgY29tbW9uIGluIHZhbmlsbGEgTmVSRiB3aGVuIHRyYWluaW5nIGltYWdlcyB2YXJ5IGluIHJlc29sdXRpb24uIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiSW5zdGFudC1OR1AgQWNjZWxlcmF0aW9uIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJWYW5pbGxhIE5lUkZcdTAwMjdzIGxhcmdlIE1MUCBpcyBxdWVyaWVkIG1pbGxpb25zIG9mIHRpbWVzIHBlciB0cmFpbmluZyBzdGVwLCBtYWtpbmcgaXQgdmVyeSBzbG93LiBJbnN0YW50LU5HUCByZXBsYWNlcyB0aGUgZGVlcCBNTFAgd2l0aCBhIG11bHRpLXJlc29sdXRpb24gaGFzaCBncmlkIG9mIHRyYWluYWJsZSBmZWF0dXJlIHZlY3RvcnMgZGVjb2RlZCBieSBhIHRpbnkgMi1sYXllciBNTFAuIEZlYXR1cmVzIGZyb20gdXAgdG8gMTYgaGFzaCBncmlkIGxldmVscyBhcmUgY29uY2F0ZW5hdGVkIGFuZCBwcm9jZXNzZWQgYXQgbmVhci1tZW1vcnktYmFuZHdpZHRoIHNwZWVkcywgcmVkdWNpbmcgdHJhaW5pbmcgZnJvbSBtYW55IGhvdXJzIHRvIHVuZGVyIGZpdmUgbWludXRlcy4ifSx7InR5cGUiOiJjYWxsb3V0IiwiY2FsbG91dF90eXBlIjoid2FybmluZyIsImNvbnRlbnQiOiJOZVJGIHJlcXVpcmVzIHBlci1zY2VuZSBvcHRpbWl6YXRpb24g4oCUIGVhY2ggc2NlbmUgdHJhaW5zIGEgc2VwYXJhdGUgTUxQIGZyb20gc2NyYXRjaC4gR2VuZXJhbGl6YWJsZSBOZVJGcyAoUGl4ZWxOZVJGLCBNVlNOZVJGKSBjb25kaXRpb24gb24gc291cmNlIGltYWdlcyBidXQgaGF2ZSBsb3dlciBxdWFsaXR5LiBJbnN0YW50LU5HUFx1MDAyN3MgaGFzaCBncmlkIGN1dHMgdHJhaW5pbmcgZnJvbSBkYXlzIHRvIG1pbnV0ZXMgd2l0aG91dCBzYWNyaWZpY2luZyBxdWFsaXR5LiJ9LHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiIjIEluc3RhbnQtTkdQOiBtdWx0aS1yZXNvbHV0aW9uIGhhc2ggZ3JpZCArIHRpbnkgTUxQXG5pbXBvcnQgdGlueWN1ZGFubiBhcyB0Y25uXG5cbmhhc2hfZ3JpZCA9IHRjbm4uRW5jb2Rpbmcobl9pbnB1dF9kaW1zPTMsIGVuY29kaW5nX2NvbmZpZz17XG4gICAgXCJvdHlwZVwiOiBcIkhhc2hHcmlkXCIsIFwibl9sZXZlbHNcIjogMTYsXG4gICAgXCJuX2ZlYXR1cmVzX3Blcl9sZXZlbFwiOiAyLCBcImxvZzJfaGFzaG1hcF9zaXplXCI6IDE5fSlcbnRpbnlfbWxwID0gdGNubi5OZXR3b3JrKG5faW5wdXRfZGltcz0zMiwgbl9vdXRwdXRfZGltcz00KVxuXG5kZWYgcXVlcnkoeCwgZCk6XG4gICAgaCA9IGhhc2hfZ3JpZCh4KVxuICAgIHJldHVybiB0aW55X21scCh0b3JjaC5jYXQoW2gsIGRpcl9lbmNvZGUoZCldLCBkaW09LTEpKSJ9LHsidHlwZSI6InRhYmxlIiwiaGVhZGVycyI6WyJNZXRob2QiLCJUcmFpbmluZyB0aW1lIiwiUmVuZGVyIEZQUyIsIlBTTlIgKE5lUkYtU3luKSIsIkR5bmFtaWM/Il0sInJvd3MiOltbIk5lUkYiLCIx4oCTMiBkYXlzIiwiXHUwMDNjMSIsIjMxLjAiLCJObyJdLFsiTWlwLU5lUkYiLCIyIGRheXMiLCJcdTAwM2MxIiwiMzMuMSIsIk5vIl0sWyJOZVJGKysiLCIx4oCTMiBkYXlzIiwiXHUwMDNjMSIsIjMwLjUiLCJObyJdLFsiSW5zdGFudC1OR1AiLCIz4oCTNSBtaW4iLCIxMOKAkzMwIiwiMzMuMiIsIk5vIl0sWyJUZW5zb1JGIiwiMTDigJMzMCBtaW4iLCI14oCTMjAiLCIzMy4xIiwiTm8iXV19LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiVGVuc29SRiBhY2hpZXZlcyBzaW1pbGFyIHNwZWVkIGdhaW5zIGJ5IGRlY29tcG9zaW5nIHRoZSByYWRpYW5jZSBmaWVsZCB0ZW5zb3IgaW50byBjb21wYWN0IHZlY3Rvci1tYXRyaXggZmFjdG9ycywgZHJhbWF0aWNhbGx5IHJlZHVjaW5nIHBhcmFtZXRlciBjb3VudCB2ZXJzdXMgZnVsbCB2b3hlbCBncmlkcy4gQm90aCBJbnN0YW50LU5HUCBhbmQgVGVuc29SRiBwYXZlZCB0aGUgd2F5IGZvciAzRCBHYXVzc2lhbiBTcGxhdHRpbmcsIHdoaWNoIGVsaW1pbmF0ZXMgcmF5IG1hcmNoaW5nIGVudGlyZWx5LCByZXBsYWNpbmcgdGhlIGltcGxpY2l0IGZpZWxkIHdpdGggZXhwbGljaXQsIGRpcmVjdGx5LXJlbmRlcmVkIDNEIEdhdXNzaWFuIHByaW1pdGl2ZXMgZm9yIHJlYWwtdGltZSBzcGVlZHMuIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiS2V5IFRha2Vhd2F5cyJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiTmVSRlx1MDAyN3MgY29yZSBjb250cmlidXRpb24gaXMgdHVybmluZyAzRCBzY2VuZSByZXByZXNlbnRhdGlvbiBpbnRvIGEgY29udGludW91cyByZWdyZXNzaW9uIHByb2JsZW0gc29sdmFibGUgd2l0aCBzdGFuZGFyZCBncmFkaWVudCBkZXNjZW50LiBUaGUgZGlmZmVyZW50aWFibGUgdm9sdW1lIHJlbmRlcmluZyBpbnRlZ3JhbCBwcm92aWRlcyBhIHBoeXNpY2FsbHktZ3JvdW5kZWQgbG9zcyBiZXR3ZWVuIHJlbmRlcmVkIGFuZCBvYnNlcnZlZCBwaXhlbHMuIFRoaXMgZm9ybXVsYXRpb24gaXMgbm93IHRoZSBmb3VuZGF0aW9uIG9mIG1vc3QgM0QgZ2VuZXJhdGl2ZSBtb2RlbHMgaW5jbHVkaW5nIERyZWFtRnVzaW9uLCBaZXJvLTEtdG8tMywgYW5kIEdhdXNzaWFuLWJhc2VkIGdlbmVyYXRpb24gcGlwZWxpbmVzLiJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiUG9zaXRpb25hbCBlbmNvZGluZyBhbmQgaGllcmFyY2hpY2FsIHNhbXBsaW5nIGFyZSB0aGUgdHdvIGVuZ2luZWVyaW5nIHRyaWNrcyBiZWhpbmQgdmFuaWxsYSBOZVJGXHUwMDI3cyBzdWNjZXNzLiBXaXRob3V0IEZvdXJpZXIgZmVhdHVyZXMgdGhlIE1MUCBjYW5ub3QgcmVwcmVzZW50IGZpbmUtZ3JhaW5lZCBnZW9tZXRyeSBvciB0ZXh0dXJlLiBXaXRob3V0IGhpZXJhcmNoaWNhbCBzYW1wbGluZywgY29tcHV0ZSBpcyB3YXN0ZWQgb24gZW1wdHkgc3BhY2UuIEJvdGggaWRlYXMgcGVyc2lzdCBpbiBhY2NlbGVyYXRlZCB2YXJpYW50cyBsaWtlIEluc3RhbnQtTkdQLCBaaXAtTmVSRiwgYW5kIGV2ZW4gaW5mb3JtIHRoZSBkZW5zaWZpY2F0aW9uIGhldXJpc3RpYyBpbiAzRCBHYXVzc2lhbiBTcGxhdHRpbmcuIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJUaGUgTmVSRiBlY29zeXN0ZW0gbWF0dXJlZCByYXBpZGx5OiBnZW5lcmFsaXNlZCBOZVJGcyAoUGl4ZWxOZVJGLCBNVlNOZVJGKSBjb25kaXRpb24gb24gc291cmNlIGltYWdlcyBmb3IgemVyby1zaG90IHN5bnRoZXNpczsgZHluYW1pYyBOZVJGcyAoRC1OZVJGLCBIeXBlck5lUkYpIGhhbmRsZSBkZWZvcm1hYmxlIHNjZW5lczsgbGF0ZW50IGRpZmZ1c2lvbiBtb2RlbHMgZ2VuZXJhdGUgTmVSRiB3ZWlnaHRzIGZyb20gdGV4dC4gRGVzcGl0ZSBiZWluZyBzdXBlcnNlZGVkIGZvciByZW5kZXJpbmcgc3BlZWQgYnkgM0RHUywgTmVSRiByZW1haW5zIHRoZSBjb25jZXB0dWFsIGJhY2tib25lIG9mIG1vZGVybiBuZXVyYWwgcmVuZGVyaW5nIHJlc2VhcmNoLiJ9XQ=="
+---
+# NeRF: Neural Radiance Fields for Novel View Synthesis
+
+## Overview
+
+Neural Radiance Fields (NeRF) represent a 3D scene as a continuous volumetric function mapping 5D inputs (3D position x and 2D viewing direction d) to colour (r,g,b) and volume density σ. The function is parameterised by an MLP, and novel views are synthesised via differentiable volume rendering along rays cast through the scene from any camera pose.
+
+NeRF was introduced by Mildenhall et al. (ECCV 2020) and demonstrated photo-realistic novel view synthesis on bounded indoor and forward-facing outdoor scenes. It requires 20–100 posed images per scene, runs hours-long per-scene training, and renders at under 1 FPS. Subsequent work accelerates training (Instant-NGP, TensoRF) and rendering (3D Gaussian Splatting).
+
+## Volume Rendering Equation
+
+To render a pixel, NeRF casts a ray from the camera through the pixel and samples N points along the ray. At each point the MLP predicts colour and density. The final pixel colour is computed by integrating colour weighted by transmittance — how much light survives from that sample to the camera — directly mimicking physically-based light transport through participating media.
+
+```python
+def volume_render(nerf_mlp, rays_o, rays_d, t_vals):
+    T, color = 1.0, torch.zeros(3)
+    for i in range(len(t_vals) - 1):
+        delta = t_vals[i+1] - t_vals[i]
+        x_i = rays_o + t_vals[i] * rays_d
+        sigma, rgb = nerf_mlp(x_i, rays_d)
+        alpha = 1 - torch.exp(-sigma * delta)
+        color = color + T * alpha * rgb
+        T = T * (1 - alpha)
+    return color
+```
+
+The discrete accumulation is fully differentiable. Transmittance T starts at 1 and is multiplied by (1−α) at each step, where α is derived from density and segment length. This physically-grounded formulation lets gradients flow back through the rendering loop to the MLP weights, enabling scene optimisation purely from 2D image observations without any explicit 3D supervision.
+
+## MLP Radiance Field
+
+The NeRF MLP processes 3D position through 8 fully-connected ReLU layers (width 256). Viewing direction is injected after the 5th layer as a skip-connection input, separating view-independent geometry (density σ) from view-dependent appearance (rgb). This architecture lets the network model specular highlights and reflections that change with viewpoint without confusing them with geometry.
+
+The same MLP is shared across all points in the scene, making NeRF a compact implicit neural representation with no voxel-grid discretisation artefacts. Unlimited spatial resolution is theoretically available, but inference is slow because every point along every ray requires a separate MLP forward pass. The scene must be bounded, or mip-NeRF 360 extends it for unbounded backgrounds.
+
+## Positional Encoding
+
+Neural networks approximate low-frequency functions by default due to spectral bias, failing to represent high-frequency geometry and texture. Positional encoding lifts 3D coordinates and viewing directions into a high-dimensional Fourier feature space, making it easy for the MLP to learn fine-grained detail. Without it, NeRF produces blurry reconstructions that miss sharp edges and fine texture.
+
+```python
+import torch, math
+
+def positional_encoding(x, L=10):
+    freqs = [2**i * math.pi for i in range(L)]
+    encoded = [x]
+    for f in freqs:
+        encoded += [torch.sin(f * x), torch.cos(f * x)]
+    return torch.cat(encoded, dim=-1)
+# Maps R^3 -> R^(3*(2L+1)) = R^63 for L=10
+```
+
+```python
+def hierarchical_sample(rays, coarse_net, N_fine=128):
+    # Coarse pass: stratified uniform samples
+    t_coarse = sample_uniform(rays, N_coarse=64)
+    rgb_c, weights = render_coarse(coarse_net, rays, t_coarse)
+    # Fine pass: importance sample from coarse weights
+    t_fine = sample_pdf(t_coarse, weights, N_fine)
+    t_all = torch.cat([t_coarse, t_fine], dim=-1).sort().values
+    rgb_f = render_fine(fine_net, rays, t_all)
+    return rgb_c, rgb_f
+```
+
+Higher L in positional encoding captures finer detail but risks overfitting to training views. Mip-NeRF addresses aliasing by encoding integrated positional encodings (IPE) over conical frustums rather than point samples, producing anti-aliased renderings at multiple scales and eliminating the floater artefacts and blurring common in vanilla NeRF when training images vary in resolution.
+
+## Instant-NGP Acceleration
+
+Vanilla NeRF's large MLP is queried millions of times per training step, making it very slow. Instant-NGP replaces the deep MLP with a multi-resolution hash grid of trainable feature vectors decoded by a tiny 2-layer MLP. Features from up to 16 hash grid levels are concatenated and processed at near-memory-bandwidth speeds, reducing training from many hours to under five minutes.
+
+> ****: NeRF requires per-scene optimization — each scene trains a separate MLP from scratch. Generalizable NeRFs (PixelNeRF, MVSNeRF) condition on source images but have lower quality. Instant-NGP's hash grid cuts training from days to minutes without sacrificing quality.
+
+```python
+# Instant-NGP: multi-resolution hash grid + tiny MLP
+import tinycudann as tcnn
+
+hash_grid = tcnn.Encoding(n_input_dims=3, encoding_config={
+    "otype": "HashGrid", "n_levels": 16,
+    "n_features_per_level": 2, "log2_hashmap_size": 19})
+tiny_mlp = tcnn.Network(n_input_dims=32, n_output_dims=4)
+
+def query(x, d):
+    h = hash_grid(x)
+    return tiny_mlp(torch.cat([h, dir_encode(d)], dim=-1))
+```
+
+| Method | Training time | Render FPS | PSNR (NeRF-Syn) | Dynamic? |
+| --- | --- | --- | --- | --- |
+| NeRF | 1–2 days | <1 | 31.0 | No |
+| Mip-NeRF | 2 days | <1 | 33.1 | No |
+| NeRF++ | 1–2 days | <1 | 30.5 | No |
+| Instant-NGP | 3–5 min | 10–30 | 33.2 | No |
+| TensoRF | 10–30 min | 5–20 | 33.1 | No |
+
+TensoRF achieves similar speed gains by decomposing the radiance field tensor into compact vector-matrix factors, dramatically reducing parameter count versus full voxel grids. Both Instant-NGP and TensoRF paved the way for 3D Gaussian Splatting, which eliminates ray marching entirely, replacing the implicit field with explicit, directly-rendered 3D Gaussian primitives for real-time speeds.
+
+## Key Takeaways
+
+NeRF's core contribution is turning 3D scene representation into a continuous regression problem solvable with standard gradient descent. The differentiable volume rendering integral provides a physically-grounded loss between rendered and observed pixels. This formulation is now the foundation of most 3D generative models including DreamFusion, Zero-1-to-3, and Gaussian-based generation pipelines.
+
+Positional encoding and hierarchical sampling are the two engineering tricks behind vanilla NeRF's success. Without Fourier features the MLP cannot represent fine-grained geometry or texture. Without hierarchical sampling, compute is wasted on empty space. Both ideas persist in accelerated variants like Instant-NGP, Zip-NeRF, and even inform the densification heuristic in 3D Gaussian Splatting.
+
+The NeRF ecosystem matured rapidly: generalised NeRFs (PixelNeRF, MVSNeRF) condition on source images for zero-shot synthesis; dynamic NeRFs (D-NeRF, HyperNeRF) handle deformable scenes; latent diffusion models generate NeRF weights from text. Despite being superseded for rendering speed by 3DGS, NeRF remains the conceptual backbone of modern neural rendering research.
+

@@ -1,0 +1,138 @@
+---
+title: "DINOv2: Self-Distillation for Universal Visual Features"
+slug: "dinov2-visual-features"
+description: "How DINOv2 uses self-distillation with no labels to produce patch features that generalize to depth, segmentation, and dense matching out of the box."
+tags: ["vision-transformer", "self-supervised", "dinov2", "features", "distillation"]
+topic: "computer-vision"
+status: "published"
+updated: "2026-07-10"
+blocks_json: "W3sidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6Ik92ZXJ2aWV3In0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJESU5PdjIgaXMgYSBzZWxmLXN1cGVydmlzZWQgdmlzaW9uIGZvdW5kYXRpb24gbW9kZWwgdHJhaW5lZCB2aWEgc2VsZi1kaXN0aWxsYXRpb24gd2l0aCBubyBsYWJlbHMuIEl0IHByb2R1Y2VzIHBhdGNoLWxldmVsIGZlYXR1cmVzIHRoYXQgZ2VuZXJhbGl6ZSB0byBkZXB0aCBlc3RpbWF0aW9uLCBzZWdtZW50YXRpb24sIGNsYXNzaWZpY2F0aW9uLCBhbmQgZGVuc2UgbWF0Y2hpbmcgd2l0aG91dCB0YXNrLXNwZWNpZmljIGZpbmUtdHVuaW5nLiBUaGUga2V5IGluc2lnaHQ6IGEgc3R1ZGVudCBWaVQgbGVhcm5zIGJ5IG1hdGNoaW5nIHRoZSBvdXRwdXQgZGlzdHJpYnV0aW9uIG9mIGEgbW9tZW50dW0tdXBkYXRlZCB0ZWFjaGVyIFZpVCBvbiBhdWdtZW50ZWQgdmlld3Mgb2YgdGhlIHNhbWUgaW1hZ2UuIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJVbmxpa2UgY29udHJhc3RpdmUgbWV0aG9kcyB0aGF0IHB1c2ggbmVnYXRpdmVzIGFwYXJ0LCBESU5PdjIgdXNlcyBjZW50ZXJpbmcgYW5kIHNoYXJwZW5pbmcgb2YgdGVhY2hlciBsb2dpdHMgdG8gYXZvaWQgY29sbGFwc2UuIFRoZSB0ZWFjaGVyIGlzIG5ldmVyIHRyYWluZWQgZGlyZWN0bHkg4oCUIGl0IGlzIHVwZGF0ZWQgYXMgYW4gZXhwb25lbnRpYWwgbW92aW5nIGF2ZXJhZ2Ugb2Ygc3R1ZGVudCB3ZWlnaHRzLiBUaGlzIGFzeW1tZXRyeSBkcml2ZXMgcmVwcmVzZW50YXRpb24gcXVhbGl0eSBmYXIgYmV5b25kIHN1cGVydmlzZWQgYmFzZWxpbmVzIG9uIGRlbnNlIHByZWRpY3Rpb24gYmVuY2htYXJrcy4ifSx7InR5cGUiOiJjYWxsb3V0IiwidmFyaWFudCI6ImluZm8iLCJ0aXRsZSI6IkluZm8iLCJjb250ZW50IjoiRElOT3YyXHUwMDI3cyBwYXRjaCB0b2tlbnMgZW5jb2RlIGJvdGggc2VtYW50aWMgYW5kIGdlb21ldHJpYyBpbmZvcm1hdGlvbiDigJQgbWFraW5nIHRoZW0gZGlyZWN0bHkgdXNhYmxlIGZvciBkZXB0aCBlc3RpbWF0aW9uIGFuZCBzZWdtZW50YXRpb24gd2l0aG91dCBhbnkgdGFzay1zcGVjaWZpYyBmaW5lLXR1bmluZy4ifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJTZWxmLURpc3RpbGxhdGlvbiBUcmFpbmluZyJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiVHJhaW5pbmcgdXNlcyBtdWx0aS1jcm9wIGF1Z21lbnRhdGlvbjogdHdvIGdsb2JhbCB2aWV3cyBhdCAyMjRweCBhbmQgc2V2ZXJhbCBsb2NhbCB2aWV3cyBhdCA5NnB4LiBUaGUgc3R1ZGVudCBzZWVzIGFsbCBjcm9wczsgdGhlIHRlYWNoZXIgc2VlcyBvbmx5IGdsb2JhbCBjcm9wcy4gVGhlIGxvc3MgaXMgY3Jvc3MtZW50cm9weSBiZXR3ZWVuIHN0dWRlbnQgYW5kIHRlYWNoZXIgc29mdG1heCBvdXRwdXRzIGFmdGVyIGNlbnRlcmluZy4gQ2VudGVyaW5nIHN1YnRyYWN0cyBhIHJ1bm5pbmcgbWVhbiBvZiB0ZWFjaGVyIG91dHB1dHMgdG8gcHJldmVudCBtb2RlIGNvbGxhcHNlIHdpdGhvdXQgbmVlZGluZyBuZWdhdGl2ZSBwYWlycy4ifSx7InR5cGUiOiJjb2RlIiwibGFuZ3VhZ2UiOiJweXRob24iLCJjb250ZW50IjoiIyBTdHVkZW50L3RlYWNoZXIgVmlULUIvMTY6IGNlbnRlcmluZywgc2hhcnBlbmluZywgRU1BIHRlYWNoZXIgdXBkYXRlXG5pbXBvcnQgdG9yY2gsIHRvcmNoLm5uIGFzIG5uXG5cbmNsYXNzIERJTk9Mb3NzKG5uLk1vZHVsZSk6XG4gICAgZGVmIF9faW5pdF9fKHNlbGYsIG91dF9kaW0sIHRlYWNoZXJfdGVtcD0wLjA0LCBzdHVkZW50X3RlbXA9MC4xLCBjbT0wLjkpOlxuICAgICAgICBzdXBlcigpLl9faW5pdF9fKClcbiAgICAgICAgc2VsZi50dCA9IHRlYWNoZXJfdGVtcFxuICAgICAgICBzZWxmLnN0ID0gc3R1ZGVudF90ZW1wXG4gICAgICAgIHNlbGYuY20gPSBjbVxuICAgICAgICBzZWxmLnJlZ2lzdGVyX2J1ZmZlcihcdTAwMjdjZW50ZXJcdTAwMjcsIHRvcmNoLnplcm9zKDEsIG91dF9kaW0pKVxuXG4gICAgZGVmIGZvcndhcmQoc2VsZiwgc19vdXRzLCB0X291dHMpOlxuICAgICAgICB0ID0gWyhwIC0gc2VsZi5jZW50ZXIpIC8gc2VsZi50dCBmb3IgcCBpbiB0X291dHNdXG4gICAgICAgIHMgPSBbcCAvIHNlbGYuc3QgZm9yIHAgaW4gc19vdXRzXVxuICAgICAgICB0X3Byb2JzID0gW3guc29mdG1heCgtMSkgZm9yIHggaW4gdF1cbiAgICAgICAgbG9zcyA9IC1zdW0oc3VtKChxICogbm4uZnVuY3Rpb25hbC5sb2dfc29mdG1heChzdiwgLTEpKS5zdW0oLTEpLm1lYW4oKVxuICAgICAgICAgICAgICAgICAgICAgICAgZm9yIHN2IGluIHMpIGZvciBxIGluIHRfcHJvYnMpXG4gICAgICAgICMgRU1BOiB0ZWFjaGVyID0gY20qdGVhY2hlciArICgxLWNtKSpzdHVkZW50IChkb25lIGluIHRyYWluaW5nIGxvb3ApXG4gICAgICAgIHNlbGYuY2VudGVyID0gc2VsZi5jbSAqIHNlbGYuY2VudGVyICsgKDEgLSBzZWxmLmNtKSAqIHRvcmNoLmNhdCh0X291dHMpLm1lYW4oMCwga2VlcGRpbT1UcnVlKVxuICAgICAgICByZXR1cm4gbG9zcyJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiVGVhY2hlciB0ZW1wZXJhdHVyZSAoMC4wNCkgaXMgc2hhcnBlciB0aGFuIHN0dWRlbnQgdGVtcGVyYXR1cmUgKDAuMSksIGNyZWF0aW5nIGEgc2hhcnBlbmluZyBlZmZlY3QgdGhhdCBkcml2ZXMgY29uZmlkZW50IHRlYWNoZXIgcHJlZGljdGlvbnMgd2hpbGUga2VlcGluZyBzdHVkZW50IHByZWRpY3Rpb25zIHNvZnQgZW5vdWdoIHRvIGxlYXJuIGZyb20uIFRoaXMgYXN5bW1ldHJ5IGlzIGNyaXRpY2FsIOKAlCBlcXVhbGl6aW5nIHRoZSB0d28gdGVtcGVyYXR1cmVzIGxlYWRzIHRvIGNvbGxhcHNlZCByZXByZXNlbnRhdGlvbnMgd2l0aGluIGEgZmV3IGh1bmRyZWQgdHJhaW5pbmcgaXRlcmF0aW9ucy4ifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJDdXJhdGVkIERhdGEgUGlwZWxpbmUifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkRJTk92MiB3YXMgdHJhaW5lZCBvbiBMVkQtMTQyTSDigJQgYSBjdXJhdGVkIGRhdGFzZXQgb2YgMTQyIG1pbGxpb24gaW1hZ2VzLiBSYXRoZXIgdGhhbiBzY3JhcGluZyB1bmN1cmF0ZWQgd2ViIGRhdGEsIHRoZSBhdXRob3JzIHVzZWQgYSByZXRyaWV2YWwtYmFzZWQgY3VyYXRpb24gcGlwZWxpbmU6IGVtYmVkIGNhbmRpZGF0ZXMgd2l0aCBhbiBlYXJsaWVyIERJTk8gbW9kZWwsIHJldHJpZXZlIG5lYXJlc3QgbmVpZ2hib3JzIGZyb20gYSBjdXJhdGVkIHNlZWQgc2V0IChJbWFnZU5ldC0yMmspLCB0aGVuIGZpbHRlciBieSBkZWR1cGxpY2F0aW9uIGFuZCBOU0ZXIGNsYXNzaWZpZXJzLiJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiVGhpcyBjdXJhdGlvbiBzdGVwIGlzIGFyZ3VhYmx5IGFzIGltcG9ydGFudCBhcyB0aGUgc2VsZi1kaXN0aWxsYXRpb24gb2JqZWN0aXZlLiBNb2RlbHMgdHJhaW5lZCBvbiB1bmN1cmF0ZWQgZGF0YSBvZiBzaW1pbGFyIHNjYWxlIHBlcmZvcm0gc3Vic3RhbnRpYWxseSB3b3JzZSBvbiBkZW5zZSB0YXNrcy4gVGhlIHBpcGVsaW5lIGVuc3VyZXMgY292ZXJhZ2Ugb2Ygb2JqZWN0LWNlbnRyaWMsIHNjZW5lLWxldmVsLCBhbmQgdGV4dHVyZS1yaWNoIGltYWdlcyB3aGlsZSByZW1vdmluZyBuZWFyLWR1cGxpY2F0ZSBjbHVzdGVycyB0aGF0IHdvdWxkIGJpYXMgZmVhdHVyZSBnZW9tZXRyeSB0b3dhcmQgb3ZlcnJlcHJlc2VudGVkIHZpc3VhbCBjb25jZXB0cy4ifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkFkZGl0aW9uYWwgcmVndWxhcml6YXRpb24gaW5jbHVkZXMgc3RvY2hhc3RpYyBkZXB0aCwgd2VpZ2h0IGRlY2F5IHNjaGVkdWxpbmcsIGFuZCBCRjE2IG1peGVkIHByZWNpc2lvbi4gVHJhaW5pbmcgVmlULUcvMTQgKDEuMUIgcGFyYW1ldGVycykgcmVxdWlyZWQgMiBkYXlzIG9uIDY0IEExMDAgR1BVcy4gVmlULVMgYW5kIFZpVC1CIHZhcmlhbnRzIGFyZSBjaGVja3BvaW50ZWQgYXQgdGhlIHNhbWUgbnVtYmVyIG9mIGl0ZXJhdGlvbnMsIG1ha2luZyBzY2FsZSBjb21wYXJpc29ucyBjb250cm9sbGVkIGFuZCBmYWlyIGFjcm9zcyBhbGwgbW9kZWwgc2l6ZXMgaW4gdGhlIERJTk92MiBmYW1pbHkuIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiRGVuc2UgUHJlZGljdGlvbiBUYXNrcyJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiVGhlIG1vc3Qgc3RyaWtpbmcgRElOT3YyIGNhcGFiaWxpdHkgaXMgZGVuc2UgbWF0Y2hpbmc6IHBhdGNoIHRva2VucyBmcm9tIHR3byBpbWFnZXMgY2FuIGJlIGNvbXBhcmVkIGJ5IGNvc2luZSBzaW1pbGFyaXR5IHRvIGZpbmQgY29ycmVzcG9uZGVuY2VzIHdpdGggbm8gZmluZS10dW5pbmcuIFRoaXMgd29ya3MgYmVjYXVzZSBESU5PdjIgcGF0Y2ggdG9rZW5zIGhhdmUgY29uc2lzdGVudCBnZW9tZXRyeSBhY3Jvc3MgaW1hZ2VzIOKAlCB0aGUgdG9rZW4gYXQgc3BhdGlhbCBwb3NpdGlvbiAoaSxqKSBlbmNvZGVzIGxvY2FsIHBhdGNoIGFwcGVhcmFuY2UgcmVsYXRpdmUgdG8gZ2xvYmFsIHNjZW5lIGNvbnRleHQuIn0seyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6IiMgTG9hZCBESU5PdjIgcHJldHJhaW5lZCwgZXh0cmFjdCBwYXRjaCB0b2tlbnMsIFBDQSB0byAzIGRpbXMgZm9yIFJHQiB2aXpcbmltcG9ydCB0b3JjaCwgdG9yY2h2aXNpb24udHJhbnNmb3JtcyBhcyBUXG5mcm9tIFBJTCBpbXBvcnQgSW1hZ2VcbmZyb20gc2tsZWFybi5kZWNvbXBvc2l0aW9uIGltcG9ydCBQQ0FcblxubW9kZWwgPSB0b3JjaC5odWIubG9hZChcdTAwMjdmYWNlYm9va3Jlc2VhcmNoL2Rpbm92Mlx1MDAyNywgXHUwMDI3ZGlub3YyX3ZpdGIxNFx1MDAyNylcbm1vZGVsLmV2YWwoKVxudHJhbnNmb3JtID0gVC5Db21wb3NlKFtULlJlc2l6ZSg1MTgpLCBULkNlbnRlckNyb3AoNTE4KSwgVC5Ub1RlbnNvcigpLFxuICAgIFQuTm9ybWFsaXplKFswLjQ4NSwwLjQ1NiwwLjQwNl0sWzAuMjI5LDAuMjI0LDAuMjI1XSldKVxuXG5pbWcgPSB0cmFuc2Zvcm0oSW1hZ2Uub3BlbihcdTAwMjdpbWcuanBnXHUwMDI3KSkudW5zcXVlZXplKDApXG53aXRoIHRvcmNoLm5vX2dyYWQoKTpcbiAgICBmZWF0cyA9IG1vZGVsLmdldF9pbnRlcm1lZGlhdGVfbGF5ZXJzKGltZywgbj0xKVswXSAgIyAoMSwgMTM2OSwgNzY4KVxucGF0Y2hfdG9rZW5zID0gZmVhdHNbMF0uY3B1KCkubnVtcHkoKSAgIyAoMTM2OSwgNzY4KVxucGNhX2ZlYXRzID0gUENBKG5fY29tcG9uZW50cz0zKS5maXRfdHJhbnNmb3JtKHBhdGNoX3Rva2VucykgICMgKDEzNjksIDMpIn0seyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6IiMgRGVuc2UgbWF0Y2hpbmc6IGNvc2luZSBzaW1pbGFyaXR5IGJldHdlZW4gcGF0Y2ggdG9rZW5zIG9mIHR3byBpbWFnZXNcbmltcG9ydCB0b3JjaC5ubi5mdW5jdGlvbmFsIGFzIEZcblxuZGVmIGRlbnNlX21hdGNoKGZlYXRzMSwgZmVhdHMyLCB0aHJlc2hvbGQ9MC43KTpcbiAgICAjIGZlYXRzOiAoTiwgRCkgbm9ybWFsaXplZCBwYXRjaCB0b2tlbiB0ZW5zb3JzXG4gICAgZjEgPSBGLm5vcm1hbGl6ZShmZWF0czEsIGRpbT0tMSlcbiAgICBmMiA9IEYubm9ybWFsaXplKGZlYXRzMiwgZGltPS0xKVxuICAgIHNpbSA9IGYxIEAgZjIuVCAgICAgICAgICAgICMgKE4xLCBOMikgY29zaW5lIHNpbWlsYXJpdHkgbWF0cml4XG4gICAgbWF0Y2hlcyA9IHNpbS5hcmdtYXgoZGltPTEpICAjIGVhY2ggcGF0Y2ggaW4gaW1nMSAtXHUwMDNlIGJlc3QgcGF0Y2ggaW4gaW1nMlxuICAgIGNvbmZpZGVuY2UgPSBzaW0ubWF4KGRpbT0xKS52YWx1ZXNcbiAgICB2YWxpZCA9IGNvbmZpZGVuY2UgXHUwMDNlIHRocmVzaG9sZFxuICAgIHByaW50KGZcdTAwMjd7dmFsaWQuc3VtKCl9IGNvbmZpZGVudCBtYXRjaGVzIG91dCBvZiB7bGVuKG1hdGNoZXMpfVx1MDAyNylcbiAgICByZXR1cm4gbWF0Y2hlc1t2YWxpZF0sIGNvbmZpZGVuY2VbdmFsaWRdIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJGb3IgZGVwdGggZXN0aW1hdGlvbiwgYSBsaW5lYXIgbGF5ZXIgb24gdG9wIG9mIERJTk92MiBwYXRjaCB0b2tlbnMgcmVhY2hlcyB3aXRoaW4gNSUgb2Ygc3VwZXJ2aXNlZCBtZXRob2RzIG9uIE5ZVSBEZXB0aCB2Mi4gRm9yIEFERTIwSyBzZWdtZW50YXRpb24sIGEgbGluZWFyIGhlYWQgb24gZnJvemVuIERJTk92MiBWaVQtRyBhY2hpZXZlcyA0OS4wIG1Jb1Ug4oCUIGNvbXBldGl0aXZlIHdpdGggbWFueSBmaW5lLXR1bmVkIG1ldGhvZHMuIFRoZXNlIHJlc3VsdHMgZGVtb25zdHJhdGUgdGhlIHJpY2huZXNzIG9mIERJTk92MiBzcGF0aWFsIHJlcHJlc2VudGF0aW9ucyB3aXRob3V0IGFueSB0YXNrLXNwZWNpZmljIGhlYWQgZGVzaWduLiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IkxpbmVhciBQcm9iaW5nIHZzIEZpbmUtVHVuaW5nIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJMaW5lYXIgcHJvYmluZyDigJQgdHJhaW5pbmcgb25seSBhIGNsYXNzaWZpY2F0aW9uIGhlYWQgb24gZnJvemVuIGJhY2tib25lIGZlYXR1cmVzIOKAlCBpcyB0aGUgY2xlYW5lc3QgbWVhc3VyZSBvZiByZXByZXNlbnRhdGlvbiBxdWFsaXR5LiBESU5PdjIgVmlULUcgYWNoaWV2ZXMgODYuNSUgbGluZWFyIHByb2JlIGFjY3VyYWN5IG9uIEltYWdlTmV0LTFLLCBzdXJwYXNzaW5nIGZ1bGx5IHN1cGVydmlzZWQgVmlULUwgdHJhaW5lZCBmcm9tIHNjcmF0Y2guIFRoaXMgaXMgdGhlIGhlYWRsaW5lIHJlc3VsdCBkZW1vbnN0cmF0aW5nIHRoYXQgc2VsZi1zdXBlcnZpc2VkIGZlYXR1cmVzIGNhbiBleGNlZWQgc3VwZXJ2aXNlZCBvbmVzIGF0IHN1ZmZpY2llbnQgc2NhbGUuIn0seyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6IiMgTGluZWFyIHByb2JlOiBmcmVlemUgRElOT3YyIGJhY2tib25lLCB0cmFpbiBzaW5nbGUgbm4uTGluZWFyIGhlYWQgb24gSW1hZ2VOZXRcbmltcG9ydCB0b3JjaCwgdG9yY2gubm4gYXMgbm5cbmZyb20gdG9yY2gub3B0aW0gaW1wb3J0IEFkYW1cblxuYmFja2JvbmUgPSB0b3JjaC5odWIubG9hZChcdTAwMjdmYWNlYm9va3Jlc2VhcmNoL2Rpbm92Mlx1MDAyNywgXHUwMDI3ZGlub3YyX3ZpdGIxNFx1MDAyNylcbmZvciBwIGluIGJhY2tib25lLnBhcmFtZXRlcnMoKTpcbiAgICBwLnJlcXVpcmVzX2dyYWRfKEZhbHNlKVxuXG5wcm9iZSA9IG5uLkxpbmVhcig3NjgsIDEwMDApICAjIDEwMDAgSW1hZ2VOZXQgY2xhc3Nlc1xub3B0aW1pemVyID0gQWRhbShwcm9iZS5wYXJhbWV0ZXJzKCksIGxyPTFlLTMsIHdlaWdodF9kZWNheT0xZS00KVxuXG5mb3IgaW1ncywgbGFiZWxzIGluIHRyYWluX2xvYWRlcjpcbiAgICB3aXRoIHRvcmNoLm5vX2dyYWQoKTpcbiAgICAgICAgZmVhdHMgPSBiYWNrYm9uZShpbWdzKSAgICAgICAjIENMUyB0b2tlbjogKEIsIDc2OClcbiAgICBsb2dpdHMgPSBwcm9iZShmZWF0cylcbiAgICBsb3NzID0gbm4uZnVuY3Rpb25hbC5jcm9zc19lbnRyb3B5KGxvZ2l0cywgbGFiZWxzKVxuICAgIG9wdGltaXplci56ZXJvX2dyYWQoKTsgbG9zcy5iYWNrd2FyZCgpOyBvcHRpbWl6ZXIuc3RlcCgpIn0seyJ0eXBlIjoidGFibGUiLCJoZWFkZXJzIjpbIlZpVCBWYXJpYW50IiwiUGFyYW1zIChNKSIsIklOLTFLIExpbmVhciAlIiwiQURFMjBLIG1Jb1UiXSwicm93cyI6W1siVmlULVMvMTQiLCIyMSIsIjgxLjEiLCIzOS4zIl0sWyJWaVQtQi8xNCIsIjg2IiwiODQuNSIsIjQ1LjUiXSxbIlZpVC1MLzE0IiwiMzA3IiwiODYuMyIsIjQ4LjEiXSxbIlZpVC1HLzE0IiwiMTEwMCIsIjg2LjUiLCI0OS4wIl1dfSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkZ1bGwgZmluZS10dW5pbmcgY29uc2lzdGVudGx5IGJlYXRzIGxpbmVhciBwcm9iaW5nIGJ5IDHigJMyJSBvbiBjbGFzc2lmaWNhdGlvbiwgYnV0IHRoZSBnYXAgbmFycm93cyBvbiBkZW5zZSB0YXNrcy4gRm9yIGRvd25zdHJlYW0gdGFza3Mgd2l0aCBsaW1pdGVkIGxhYmVsZWQgZGF0YSwgbGluZWFyIHByb2Jpbmcgb2Z0ZW4gb3V0cGVyZm9ybXMgZmluZS10dW5pbmcgYmVjYXVzZSBmaW5lLXR1bmluZyByaXNrcyBkZXN0cm95aW5nIHRoZSBmcm96ZW4gc3BhdGlhbCBzdHJ1Y3R1cmUuIFRoZSByZWNvbW1lbmRhdGlvbjogc3RhcnQgd2l0aCBsaW5lYXIgcHJvYmluZywgZmluZS10dW5lIG9ubHkgd2hlbiB5b3UgaGF2ZSBtb3JlIHRoYW4gMTBrIGxhYmVsZWQgZXhhbXBsZXMuIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiS2V5IFRha2Vhd2F5cyJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiRElOT3YyIHJlcHJlc2VudHMgYSBjb252ZXJnZW5jZSBvZiB0aHJlZSBpbmdyZWRpZW50czogYSBwcmluY2lwbGVkIHNlbGYtZGlzdGlsbGF0aW9uIG9iamVjdGl2ZSwgY3VyYXRlZCBsYXJnZS1zY2FsZSB0cmFpbmluZyBkYXRhLCBhbmQgc3VmZmljaWVudCBtb2RlbCBzY2FsZS4gUmVtb3ZlIGFueSBvbmUgaW5ncmVkaWVudCBhbmQgcGVyZm9ybWFuY2UgZGVncmFkZXMgc3Vic3RhbnRpYWxseS4gVGhlIGFyY2hpdGVjdHVyZSBpdHNlbGYgKFZpVCkgaXMgZW50aXJlbHkgc3RhbmRhcmQg4oCUIHRoZSBub3ZlbHR5IGlzIGluIHRoZSB0cmFpbmluZyByZWNpcGUsIG5vdCB0aGUgbW9kZWwgc3RydWN0dXJlLiJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiRm9yIHByYWN0aXRpb25lcnMsIERJTk92MiBmZWF0dXJlcyBhcmUgdGhlIHJlY29tbWVuZGVkIHN0YXJ0aW5nIHBvaW50IGZvciBhbnkgdmlzaW9uIHRhc2sgd2hlcmUgbGFiZWxlZCBkYXRhIGlzIGxpbWl0ZWQuIFRoZSBmcm96ZW4gVmlULUIvMTQgYmFja2JvbmUgYXQgODZNIHBhcmFtZXRlcnMgb2ZmZXJzIHRoZSBiZXN0IHNwZWVkLXF1YWxpdHkgdHJhZGVvZmYgZm9yIG1vc3QgdGFza3MuIFVzZSBWaVQtUyBmb3IgZWRnZSBkZXBsb3ltZW50IGFuZCBWaVQtTCBvciBWaVQtRyBvbmx5IHdoZW4geW91IG5lZWQgbWF4aW11bSBhY2N1cmFjeSBvbiBkZW5zZSBwcmVkaWN0aW9uIHdpdGggdGhlIGNvbXB1dGUgYnVkZ2V0IHRvIG1hdGNoLiJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiVGhlIHNlbGYtZGlzdGlsbGF0aW9uIGZyYW1ld29yayBpcyBhcmNoaXRlY3R1cmUtYWdub3N0aWMgYW5kIGhhcyBzaW5jZSBiZWVuIGFwcGxpZWQgdG8gQ05OIGJhY2tib25lcyBhbmQgaHlicmlkIG1vZGVscy4gSG93ZXZlciwgVmlUXHUwMDI3cyBleHBsaWNpdCBwYXRjaCB0b2tlbml6YXRpb24gaXMgY2VudHJhbCB0byB0aGUgZGVuc2UgbWF0Y2hpbmcgY2FwYWJpbGl0eTogd2l0aG91dCBzcGF0aWFsIHRva2VuIHBvc2l0aW9ucyB5b3UgbG9zZSB0aGUgZ2VvbWV0cnkgdGhhdCBtYWtlcyBESU5PdjIgZmVhdHVyZXMgdXNlZnVsIGZvciBjb3JyZXNwb25kZW5jZSBhbmQgZGVwdGguIFRoZSBwYXRjaCB0b2tlbiBkZXNpZ24gaXMgYSBmZWF0dXJlLCBub3QgYSBjb25zdHJhaW50LiJ9XQ=="
+---
+# DINOv2: Self-Distillation for Universal Visual Features
+
+## Overview
+
+DINOv2 is a self-supervised vision foundation model trained via self-distillation with no labels. It produces patch-level features that generalize to depth estimation, segmentation, classification, and dense matching without task-specific fine-tuning. The key insight: a student ViT learns by matching the output distribution of a momentum-updated teacher ViT on augmented views of the same image.
+
+Unlike contrastive methods that push negatives apart, DINOv2 uses centering and sharpening of teacher logits to avoid collapse. The teacher is never trained directly — it is updated as an exponential moving average of student weights. This asymmetry drives representation quality far beyond supervised baselines on dense prediction benchmarks.
+
+> **Info**: DINOv2's patch tokens encode both semantic and geometric information — making them directly usable for depth estimation and segmentation without any task-specific fine-tuning.
+
+## Self-Distillation Training
+
+Training uses multi-crop augmentation: two global views at 224px and several local views at 96px. The student sees all crops; the teacher sees only global crops. The loss is cross-entropy between student and teacher softmax outputs after centering. Centering subtracts a running mean of teacher outputs to prevent mode collapse without needing negative pairs.
+
+```python
+# Student/teacher ViT-B/16: centering, sharpening, EMA teacher update
+import torch, torch.nn as nn
+
+class DINOLoss(nn.Module):
+    def __init__(self, out_dim, teacher_temp=0.04, student_temp=0.1, cm=0.9):
+        super().__init__()
+        self.tt = teacher_temp
+        self.st = student_temp
+        self.cm = cm
+        self.register_buffer('center', torch.zeros(1, out_dim))
+
+    def forward(self, s_outs, t_outs):
+        t = [(p - self.center) / self.tt for p in t_outs]
+        s = [p / self.st for p in s_outs]
+        t_probs = [x.softmax(-1) for x in t]
+        loss = -sum(sum((q * nn.functional.log_softmax(sv, -1)).sum(-1).mean()
+                        for sv in s) for q in t_probs)
+        # EMA: teacher = cm*teacher + (1-cm)*student (done in training loop)
+        self.center = self.cm * self.center + (1 - self.cm) * torch.cat(t_outs).mean(0, keepdim=True)
+        return loss
+```
+
+Teacher temperature (0.04) is sharper than student temperature (0.1), creating a sharpening effect that drives confident teacher predictions while keeping student predictions soft enough to learn from. This asymmetry is critical — equalizing the two temperatures leads to collapsed representations within a few hundred training iterations.
+
+## Curated Data Pipeline
+
+DINOv2 was trained on LVD-142M — a curated dataset of 142 million images. Rather than scraping uncurated web data, the authors used a retrieval-based curation pipeline: embed candidates with an earlier DINO model, retrieve nearest neighbors from a curated seed set (ImageNet-22k), then filter by deduplication and NSFW classifiers.
+
+This curation step is arguably as important as the self-distillation objective. Models trained on uncurated data of similar scale perform substantially worse on dense tasks. The pipeline ensures coverage of object-centric, scene-level, and texture-rich images while removing near-duplicate clusters that would bias feature geometry toward overrepresented visual concepts.
+
+Additional regularization includes stochastic depth, weight decay scheduling, and BF16 mixed precision. Training ViT-G/14 (1.1B parameters) required 2 days on 64 A100 GPUs. ViT-S and ViT-B variants are checkpointed at the same number of iterations, making scale comparisons controlled and fair across all model sizes in the DINOv2 family.
+
+## Dense Prediction Tasks
+
+The most striking DINOv2 capability is dense matching: patch tokens from two images can be compared by cosine similarity to find correspondences with no fine-tuning. This works because DINOv2 patch tokens have consistent geometry across images — the token at spatial position (i,j) encodes local patch appearance relative to global scene context.
+
+```python
+# Load DINOv2 pretrained, extract patch tokens, PCA to 3 dims for RGB viz
+import torch, torchvision.transforms as T
+from PIL import Image
+from sklearn.decomposition import PCA
+
+model = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
+model.eval()
+transform = T.Compose([T.Resize(518), T.CenterCrop(518), T.ToTensor(),
+    T.Normalize([0.485,0.456,0.406],[0.229,0.224,0.225])])
+
+img = transform(Image.open('img.jpg')).unsqueeze(0)
+with torch.no_grad():
+    feats = model.get_intermediate_layers(img, n=1)[0]  # (1, 1369, 768)
+patch_tokens = feats[0].cpu().numpy()  # (1369, 768)
+pca_feats = PCA(n_components=3).fit_transform(patch_tokens)  # (1369, 3)
+```
+
+```python
+# Dense matching: cosine similarity between patch tokens of two images
+import torch.nn.functional as F
+
+def dense_match(feats1, feats2, threshold=0.7):
+    # feats: (N, D) normalized patch token tensors
+    f1 = F.normalize(feats1, dim=-1)
+    f2 = F.normalize(feats2, dim=-1)
+    sim = f1 @ f2.T            # (N1, N2) cosine similarity matrix
+    matches = sim.argmax(dim=1)  # each patch in img1 -> best patch in img2
+    confidence = sim.max(dim=1).values
+    valid = confidence > threshold
+    print(f'{valid.sum()} confident matches out of {len(matches)}')
+    return matches[valid], confidence[valid]
+```
+
+For depth estimation, a linear layer on top of DINOv2 patch tokens reaches within 5% of supervised methods on NYU Depth v2. For ADE20K segmentation, a linear head on frozen DINOv2 ViT-G achieves 49.0 mIoU — competitive with many fine-tuned methods. These results demonstrate the richness of DINOv2 spatial representations without any task-specific head design.
+
+## Linear Probing vs Fine-Tuning
+
+Linear probing — training only a classification head on frozen backbone features — is the cleanest measure of representation quality. DINOv2 ViT-G achieves 86.5% linear probe accuracy on ImageNet-1K, surpassing fully supervised ViT-L trained from scratch. This is the headline result demonstrating that self-supervised features can exceed supervised ones at sufficient scale.
+
+```python
+# Linear probe: freeze DINOv2 backbone, train single nn.Linear head on ImageNet
+import torch, torch.nn as nn
+from torch.optim import Adam
+
+backbone = torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')
+for p in backbone.parameters():
+    p.requires_grad_(False)
+
+probe = nn.Linear(768, 1000)  # 1000 ImageNet classes
+optimizer = Adam(probe.parameters(), lr=1e-3, weight_decay=1e-4)
+
+for imgs, labels in train_loader:
+    with torch.no_grad():
+        feats = backbone(imgs)       # CLS token: (B, 768)
+    logits = probe(feats)
+    loss = nn.functional.cross_entropy(logits, labels)
+    optimizer.zero_grad(); loss.backward(); optimizer.step()
+```
+
+| ViT Variant | Params (M) | IN-1K Linear % | ADE20K mIoU |
+| --- | --- | --- | --- |
+| ViT-S/14 | 21 | 81.1 | 39.3 |
+| ViT-B/14 | 86 | 84.5 | 45.5 |
+| ViT-L/14 | 307 | 86.3 | 48.1 |
+| ViT-G/14 | 1100 | 86.5 | 49.0 |
+
+Full fine-tuning consistently beats linear probing by 1–2% on classification, but the gap narrows on dense tasks. For downstream tasks with limited labeled data, linear probing often outperforms fine-tuning because fine-tuning risks destroying the frozen spatial structure. The recommendation: start with linear probing, fine-tune only when you have more than 10k labeled examples.
+
+## Key Takeaways
+
+DINOv2 represents a convergence of three ingredients: a principled self-distillation objective, curated large-scale training data, and sufficient model scale. Remove any one ingredient and performance degrades substantially. The architecture itself (ViT) is entirely standard — the novelty is in the training recipe, not the model structure.
+
+For practitioners, DINOv2 features are the recommended starting point for any vision task where labeled data is limited. The frozen ViT-B/14 backbone at 86M parameters offers the best speed-quality tradeoff for most tasks. Use ViT-S for edge deployment and ViT-L or ViT-G only when you need maximum accuracy on dense prediction with the compute budget to match.
+
+The self-distillation framework is architecture-agnostic and has since been applied to CNN backbones and hybrid models. However, ViT's explicit patch tokenization is central to the dense matching capability: without spatial token positions you lose the geometry that makes DINOv2 features useful for correspondence and depth. The patch token design is a feature, not a constraint.
+

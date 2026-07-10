@@ -1,0 +1,121 @@
+---
+title: "Image Normalization for Deep Learning"
+slug: "image-normalization-cv"
+description: "Channel-wise mean/std normalization using ImageNet statistics, per-sample normalization variants, and how normalization affects model training stability and transfer learning."
+tags: ["computer-vision"]
+topic: "computer-vision"
+status: "published"
+updated: "2026-07-10"
+blocks_json: "W3sidHlwZSI6ImgyIiwiY29udGVudCI6Ik92ZXJ2aWV3In0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJOb3JtYWxpemF0aW9uIGlzIGEgY3JpdGljYWwgcHJlcHJvY2Vzc2luZyBzdGVwIHRoYXQgcmVzY2FsZXMgcGl4ZWwgdmFsdWVzIHNvIG5ldXJhbCBuZXR3b3JrIHdlaWdodHMgZG8gbm90IG5lZWQgdG8gYWRhcHQgdG8gYXJiaXRyYXJ5IGlucHV0IHNjYWxlcy4gV2l0aG91dCBub3JtYWxpemF0aW9uLCBkaWZmZXJlbnQgY2hhbm5lbHMgYW5kIGRhdGFzZXRzIGNhbiBoYXZlIHZlcnkgZGlmZmVyZW50IGRpc3RyaWJ1dGlvbnMsIHNsb3dpbmcgb3IgZGVzdGFiaWxpemluZyB0cmFpbmluZy4gU3RhbmRhcmQgYXBwcm9hY2hlcyBpbmNsdWRlIHplcm8tbWVhbiB1bml0LXZhcmlhbmNlIG5vcm1hbGl6YXRpb24sIFswLCAxXSBzY2FsaW5nLCBhbmQgdGhlIHdpZGVseS11c2VkIEltYWdlTmV0IG1lYW4vc3RkLiJ9LHsidHlwZSI6ImgyIiwiY29udGVudCI6IkltYWdlTmV0IE1lYW4gYW5kIFN0ZCJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiSW1hZ2VOZXQgbWVhbiBhbmQgc3RhbmRhcmQgZGV2aWF0aW9uIGFyZSBjb21wdXRlZCBvdmVyIDEuMiBtaWxsaW9uIHRyYWluaW5nIGltYWdlcy4gUGVyLWNoYW5uZWwgbWVhbjogWzAuNDg1LCAwLjQ1NiwgMC40MDZdIGluIFJHQiBvcmRlci4gUGVyLWNoYW5uZWwgc3RkOiBbMC4yMjksIDAuMjI0LCAwLjIyNV0uIFRoZXNlIGFyZSBhcHBsaWVkIGFmdGVyIGNvbnZlcnRpbmcgcGl4ZWwgdmFsdWVzIHRvIGZsb2F0MzIgWzAsIDFdLiBUaGUgbm9ybWFsaXplZCB2YWx1ZSBpcyAocGl4ZWwgLSBtZWFuKSAvIHN0ZCwgcHJvZHVjaW5nIHJvdWdobHkgemVyby1tZWFuIHVuaXQtdmFyaWFuY2UgaW5wdXRzIHBlciBjaGFubmVsLiJ9LHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiJpbXBvcnQgdG9yY2hcbmZyb20gdG9yY2h2aXNpb24gaW1wb3J0IHRyYW5zZm9ybXNcbmZyb20gUElMIGltcG9ydCBJbWFnZVxuXG5pbWFnZW5ldF9tZWFuID0gWzAuNDg1LCAwLjQ1NiwgMC40MDZdXG5pbWFnZW5ldF9zdGQgID0gWzAuMjI5LCAwLjIyNCwgMC4yMjVdXG5cbnRyYW5zZm9ybSA9IHRyYW5zZm9ybXMuQ29tcG9zZShbXG4gICAgdHJhbnNmb3Jtcy5SZXNpemUoKDIyNCwgMjI0KSksXG4gICAgdHJhbnNmb3Jtcy5Ub1RlbnNvcigpLCAgICAgICAgICAgICAgICAgICAgIyB1aW50OCBIV0Mg4oaSIGZsb2F0MzIgQ0hXIFswLDFdXG4gICAgdHJhbnNmb3Jtcy5Ob3JtYWxpemUoaW1hZ2VuZXRfbWVhbiwgaW1hZ2VuZXRfc3RkKSxcbl0pXG5cbmltZyA9IEltYWdlLm9wZW4oXHUwMDI3c2FtcGxlLmpwZ1x1MDAyNykuY29udmVydChcdTAwMjdSR0JcdTAwMjcpXG50ZW5zb3IgPSB0cmFuc2Zvcm0oaW1nKVxucHJpbnQoXHUwMDI3Tm9ybWFsaXplZCBzaGFwZTpcdTAwMjcsIHRlbnNvci5zaGFwZSwgXHUwMDI3bWVhbjpcdTAwMjcsIHRlbnNvci5tZWFuKCkuaXRlbSgpKSJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiUHJldHJhaW5lZCBtb2RlbHMgbGlrZSBSZXNOZXQsIFZHRywgRWZmaWNpZW50TmV0LCBhbmQgVmlUIHdlcmUgYWxsIHRyYWluZWQgd2l0aCBJbWFnZU5ldCBub3JtYWxpemF0aW9uLiBUaGVpciBlYXJseS1sYXllciBmaWx0ZXJzIGxlYXJuZWQgdG8gcmVzcG9uZCB0byBpbnB1dHMgaW4gdGhhdCBkaXN0cmlidXRpb24uIFVzaW5nIGRpZmZlcmVudCBub3JtYWxpemF0aW9uIHNoaWZ0cyB0aGUgaW5wdXQgZGlzdHJpYnV0aW9uLCB3aGljaCBjYW4gc2lnbmlmaWNhbnRseSBodXJ0IHRyYW5zZmVyIGxlYXJuaW5nIHBlcmZvcm1hbmNlIOKAlCBlc3BlY2lhbGx5IHdoZW4gZmluZS10dW5pbmcgd2l0aCBzbWFsbCBkYXRhc2V0cyB3aGVyZSB0aGUgbWlzbWF0Y2ggY2Fubm90IGJlIGNvcnJlY3RlZC4ifSx7InR5cGUiOiJjYWxsb3V0IiwiY2FsbG91dFR5cGUiOiJpbmZvIiwiY29udGVudCI6IlVzZSBJbWFnZU5ldCBtZWFuL3N0ZCB3aGVuIGZpbmUtdHVuaW5nIHByZXRyYWluZWQgbW9kZWxzIOKAlCB1c2luZyBkaWZmZXJlbnQgc3RhdHMgaHVydHMgdHJhbnNmZXIgYmVjYXVzZSB0aGUgbW9kZWxcdTAwMjdzIGVhcmx5IGZpbHRlcnMgd2VyZSBhZGFwdGVkIHRvIHRoYXQgZGlzdHJpYnV0aW9uLiJ9LHsidHlwZSI6ImgyIiwiY29udGVudCI6IkNoYW5uZWwtd2lzZSBOb3JtYWxpemF0aW9uIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJDaGFubmVsLXdpc2Ugbm9ybWFsaXphdGlvbiBhcHBsaWVzIGEgZGlzdGluY3QgbWVhbiBhbmQgc3RkIHRvIGVhY2ggY29sb3IgY2hhbm5lbCBpbmRlcGVuZGVudGx5LiBUaGlzIGFjY291bnRzIGZvciB0aGUgZmFjdCB0aGF0IHJlZCwgZ3JlZW4sIGFuZCBibHVlIGNoYW5uZWxzIGhhdmUgZGlmZmVyZW50IG5hdHVyYWwgZGlzdHJpYnV0aW9ucyBpbiByZWFsLXdvcmxkIGltYWdlcy4gVGhlIGZvcm11bGEgaXMgeF9ub3JtID0gKHggLSBtZWFuX2MpIC8gc3RkX2Mgd2hlcmUgYyBpbmRleGVzIHRoZSBjaGFubmVsLiBUaGlzIGlzIGV4YWN0bHkgd2hhdCB0b3JjaHZpc2lvbi50cmFuc2Zvcm1zLk5vcm1hbGl6ZSBpbXBsZW1lbnRzIGludGVybmFsbHkuIn0seyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6ImltcG9ydCB0b3JjaFxuZnJvbSB0b3JjaC51dGlscy5kYXRhIGltcG9ydCBEYXRhTG9hZGVyXG5mcm9tIHRvcmNodmlzaW9uLmRhdGFzZXRzIGltcG9ydCBJbWFnZUZvbGRlclxuZnJvbSB0b3JjaHZpc2lvbiBpbXBvcnQgdHJhbnNmb3Jtc1xuXG5kYXRhc2V0ID0gSW1hZ2VGb2xkZXIoXHUwMDI3ZGF0YS90cmFpblx1MDAyNywgdHJhbnNmb3JtPXRyYW5zZm9ybXMuVG9UZW5zb3IoKSlcbmxvYWRlciAgPSBEYXRhTG9hZGVyKGRhdGFzZXQsIGJhdGNoX3NpemU9NjQsIG51bV93b3JrZXJzPTIpXG5cbm1lYW4gPSB0b3JjaC56ZXJvcygzKVxuc3RkICA9IHRvcmNoLnplcm9zKDMpXG5mb3IgaW1ncywgXyBpbiBsb2FkZXI6XG4gICAgbWVhbiArPSBpbWdzLm1lYW4oZGltPVswLCAyLCAzXSlcbiAgICBzdGQgICs9IGltZ3Muc3RkKGRpbT1bMCwgMiwgM10pXG5tZWFuIC89IGxlbihsb2FkZXIpXG5zdGQgIC89IGxlbihsb2FkZXIpXG5wcmludChcdTAwMjdNZWFuOlx1MDAyNywgbWVhbiwgXHUwMDI3U3RkOlx1MDAyNywgc3RkKSJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiQWZ0ZXIgSW1hZ2VOZXQgbm9ybWFsaXphdGlvbiwgcmVkIGNoYW5uZWwgdmFsdWVzIG5lYXIgdGhlIG1lYW4gKDAuNDg1KSBiZWNvbWUgYXBwcm94aW1hdGVseSAwLjAuIEJhdGNoIG5vcm1hbGl6YXRpb24gbGF5ZXJzIGluIHRoZSBuZXR3b3JrIGZ1cnRoZXIgbm9ybWFsaXplIGFjdGl2YXRpb25zLCBidXQgaW5wdXQgbm9ybWFsaXphdGlvbiBlbnN1cmVzIHRoZSBmaXJzdCBsYXllciByZWNlaXZlcyBhIHdlbGwtY29uZGl0aW9uZWQgc2lnbmFsLiBUaGlzIGlzIHdoeSBub3JtYWxpemF0aW9uIGNhbiBiZSB0aGUgZGlmZmVyZW5jZSBiZXR3ZWVuIGEgbW9kZWwgdGhhdCBjb252ZXJnZXMgcXVpY2tseSBhbmQgb25lIHRoYXQgc3RydWdnbGVzIGZvciBkb3plbnMgb2YgZXBvY2hzLiJ9LHsidHlwZSI6ImgyIiwiY29udGVudCI6IlBlci1TYW1wbGUgdnMgRGF0YXNldCBOb3JtYWxpemF0aW9uIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJEYXRhc2V0IG5vcm1hbGl6YXRpb24gdXNlcyBzdGF0aXN0aWNzIGNvbXB1dGVkIGFjcm9zcyBhbGwgdHJhaW5pbmcgaW1hZ2VzIOKAlCB0aGUgSW1hZ2VOZXQgYXBwcm9hY2guIFBlci1zYW1wbGUgbm9ybWFsaXphdGlvbiBjb21wdXRlcyBtZWFuIGFuZCBzdGQgZnJvbSBhIHNpbmdsZSBpbWFnZSBpbmRlcGVuZGVudGx5LiBUaGlzIGlzIHVzZWZ1bCB3aGVuIGltYWdlcyBoYXZlIHZlcnkgZGlmZmVyZW50IGV4cG9zdXJlIGxldmVscywgc3VjaCBhcyBpbiBtZWRpY2FsIGltYWdpbmcgb3Igc2F0ZWxsaXRlIGltYWdlcnkuIEl0IHJlbW92ZXMgcGVyLWltYWdlIGxpZ2h0aW5nIGVmZmVjdHMgYnV0IGxvc2VzIGNyb3NzLWltYWdlIHNjYWxlIGluZm9ybWF0aW9uIGZvciBnbG9iYWwgY29tcGFyaXNvbnMuIn0seyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6ImltcG9ydCB0b3JjaFxuaW1wb3J0IG51bXB5IGFzIG5wXG5mcm9tIHRvcmNoLnV0aWxzLmRhdGEgaW1wb3J0IERhdGFzZXRcblxuY2xhc3MgTWVkaWNhbERhdGFzZXQoRGF0YXNldCk6XG4gICAgZGVmIF9faW5pdF9fKHNlbGYsIGltYWdlcyk6XG4gICAgICAgIGFyciA9IG5wLnN0YWNrKGltYWdlcykuYXN0eXBlKG5wLmZsb2F0MzIpXG4gICAgICAgIHNlbGYubWVhbiA9IGFyci5tZWFuKGF4aXM9KDAsIDEsIDIpKVxuICAgICAgICBzZWxmLnN0ZCAgPSBhcnIuc3RkKGF4aXM9KDAsIDEsIDIpKSArIDFlLTZcbiAgICAgICAgc2VsZi5kYXRhID0gKGFyciAtIHNlbGYubWVhbikgLyBzZWxmLnN0ZFxuXG4gICAgZGVmIF9fbGVuX18oc2VsZik6IHJldHVybiBsZW4oc2VsZi5kYXRhKVxuICAgIGRlZiBfX2dldGl0ZW1fXyhzZWxmLCBpKTpcbiAgICAgICAgcmV0dXJuIHRvcmNoLmZyb21fbnVtcHkoc2VsZi5kYXRhW2ldKS5wZXJtdXRlKDIsIDAsIDEpIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJVc2UgSW1hZ2VOZXQgc3RhdHMgd2hlbiBmaW5lLXR1bmluZyBwcmV0cmFpbmVkIG1vZGVscyDigJQgdGhlIG1pc21hdGNoIGNvc3QgaXMgbWVhc3VyYWJsZS4gQ29tcHV0ZSBjdXN0b20gZGF0YXNldCBzdGF0cyB3aGVuIHRyYWluaW5nIGZyb20gc2NyYXRjaCBvbiBkb21haW4tc3BlY2lmaWMgZGF0YSBzdWNoIGFzIG1lZGljYWwsIHNhdGVsbGl0ZSwgb3IgaW5kdXN0cmlhbCBpbWFnZXJ5LiBVc2UgWzAsIDFdIHJhbmdlIG5vcm1hbGl6YXRpb24gYXMgYSBzYWZlIGJhc2VsaW5lIHdoZW4gdW5zdXJlLiBBdm9pZCBwZXItc2FtcGxlIG5vcm1hbGl6YXRpb24gZm9yIHRhc2tzIHJlcXVpcmluZyBjb21wYXJpc29uIG9mIGludGVuc2l0eSB2YWx1ZXMgYWNyb3NzIGltYWdlcy4ifSx7InR5cGUiOiJoMiIsImNvbnRlbnQiOiJEZW5vcm1hbGl6YXRpb24gZm9yIFZpc3VhbGl6YXRpb24ifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkRlbm9ybWFsaXphdGlvbiByZXZlcnNlcyB0aGUgbm9ybWFsaXphdGlvbiB0cmFuc2Zvcm0gdG8gcmVjb3ZlciBkaXNwbGF5YWJsZSBwaXhlbCB2YWx1ZXMuIFNpbmNlIG1hdHBsb3RsaWIgZXhwZWN0cyBmbG9hdCB2YWx1ZXMgaW4gWzAsIDFdIG9yIHVpbnQ4IGluIFswLCAyNTVdLCBub3JtYWxpemVkIHRlbnNvcnMgd2l0aCBuZWdhdGl2ZSB2YWx1ZXMgd2lsbCBkaXNwbGF5IGluY29ycmVjdGx5IHdpdGhvdXQgcmV2ZXJzYWwuIFRoZSBpbnZlcnNlIGZvcm11bGEgaXMgeCA9ICh4X25vcm0gKiBzdGQpICsgbWVhbiwgZm9sbG93ZWQgYnkgY2xhbXBpbmcgdG8gWzAsIDFdIHRvIGhhbmRsZSBib3VuZGFyeSBjYXNlcyBuZWFyIHRoZSBlZGdlcy4ifSx7InR5cGUiOiJjb2RlIiwibGFuZ3VhZ2UiOiJweXRob24iLCJjb250ZW50IjoiaW1wb3J0IHRvcmNoXG5pbXBvcnQgbWF0cGxvdGxpYi5weXBsb3QgYXMgcGx0XG5pbXBvcnQgbnVtcHkgYXMgbnBcblxuZGVmIGRlbm9ybWFsaXplKHRlbnNvciwgbWVhbiwgc3RkKTpcbiAgICBtZWFuID0gdG9yY2gudGVuc29yKG1lYW4pLnZpZXcoMywgMSwgMSlcbiAgICBzdGQgID0gdG9yY2gudGVuc29yKHN0ZCkudmlldygzLCAxLCAxKVxuICAgIGltZyA9IHRlbnNvciAqIHN0ZCArIG1lYW4gICAgICAgICAgIyByZXZlcnNlIG5vcm1hbGl6YXRpb25cbiAgICBpbWcgPSB0b3JjaC5jbGFtcChpbWcsIDAuMCwgMS4wKSAgIyBjbGFtcCB0byB2YWxpZCBkaXNwbGF5IHJhbmdlXG4gICAgcmV0dXJuIGltZy5wZXJtdXRlKDEsIDIsIDApLm51bXB5KCkgICMgQ0hXIOKGkiBIV0NcblxubWVhbiA9IFswLjQ4NSwgMC40NTYsIDAuNDA2XVxuc3RkICA9IFswLjIyOSwgMC4yMjQsIDAuMjI1XVxuaW1nX2Rpc3BsYXkgPSBkZW5vcm1hbGl6ZSh0ZW5zb3IsIG1lYW4sIHN0ZClcbnBsdC5pbXNob3coaW1nX2Rpc3BsYXkpOyBwbHQuYXhpcyhcdTAwMjdvZmZcdTAwMjcpOyBwbHQuc2hvdygpIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJXaGVuIHZpc3VhbGl6aW5nIGF1Z21lbnRlZCBiYXRjaGVzIGR1cmluZyB0cmFpbmluZywgYWx3YXlzIGRlbm9ybWFsaXplIGJlZm9yZSBkaXNwbGF5LiBBIGNvbW1vbiBwYXR0ZXJuIGlzIHRvIHdyaXRlIGEgc2hvd19iYXRjaCgpIGhlbHBlciB0aGF0IHVuZG9lcyBub3JtYWxpemF0aW9uLCBjb252ZXJ0cyBDSFcgdG8gSFdDLCBhbmQgY2FsbHMgcGx0Lmltc2hvdygpLiBDaGVja2luZyBhIGZldyB0cmFpbmluZyBiYXRjaGVzIHZpc3VhbGx5IGlzIG9uZSBvZiB0aGUgaGlnaGVzdC1ST0kgZGVidWdnaW5nIHRlY2huaXF1ZXMg4oCUIGl0IGNhdGNoZXMgaW5jb3JyZWN0IG5vcm1hbGl6YXRpb24sIHdyb25nIGNoYW5uZWwgb3JkZXIsIGFuZCBicm9rZW4gYXVnbWVudGF0aW9uIHBpcGVsaW5lcy4ifSx7InR5cGUiOiJ0YWJsZSIsImhlYWRlcnMiOlsiTm9ybWFsaXphdGlvbiBTY2hlbWUiLCJXaGVuIHRvIFVzZSIsIlByb3MiLCJDb25zIl0sInJvd3MiOltbIkltYWdlTmV0IHN0YXRzIiwiRmluZS10dW5pbmcgcHJldHJhaW5lZCBtb2RlbHMiLCJDb21wYXRpYmxlIHdpdGggcHJldHJhaW5lZCB3ZWlnaHRzIiwiV3JvbmcgZm9yIHZlcnkgZGlmZmVyZW50IGRvbWFpbnMiXSxbIkRhdGFzZXQgc3RhdHMiLCJUcmFpbmluZyBmcm9tIHNjcmF0Y2giLCJPcHRpbWFsIGZvciB5b3VyIGRhdGEgZGlzdHJpYnV0aW9uIiwiUmVxdWlyZXMgZnVsbCBkYXRhc2V0IHBhc3MgdG8gY29tcHV0ZSJdLFsiWzAsIDFdIHJhbmdlIiwiQmFzZWxpbmUgLyBzaW1wbGUgbW9kZWxzIiwiRWFzeSB0byBpbXBsZW1lbnQgYW5kIGRlYnVnIiwiTm90IHplcm8tY2VudGVyZWQ7IG1heSBzbG93IGNvbnZlcmdlbmNlIl0sWyJbLTEsIDFdIHJhbmdlIiwiR0FOIHRyYWluaW5nIC8gc29tZSBhcmNoaXRlY3R1cmVzIiwiWmVyby1jZW50ZXJlZCIsIk5lZWRzIGRlbm9ybSBmb3IgZGlzcGxheTsgbGVzcyBjb21tb24iXSxbIlBlci1zYW1wbGUiLCJNZWRpY2FsIC8gc2F0ZWxsaXRlIGltYWdlcnkiLCJSb2J1c3QgdG8gcGVyLWltYWdlIGV4cG9zdXJlIHZhcmlhdGlvbiIsIkxvc2VzIGNyb3NzLWltYWdlIHNjYWxlIGluZm9ybWF0aW9uIl1dfSx7InR5cGUiOiJoMiIsImNvbnRlbnQiOiJLZXkgVGFrZWF3YXlzIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJOb3JtYWxpemF0aW9uIGlzIG5vdCBvcHRpb25hbCBmb3IgZGVlcCBsZWFybmluZyDigJQgaXQgZGlyZWN0bHkgYWZmZWN0cyBncmFkaWVudCBtYWduaXR1ZGVzIGFuZCB0cmFpbmluZyBzdGFiaWxpdHkuIFVzZSB0aGUgc2FtZSBub3JtYWxpemF0aW9uIGF0IGluZmVyZW5jZSB0aW1lIGFzIGR1cmluZyB0cmFpbmluZzsgbWlzbWF0Y2hlZCBzdGF0cyBhdCBkZXBsb3ltZW50IGlzIGEgY29tbW9uIHByb2R1Y3Rpb24gYnVnLiBJZiB5b3UgY2hhbmdlIHRoZSBub3JtYWxpemF0aW9uIHNjaGVtZSBtaWQtdHJhaW5pbmcsIHJlc3VsdHMgd2lsbCBiZSB1bnByZWRpY3RhYmxlIHdpdGhvdXQgcmVzdGFydGluZyBmcm9tIGEgY2hlY2twb2ludCB0cmFpbmVkIHdpdGggY29uc2lzdGVudCBwcmVwcm9jZXNzaW5nLiJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiRG9jdW1lbnQgeW91ciBub3JtYWxpemF0aW9uIHBhcmFtZXRlcnMgYWxvbmdzaWRlIG1vZGVsIHdlaWdodHMuIFRoZSBtZWFuIGFuZCBzdGQgdXNlZCBkdXJpbmcgdHJhaW5pbmcgYXJlIHBhcnQgb2YgdGhlIG1vZGVsIGNvbnRyYWN0IGFuZCBtdXN0IHRyYXZlbCB3aXRoIHRoZSBjaGVja3BvaW50LiBNYW55IGluZmVyZW5jZSBmcmFtZXdvcmtzIOKAlCBPTk5YLCBUb3JjaFNjcmlwdCwgVEYgU2F2ZWRNb2RlbCDigJQgYWxsb3cgYmFraW5nIG5vcm1hbGl6YXRpb24gaW50byB0aGUgbW9kZWwgZ3JhcGggc28gY29uc3VtZXJzIGRvIG5vdCBuZWVkIHRvIGFwcGx5IGl0IHNlcGFyYXRlbHkuIFByZWZlciB0aGlzIGFwcHJvYWNoIHdoZW4gc2hpcHBpbmcgbW9kZWxzIHRvIHByb2R1Y3Rpb24uIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJGb3IgdHJhbnNmZXIgbGVhcm5pbmcsIGFsd2F5cyBzdGFydCB3aXRoIEltYWdlTmV0IG5vcm1hbGl6YXRpb24gYW5kIG9ubHkgc3dpdGNoIHRvIGRhdGFzZXQtc3BlY2lmaWMgc3RhdHMgaWYgeW91IGhhdmUgc3Ryb25nIGV2aWRlbmNlIG9mIGEgZG9tYWluIG1pc21hdGNoLiBDb21wdXRlIHN0YXRzIG9uIHRoZSB0cmFpbmluZyBzcGxpdCBvbmx5IOKAlCBuZXZlciB0aGUgdmFsaWRhdGlvbiBvciB0ZXN0IHNwbGl0IOKAlCB0byBhdm9pZCBkYXRhIGxlYWthZ2UuIFJlY29yZCB0aGUgY29tcHV0ZWQgbWVhbiBhbmQgc3RkIGluIGEgY29uZmlnIGZpbGUgYWxvbmdzaWRlIHNwbGl0IGRlZmluaXRpb25zIHNvIGV4cGVyaW1lbnRzIGFyZSBmdWxseSByZXByb2R1Y2libGUuIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJBIHNpbXBsZSBlbmQtdG8tZW5kIHRlc3Q6IG5vcm1hbGl6ZSBhIHNhbXBsZSBpbWFnZSwgZGVub3JtYWxpemUgaXQsIGFuZCBjb21wYXJlIHRvIHRoZSBvcmlnaW5hbC4gUGl4ZWwgdmFsdWVzIHNob3VsZCBiZSBuZWFybHkgaWRlbnRpY2FsLiBJZiB0aGV5IGRpZmZlciBzaWduaWZpY2FudGx5LCBjaGVjayBmb3IgZHR5cGUgY2FzdGluZyBlcnJvcnMsIGluY29ycmVjdCBtZWFuL3N0ZCBvcmRlciwgb3IgYSBtaXNzaW5nIGNsYW1wIHN0ZXAuIFRoaXMgcm91bmQtdHJpcCB0ZXN0IHRha2VzIHVuZGVyIHRlbiBsaW5lcyBvZiBjb2RlIGFuZCB2ZXJpZmllcyB0aGUgZW50aXJlIG5vcm1hbGl6YXRpb24gcGlwZWxpbmUgYmVmb3JlIGFueSB0cmFpbmluZyBiZWdpbnMuIn1d"
+---
+# Image Normalization for Deep Learning
+
+Normalization is a critical preprocessing step that rescales pixel values so neural network weights do not need to adapt to arbitrary input scales. Without normalization, different channels and datasets can have very different distributions, slowing or destabilizing training. Standard approaches include zero-mean unit-variance normalization, [0, 1] scaling, and the widely-used ImageNet mean/std.
+
+ImageNet mean and standard deviation are computed over 1.2 million training images. Per-channel mean: [0.485, 0.456, 0.406] in RGB order. Per-channel std: [0.229, 0.224, 0.225]. These are applied after converting pixel values to float32 [0, 1]. The normalized value is (pixel - mean) / std, producing roughly zero-mean unit-variance inputs per channel.
+
+```python
+import torch
+from torchvision import transforms
+from PIL import Image
+
+imagenet_mean = [0.485, 0.456, 0.406]
+imagenet_std  = [0.229, 0.224, 0.225]
+
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),                    # uint8 HWC → float32 CHW [0,1]
+    transforms.Normalize(imagenet_mean, imagenet_std),
+])
+
+img = Image.open('sample.jpg').convert('RGB')
+tensor = transform(img)
+print('Normalized shape:', tensor.shape, 'mean:', tensor.mean().item())
+```
+
+Pretrained models like ResNet, VGG, EfficientNet, and ViT were all trained with ImageNet normalization. Their early-layer filters learned to respond to inputs in that distribution. Using different normalization shifts the input distribution, which can significantly hurt transfer learning performance — especially when fine-tuning with small datasets where the mismatch cannot be corrected.
+
+> ****: Use ImageNet mean/std when fine-tuning pretrained models — using different stats hurts transfer because the model's early filters were adapted to that distribution.
+
+Channel-wise normalization applies a distinct mean and std to each color channel independently. This accounts for the fact that red, green, and blue channels have different natural distributions in real-world images. The formula is x_norm = (x - mean_c) / std_c where c indexes the channel. This is exactly what torchvision.transforms.Normalize implements internally.
+
+```python
+import torch
+from torch.utils.data import DataLoader
+from torchvision.datasets import ImageFolder
+from torchvision import transforms
+
+dataset = ImageFolder('data/train', transform=transforms.ToTensor())
+loader  = DataLoader(dataset, batch_size=64, num_workers=2)
+
+mean = torch.zeros(3)
+std  = torch.zeros(3)
+for imgs, _ in loader:
+    mean += imgs.mean(dim=[0, 2, 3])
+    std  += imgs.std(dim=[0, 2, 3])
+mean /= len(loader)
+std  /= len(loader)
+print('Mean:', mean, 'Std:', std)
+```
+
+After ImageNet normalization, red channel values near the mean (0.485) become approximately 0.0. Batch normalization layers in the network further normalize activations, but input normalization ensures the first layer receives a well-conditioned signal. This is why normalization can be the difference between a model that converges quickly and one that struggles for dozens of epochs.
+
+Dataset normalization uses statistics computed across all training images — the ImageNet approach. Per-sample normalization computes mean and std from a single image independently. This is useful when images have very different exposure levels, such as in medical imaging or satellite imagery. It removes per-image lighting effects but loses cross-image scale information for global comparisons.
+
+```python
+import torch
+import numpy as np
+from torch.utils.data import Dataset
+
+class MedicalDataset(Dataset):
+    def __init__(self, images):
+        arr = np.stack(images).astype(np.float32)
+        self.mean = arr.mean(axis=(0, 1, 2))
+        self.std  = arr.std(axis=(0, 1, 2)) + 1e-6
+        self.data = (arr - self.mean) / self.std
+
+    def __len__(self): return len(self.data)
+    def __getitem__(self, i):
+        return torch.from_numpy(self.data[i]).permute(2, 0, 1)
+```
+
+Use ImageNet stats when fine-tuning pretrained models — the mismatch cost is measurable. Compute custom dataset stats when training from scratch on domain-specific data such as medical, satellite, or industrial imagery. Use [0, 1] range normalization as a safe baseline when unsure. Avoid per-sample normalization for tasks requiring comparison of intensity values across images.
+
+Denormalization reverses the normalization transform to recover displayable pixel values. Since matplotlib expects float values in [0, 1] or uint8 in [0, 255], normalized tensors with negative values will display incorrectly without reversal. The inverse formula is x = (x_norm * std) + mean, followed by clamping to [0, 1] to handle boundary cases near the edges.
+
+```python
+import torch
+import matplotlib.pyplot as plt
+import numpy as np
+
+def denormalize(tensor, mean, std):
+    mean = torch.tensor(mean).view(3, 1, 1)
+    std  = torch.tensor(std).view(3, 1, 1)
+    img = tensor * std + mean          # reverse normalization
+    img = torch.clamp(img, 0.0, 1.0)  # clamp to valid display range
+    return img.permute(1, 2, 0).numpy()  # CHW → HWC
+
+mean = [0.485, 0.456, 0.406]
+std  = [0.229, 0.224, 0.225]
+img_display = denormalize(tensor, mean, std)
+plt.imshow(img_display); plt.axis('off'); plt.show()
+```
+
+When visualizing augmented batches during training, always denormalize before display. A common pattern is to write a show_batch() helper that undoes normalization, converts CHW to HWC, and calls plt.imshow(). Checking a few training batches visually is one of the highest-ROI debugging techniques — it catches incorrect normalization, wrong channel order, and broken augmentation pipelines.
+
+| Normalization Scheme | When to Use | Pros | Cons |
+| --- | --- | --- | --- |
+| ImageNet stats | Fine-tuning pretrained models | Compatible with pretrained weights | Wrong for very different domains |
+| Dataset stats | Training from scratch | Optimal for your data distribution | Requires full dataset pass to compute |
+| [0, 1] range | Baseline / simple models | Easy to implement and debug | Not zero-centered; may slow convergence |
+| [-1, 1] range | GAN training / some architectures | Zero-centered | Needs denorm for display; less common |
+| Per-sample | Medical / satellite imagery | Robust to per-image exposure variation | Loses cross-image scale information |
+
+Normalization is not optional for deep learning — it directly affects gradient magnitudes and training stability. Use the same normalization at inference time as during training; mismatched stats at deployment is a common production bug. If you change the normalization scheme mid-training, results will be unpredictable without restarting from a checkpoint trained with consistent preprocessing.
+
+Document your normalization parameters alongside model weights. The mean and std used during training are part of the model contract and must travel with the checkpoint. Many inference frameworks — ONNX, TorchScript, TF SavedModel — allow baking normalization into the model graph so consumers do not need to apply it separately. Prefer this approach when shipping models to production.
+
+For transfer learning, always start with ImageNet normalization and only switch to dataset-specific stats if you have strong evidence of a domain mismatch. Compute stats on the training split only — never the validation or test split — to avoid data leakage. Record the computed mean and std in a config file alongside split definitions so experiments are fully reproducible.
+
+A simple end-to-end test: normalize a sample image, denormalize it, and compare to the original. Pixel values should be nearly identical. If they differ significantly, check for dtype casting errors, incorrect mean/std order, or a missing clamp step. This round-trip test takes under ten lines of code and verifies the entire normalization pipeline before any training begins.
+

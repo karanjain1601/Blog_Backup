@@ -1,0 +1,93 @@
+---
+title: "PointNet: Deep Learning on Unordered Point Clouds"
+slug: "pointnet-point-cloud-learning"
+description: ""
+tags: [""]
+topic: ""
+status: ""
+updated: ""
+blocks_json: "W3sidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6Ik92ZXJ2aWV3In0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJQb2ludCBjbG91ZHMgYXJlIHNldHMgb2YgM0QgY29vcmRpbmF0ZXMgY2FwdHVyZWQgYnkgTGlEQVIgb3IgZGVwdGggc2Vuc29ycy4gVW5saWtlIGltYWdlcyB3aXRoIHJlZ3VsYXIgcGl4ZWwgZ3JpZHMsIHBvaW50IGNsb3VkcyBhcmUgdW5vcmRlcmVkIGFuZCB2YXJpYWJsZSBpbiBzaXplIOKAlCB0d28gc2NhbnMgb2YgdGhlIHNhbWUgc2NlbmUgbWF5IGNvbnRhaW4gZGlmZmVyZW50IG51bWJlcnMgb2YgcG9pbnRzIGluIGRpZmZlcmVudCBvcmRlcnMsIG1ha2luZyBzdGFuZGFyZCBDTk5zIGFuZCBSTk5zIGlsbC1zdWl0ZWQgZm9yIGRpcmVjdCBwcm9jZXNzaW5nLiJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiUG9pbnROZXQsIGludHJvZHVjZWQgYnkgUWkgZXQgYWwuIGluIDIwMTcsIHdhcyB0aGUgZmlyc3QgZGVlcCBuZXR3b3JrIHRvIG9wZXJhdGUgZGlyZWN0bHkgb24gcmF3IHBvaW50IGNsb3VkcyB3aXRob3V0IHZveGVsaXphdGlvbiBvciBwcm9qZWN0aW9uLiBJdCB1c2VzIHNoYXJlZCBNTFBzIGFuZCBhIHN5bW1ldHJpYyBhZ2dyZWdhdGlvbiBmdW5jdGlvbiB0byBleHRyYWN0IHBlci1wb2ludCBhbmQgZ2xvYmFsIGZlYXR1cmVzLCBhY2hpZXZpbmcgY29tcGV0aXRpdmUgcmVzdWx0cyBvbiBjbGFzc2lmaWNhdGlvbiBhbmQgc2VnbWVudGF0aW9uIGJlbmNobWFya3MuIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiUGVybXV0YXRpb24gSW52YXJpYW5jZSJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiQSBmdW5jdGlvbiBmIGlzIHBlcm11dGF0aW9uLWludmFyaWFudCBpZiBmKFApIGVxdWFscyBmIGFwcGxpZWQgdG8gYW55IHBlcm11dGF0aW9uIG9mIFAuIFNvcnRpbmcgcG9pbnRzIGlzIGFuIHVuc3RhYmxlIGFwcHJvYWNoIGR1ZSB0byBzZW5zaXRpdml0eSB0byB0aWVzIGFuZCBudW1lcmljIHByZWNpc2lvbi4gUG9pbnROZXQgYXBwbGllcyBzaGFyZWQgTUxQIHRyYW5zZm9ybXMgaW5kZXBlbmRlbnRseSBwZXIgcG9pbnQsIHRoZW4gYWdncmVnYXRlcyB3aXRoIHN5bW1ldHJpYyBtYXgtcG9vbGluZyBhY3Jvc3MgdGhlIHBvaW50IGRpbWVuc2lvbiwgcHJvZHVjaW5nIGlkZW50aWNhbCBvdXRwdXQgZm9yIGFueSBpbnB1dCBvcmRlcmluZy4ifSx7InR5cGUiOiJjb2RlIiwibGFuZyI6InB5dGhvbiIsImNvbnRlbnQiOiIjIFBlci1wb2ludCBNTFAgc2hhcmVkIGFjcm9zcyBhbGwgTiBwb2ludHNcbnBlcl9wb2ludF9mZWF0ID0gbWxwKHBvaW50cykgICAgICAgICAgIyAoQiwgTiwgNjQpXG4jIEdsb2JhbCBmZWF0dXJlIHZpYSBzeW1tZXRyaWMgbWF4LXBvb2xpbmdcbmdsb2JhbF9mZWF0ID0gZ2xvYmFsX21heF9wb29sKHBlcl9wb2ludF9mZWF0LCBkaW09MSkgICMgKEIsIDEwMjQpXG4jIFBlcm11dGF0aW9uLWludmFyaWFudDogc3dhcHBpbmcgYW55IHR3byByb3dzXG4jIG9mIFx1MDAyN3BvaW50c1x1MDAyNyB5aWVsZHMgdGhlIHNhbWUgZ2xvYmFsX2ZlYXQifSx7InR5cGUiOiJjYWxsb3V0IiwidmFyaWFudCI6ImluZm8iLCJjb250ZW50IjoiUG9pbnROZXRcdTAwMjdzIG1heC1wb29sIGFnZ3JlZ2F0aW9uIG1ha2VzIGl0IHByb3ZhYmx5IHBlcm11dGF0aW9uLWludmFyaWFudCDigJQgdGhlIHNhbWUgb3V0cHV0IGZvciBhbnkgb3JkZXJpbmcgb2YgaW5wdXQgcG9pbnRzLiBJdCBhbHNvIGhhbmRsZXMgdmFyaWFibGUtc2l6ZSBwb2ludCBjbG91ZHMgbmF0dXJhbGx5IHNpbmNlIG1heC1wb29sIHJlZHVjZXMgTiBwb2ludHMgdG8gYSBmaXhlZC1zaXplIGdsb2JhbCBkZXNjcmlwdG9yLiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IlBvaW50TmV0IEFyY2hpdGVjdHVyZSJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiVGhlIFBvaW50TmV0IGFyY2hpdGVjdHVyZSBoYXMgdGhyZWUgc3RhZ2VzLiBBIFQtTmV0IHByZWRpY3RzIGEgM3gzIHRyYW5zZm9ybWF0aW9uIG1hdHJpeCB0byBjYW5vbmljYWxpemUgaW5wdXQgY29vcmRpbmF0ZXMuIFNoYXJlZCBNTFAgbGF5ZXJzIHRoZW4gZXh0cmFjdCBwZXItcG9pbnQgZmVhdHVyZXMgb2YgZ3Jvd2luZyBkaW1lbnNpb24gKDY0LCAxMjgsIDEwMjQpLiBGaW5hbGx5LCBtYXgtcG9vbGluZyBhZ2dyZWdhdGVzIGFjcm9zcyBhbGwgcG9pbnRzIHRvIHlpZWxkIGEgZml4ZWQgMTAyNC1kaW1lbnNpb25hbCBnbG9iYWwgZmVhdHVyZSB2ZWN0b3IgdXNlZCBmb3IgY2xhc3NpZmljYXRpb24gb3Igc2VnbWVudGF0aW9uLiJ9LHsidHlwZSI6ImNvZGUiLCJsYW5nIjoicHl0aG9uIiwiY29udGVudCI6InRyYW5zZm9ybSA9IHRfbmV0KHBvaW50cykgICAgICAgICAgICAgIyAoQiwgMywgMylcbnBvaW50c19hbGlnbmVkID0gdG9yY2guYm1tKHBvaW50cywgdHJhbnNmb3JtKSAgICMgKEIsIE4sIDMpXG4jIEZlYXR1cmUtc3BhY2UgVC1OZXQgYWxpZ25zIDY0LWRpbSBmZWF0dXJlc1xuZmVhdF90cmFuc2Zvcm0gPSB0X25ldF9mZWF0KHBlcl9wb2ludF9mZWF0KSAgICAgICMgKEIsIDY0LCA2NClcbmZlYXRfYWxpZ25lZCA9IHRvcmNoLmJtbShwZXJfcG9pbnRfZmVhdCwgZmVhdF90cmFuc2Zvcm0pXG4jIFJlZ3VsYXJpemVyOiB8fEkgLSBBKkFeVHx8XjIga2VlcHMgdHJhbnNmb3JtIG5lYXIgb3J0aG9nb25hbCJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiVGhlIGZlYXR1cmUgVC1OZXQgaW5jbHVkZXMgYSByZWd1bGFyaXphdGlvbiBsb3NzIHBlbmFsaXppbmcgdGhlIHRyYW5zZm9ybSBtYXRyaXggZm9yIGRldmlhdGluZyBmcm9tIG9ydGhvZ29uYWxpdHk6IExfcmVnID0gfHxJIC0gQSpBXlR8fF4yX0YuIFRoaXMga2VlcHMgdGhlIGZlYXR1cmUtc3BhY2UgdHJhbnNmb3JtYXRpb24gbnVtZXJpY2FsbHkgc3RhYmxlIGFuZCBpbXByb3ZlcyBmaW5hbCBjbGFzc2lmaWNhdGlvbiBhY2N1cmFjeSBieSByb3VnaGx5IDEtMiUgb24gdGhlIE1vZGVsTmV0NDAgYmVuY2htYXJrIGNvbXBhcmVkIHRvIHVzaW5nIG5vIGZlYXR1cmUgYWxpZ25tZW50LiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IlBvaW50TmV0KysgSGllcmFyY2hpY2FsIExlYXJuaW5nIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJQb2ludE5ldCsrIGludHJvZHVjZXMgaGllcmFyY2hpY2FsIGZlYXR1cmUgbGVhcm5pbmcgdG8gY2FwdHVyZSBsb2NhbCBnZW9tZXRyeSB0aGF0IHZhbmlsbGEgUG9pbnROZXQgbWlzc2VzLiBFYWNoIFNldCBBYnN0cmFjdGlvbiAoU0EpIGxheWVyIHJ1bnMgdGhyZWUgc3RlcHM6IEZhcnRoZXN0IFBvaW50IFNhbXBsaW5nIHNlbGVjdHMgTSByZXByZXNlbnRhdGl2ZSBjZW50cm9pZHMsIGJhbGwgcXVlcnkgZmluZHMgSyBuZWlnaGJvciBwb2ludHMgd2l0aGluIGEgZ2l2ZW4gcmFkaXVzLCBhbmQgYSBtaW5pLVBvaW50TmV0IGVuY29kZXMgbG9jYWwgZ2VvbWV0cnkgaW50byBhIGZlYXR1cmUgdmVjdG9yIHBlciBjZW50cm9pZC4ifSx7InR5cGUiOiJjb2RlIiwibGFuZyI6InB5dGhvbiIsImNvbnRlbnQiOiJjZW50cm9pZHMgPSBmYXJ0aGVzdF9wb2ludF9zYW1wbGUoeHl6LCBuX2NlbnRyb2lkcykgICAgIyAoQiwgTSlcbmlkeCA9IGJhbGxfcXVlcnkoeHl6LCBjZW50cm9pZHMsIHJhZGl1cywgbl9zYW1wbGVzKSAgICAjIChCLCBNLCBLKVxuZ3JvdXBlZCA9IGluZGV4X3BvaW50cyhmZWF0LCBpZHgpICAgICAgICAgICAgICAgICAgICAgICAjIChCLCBNLCBLLCBDKVxubG9jYWxfZmVhdCA9IHBvaW50bmV0KGdyb3VwZWQpICAgICAgICAgICAgICAgICAgICAgICAgICAjIChCLCBNLCBDXHUwMDI3KSJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiUG9pbnROZXQrKyBhbHNvIHN1cHBvcnRzIG11bHRpLXNjYWxlIGdyb3VwaW5nIChNU0cpLCBhcHBseWluZyBiYWxsIHF1ZXJpZXMgYXQgZGlmZmVyZW50IHJhZGlpIGFuZCBjb25jYXRlbmF0aW5nIHRoZSByZXN1bHRpbmcgZmVhdHVyZXMuIFRoaXMgbWFrZXMgdGhlIG1vZGVsIHJvYnVzdCB0byB2YXJ5aW5nIHBvaW50IGRlbnNpdGllcyDigJQgYSBjb21tb24gaXNzdWUgaW4gcmVhbCBMaURBUiBzY2FucyB3aGVyZSBuZWFyYnkgb2JqZWN0cyBhcmUgZGVuc2VseSBzYW1wbGVkIGFuZCBkaXN0YW50IG9iamVjdHMgeWllbGQgb25seSBhIGhhbmRmdWwgb2YgcG9pbnRzIHBlciBzcXVhcmUgbWV0ZXIuIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiQXBwbGljYXRpb25zIGluIDNEIERldGVjdGlvbiJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiUG9pbnROZXQgYW5kIFBvaW50TmV0Kysgc2VydmUgYXMgYmFja2JvbmUgZW5jb2RlcnMgaW4gbWFueSAzRCBvYmplY3QgZGV0ZWN0aW9uIHBpcGVsaW5lcy4gVm90ZU5ldCBmZWVkcyBQb2ludE5ldCsrIGZlYXR1cmVzIGludG8gYSBIb3VnaCB2b3RpbmcgbW9kdWxlIHRoYXQgcHJlZGljdHMgb2JqZWN0IGNlbnRlcnMuIFBvaW50UGlsbGFycyB2b3hlbGl6ZXMgdGhlIHBvaW50IGNsb3VkIGludG8gdmVydGljYWwgcGlsbGFycyBhbmQgdXNlcyBhIHNpbXBsaWZpZWQgUG9pbnROZXQgcGVyIHBpbGxhciB0byBnZW5lcmF0ZSBhIHBzZXVkby1pbWFnZSBmb3IgZmFzdCAyRCBDTk4gZGV0ZWN0aW9uLiJ9LHsidHlwZSI6ImNvZGUiLCJsYW5nIjoicHl0aG9uIiwiY29udGVudCI6ImNvbWJpbmVkID0gdG9yY2guY2F0KFtnbG9iYWxfZmVhdCwgYW5jaG9yX2ZlYXRdLCBkaW09LTEpXG5wcmVkID0gYmJveF9oZWFkKGNvbWJpbmVkKVxuIyBQcmVkaWN0IDcgb2Zmc2V0czogZHgsIGR5LCBkeiwgZGgsIGR3LCBkbCwgZHRoZXRhXG5keCwgZHksIGR6ID0gcHJlZFsuLi4sMF0sIHByZWRbLi4uLDFdLCBwcmVkWy4uLiwyXVxuZGgsIGR3LCBkbCA9IHByZWRbLi4uLDNdLCBwcmVkWy4uLiw0XSwgcHJlZFsuLi4sNV1cbmR0aGV0YSAgICAgPSBwcmVkWy4uLiw2XVxuIyBBcHBseSAzRCBJb1UgTk1TIHRvIHN1cHByZXNzIGR1cGxpY2F0ZSBkZXRlY3Rpb25zIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiIzRCBJb1UtYmFzZWQgTk1TIGlzIGZhciBtb3JlIGV4cGVuc2l2ZSB0aGFuIDJEIE5NUy4gQ29tcHV0aW5nIHRoZSBpbnRlcnNlY3Rpb24gb2YgdHdvIG9yaWVudGVkIDNEIGJveGVzIHJlcXVpcmVzIHBvbHlnb24gY2xpcHBpbmcgaW4gdGhlIGhvcml6b250YWwgcGxhbmUgcGx1cyBpbnRlcnZhbCBvdmVybGFwIGluIHRoZSB2ZXJ0aWNhbCBheGlzLiBMaWJyYXJpZXMgbGlrZSBpb3UzZC1ubXMtY3VkYSBwcm92aWRlIEdQVS1hY2NlbGVyYXRlZCBpbXBsZW1lbnRhdGlvbnMgZXNzZW50aWFsIGZvciBrZWVwaW5nIDNEIGRldGVjdGlvbiBpbmZlcmVuY2Ugd2l0aGluIHJlYWwtdGltZSBsYXRlbmN5IGJ1ZGdldHMuIn0seyJ0eXBlIjoidGFibGUiLCJoZWFkZXJzIjpbIk1vZGVsIiwiVGFzayIsIklucHV0IiwibUFQIC8gQWNjICUiLCJTcGVlZCAobXMpIl0sInJvd3MiOltbIlBvaW50TmV0IiwiQ2xhc3NpZmljYXRpb24iLCIxMDI0IHB0cyIsIjg5LjIlIiwifjI1Il0sWyJQb2ludE5ldCIsIlBhcnQgU2VnIiwiMjA0OCBwdHMiLCI4My43IG1Jb1UiLCJ+MzUiXSxbIlBvaW50TmV0KysiLCJDbGFzc2lmaWNhdGlvbiIsIjEwMjQgcHRzIiwiOTEuOSUiLCJ+NDAiXSxbIlZvdGVOZXQiLCIzRCBEZXRlY3Rpb24iLCIyMGsgcHRzIiwiNTguNiBBUCIsIn4yMDAiXSxbIlBvaW50UGlsbGFycyIsIjNEIERldGVjdGlvbiIsIkxpREFSIHZveGVscyIsIjYxLjkgQVAiLCJ+MTYiXV19LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IktleSBUYWtlYXdheXMifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IlBvaW50TmV0XHUwMDI3cyBjb3JlIGluc2lnaHQgaXMgdGhhdCBhIHN5bW1ldHJpYyBmdW5jdGlvbiAobWF4LXBvb2wpIGFwcGxpZWQgdG8gcGVyLXBvaW50IGZlYXR1cmUgdHJhbnNmb3JtcyB5aWVsZHMgYSBwZXJtdXRhdGlvbi1pbnZhcmlhbnQgZ2xvYmFsIGRlc2NyaXB0b3IuIFRoaXMgZWxpbWluYXRlcyB0aGUgbmVlZCBmb3Igdm94ZWxpemF0aW9uIG9yIGdyYXBoIGNvbnN0cnVjdGlvbiBhbmQgZW5hYmxlcyBlbmQtdG8tZW5kIHRyYWluaW5nIGRpcmVjdGx5IG9uIHJhdyAzRCBwb2ludCBzZXRzIHdpdGggdmFyaWFibGUgY2FyZGluYWxpdHkuIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJQb2ludE5ldCsrIGFkZHJlc3NlcyB0aGUgbG9jYWxpdHkgcHJvYmxlbSBieSBsZWFybmluZyBoaWVyYXJjaGljYWwgcmVwcmVzZW50YXRpb25zIHRocm91Z2ggcmVwZWF0ZWQgU2V0IEFic3RyYWN0aW9uLiBFYWNoIGxheWVyIGNhcHR1cmVzIGZlYXR1cmVzIGF0IGEgZGlmZmVyZW50IHNwYXRpYWwgc2NhbGUg4oCUIGZyb20gZmluZSBlZGdlIGRldGFpbHMgdG8gY29hcnNlIHNoYXBlIHN0cnVjdHVyZXMg4oCUIG1ha2luZyBpdCBlZmZlY3RpdmUgZm9yIGJvdGggZGVuc2UgaW5kb29yIHNjYW5zIGFuZCBzcGFyc2Ugb3V0ZG9vciBMaURBUiBwb2ludCBjbG91ZHMuIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJCb3RoIGFyY2hpdGVjdHVyZXMgcmVtYWluIGhpZ2hseSBpbmZsdWVudGlhbCBiYXNlbGluZXMuIE1vZGVybiBzdWNjZXNzb3JzIGxpa2UgUG9pbnQgVHJhbnNmb3JtZXIsIDNERVRSLCBhbmQgTWFtYmEzRCBleHRlbmQgdGhlc2UgZm91bmRhdGlvbnMgd2l0aCBhdHRlbnRpb24gb3Igc3RhdGUtc3BhY2UgbWVjaGFuaXNtcywgeWV0IHJldGFpbiB0aGUgY29yZSBwcmluY2lwbGUgb2Ygb3BlcmF0aW5nIGRpcmVjdGx5IG9uIHVuc3RydWN0dXJlZCAzRCBwb2ludCBzZXRzIHdpdGhvdXQgYW55IHZveGVsaXphdGlvbiBwcmVwcm9jZXNzaW5nIHN0ZXAuIn1d"
+---
+# PointNet: Deep Learning on Unordered Point Clouds
+
+## Overview
+
+Point clouds are sets of 3D coordinates captured by LiDAR or depth sensors. Unlike images with regular pixel grids, point clouds are unordered and variable in size — two scans of the same scene may contain different numbers of points in different orders, making standard CNNs and RNNs ill-suited for direct processing.
+
+PointNet, introduced by Qi et al. in 2017, was the first deep network to operate directly on raw point clouds without voxelization or projection. It uses shared MLPs and a symmetric aggregation function to extract per-point and global features, achieving competitive results on classification and segmentation benchmarks.
+
+## Permutation Invariance
+
+A function f is permutation-invariant if f(P) equals f applied to any permutation of P. Sorting points is an unstable approach due to sensitivity to ties and numeric precision. PointNet applies shared MLP transforms independently per point, then aggregates with symmetric max-pooling across the point dimension, producing identical output for any input ordering.
+
+```
+# Per-point MLP shared across all N points
+per_point_feat = mlp(points)          # (B, N, 64)
+# Global feature via symmetric max-pooling
+global_feat = global_max_pool(per_point_feat, dim=1)  # (B, 1024)
+# Permutation-invariant: swapping any two rows
+# of 'points' yields the same global_feat
+```
+
+> **info**: PointNet's max-pool aggregation makes it provably permutation-invariant — the same output for any ordering of input points. It also handles variable-size point clouds naturally since max-pool reduces N points to a fixed-size global descriptor.
+
+## PointNet Architecture
+
+The PointNet architecture has three stages. A T-Net predicts a 3x3 transformation matrix to canonicalize input coordinates. Shared MLP layers then extract per-point features of growing dimension (64, 128, 1024). Finally, max-pooling aggregates across all points to yield a fixed 1024-dimensional global feature vector used for classification or segmentation.
+
+```
+transform = t_net(points)             # (B, 3, 3)
+points_aligned = torch.bmm(points, transform)   # (B, N, 3)
+# Feature-space T-Net aligns 64-dim features
+feat_transform = t_net_feat(per_point_feat)      # (B, 64, 64)
+feat_aligned = torch.bmm(per_point_feat, feat_transform)
+# Regularizer: ||I - A*A^T||^2 keeps transform near orthogonal
+```
+
+The feature T-Net includes a regularization loss penalizing the transform matrix for deviating from orthogonality: L_reg = ||I - A*A^T||^2_F. This keeps the feature-space transformation numerically stable and improves final classification accuracy by roughly 1-2% on the ModelNet40 benchmark compared to using no feature alignment.
+
+## PointNet++ Hierarchical Learning
+
+PointNet++ introduces hierarchical feature learning to capture local geometry that vanilla PointNet misses. Each Set Abstraction (SA) layer runs three steps: Farthest Point Sampling selects M representative centroids, ball query finds K neighbor points within a given radius, and a mini-PointNet encodes local geometry into a feature vector per centroid.
+
+```
+centroids = farthest_point_sample(xyz, n_centroids)    # (B, M)
+idx = ball_query(xyz, centroids, radius, n_samples)    # (B, M, K)
+grouped = index_points(feat, idx)                       # (B, M, K, C)
+local_feat = pointnet(grouped)                          # (B, M, C')
+```
+
+PointNet++ also supports multi-scale grouping (MSG), applying ball queries at different radii and concatenating the resulting features. This makes the model robust to varying point densities — a common issue in real LiDAR scans where nearby objects are densely sampled and distant objects yield only a handful of points per square meter.
+
+## Applications in 3D Detection
+
+PointNet and PointNet++ serve as backbone encoders in many 3D object detection pipelines. VoteNet feeds PointNet++ features into a Hough voting module that predicts object centers. PointPillars voxelizes the point cloud into vertical pillars and uses a simplified PointNet per pillar to generate a pseudo-image for fast 2D CNN detection.
+
+```
+combined = torch.cat([global_feat, anchor_feat], dim=-1)
+pred = bbox_head(combined)
+# Predict 7 offsets: dx, dy, dz, dh, dw, dl, dtheta
+dx, dy, dz = pred[...,0], pred[...,1], pred[...,2]
+dh, dw, dl = pred[...,3], pred[...,4], pred[...,5]
+dtheta     = pred[...,6]
+# Apply 3D IoU NMS to suppress duplicate detections
+```
+
+3D IoU-based NMS is far more expensive than 2D NMS. Computing the intersection of two oriented 3D boxes requires polygon clipping in the horizontal plane plus interval overlap in the vertical axis. Libraries like iou3d-nms-cuda provide GPU-accelerated implementations essential for keeping 3D detection inference within real-time latency budgets.
+
+| Model | Task | Input | mAP / Acc % | Speed (ms) |
+| --- | --- | --- | --- | --- |
+| PointNet | Classification | 1024 pts | 89.2% | ~25 |
+| PointNet | Part Seg | 2048 pts | 83.7 mIoU | ~35 |
+| PointNet++ | Classification | 1024 pts | 91.9% | ~40 |
+| VoteNet | 3D Detection | 20k pts | 58.6 AP | ~200 |
+| PointPillars | 3D Detection | LiDAR voxels | 61.9 AP | ~16 |
+
+## Key Takeaways
+
+PointNet's core insight is that a symmetric function (max-pool) applied to per-point feature transforms yields a permutation-invariant global descriptor. This eliminates the need for voxelization or graph construction and enables end-to-end training directly on raw 3D point sets with variable cardinality.
+
+PointNet++ addresses the locality problem by learning hierarchical representations through repeated Set Abstraction. Each layer captures features at a different spatial scale — from fine edge details to coarse shape structures — making it effective for both dense indoor scans and sparse outdoor LiDAR point clouds.
+
+Both architectures remain highly influential baselines. Modern successors like Point Transformer, 3DETR, and Mamba3D extend these foundations with attention or state-space mechanisms, yet retain the core principle of operating directly on unstructured 3D point sets without any voxelization preprocessing step.
+

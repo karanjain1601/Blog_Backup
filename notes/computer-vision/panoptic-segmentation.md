@@ -1,0 +1,126 @@
+---
+title: "Panoptic Segmentation: Things and Stuff"
+slug: "panoptic-segmentation"
+description: "Unifying semantic and instance segmentation — panoptic quality metric, things vs stuff categories, Panoptic FPN architecture, and how to merge semantic and instance outputs."
+tags: ["computer-vision"]
+topic: "computer-vision"
+status: "published"
+updated: "2026-07-10"
+blocks_json: "W3sidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6Ik92ZXJ2aWV3In0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJQYW5vcHRpYyBzZWdtZW50YXRpb24gY29tYmluZXMgc2VtYW50aWMgc2VnbWVudGF0aW9uLCB3aGljaCBsYWJlbHMgZXZlcnkgcGl4ZWwgd2l0aCBhIGNsYXNzLCBhbmQgaW5zdGFuY2Ugc2VnbWVudGF0aW9uLCB3aGljaCBpZGVudGlmaWVzIGluZGl2aWR1YWwgb2JqZWN0IGluc3RhbmNlcy4gSW50cm9kdWNlZCBieSBLaXJpbGxvdiBldCBhbC4gaW4gMjAxOSwgaXQgcHJvZHVjZXMgYSB1bmlmaWVkIG91dHB1dCB3aGVyZSBldmVyeSBwaXhlbCByZWNlaXZlcyBib3RoIGEgc2VtYW50aWMgbGFiZWwgYW5kIGFuIGluc3RhbmNlIElELCBlbmFibGluZyBjb21wbGV0ZSBzY2VuZSB1bmRlcnN0YW5kaW5nIGZvciBhdXRvbm9tb3VzIGRyaXZpbmcsIHJvYm90aWNzLCBhbmQgdmlkZW8gYW5hbHlzaXMuIn0seyJ0eXBlIjoiY2FsbG91dCIsInZhcmlhbnQiOiJpbmZvIiwiY29udGVudCI6IlBhbm9wdGljIHNlZ21lbnRhdGlvbiBpcyB0aGUgbW9zdCBjb21wbGV0ZSBzY2VuZSB1bmRlcnN0YW5kaW5nIHRhc2sg4oCUIGl0IGFzc2lnbnMgZXZlcnkgcGl4ZWwgYSBsYWJlbCBBTkQgZGlmZmVyZW50aWF0ZXMgYmV0d2VlbiBpbmRpdmlkdWFsIHRoaW5nIGluc3RhbmNlcyAocGVvcGxlLCBjYXJzKSBhbmQgYW1vcnBob3VzIHN0dWZmIChza3ksIGdyYXNzKS4ifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJUaGluZ3MgdnMgU3R1ZmYifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkluIHBhbm9wdGljIHNlZ21lbnRhdGlvbiwgY2F0ZWdvcmllcyBhcmUgZGl2aWRlZCBpbnRvIHRoaW5ncyBhbmQgc3R1ZmYuIFRoaW5ncyBhcmUgY291bnRhYmxlIG9iamVjdHMgd2l0aCB3ZWxsLWRlZmluZWQgaW5zdGFuY2VzIOKAlCBwZW9wbGUsIGNhcnMsIGFuaW1hbHMg4oCUIHRoYXQgaW5zdGFuY2Ugc2VnbWVudGF0aW9uIGhhbmRsZXMuIFN0dWZmIGNhdGVnb3JpZXMg4oCUIHNreSwgcm9hZCwgZ3Jhc3MsIHdhdGVyIOKAlCBhcmUgYW1vcnBob3VzIHJlZ2lvbnMgd2l0aG91dCBkaXNjcmV0ZSBib3VuZGFyaWVzLiBFYWNoIHRoaW5nIHBpeGVsIGdldHMgYSB1bmlxdWUgaW5zdGFuY2UgSUQsIHdoaWxlIGFsbCBzdHVmZiBwaXhlbHMgb2YgdGhlIHNhbWUgY2xhc3Mgc2hhcmUgYSBzaW5nbGUgbGFiZWwuIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJUaGUgQ09DTyBQYW5vcHRpYyBkYXRhc2V0IGNvbnRhaW5zIDgwIHRoaW5nIGNhdGVnb3JpZXMgYW5kIDUzIHN0dWZmIGNhdGVnb3JpZXMsIHRvdGFsbGluZyAxMzMgY2xhc3Nlcy4gTW9kZWxzIG11c3QgaGFuZGxlIGJvdGggcGFyYWRpZ21zIHNpbXVsdGFuZW91c2x5LiBUaGluZyBjbGFzc2VzIGJlbmVmaXQgZnJvbSBvYmplY3QgZGV0ZWN0aW9uIHByaW9ycywgd2hpbGUgc3R1ZmYgY2xhc3NlcyByZXF1aXJlIHNlbWFudGljIGNvbnRleHQgb3ZlciBsYXJnZSBzcGF0aWFsIHJlZ2lvbnMuIEJhbGFuY2luZyB0aGVzZSB0d28gY29tcGxlbWVudGFyeSBvYmplY3RpdmVzIGlzIHRoZSBjb3JlIGFyY2hpdGVjdHVyYWwgY2hhbGxlbmdlIG9mIHBhbm9wdGljIG1vZGVscy4ifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJQYW5vcHRpYyBRdWFsaXR5IE1ldHJpYyJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiUGFub3B0aWMgUXVhbGl0eSAoUFEpIGlzIGNvbXB1dGVkIGJ5IG1hdGNoaW5nIHByZWRpY3RlZCBzZWdtZW50cyB0byBncm91bmQgdHJ1dGggdXNpbmcgSW9VIGdyZWF0ZXIgdGhhbiAwLjUuIFBRIGRlY29tcG9zZXMgaW50byBTZWdtZW50YXRpb24gUXVhbGl0eSAoU1EpLCB0aGUgYXZlcmFnZSBJb1Ugb2YgbWF0Y2hlZCBwYWlycywgYW5kIFJlY29nbml0aW9uIFF1YWxpdHkgKFJRKSwgdGhlIEYxIHNjb3JlIG92ZXIgbWF0Y2hlZCBhbmQgdW5tYXRjaGVkIHNlZ21lbnRzLiBQUSBlcXVhbHMgU1EgdGltZXMgUlEsIHdpdGggU1EgbWVhc3VyaW5nIG1hc2sgYWNjdXJhY3kgYW5kIFJRIG1lYXN1cmluZyBkZXRlY3Rpb24gcHJlY2lzaW9uIGFuZCByZWNhbGwgc2ltdWx0YW5lb3VzbHkuIn0seyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6ImltcG9ydCBudW1weSBhcyBucFxuXG5kZWYgY29tcHV0ZV9wcShtYXRjaGVkX2lvdXMsIG51bV9ndCwgbnVtX3ByZWQpOlxuICAgIFwiXCJcIkNvbXB1dGUgUFEgPSBTUSB4IFJRIGZvciBvbmUgY2F0ZWdvcnkuXCJcIlwiXG4gICAgdHAgPSBsZW4obWF0Y2hlZF9pb3VzKVxuICAgIGZwID0gbnVtX3ByZWQgLSB0cFxuICAgIGZuID0gbnVtX2d0IC0gdHBcbiAgICBzcSA9IG5wLm1lYW4obWF0Y2hlZF9pb3VzKSBpZiB0cCBcdTAwM2UgMCBlbHNlIDAuMFxuICAgIHJxID0gdHAgLyAodHAgKyAwLjUgKiBmcCArIDAuNSAqIGZuKSBpZiAodHAgKyBmcCArIGZuKSBcdTAwM2UgMCBlbHNlIDAuMFxuICAgIHBxID0gc3EgKiBycVxuICAgIHJldHVybiB7XCJQUVwiOiBwcSwgXCJTUVwiOiBzcSwgXCJSUVwiOiBycX0ifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IlBRIGlzIGNvbXB1dGVkIHBlciBjYXRlZ29yeSBhbmQgYXZlcmFnZWQgYWNyb3NzIGFsbCBjbGFzc2VzLiBGb3IgdGhpbmdzLCBhIG1pc3NlZCBkZXRlY3Rpb24gY29udHJpYnV0ZXMgYSBmYWxzZSBuZWdhdGl2ZSB0byBSUS4gRm9yIHN0dWZmLCB0eXBpY2FsbHkgb25lIHByZWRpY3Rpb24gcGVyIGNsYXNzIGlzIGV4cGVjdGVkLiBTUSBpcyBhbHdheXMgYWJvdmUgMC41IGJ5IGNvbnN0cnVjdGlvbiBzaW5jZSBtYXRjaGVkIHBhaXJzIHJlcXVpcmUgSW9VIGdyZWF0ZXIgdGhhbiAwLjUuIFN0YXRlLW9mLXRoZS1hcnQgcGFub3B0aWMgbW9kZWxzIGFjaGlldmUgUFEgb2YgNTUgdG8gNjUgb24gQ09DTyB2YWwyMDE3LiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IlBhbm9wdGljIEZQTiBBcmNoaXRlY3R1cmUifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IlBhbm9wdGljIEZlYXR1cmUgUHlyYW1pZCBOZXR3b3JrIGJ1aWxkcyBvbiBhIHNoYXJlZCBGUE4gYmFja2JvbmUgcHJvZHVjaW5nIG11bHRpLXNjYWxlIGZlYXR1cmUgbWFwcyBhdCBzdHJpZGVzIDQsIDgsIDE2LCBhbmQgMzIuIEEgc2VtYW50aWMgaGVhZCB1cHNhbXBsZXMgYW5kIG1lcmdlcyBhbGwgRlBOIGxldmVscyB0byBhIGZ1bGwtcmVzb2x1dGlvbiBsb2dpdCBtYXAuIEEgTWFzayBSLUNOTiBpbnN0YW5jZSBoZWFkIHJ1bnMgaW4gcGFyYWxsZWwgb24gdGhlIHNhbWUgZmVhdHVyZXMuIEJvdGggaGVhZHMgc2hhcmUgdGhlIGJhY2tib25lLCByZWR1Y2luZyBjb21wdXRlIGFuZCBlbmFibGluZyBqb2ludCBlbmQtdG8tZW5kIHRyYWluaW5nIHdpdGggYSBjb21iaW5lZCBsb3NzLiJ9LHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiJpbXBvcnQgdG9yY2hcbmltcG9ydCB0b3JjaC5ubiBhcyBublxuZnJvbSB0b3JjaHZpc2lvbi5tb2RlbHMuZGV0ZWN0aW9uIGltcG9ydCBtYXNrcmNubl9yZXNuZXQ1MF9mcG5cblxuY2xhc3MgUGFub3B0aWNGUE4obm4uTW9kdWxlKTpcbiAgICBkZWYgX19pbml0X18oc2VsZiwgbnVtX3RoaW5nLCBudW1fc3R1ZmYpOlxuICAgICAgICBzdXBlcigpLl9faW5pdF9fKClcbiAgICAgICAgc2VsZi5iYWNrYm9uZSA9IG1hc2tyY25uX3Jlc25ldDUwX2Zwbih3ZWlnaHRzPVwiREVGQVVMVFwiKS5iYWNrYm9uZVxuICAgICAgICBzZWxmLnNlbV9oZWFkID0gU2VtYW50aWNIZWFkKDI1NiwgbnVtX3RoaW5nICsgbnVtX3N0dWZmKVxuICAgICAgICBzZWxmLmluc3RfaGVhZCA9IEluc3RhbmNlSGVhZCgyNTYsIG51bV90aGluZylcbiAgICBkZWYgZm9yd2FyZChzZWxmLCBpbWFnZXMpOlxuICAgICAgICBmZWF0dXJlcyA9IHNlbGYuYmFja2JvbmUoaW1hZ2VzKVxuICAgICAgICBzZW1fbG9naXRzID0gc2VsZi5zZW1faGVhZChmZWF0dXJlcylcbiAgICAgICAgaW5zdF9vdXQgPSBzZWxmLmluc3RfaGVhZChmZWF0dXJlcywgaW1hZ2VzKVxuICAgICAgICByZXR1cm4gc2VtX2xvZ2l0cywgaW5zdF9vdXQifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IlRoZSBzZW1hbnRpYyBoZWFkIGFwcGxpZXMgM3gzIGNvbnZvbHV0aW9ucyBhbmQgYmlsaW5lYXIgdXBzYW1wbGluZyBhdCBlYWNoIEZQTiBsZXZlbCwgc3VtcyBhbGwgbGV2ZWxzIGVsZW1lbnQtd2lzZSwgdGhlbiBwcmVkaWN0cyBwZXItcGl4ZWwgbG9naXRzIHdpdGggYSAxeDEgY29udm9sdXRpb24uIFRoZSBpbnN0YW5jZSBoZWFkIHVzZXMgc3RhbmRhcmQgTWFzayBSLUNOTiB3aXRoIFJvSSBBbGlnbiDigJQgcmVnaW9uIHByb3Bvc2FscywgYm94IHJlZ3Jlc3Npb24sIGNsYXNzaWZpY2F0aW9uLCBhbmQgMjh4MjggbWFzayBwcmVkaWN0aW9uIHBlciBkZXRlY3RlZCBvYmplY3QuIEJvdGggaGVhZHMgYXJlIG9wdGltaXplZCBqb2ludGx5IHdpdGggZXF1YWwgbG9zcyB3ZWlnaHRpbmcuIn0seyJ0eXBlIjoidGFibGUiLCJoZWFkZXJzIjpbIlRhc2siLCJPdXRwdXQgcGVyIHBpeGVsIiwiT3V0cHV0IHBlciBpbnN0YW5jZSIsIk1ldHJpYyIsIktleSBtb2RlbCJdLCJyb3dzIjpbWyJTZW1hbnRpYyBzZWciLCJDbGFzcyBsYWJlbCIsIk5vIiwibUlvVSIsIkRlZXBMYWIsIFNlZ0Zvcm1lciJdLFsiSW5zdGFuY2Ugc2VnIiwiTm8iLCJDbGFzcyArIG1hc2sgcGVyIG9iamVjdCIsIkFQIChtYXNrKSIsIk1hc2sgUi1DTk4sIFNPTE92MiJdLFsiUGFub3B0aWMgc2VnIiwiQ2xhc3MgKyBpbnN0YW5jZSBJRCIsIlllcyIsIlBRIiwiUGFub3B0aWMgRlBOLCBNYXNrMkZvcm1lciJdXX0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiTWVyZ2luZyBTZW1hbnRpYyBhbmQgSW5zdGFuY2UgT3V0cHV0cyJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiTWVyZ2luZyBzZW1hbnRpYyBhbmQgaW5zdGFuY2Ugb3V0cHV0cyByZXF1aXJlcyByZXNvbHZpbmcgY29uZmxpY3RzLiBGb3IgdGhpbmcgY2F0ZWdvcmllcywgaW5zdGFuY2UgcHJlZGljdGlvbnMgdGFrZSBwcmlvcml0eSBvdmVyIHRoZSBzZW1hbnRpYyBtYXAuIEZvciBzdHVmZiBjYXRlZ29yaWVzLCBzZW1hbnRpYyBwcmVkaWN0aW9ucyBmaWxsIHBpeGVscyBub3QgY2xhaW1lZCBieSBhbnkgaW5zdGFuY2UuIFBpeGVscyB3aXRoIGxvdyBjb25maWRlbmNlIGluIGJvdGggaGVhZHMgYXJlIGFzc2lnbmVkIGEgdm9pZCBsYWJlbC4gVGhlIGZpbmFsIHBhbm9wdGljIG91dHB1dCBpcyBhbiBIeFcgbWFwIG9mIHVuaXF1ZSBjYXRlZ29yeSBhbmQgaW5zdGFuY2UgSUQgcGFpcnMuIn0seyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6ImltcG9ydCBudW1weSBhcyBucFxuXG5kZWYgbWVyZ2VfcGFub3B0aWMoc2VtX2xvZ2l0cywgaW5zdF9tYXNrcywgaW5zdF9sYWJlbHMsIHN0dWZmX2lkcywgdGhpbmdfaWRzKTpcbiAgICBcIlwiXCJNZXJnZSBzZW1hbnRpYyBhbmQgaW5zdGFuY2Ugb3V0cHV0cyBpbnRvIGEgcGFub3B0aWMgbWFwLlwiXCJcIlxuICAgIEgsIFcgPSBzZW1fbG9naXRzLnNoYXBlWy0yOl1cbiAgICBwYW5vcHRpYyA9IG5wLnplcm9zKChILCBXKSwgZHR5cGU9bnAuaW50MzIpXG4gICAgc2VtX3ByZWQgPSBzZW1fbG9naXRzLmFyZ21heCgwKVxuICAgIGZvciBjYXRfaWQgaW4gc3R1ZmZfaWRzOlxuICAgICAgICBwYW5vcHRpY1tzZW1fcHJlZCA9PSBjYXRfaWRdID0gY2F0X2lkICogMTAwMFxuICAgIGluc3RfaWQgPSAxXG4gICAgZm9yIG1hc2ssIGxhYmVsIGluIHppcChpbnN0X21hc2tzLCBpbnN0X2xhYmVscyk6XG4gICAgICAgIGlmIGxhYmVsIGluIHRoaW5nX2lkczpcbiAgICAgICAgICAgIHBhbm9wdGljW21hc2sgXHUwMDNlIDAuNV0gPSBsYWJlbCAqIDEwMDAgKyBpbnN0X2lkXG4gICAgICAgICAgICBpbnN0X2lkICs9IDFcbiAgICByZXR1cm4gcGFub3B0aWMifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkFmdGVyIG1lcmdpbmcsIGVhY2ggcGl4ZWwgaGFzIGV4YWN0bHkgb25lIHBhbm9wdGljIGxhYmVsLiBJbnN0YW5jZXMgYXJlIGFzc2lnbmVkIElEcyBzdGFydGluZyBmcm9tIDEgcGVyIHRoaW5nIGNhdGVnb3J5OyBzdHVmZiBhbHdheXMgZ2V0cyBJRCAwLiBPdmVybGFwcGluZyBpbnN0YW5jZXMgZnJvbSB0aGUgTWFzayBSLUNOTiBoZWFkIGFyZSByZXNvbHZlZCBieSBOTVMgYmVmb3JlIG1hc2sgbWVyZ2luZy4gVGhlIHBhbm9wdGljIG1hcCBpcyBzdG9yZWQgYXMgdWludDMyIHVzaW5nIHRoZSBmb3JtdWxhIGNhdGVnb3J5X2lkIHRpbWVzIDEwMDAgcGx1cyBpbnN0YW5jZV9pZCwgZm9sbG93aW5nIHRoZSBDT0NPIHBhbm9wdGljIGZvcm1hdCBjb252ZW50aW9uLiJ9LHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiJpbXBvcnQganNvblxuZnJvbSBwYW5vcHRpY2FwaS5ldmFsdWF0aW9uIGltcG9ydCBwcV9jb21wdXRlXG5cbmRlZiBldmFsdWF0ZV9wYW5vcHRpYyhndF9qc29uLCBwcmVkX2pzb24sIGd0X2ZvbGRlciwgcHJlZF9mb2xkZXIpOlxuICAgIFwiXCJcIkNvbXB1dGUgUFEsIFNRLCBSUSB1c2luZyB0aGUgcGFub3B0aWNhcGkgbGlicmFyeS5cIlwiXCJcbiAgICB3aXRoIG9wZW4oZ3RfanNvbikgYXMgZjpcbiAgICAgICAgZ3RfZGF0YSA9IGpzb24ubG9hZChmKVxuICAgIHdpdGggb3BlbihwcmVkX2pzb24pIGFzIGY6XG4gICAgICAgIHByZWRfZGF0YSA9IGpzb24ubG9hZChmKVxuICAgIHJlc3VsdHMgPSBwcV9jb21wdXRlKFxuICAgICAgICBndF9kYXRhLCBwcmVkX2RhdGEsXG4gICAgICAgIGd0X2ZvbGRlcj1ndF9mb2xkZXIsXG4gICAgICAgIHByZWRfZm9sZGVyPXByZWRfZm9sZGVyXG4gICAgKVxuICAgIHByaW50KGZcIlBRPXtyZXN1bHRzW1x1MDAyN0FsbFx1MDAyN11bXHUwMDI3cHFcdTAwMjddOi4zZn0gU1E9e3Jlc3VsdHNbXHUwMDI3QWxsXHUwMDI3XVtcdTAwMjdzcVx1MDAyN106LjNmfSBSUT17cmVzdWx0c1tcdTAwMjdBbGxcdTAwMjddW1x1MDAyN3JxXHUwMDI3XTouM2Z9XCIpIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJUaGUgcGFub3B0aWNhcGkgbGlicmFyeSBmcm9tIEZhY2Vib29rIFJlc2VhcmNoIHByb3ZpZGVzIHN0YW5kYXJkIGV2YWx1YXRpb24gY29kZS4gUmVzdWx0cyBhcmUgcmVwb3J0ZWQgYXMgUFEsIFNRLCBhbmQgUlEgZm9yIGFsbCBjYXRlZ29yaWVzLCB0aGluZ3Mgb25seSwgYW5kIHN0dWZmIG9ubHkuIE1vZGVscyBzdHJvbmcgb24gdGhpbmdzIG1heSBiZSB3ZWFrIG9uIHN0dWZmLiBDb21wcmVoZW5zaXZlIHBhbm9wdGljIG1vZGVscyBhY2hpZXZlIGNvbXBldGl0aXZlIHBlcmZvcm1hbmNlIG9uIGJvdGggc3Vic2V0cywgZGVtb25zdHJhdGluZyBnZW51aW5lIHNjZW5lIHVuZGVyc3RhbmRpbmcgcmF0aGVyIHRoYW4gZXhjZWxsaW5nIGF0IG9ubHkgb25lIHN1YnRhc2suIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiS2V5IFRha2Vhd2F5cyJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiUGFub3B0aWMgc2VnbWVudGF0aW9uIHVuaWZpZXMgdHdvIHByZXZpb3VzbHkgc2VwYXJhdGUgdGFza3MgYnkgYXNzaWduaW5nIGV2ZXJ5IHBpeGVsIGJvdGggYSBzZW1hbnRpYyBjbGFzcyBhbmQgYW4gaW5zdGFuY2UgaWRlbnRpdHkuIFRoZSBQYW5vcHRpYyBRdWFsaXR5IG1ldHJpYyBkZWNvbXBvc2VzIGFjY3VyYWN5IGludG8gc2VnbWVudGF0aW9uIHF1YWxpdHkgYW5kIHJlY29nbml0aW9uIHF1YWxpdHksIG1ha2luZyByZXN1bHRzIGludGVycHJldGFibGUgYW5kIGNvbXBhcmFibGUgYWNyb3NzIG1vZGVscyB3aXRoIGRpZmZlcmVudCBhcmNoaXRlY3R1cmFsIHN0cmF0ZWdpZXMgaW5jbHVkaW5nIHR3by1zdGFnZSwgc2luZ2xlLXN0YWdlLCBhbmQgdHJhbnNmb3JtZXIgYXBwcm9hY2hlcy4ifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IlBhbm9wdGljIEZQTiBkZW1vbnN0cmF0ZXMgdGhhdCBhIHNoYXJlZCBGUE4gYmFja2JvbmUgY2FuIHNpbXVsdGFuZW91c2x5IHNlcnZlIHNlbWFudGljIGFuZCBpbnN0YW5jZSBoZWFkcyB3aXRoIG1pbmltYWwgb3ZlcmhlYWQuIE11bHRpLXNjYWxlIGZlYXR1cmUgc2hhcmluZyBpbXByb3ZlcyBib3RoIHRhc2tzIGNvbXBhcmVkIHRvIGluZGVwZW5kZW50IHRyYWluaW5nLiBUaGlzIGFyY2hpdGVjdHVyZSBwYXR0ZXJuIGhhcyBpbmZsdWVuY2VkIHN1YnNlcXVlbnQgbW9kZWxzIGluY2x1ZGluZyBQYW5vcHRpY0ZDTiwgTWFza0Zvcm1lciwgYW5kIE1hc2syRm9ybWVyLCB3aGljaCB1bmlmeSBib3RoIHRhc2tzIHVuZGVyIGEgc2luZ2xlIHF1ZXJ5LWJhc2VkIGRlY29kZXIuIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJUaGUgdGhpbmcvc3R1ZmYgZGlzdGluY3Rpb24gcmVmbGVjdHMgZnVuZGFtZW50YWwgb250b2xvZ2ljYWwgZGlmZmVyZW5jZXMgaW4gc2NlbmUgY2F0ZWdvcmllcy4gTW9kZXJuIHRyYW5zZm9ybWVyLWJhc2VkIHBhbm9wdGljIG1vZGVscyBzdWNoIGFzIE1hc2syRm9ybWVyIHRyZWF0IGFsbCBjYXRlZ29yaWVzIHVuaWZvcm1seSB1c2luZyBtYXNrZWQgYXR0ZW50aW9uLCBhY2hpZXZpbmcgc3RhdGUtb2YtdGhlLWFydCByZXN1bHRzIHdpdGhvdXQgZXhwbGljaXQgdGhpbmcvc3R1ZmYgc2VwYXJhdGlvbi4gVW5kZXJzdGFuZGluZyB0aGUgb3JpZ2luYWwgZm9ybXVsYXRpb24gaGVscHMgaW50ZXJwcmV0IHdoeSBuZXdlciBhcmNoaXRlY3R1cmVzIGNvbnZlcmdlIHRvd2FyZCBhIHVuaWZpZWQgcXVlcnktYmFzZWQgYXBwcm9hY2guIn1d"
+---
+# Panoptic Segmentation: Things and Stuff
+
+## Overview
+
+Panoptic segmentation combines semantic segmentation, which labels every pixel with a class, and instance segmentation, which identifies individual object instances. Introduced by Kirillov et al. in 2019, it produces a unified output where every pixel receives both a semantic label and an instance ID, enabling complete scene understanding for autonomous driving, robotics, and video analysis.
+
+> **info**: Panoptic segmentation is the most complete scene understanding task — it assigns every pixel a label AND differentiates between individual thing instances (people, cars) and amorphous stuff (sky, grass).
+
+## Things vs Stuff
+
+In panoptic segmentation, categories are divided into things and stuff. Things are countable objects with well-defined instances — people, cars, animals — that instance segmentation handles. Stuff categories — sky, road, grass, water — are amorphous regions without discrete boundaries. Each thing pixel gets a unique instance ID, while all stuff pixels of the same class share a single label.
+
+The COCO Panoptic dataset contains 80 thing categories and 53 stuff categories, totalling 133 classes. Models must handle both paradigms simultaneously. Thing classes benefit from object detection priors, while stuff classes require semantic context over large spatial regions. Balancing these two complementary objectives is the core architectural challenge of panoptic models.
+
+## Panoptic Quality Metric
+
+Panoptic Quality (PQ) is computed by matching predicted segments to ground truth using IoU greater than 0.5. PQ decomposes into Segmentation Quality (SQ), the average IoU of matched pairs, and Recognition Quality (RQ), the F1 score over matched and unmatched segments. PQ equals SQ times RQ, with SQ measuring mask accuracy and RQ measuring detection precision and recall simultaneously.
+
+```python
+import numpy as np
+
+def compute_pq(matched_ious, num_gt, num_pred):
+    """Compute PQ = SQ x RQ for one category."""
+    tp = len(matched_ious)
+    fp = num_pred - tp
+    fn = num_gt - tp
+    sq = np.mean(matched_ious) if tp > 0 else 0.0
+    rq = tp / (tp + 0.5 * fp + 0.5 * fn) if (tp + fp + fn) > 0 else 0.0
+    pq = sq * rq
+    return {"PQ": pq, "SQ": sq, "RQ": rq}
+```
+
+PQ is computed per category and averaged across all classes. For things, a missed detection contributes a false negative to RQ. For stuff, typically one prediction per class is expected. SQ is always above 0.5 by construction since matched pairs require IoU greater than 0.5. State-of-the-art panoptic models achieve PQ of 55 to 65 on COCO val2017.
+
+## Panoptic FPN Architecture
+
+Panoptic Feature Pyramid Network builds on a shared FPN backbone producing multi-scale feature maps at strides 4, 8, 16, and 32. A semantic head upsamples and merges all FPN levels to a full-resolution logit map. A Mask R-CNN instance head runs in parallel on the same features. Both heads share the backbone, reducing compute and enabling joint end-to-end training with a combined loss.
+
+```python
+import torch
+import torch.nn as nn
+from torchvision.models.detection import maskrcnn_resnet50_fpn
+
+class PanopticFPN(nn.Module):
+    def __init__(self, num_thing, num_stuff):
+        super().__init__()
+        self.backbone = maskrcnn_resnet50_fpn(weights="DEFAULT").backbone
+        self.sem_head = SemanticHead(256, num_thing + num_stuff)
+        self.inst_head = InstanceHead(256, num_thing)
+    def forward(self, images):
+        features = self.backbone(images)
+        sem_logits = self.sem_head(features)
+        inst_out = self.inst_head(features, images)
+        return sem_logits, inst_out
+```
+
+The semantic head applies 3x3 convolutions and bilinear upsampling at each FPN level, sums all levels element-wise, then predicts per-pixel logits with a 1x1 convolution. The instance head uses standard Mask R-CNN with RoI Align — region proposals, box regression, classification, and 28x28 mask prediction per detected object. Both heads are optimized jointly with equal loss weighting.
+
+| Task | Output per pixel | Output per instance | Metric | Key model |
+| --- | --- | --- | --- | --- |
+| Semantic seg | Class label | No | mIoU | DeepLab, SegFormer |
+| Instance seg | No | Class + mask per object | AP (mask) | Mask R-CNN, SOLOv2 |
+| Panoptic seg | Class + instance ID | Yes | PQ | Panoptic FPN, Mask2Former |
+
+## Merging Semantic and Instance Outputs
+
+Merging semantic and instance outputs requires resolving conflicts. For thing categories, instance predictions take priority over the semantic map. For stuff categories, semantic predictions fill pixels not claimed by any instance. Pixels with low confidence in both heads are assigned a void label. The final panoptic output is an HxW map of unique category and instance ID pairs.
+
+```python
+import numpy as np
+
+def merge_panoptic(sem_logits, inst_masks, inst_labels, stuff_ids, thing_ids):
+    """Merge semantic and instance outputs into a panoptic map."""
+    H, W = sem_logits.shape[-2:]
+    panoptic = np.zeros((H, W), dtype=np.int32)
+    sem_pred = sem_logits.argmax(0)
+    for cat_id in stuff_ids:
+        panoptic[sem_pred == cat_id] = cat_id * 1000
+    inst_id = 1
+    for mask, label in zip(inst_masks, inst_labels):
+        if label in thing_ids:
+            panoptic[mask > 0.5] = label * 1000 + inst_id
+            inst_id += 1
+    return panoptic
+```
+
+After merging, each pixel has exactly one panoptic label. Instances are assigned IDs starting from 1 per thing category; stuff always gets ID 0. Overlapping instances from the Mask R-CNN head are resolved by NMS before mask merging. The panoptic map is stored as uint32 using the formula category_id times 1000 plus instance_id, following the COCO panoptic format convention.
+
+```python
+import json
+from panopticapi.evaluation import pq_compute
+
+def evaluate_panoptic(gt_json, pred_json, gt_folder, pred_folder):
+    """Compute PQ, SQ, RQ using the panopticapi library."""
+    with open(gt_json) as f:
+        gt_data = json.load(f)
+    with open(pred_json) as f:
+        pred_data = json.load(f)
+    results = pq_compute(
+        gt_data, pred_data,
+        gt_folder=gt_folder,
+        pred_folder=pred_folder
+    )
+    print(f"PQ={results['All']['pq']:.3f} SQ={results['All']['sq']:.3f} RQ={results['All']['rq']:.3f}")
+```
+
+The panopticapi library from Facebook Research provides standard evaluation code. Results are reported as PQ, SQ, and RQ for all categories, things only, and stuff only. Models strong on things may be weak on stuff. Comprehensive panoptic models achieve competitive performance on both subsets, demonstrating genuine scene understanding rather than excelling at only one subtask.
+
+## Key Takeaways
+
+Panoptic segmentation unifies two previously separate tasks by assigning every pixel both a semantic class and an instance identity. The Panoptic Quality metric decomposes accuracy into segmentation quality and recognition quality, making results interpretable and comparable across models with different architectural strategies including two-stage, single-stage, and transformer approaches.
+
+Panoptic FPN demonstrates that a shared FPN backbone can simultaneously serve semantic and instance heads with minimal overhead. Multi-scale feature sharing improves both tasks compared to independent training. This architecture pattern has influenced subsequent models including PanopticFCN, MaskFormer, and Mask2Former, which unify both tasks under a single query-based decoder.
+
+The thing/stuff distinction reflects fundamental ontological differences in scene categories. Modern transformer-based panoptic models such as Mask2Former treat all categories uniformly using masked attention, achieving state-of-the-art results without explicit thing/stuff separation. Understanding the original formulation helps interpret why newer architectures converge toward a unified query-based approach.
+

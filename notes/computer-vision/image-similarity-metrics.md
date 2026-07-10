@@ -1,0 +1,112 @@
+---
+title: "Image Quality and Similarity Metrics"
+slug: "image-similarity-metrics"
+description: "PSNR, SSIM, LPIPS, and FID — measuring image reconstruction fidelity, perceptual similarity, and generative model quality for super-resolution, inpainting, and image generation tasks."
+tags: ["computer-vision"]
+topic: "computer-vision"
+status: "published"
+updated: "2026-07-10"
+blocks_json: "W3sidHlwZSI6ImgyIiwiY29udGVudCI6Ik92ZXJ2aWV3In0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJJbWFnZSBxdWFsaXR5IG1ldHJpY3MgcXVhbnRpZnkgaG93IGZhaXRoZnVsbHkgYSByZWNvbnN0cnVjdGVkIG9yIGdlbmVyYXRlZCBpbWFnZSBtYXRjaGVzIGEgcmVmZXJlbmNlLiBUaGV5IGZhbGwgaW50byB0aHJlZSB0aWVyczogcGl4ZWwtbGV2ZWwgbWV0cmljcyBsaWtlIE1TRSBhbmQgUFNOUiB0aGF0IGNvbXBhcmUgcmF3IGludGVuc2l0aWVzLCBzdHJ1Y3R1cmFsIG1ldHJpY3MgbGlrZSBTU0lNIHRoYXQgbW9kZWwgbHVtaW5hbmNlLCBjb250cmFzdCwgYW5kIHN0cnVjdHVyZSwgYW5kIGxlYXJuZWQgcGVyY2VwdHVhbCBtZXRyaWNzIGxpa2UgTFBJUFMgYW5kIEZJRCB0aGF0IGFsaWduIHdpdGggaHVtYW4gdmlzdWFsIGp1ZGdtZW50LiJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiQ2hvb3NpbmcgdGhlIHJpZ2h0IG1ldHJpYyBkZXBlbmRzIG9uIHRoZSB0YXNrLiBTdXBlci1yZXNvbHV0aW9uIGFuZCBjb21wcmVzc2lvbiB1c2UgUFNOUiBhbmQgU1NJTSBmb3IgYmVuY2htYXJraW5nLCBidXQgcGVyY2VwdHVhbCBxdWFsaXR5IGRlbWFuZHMgTFBJUFMuIEdlbmVyYXRpdmUgbW9kZWxzIOKAlCBkaWZmdXNpb24sIEdBTnMsIFZBRXMg4oCUIHJlcXVpcmUgZGlzdHJpYnV0aW9uLWxldmVsIG1ldHJpY3MgbGlrZSBGSUQgdGhhdCBldmFsdWF0ZSBkaXZlcnNpdHkgYW5kIHJlYWxpc20gYWNyb3NzIGFuIGVudGlyZSBkYXRhc2V0IHJhdGhlciB0aGFuIGltYWdlIHBhaXJzLiJ9LHsidHlwZSI6ImgyIiwiY29udGVudCI6IlBTTlIgYW5kIE1TRSJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiUFNOUiAoUGVhayBTaWduYWwtdG8tTm9pc2UgUmF0aW8pIG1lYXN1cmVzIHJlY29uc3RydWN0aW9uIGZpZGVsaXR5IGFzIHRoZSByYXRpbyBvZiBtYXhpbXVtIHBvc3NpYmxlIHNpZ25hbCBwb3dlciB0byBub2lzZSBwb3dlciBpbnRyb2R1Y2VkIGJ5IGRpc3RvcnRpb24uIEl0IGlzIGRlcml2ZWQgZnJvbSBNU0Ug4oCUIG1lYW4gc3F1YXJlZCBlcnJvciBiZXR3ZWVuIGNvcnJlc3BvbmRpbmcgcGl4ZWxzLiBIaWdoZXIgUFNOUiBtZWFucyBiZXR0ZXIgcXVhbGl0eTogdmFsdWVzIGFib3ZlIDQwIGRCIGluZGljYXRlIG5lYXItbG9zc2xlc3MgcmVjb25zdHJ1Y3Rpb24sIHdoaWxlIDMw4oCTMzUgZEIgaXMgdHlwaWNhbCBmb3IgY29tcHJlc3NlZCBpbWFnZXMuIn0seyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6ImltcG9ydCB0b3JjaFxuaW1wb3J0IHRvcmNoLm5uLmZ1bmN0aW9uYWwgYXMgRlxuXG5kZWYgcHNucl9iYXRjaChwcmVkOiB0b3JjaC5UZW5zb3IsIHRhcmdldDogdG9yY2guVGVuc29yKSAtXHUwMDNlIHRvcmNoLlRlbnNvcjpcbiAgICBcIlwiXCJDb21wdXRlIFBTTlIgZm9yIGEgYmF0Y2ggb2YgaW1hZ2VzIGluIFswLCAxXS5cIlwiXCJcbiAgICBtc2UgPSBGLm1zZV9sb3NzKHByZWQsIHRhcmdldCwgcmVkdWN0aW9uPVx1MDAyN25vbmVcdTAwMjcpXG4gICAgbXNlID0gbXNlLnZpZXcobXNlLnNpemUoMCksIC0xKS5tZWFuKGRpbT0xKSAgIyBwZXItaW1hZ2UgTVNFXG4gICAgcHNuciA9IDEwLjAgKiB0b3JjaC5sb2cxMCgxLjAgLyBtc2UuY2xhbXAobWluPTFlLTEwKSlcbiAgICByZXR1cm4gcHNuciAgIyBzaGFwZTogKEIsKSwgaGlnaGVyIGlzIGJldHRlclxuXG4jIEV4YW1wbGUgdXNhZ2VcbnByZWQgPSB0b3JjaC5yYW5kKDQsIDMsIDI1NiwgMjU2KVxudGFyZ2V0ID0gdG9yY2gucmFuZCg0LCAzLCAyNTYsIDI1NilcbnByaW50KHBzbnJfYmF0Y2gocHJlZCwgdGFyZ2V0KSkgICMgdGVuc29yIG9mIDQgUFNOUiB2YWx1ZXMgaW4gZEIifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IlBTTlIgaXMgc2ltcGxlLCBkaWZmZXJlbnRpYWJsZSB0aHJvdWdoIE1TRSwgYW5kIHVuaXZlcnNhbGx5IHJlcG9ydGVkIGluIGNvbXByZXNzaW9uIGFuZCBzdXBlci1yZXNvbHV0aW9uIHBhcGVycy4gSG93ZXZlciwgaXQgdHJlYXRzIGFsbCBwaXhlbHMgZXF1YWxseSByZWdhcmRsZXNzIG9mIHNwYXRpYWwgc3RydWN0dXJlIGFuZCBjYW4gYmUgbWlzbGVhZGluZzogYSBnbG9iYWxseSBibHVycmVkIGltYWdlIG1heSBzY29yZSBoaWdoIFBTTlIsIHdoaWxlIGEgc2hhcnAgYnV0IHNsaWdodGx5IHNoaWZ0ZWQgcmVjb25zdHJ1Y3Rpb24gc2NvcmVzIGxvdy4gQWx3YXlzIHBhaXIgUFNOUiB3aXRoIGEgcGVyY2VwdHVhbCBtZXRyaWMuIn0seyJ0eXBlIjoiaDIiLCJjb250ZW50IjoiU1NJTSBTdHJ1Y3R1cmFsIFNpbWlsYXJpdHkifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IlNTSU0gbWVhc3VyZXMgcGVyY2VwdHVhbCBzaW1pbGFyaXR5IGJ5IGNvbXBhcmluZyB0aHJlZSBjb21wb25lbnRzOiBsdW1pbmFuY2UgKG1lYW4gaW50ZW5zaXR5KSwgY29udHJhc3QgKHN0YW5kYXJkIGRldmlhdGlvbiksIGFuZCBzdHJ1Y3R1cmUgKG5vcm1hbGl6ZWQgY3Jvc3MtY29ycmVsYXRpb24pIHdpdGhpbiBsb2NhbCB3aW5kb3dzLiBUaGUgZmluYWwgc2NvcmUgaXMgYSBwcm9kdWN0IG9mIGFsbCB0aHJlZSB0ZXJtcyBhbmQgcmFuZ2VzIGZyb20g4oiSMSB0byAxLCB3aGVyZSAxIG1lYW5zIGlkZW50aWNhbCBpbWFnZXMuIFNTSU0gYmV0dGVyIHJlZmxlY3RzIGh1bWFuIHBlcmNlcHRpb24gdGhhbiBQU05SIGZvciBtYW55IGRpc3RvcnRpb24gdHlwZXMuIn0seyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6ImltcG9ydCBudW1weSBhcyBucFxuZnJvbSBza2ltYWdlLm1ldHJpY3MgaW1wb3J0IHN0cnVjdHVyYWxfc2ltaWxhcml0eSwgcGVha19zaWduYWxfbm9pc2VfcmF0aW9cblxuIyBJbWFnZXMgc2hvdWxkIGJlIGZsb2F0MzIgaW4gWzAsIDFdLCBzaGFwZSAoSCwgVywgQylcbmltMSA9IG5wLnJhbmRvbS5yYW5kKDI1NiwgMjU2LCAzKS5hc3R5cGUobnAuZmxvYXQzMilcbmltMiA9IG5wLnJhbmRvbS5yYW5kKDI1NiwgMjU2LCAzKS5hc3R5cGUobnAuZmxvYXQzMilcblxuc3NpbV92YWwgPSBzdHJ1Y3R1cmFsX3NpbWlsYXJpdHkoaW0xLCBpbTIsIGNoYW5uZWxfYXhpcz0yLCBkYXRhX3JhbmdlPTEuMClcbnBzbnJfdmFsID0gcGVha19zaWduYWxfbm9pc2VfcmF0aW8oaW0xLCBpbTIsIGRhdGFfcmFuZ2U9MS4wKVxuXG5wcmludChmXCJTU0lNOiB7c3NpbV92YWw6LjRmfVwiKSAgICMgMS4wID0gaWRlbnRpY2FsLCBoaWdoZXIgaXMgYmV0dGVyXG5wcmludChmXCJQU05SOiB7cHNucl92YWw6LjJmfSBkQlwiKSAgIyBoaWdoZXIgaXMgYmV0dGVyIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJNUy1TU0lNIChNdWx0aS1TY2FsZSBTU0lNKSBleHRlbmRzIFNTSU0gYnkgZXZhbHVhdGluZyBzaW1pbGFyaXR5IGF0IG11bHRpcGxlIHJlc29sdXRpb25zLCB3ZWlnaHRpbmcgdGhlbSBieSBwZXJjZXB0dWFsIGltcG9ydGFuY2UuIEl0IGlzIGdlbmVyYWxseSBwcmVmZXJyZWQgb3ZlciBzaW5nbGUtc2NhbGUgU1NJTSBmb3IgaGlnaC1yZXNvbHV0aW9uIGltYWdlcy4gQm90aCB2YXJpYW50cyBhcmUgZGlmZmVyZW50aWFibGUgYW5kIHVzZWQgYXMgYXV4aWxpYXJ5IGxvc3NlcyBkdXJpbmcgdHJhaW5pbmcgb2YgaW1hZ2UgcmVzdG9yYXRpb24gbmV0d29ya3MgYWxvbmdzaWRlIHBpeGVsLWxldmVsIEwxIG9yIEwyIHJlY29uc3RydWN0aW9uIGxvc3Nlcy4ifSx7InR5cGUiOiJoMiIsImNvbnRlbnQiOiJMUElQUyBQZXJjZXB0dWFsIERpc3RhbmNlIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJMUElQUyAoTGVhcm5lZCBQZXJjZXB0dWFsIEltYWdlIFBhdGNoIFNpbWlsYXJpdHkpIHVzZXMgZGVlcCBuZXR3b3JrIGFjdGl2YXRpb25zIOKAlCBmcm9tIEFsZXhOZXQsIFZHRywgb3IgU3F1ZWV6ZU5ldCDigJQgdG8gY29tcGFyZSBpbWFnZXMgaW4gYSBmZWF0dXJlIHNwYWNlIHRoYXQgbWlycm9ycyBodW1hbiBwZXJjZXB0dWFsIGp1ZGdtZW50cy4gVHJhaW5lZCBvbiBodW1hbiBzaW1pbGFyaXR5IHJhdGluZ3MsIGl0IGlzIGZhciBtb3JlIGFsaWduZWQgd2l0aCBzdWJqZWN0aXZlIHF1YWxpdHkgdGhhbiBQU05SIG9yIFNTSU0uIExvd2VyIExQSVBTIG1lYW5zIG1vcmUgc2ltaWxhciBpbWFnZXM7IHRoZSBtZXRyaWMgaXMgZnVsbHkgZGlmZmVyZW50aWFibGUuIn0seyJ0eXBlIjoiY29kZSIsImxhbmd1YWdlIjoicHl0aG9uIiwiY29udGVudCI6ImltcG9ydCB0b3JjaFxuaW1wb3J0IGxwaXBzXG5cbiMgTG9hZCBWR0ctYmFzZWQgcGVyY2VwdHVhbCBsb3NzIChkb3dubG9hZHMgd2VpZ2h0cyBvbiBmaXJzdCB1c2UpXG5sb3NzX2ZuID0gbHBpcHMuTFBJUFMobmV0PVx1MDAyN3ZnZ1x1MDAyNykuY3VkYSgpXG5cbiMgSW1hZ2VzIG11c3QgYmUgaW4gWy0xLCAxXSwgc2hhcGUgKEIsIEMsIEgsIFcpXG5pbWcwID0gdG9yY2gucmFuZCgxLCAzLCAyNTYsIDI1NikuY3VkYSgpICogMiAtIDFcbmltZzEgPSB0b3JjaC5yYW5kKDEsIDMsIDI1NiwgMjU2KS5jdWRhKCkgKiAyIC0gMVxuXG5kaXN0ID0gbG9zc19mbihpbWcwLCBpbWcxKSAgIyBzY2FsYXIgdGVuc29yLCBsb3dlciA9IG1vcmUgc2ltaWxhclxucHJpbnQoZlwiTFBJUFMgZGlzdGFuY2U6IHtkaXN0Lml0ZW0oKTouNGZ9XCIpICAjIDAuMCA9IGlkZW50aWNhbCJ9LHsidHlwZSI6ImNhbGxvdXQiLCJjYWxsb3V0VHlwZSI6Indhcm5pbmciLCJjb250ZW50IjoiUFNOUiBhbmQgU1NJTSBjb3JyZWxhdGUgcG9vcmx5IHdpdGggaHVtYW4gcGVyY2VwdHVhbCBxdWFsaXR5IOKAlCBhIGJsdXJyeSBpbWFnZSBjYW4gc2NvcmUgaGlnaGVyIFNTSU0gdGhhbiBhIHNoYXJwIGJ1dCBzbGlnaHRseSBkaWZmZXJlbnQgcmVjb25zdHJ1Y3Rpb24uIFVzZSBMUElQUyBmb3IgcGVyY2VwdHVhbCB0YXNrcyBhbmQgRklEIGZvciBnZW5lcmF0aXZlIG1vZGVsIGNvbXBhcmlzb24uIn0seyJ0eXBlIjoiaDIiLCJjb250ZW50IjoiRklEIGZvciBHZW5lcmF0aXZlIE1vZGVscyJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiRklEIChGcsOpY2hldCBJbmNlcHRpb24gRGlzdGFuY2UpIG1lYXN1cmVzIHRoZSBkaXN0YW5jZSBiZXR3ZWVuIHRoZSBkaXN0cmlidXRpb24gb2YgcmVhbCBpbWFnZXMgYW5kIGdlbmVyYXRlZCBpbWFnZXMgaW4gdGhlIGZlYXR1cmUgc3BhY2Ugb2YgSW5jZXB0aW9uVjMuIEJvdGggZGlzdHJpYnV0aW9ucyBhcmUgbW9kZWxlZCBhcyBtdWx0aXZhcmlhdGUgR2F1c3NpYW5zLiBBIGxvd2VyIEZJRCBtZWFucyBnZW5lcmF0ZWQgaW1hZ2VzIGFyZSBtb3JlIHJlYWxpc3RpYyBhbmQgZGl2ZXJzZS4gRklEIHJlcXVpcmVzIGxhcmdlIHNhbXBsZSBzZXRzIChhdCBsZWFzdCAxMCwwMDAgaW1hZ2VzKSBmb3IgcmVsaWFibGUgZXN0aW1hdGVzIGFuZCBjYW5ub3QgYmUgY29tcHV0ZWQgcGVyLWltYWdlLiJ9LHsidHlwZSI6ImNvZGUiLCJsYW5ndWFnZSI6InB5dGhvbiIsImNvbnRlbnQiOiJpbXBvcnQgbnVtcHkgYXMgbnBcbmZyb20gc2NpcHkubGluYWxnIGltcG9ydCBzcXJ0bVxuXG5kZWYgZnJlY2hldF9kaXN0YW5jZShtdTEsIHNpZ21hMSwgbXUyLCBzaWdtYTIpOlxuICAgIFwiXCJcIkNvbXB1dGUgRklEIGJldHdlZW4gdHdvIEdhdXNzaWFuIGRpc3RyaWJ1dGlvbnMuXCJcIlwiXG4gICAgZGlmZiA9IG11MSAtIG11MlxuICAgIGNvdm1lYW4gPSBzcXJ0bShzaWdtYTEgQCBzaWdtYTIpXG4gICAgaWYgbnAuaXNjb21wbGV4b2JqKGNvdm1lYW4pOiAgIyByZW1vdmUgbnVtZXJpY2FsIGFydGlmYWN0c1xuICAgICAgICBjb3ZtZWFuID0gY292bWVhbi5yZWFsXG4gICAgZmlkID0gZGlmZiBAIGRpZmYgKyBucC50cmFjZShzaWdtYTEgKyBzaWdtYTIgLSAyICogY292bWVhbilcbiAgICByZXR1cm4gZmxvYXQoZmlkKVxuXG4jIEV4dHJhY3QgSW5jZXB0aW9uVjMgcG9vbDMgZmVhdHVyZXMgZm9yIHJlYWwgYW5kIGdlbmVyYXRlZCBzZXRzLFxuIyBjb21wdXRlIG11L3NpZ21hIHBlciBzZXQsIHRoZW4gY2FsbDpcbiMgZnJlY2hldF9kaXN0YW5jZShtdV9yZWFsLCBzaWdtYV9yZWFsLCBtdV9nZW4sIHNpZ21hX2dlbikifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkNMSVAgU2NvcmUgaXMgYW4gYWx0ZXJuYXRpdmUgdG8gRklEIGZvciB0ZXh0LXRvLWltYWdlIG1vZGVscy4gSXQgbWVhc3VyZXMgY29zaW5lIHNpbWlsYXJpdHkgYmV0d2VlbiBDTElQIGltYWdlIGFuZCB0ZXh0IGVtYmVkZGluZ3MsIGNhcHR1cmluZyBwcm9tcHQgYWxpZ25tZW50IHJhdGhlciB0aGFuIGRpc3RyaWJ1dGlvbmFsIHJlYWxpc20uIFVubGlrZSBGSUQsIENMSVAgU2NvcmUgaXMgcmVmZXJlbmNlLWZyZWUg4oCUIGl0IGRvZXMgbm90IHJlcXVpcmUgYSByZWFsIGltYWdlIGRhdGFzZXQg4oCUIG1ha2luZyBpdCBwcmFjdGljYWwgZm9yIGV2YWx1YXRpbmcgb3Blbi1lbmRlZCBnZW5lcmF0aW9uIHdpdGggZGl2ZXJzZSB0ZXh0IHByb21wdHMuIn0seyJ0eXBlIjoiaDIiLCJjb250ZW50IjoiS2V5IFRha2Vhd2F5cyJ9LHsidHlwZSI6InRhYmxlIiwiaGVhZGVycyI6WyJNZXRyaWMiLCJNZWFzdXJlcyIsIlJhbmdlIiwiSHVtYW4gQ29ycmVsYXRpb24iLCJEaWZmZXJlbnRpYWJsZSIsIlVzZSBDYXNlIl0sInJvd3MiOltbIk1TRSIsIlBpeGVsIGVycm9yIiwiWzAsIOKInikiLCJMb3ciLCJZZXMiLCJMb3NzIGZ1bmN0aW9uIl0sWyJQU05SIiwiU2lnbmFsLXRvLW5vaXNlIHJhdGlvIiwiKDAsIOKInikgZEIiLCJMb3ciLCJZZXMiLCJDb21wcmVzc2lvbiAvIFNSIGJlbmNobWFyayJdLFsiU1NJTSIsIkx1bWluYW5jZSwgY29udHJhc3QsIHN0cnVjdHVyZSIsIlviiJIxLCAxXSIsIk1lZGl1bSIsIlllcyIsIkltYWdlIHJlc3RvcmF0aW9uIl0sWyJMUElQUyIsIkRlZXAgZmVhdHVyZSBkaXN0YW5jZSIsIlswLCDiiJ4pIiwiSGlnaCIsIlllcyIsIlBlcmNlcHR1YWwgcXVhbGl0eSJdLFsiRklEIiwiRGlzdHJpYnV0aW9uIGRpc3RhbmNlIiwiWzAsIOKInikiLCJIaWdoIiwiTm8iLCJHZW5lcmF0aXZlIG1vZGVsIGV2YWwiXSxbIkNMSVAgU2NvcmUiLCJUZXh0LWltYWdlIGFsaWdubWVudCIsIlswLCAxXSIsIkhpZ2giLCJObyIsIlRleHQtdG8taW1hZ2UgZXZhbCJdXX0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJObyBzaW5nbGUgbWV0cmljIGNhcHR1cmVzIGFsbCBhc3BlY3RzIG9mIGltYWdlIHF1YWxpdHkuIFBpeGVsIG1ldHJpY3MgKE1TRSwgUFNOUikgYXJlIGZhc3QgYW5kIGRpZmZlcmVudGlhYmxlIGJ1dCBwZXJjZXB0dWFsbHkgdW5yZWxpYWJsZS4gU1NJTSBhZGRzIHN0cnVjdHVyYWwgYXdhcmVuZXNzIGF0IGxvdyBjb21wdXRhdGlvbmFsIGNvc3QuIExQSVBTIGFsaWducyBiZXN0IHdpdGggaHVtYW4ganVkZ21lbnQgZm9yIGltYWdlIHBhaXJzIGFuZCBzaG91bGQgYmUgdGhlIGRlZmF1bHQgZm9yIHN1cGVyLXJlc29sdXRpb24sIGlucGFpbnRpbmcsIGFuZCBpbWFnZSB0cmFuc2xhdGlvbiBiZW5jaG1hcmtzIHdoZXJlIHBlcmNlcHR1YWwgcXVhbGl0eSBtYXR0ZXJzLiJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiRm9yIGdlbmVyYXRpdmUgbW9kZWxzLCBGSUQgcmVtYWlucyB0aGUgc3RhbmRhcmQgYmVuY2htYXJrIGRlc3BpdGUgaXRzIHNlbnNpdGl2aXR5IHRvIHNhbXBsZSBjb3VudCBhbmQgSW5jZXB0aW9uVjMgc3RhdGlzdGljcy4gTmV3ZXIgYWx0ZXJuYXRpdmVzIGxpa2UgS0lEIChLZXJuZWwgSW5jZXB0aW9uIERpc3RhbmNlKSBvZmZlciB1bmJpYXNlZCBlc3RpbWF0ZXMgd2l0aCBzbWFsbGVyIHNhbXBsZSBzZXRzLiBXaGVuIGV2YWx1YXRpbmcgdGV4dC10by1pbWFnZSBzeXN0ZW1zLCBwYWlyIEZJRCB3aXRoIENMSVAgU2NvcmUgdG8gam9pbnRseSBhc3Nlc3MgcmVhbGlzbSBhbmQgcHJvbXB0IGFsaWdubWVudCBhY3Jvc3MgZGl2ZXJzZSBnZW5lcmF0aW9ucy4ifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkluIHByYWN0aWNlLCB1c2UgTVNFIG9yIEwxIGFzIGEgdHJhaW5pbmcgbG9zcywgYWRkIExQSVBTIGFzIGEgcGVyY2VwdHVhbCBhdXhpbGlhcnkgbG9zcywgYW5kIGV2YWx1YXRlIGNoZWNrcG9pbnRzIHdpdGggUFNOUiwgU1NJTSwgYW5kIExQSVBTIHRvZ2V0aGVyLiBGb3IgZ2VuZXJhdGl2ZSB0YXNrcywgcmVwb3J0IEZJRCBhdCAzMGsgb3IgNTBrIHNhbXBsZXMgdXNpbmcgY2xlYW4tZmlkIHRvIGF2b2lkIGV2YWx1YXRpb24gYXJ0aWZhY3RzLiBTdGFuZGFyZGl6ZSB0aGUgZXZhbHVhdGlvbiBwaXBlbGluZSDigJQgbmV2ZXIgY29tcGFyZSBGSUQgdmFsdWVzIGNvbXB1dGVkIHdpdGggZGlmZmVyZW50IGltcGxlbWVudGF0aW9ucy4ifV0="
+---
+# Image Quality and Similarity Metrics
+
+Image quality metrics quantify how faithfully a reconstructed or generated image matches a reference. They fall into three tiers: pixel-level metrics like MSE and PSNR that compare raw intensities, structural metrics like SSIM that model luminance, contrast, and structure, and learned perceptual metrics like LPIPS and FID that align with human visual judgment.
+
+Choosing the right metric depends on the task. Super-resolution and compression use PSNR and SSIM for benchmarking, but perceptual quality demands LPIPS. Generative models — diffusion, GANs, VAEs — require distribution-level metrics like FID that evaluate diversity and realism across an entire dataset rather than image pairs.
+
+PSNR (Peak Signal-to-Noise Ratio) measures reconstruction fidelity as the ratio of maximum possible signal power to noise power introduced by distortion. It is derived from MSE — mean squared error between corresponding pixels. Higher PSNR means better quality: values above 40 dB indicate near-lossless reconstruction, while 30–35 dB is typical for compressed images.
+
+```python
+import torch
+import torch.nn.functional as F
+
+def psnr_batch(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Compute PSNR for a batch of images in [0, 1]."""
+    mse = F.mse_loss(pred, target, reduction='none')
+    mse = mse.view(mse.size(0), -1).mean(dim=1)  # per-image MSE
+    psnr = 10.0 * torch.log10(1.0 / mse.clamp(min=1e-10))
+    return psnr  # shape: (B,), higher is better
+
+# Example usage
+pred = torch.rand(4, 3, 256, 256)
+target = torch.rand(4, 3, 256, 256)
+print(psnr_batch(pred, target))  # tensor of 4 PSNR values in dB
+```
+
+PSNR is simple, differentiable through MSE, and universally reported in compression and super-resolution papers. However, it treats all pixels equally regardless of spatial structure and can be misleading: a globally blurred image may score high PSNR, while a sharp but slightly shifted reconstruction scores low. Always pair PSNR with a perceptual metric.
+
+SSIM measures perceptual similarity by comparing three components: luminance (mean intensity), contrast (standard deviation), and structure (normalized cross-correlation) within local windows. The final score is a product of all three terms and ranges from −1 to 1, where 1 means identical images. SSIM better reflects human perception than PSNR for many distortion types.
+
+```python
+import numpy as np
+from skimage.metrics import structural_similarity, peak_signal_noise_ratio
+
+# Images should be float32 in [0, 1], shape (H, W, C)
+im1 = np.random.rand(256, 256, 3).astype(np.float32)
+im2 = np.random.rand(256, 256, 3).astype(np.float32)
+
+ssim_val = structural_similarity(im1, im2, channel_axis=2, data_range=1.0)
+psnr_val = peak_signal_noise_ratio(im1, im2, data_range=1.0)
+
+print(f"SSIM: {ssim_val:.4f}")   # 1.0 = identical, higher is better
+print(f"PSNR: {psnr_val:.2f} dB")  # higher is better
+```
+
+MS-SSIM (Multi-Scale SSIM) extends SSIM by evaluating similarity at multiple resolutions, weighting them by perceptual importance. It is generally preferred over single-scale SSIM for high-resolution images. Both variants are differentiable and used as auxiliary losses during training of image restoration networks alongside pixel-level L1 or L2 reconstruction losses.
+
+LPIPS (Learned Perceptual Image Patch Similarity) uses deep network activations — from AlexNet, VGG, or SqueezeNet — to compare images in a feature space that mirrors human perceptual judgments. Trained on human similarity ratings, it is far more aligned with subjective quality than PSNR or SSIM. Lower LPIPS means more similar images; the metric is fully differentiable.
+
+```python
+import torch
+import lpips
+
+# Load VGG-based perceptual loss (downloads weights on first use)
+loss_fn = lpips.LPIPS(net='vgg').cuda()
+
+# Images must be in [-1, 1], shape (B, C, H, W)
+img0 = torch.rand(1, 3, 256, 256).cuda() * 2 - 1
+img1 = torch.rand(1, 3, 256, 256).cuda() * 2 - 1
+
+dist = loss_fn(img0, img1)  # scalar tensor, lower = more similar
+print(f"LPIPS distance: {dist.item():.4f}")  # 0.0 = identical
+```
+
+> ****: PSNR and SSIM correlate poorly with human perceptual quality — a blurry image can score higher SSIM than a sharp but slightly different reconstruction. Use LPIPS for perceptual tasks and FID for generative model comparison.
+
+FID (Fréchet Inception Distance) measures the distance between the distribution of real images and generated images in the feature space of InceptionV3. Both distributions are modeled as multivariate Gaussians. A lower FID means generated images are more realistic and diverse. FID requires large sample sets (at least 10,000 images) for reliable estimates and cannot be computed per-image.
+
+```python
+import numpy as np
+from scipy.linalg import sqrtm
+
+def frechet_distance(mu1, sigma1, mu2, sigma2):
+    """Compute FID between two Gaussian distributions."""
+    diff = mu1 - mu2
+    covmean = sqrtm(sigma1 @ sigma2)
+    if np.iscomplexobj(covmean):  # remove numerical artifacts
+        covmean = covmean.real
+    fid = diff @ diff + np.trace(sigma1 + sigma2 - 2 * covmean)
+    return float(fid)
+
+# Extract InceptionV3 pool3 features for real and generated sets,
+# compute mu/sigma per set, then call:
+# frechet_distance(mu_real, sigma_real, mu_gen, sigma_gen)
+```
+
+CLIP Score is an alternative to FID for text-to-image models. It measures cosine similarity between CLIP image and text embeddings, capturing prompt alignment rather than distributional realism. Unlike FID, CLIP Score is reference-free — it does not require a real image dataset — making it practical for evaluating open-ended generation with diverse text prompts.
+
+| Metric | Measures | Range | Human Correlation | Differentiable | Use Case |
+| --- | --- | --- | --- | --- | --- |
+| MSE | Pixel error | [0, ∞) | Low | Yes | Loss function |
+| PSNR | Signal-to-noise ratio | (0, ∞) dB | Low | Yes | Compression / SR benchmark |
+| SSIM | Luminance, contrast, structure | [−1, 1] | Medium | Yes | Image restoration |
+| LPIPS | Deep feature distance | [0, ∞) | High | Yes | Perceptual quality |
+| FID | Distribution distance | [0, ∞) | High | No | Generative model eval |
+| CLIP Score | Text-image alignment | [0, 1] | High | No | Text-to-image eval |
+
+No single metric captures all aspects of image quality. Pixel metrics (MSE, PSNR) are fast and differentiable but perceptually unreliable. SSIM adds structural awareness at low computational cost. LPIPS aligns best with human judgment for image pairs and should be the default for super-resolution, inpainting, and image translation benchmarks where perceptual quality matters.
+
+For generative models, FID remains the standard benchmark despite its sensitivity to sample count and InceptionV3 statistics. Newer alternatives like KID (Kernel Inception Distance) offer unbiased estimates with smaller sample sets. When evaluating text-to-image systems, pair FID with CLIP Score to jointly assess realism and prompt alignment across diverse generations.
+
+In practice, use MSE or L1 as a training loss, add LPIPS as a perceptual auxiliary loss, and evaluate checkpoints with PSNR, SSIM, and LPIPS together. For generative tasks, report FID at 30k or 50k samples using clean-fid to avoid evaluation artifacts. Standardize the evaluation pipeline — never compare FID values computed with different implementations.
+

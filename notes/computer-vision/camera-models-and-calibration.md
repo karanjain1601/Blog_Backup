@@ -1,0 +1,105 @@
+---
+title: "Camera Models and Calibration: Pinhole, Distortion, and Extrinsics"
+slug: "camera-models-and-calibration"
+description: ""
+tags: [""]
+topic: ""
+status: ""
+updated: ""
+blocks_json: "W3sidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6Ik92ZXJ2aWV3In0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJDYW1lcmEgY2FsaWJyYXRpb24gZGV0ZXJtaW5lcyB0aGUgbWF0aGVtYXRpY2FsIHJlbGF0aW9uc2hpcCBiZXR3ZWVuIDNEIHdvcmxkIHBvaW50cyBhbmQgdGhlaXIgMkQgaW1hZ2UgcHJvamVjdGlvbnMuIEl0IGludm9sdmVzIGVzdGltYXRpbmcgaW50cmluc2ljIHBhcmFtZXRlcnMg4oCUIGZvY2FsIGxlbmd0aCwgcHJpbmNpcGFsIHBvaW50LCBhbmQgZGlzdG9ydGlvbiBjb2VmZmljaWVudHMg4oCUIGFuZCBleHRyaW5zaWMgcGFyYW1ldGVycywgdGhlIHJvdGF0aW9uIGFuZCB0cmFuc2xhdGlvbiByZWxhdGluZyB0aGUgY2FtZXJhIGNvb3JkaW5hdGUgZnJhbWUgdG8gdGhlIHdvcmxkIGZyYW1lLiJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiQWNjdXJhdGUgY2FsaWJyYXRpb24gaXMgZm91bmRhdGlvbmFsIGZvciBhbGwgM0QgY29tcHV0ZXIgdmlzaW9uIHRhc2tzLiBFdmVuIGEgMSUgZm9jYWwgbGVuZ3RoIGVycm9yIHByb2R1Y2VzIGEgMSUgc3lzdGVtYXRpYyBkZXB0aCBlcnJvci4gQ2FsaWJyYXRpb24gaXMgcGVyZm9ybWVkIG9mZmxpbmUgdXNpbmcga25vd24gcGF0dGVybnMgc3VjaCBhcyBjaGVja2VyYm9hcmRzIG9yIENoQXJVY28gYm9hcmRzLCB3aGljaCBzdXBwbHkgcHJlY2lzZSAzRC10by0yRCBjb3JyZXNwb25kZW5jZXMgZm9yIHBhcmFtZXRlciBlc3RpbWF0aW9uIHZpYSBub25saW5lYXIgbGVhc3Qgc3F1YXJlcyBvcHRpbWl6YXRpb24uIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiUGluaG9sZSBDYW1lcmEgTW9kZWwifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IlRoZSBwaW5ob2xlIGNhbWVyYSBtb2RlbCBhcHByb3hpbWF0ZXMgYSBsZW5zIGFzIGEgc2luZ2xlIHBvaW50IHRocm91Z2ggd2hpY2ggYWxsIGxpZ2h0IHJheXMgcGFzcy4gQSAzRCBwb2ludCBYX3dvcmxkIGlzIGZpcnN0IHRyYW5zZm9ybWVkIHRvIGNhbWVyYSBjb29yZGluYXRlcyB2aWEgdGhlIGV4dHJpbnNpYyBSIGFuZCB0LCB0aGVuIHByb2plY3RlZCB0byB0aGUgbm9ybWFsaXplZCBpbWFnZSBwbGFuZSBieSBkaXZpZGluZyBieSBkZXB0aCwgYW5kIGZpbmFsbHkgc2NhbGVkIGJ5IGZvY2FsIGxlbmd0aCBhbmQgc2hpZnRlZCBieSB0aGUgcHJpbmNpcGFsIHBvaW50IHRvIHBpeGVsIGNvb3JkaW5hdGVzLiJ9LHsidHlwZSI6ImNvZGUiLCJsYW5nIjoicHl0aG9uIiwiY29udGVudCI6IiMgRXh0cmluc2ljOiB3b3JsZCB0byBjYW1lcmEgY29vcmRpbmF0ZXNcblhfY2FtID0gUiBAIFhfd29ybGQgKyB0ICAgICAgICMgc2hhcGUgKDMsKVxuIyBQZXJzcGVjdGl2ZSBkaXZpc2lvbiAocHJvamVjdCB0byBub3JtYWxpemVkIHBsYW5lKVxueF9uID0gWF9jYW1bMF0gLyBYX2NhbVsyXSAgICAjIG5vcm1hbGl6ZWQgeFxueV9uID0gWF9jYW1bMV0gLyBYX2NhbVsyXSAgICAjIG5vcm1hbGl6ZWQgeVxuIyBJbnRyaW5zaWM6IHNjYWxlIGFuZCBzaGlmdCB0byBwaXhlbCBjb29yZGluYXRlc1xueF9weCA9IGZfeCAqIHhfbiArIGNfeCAgICAgICAjIHBpeGVsIHhcbnlfcHggPSBmX3kgKiB5X24gKyBjX3kgICAgICAgIyBwaXhlbCB5In0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJUaGUgZnVsbCBwcm9qZWN0aW9uIGlzIHdyaXR0ZW4gY29tcGFjdGx5IGFzIHAgPSBLIFtSIHwgdF0gWCwgd2hlcmUgSyBpcyB0aGUgM3gzIGludHJpbnNpYyBtYXRyaXgsIFtSfHRdIGlzIHRoZSAzeDQgZXh0cmluc2ljIG1hdHJpeCwgYW5kIFggaXMgdGhlIGhvbW9nZW5lb3VzIDREIHdvcmxkIHBvaW50LiBUaGlzIGZvcm0gaXMgdXNlZCB0aHJvdWdob3V0IG11bHRpLXZpZXcgZ2VvbWV0cnkgZm9yIHRyaWFuZ3VsYXRpb24sIGJ1bmRsZSBhZGp1c3RtZW50LCBhbmQgUG5QLWJhc2VkIGNhbWVyYSBwb3NlIGVzdGltYXRpb24gZnJvbSAyRC0zRCBjb3JyZXNwb25kZW5jZXMuIn0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiTGVucyBEaXN0b3J0aW9uIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJSZWFsIGxlbnNlcyBkZXZpYXRlIGZyb20gdGhlIGlkZWFsIHBpbmhvbGUgbW9kZWwgZHVlIHRvIG9wdGljYWwgYWJlcnJhdGlvbnMuIFJhZGlhbCBkaXN0b3J0aW9uIGNhdXNlcyBzdHJhaWdodCBsaW5lcyB0byBjdXJ2ZSBpbndhcmQgKGJhcnJlbCBkaXN0b3J0aW9uLCBrMSBcdTAwM2MgMCkgb3Igb3V0d2FyZCAocGluY3VzaGlvbiBkaXN0b3J0aW9uLCBrMSBcdTAwM2UgMCkuIFRhbmdlbnRpYWwgZGlzdG9ydGlvbiBhcmlzZXMgZnJvbSBsZW5zIHRpbHQgcmVsYXRpdmUgdG8gdGhlIGltYWdlIHNlbnNvciBwbGFuZSBhbmQgaXMgdHlwaWNhbGx5IG11Y2ggc21hbGxlciB0aGFuIHJhZGlhbCBkaXN0b3J0aW9uLiJ9LHsidHlwZSI6ImNvZGUiLCJsYW5nIjoicHl0aG9uIiwiY29udGVudCI6InIyID0geF9uKioyICsgeV9uKioyXG5yNCA9IHIyKioyXG4jIFJhZGlhbCBkaXN0b3J0aW9uXG54X2QgPSB4X24gKiAoMSArIGsxKnIyICsgazIqcjQpXG55X2QgPSB5X24gKiAoMSArIGsxKnIyICsgazIqcjQpXG4jIFRhbmdlbnRpYWwgZGlzdG9ydGlvblxueF9kICs9IDIqcDEqeF9uKnlfbiArIHAyKihyMiArIDIqeF9uKioyKVxueV9kICs9IHAxKihyMiArIDIqeV9uKioyKSArIDIqcDIqeF9uKnlfbiJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiRm9yIGZpc2hleWUgYW5kIHdpZGUtYW5nbGUgbGVuc2VzIHdpdGggZmllbGQtb2YtdmlldyBhYm92ZSAxMjAgZGVncmVlcywgdGhlIHN0YW5kYXJkIHBvbHlub21pYWwgbW9kZWwgYnJlYWtzIGRvd24uIE9wZW5DViBwcm92aWRlcyBhIGZpc2hleWUgbW9kZWwgdXNpbmcgZXF1aWRpc3RhbnQgcHJvamVjdGlvbjogdGhldGFfZCA9IHRoZXRhKigxICsgazEqdGhldGFeMiArIGsyKnRoZXRhXjQgKyBrMyp0aGV0YV42ICsgazQqdGhldGFeOCksIHdoZXJlIHRoZXRhIGlzIHRoZSBhbmdsZSBvZiBpbmNpZGVuY2UsIGFjY3VyYXRlbHkgaGFuZGxpbmcgZXh0cmVtZSByYWRpYWwgZGlzdG9ydGlvbiBpbiBhdXRvbW90aXZlIGNhbWVyYXMuIn0seyJ0eXBlIjoiY2FsbG91dCIsInZhcmlhbnQiOiJ0aXAiLCJjb250ZW50IjoiVXNlIGEgY2hlY2tlcmJvYXJkIHdpdGggYXQgbGVhc3QgMjAgZGlmZmVyZW50IHBvc2VzIGNvdmVyaW5nIHRoZSBpbWFnZSBjb3JuZXJzIGFuZCBjZW50ZXIuIFBvb3IgY2FsaWJyYXRpb24gKHJlcHJvamVjdGlvbiBlcnJvciBcdTAwM2UgMXB4KSBwcm9wYWdhdGVzIGludG8gZXZlcnkgZG93bnN0cmVhbSAzRCB0YXNrIOKAlCBkZXB0aCBlc3RpbWF0aW9uLCBTTEFNLCBzdGVyZW8gbWF0Y2hpbmcuIFJlY2FsaWJyYXRlIHdoZW4gdGhlIGNhbWVyYSBpcyBwaHlzaWNhbGx5IGRpc3R1cmJlZC4ifSx7InR5cGUiOiJoZWFkaW5nIiwibGV2ZWwiOjIsImNvbnRlbnQiOiJJbnRyaW5zaWMgTWF0cml4In0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJUaGUgaW50cmluc2ljIG1hdHJpeCBLIGVuY29kZXMgdGhlIGNhbWVyYVx1MDAyN3MgaW50ZXJuYWwgb3B0aWNhbCBwYXJhbWV0ZXJzIGluIGEgM3gzIHVwcGVyLXRyaWFuZ3VsYXIgbWF0cml4OiBLID0gW1tmeCwgcywgY3hdLCBbMCwgZnksIGN5XSwgWzAsIDAsIDFdXS4gVGhlIHNrZXcgcyBpcyBuZWFybHkgYWx3YXlzIHplcm8gZm9yIG1vZGVybiBkaWdpdGFsIGNhbWVyYXMuIGZ4IGFuZCBmeSBtYXkgZGlmZmVyIGlmIHBpeGVscyBhcmUgbm9uLXNxdWFyZSwgdGhvdWdoIG1vc3Qgc2Vuc29ycyBoYXZlIHNxdWFyZSBwaXhlbHMgc28gZnggaXMgYXBwcm94aW1hdGVseSBlcXVhbCB0byBmeS4ifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IlRoZSBwcmluY2lwYWwgcG9pbnQgKGN4LCBjeSkgaXMgaWRlYWxseSBhdCB0aGUgaW1hZ2UgY2VudGVyIGJ1dCBjYW4gYmUgb2Zmc2V0IGJ5IGEgZmV3IHBlcmNlbnQgb2YgaW1hZ2UgZGltZW5zaW9ucyBkdWUgdG8gc2Vuc29yIGFsaWdubWVudCB0b2xlcmFuY2VzLiBFdmVuIHNtYWxsIHByaW5jaXBhbCBwb2ludCBlcnJvcnMgY2F1c2UgcGFyYWxsYXggYXJ0aWZhY3RzIGluIHN0ZXJlbyByZWN0aWZpY2F0aW9uIGFuZCBpbmNvcnJlY3QgM0QgcmVjb25zdHJ1Y3Rpb24uIEFjY3VyYXRlIGVzdGltYXRpb24gcmVxdWlyZXMgY2FsaWJyYXRpb24gaW1hZ2VzIHRoYXQgY292ZXIgdGhlIGltYWdlIGNvcm5lcnMgYW5kIGVkZ2VzIHRob3JvdWdobHkuIn0seyJ0eXBlIjoidGFibGUiLCJoZWFkZXJzIjpbIlBhcmFtZXRlciIsIlN5bWJvbCIsIlR5cGljYWwgVmFsdWUiLCJFZmZlY3Qgb2YgRXJyb3IiXSwicm93cyI6W1siRm9jYWwgbGVuZ3RoIiwiZngsIGZ5IiwiNDAwLTQwMDAgcHgiLCJEZXB0aCBzY2FsZSBlcnJvciJdLFsiUHJpbmNpcGFsIHBvaW50IiwiY3gsIGN5IiwifmltYWdlIGNlbnRlciIsIlBhcmFsbGF4IC8gcmVjdGlmaWNhdGlvbiBzaGlmdCJdLFsiUmFkaWFsIGRpc3RvcnRpb24gMSIsImsxIiwiLTAuMyB0byAwLjMiLCJCYXJyZWwgLyBwaW5jdXNoaW9uIGJvdyJdLFsiUmFkaWFsIGRpc3RvcnRpb24gMiIsImsyIiwiLTAuMSB0byAwLjEiLCJIaWdoZXItb3JkZXIgYm93Il0sWyJUYW5nZW50aWFsIGRpc3RvcnRpb24iLCJwMSwgcDIiLCJ+MCB0byAwLjAwNSIsIkltYWdlIHRpbHQgYXJ0aWZhY3RzIl0sWyJCYXNlbGluZSAoc3RlcmVvKSIsImIiLCIwLjA1LTAuNjAgbSIsIkRlcHRoIHJhbmdlIGFuZCBhY2N1cmFjeSJdXX0seyJ0eXBlIjoiaGVhZGluZyIsImxldmVsIjoyLCJjb250ZW50IjoiRXh0cmluc2ljIENhbGlicmF0aW9uIn0seyJ0eXBlIjoidGV4dCIsImNvbnRlbnQiOiJFeHRyaW5zaWMgY2FsaWJyYXRpb24gZXN0aW1hdGVzIHRoZSByaWdpZC1ib2R5IHRyYW5zZm9ybWF0aW9uIChSLCB0KSBiZXR3ZWVuIGNvb3JkaW5hdGUgZnJhbWVzLiBGb3IgYSBzaW5nbGUgY2FtZXJhIGl0IGlzIHRoZSBwb3NlIHJlbGF0aXZlIHRvIHRoZSB3b3JsZCBmcmFtZSBwZXIgY2FsaWJyYXRpb24gaW1hZ2UuIEZvciBhIHN0ZXJlbyBwYWlyIGl0IGlzIHRoZSBmaXhlZCByZWxhdGl2ZSBwb3NlIGJldHdlZW4gY2FtZXJhcy4gTXVsdGktY2FtZXJhIHJpZ3MgcmVxdWlyZSBhIGNhbGlicmF0aW9uIHRhcmdldCBzaW11bHRhbmVvdXNseSB2aXNpYmxlIHRvIGFsbCBjYW1lcmFzLiJ9LHsidHlwZSI6ImNvZGUiLCJsYW5nIjoicHl0aG9uIiwiY29udGVudCI6InJldCwgSywgZGlzdCwgcnZlY3MsIHR2ZWNzID0gY3YyLmNhbGlicmF0ZUNhbWVyYShcbiAgICBvYmpfcHRzLCAgICAgICAgIyBsaXN0IG9mIChOLDMpIHdvcmxkIGNvb3JkaW5hdGVzXG4gICAgaW1nX3B0cywgICAgICAgICMgbGlzdCBvZiAoTiwyKSBpbWFnZSBjb29yZGluYXRlc1xuICAgIGltZ19zaXplLFxuICAgIE5vbmUsIE5vbmUgICAgICAjIG5vIGluaXRpYWwgZ3Vlc3MgZm9yIEsgb3IgZGlzdFxuKVxuIyByZXQgPSBtZWFuIHJlcHJvamVjdGlvbiBlcnJvciBpbiBwaXhlbHNcbiMgR29vZCBjYWxpYnJhdGlvbjogcmV0IFx1MDAzYyAwLjUgcHgifSx7InR5cGUiOiJjb2RlIiwibGFuZyI6InB5dGhvbiIsImNvbnRlbnQiOiJyZXQsIEsxLCBkMSwgSzIsIGQyLCBSLCBULCBFLCBGID0gY3YyLnN0ZXJlb0NhbGlicmF0ZShcbiAgICBvYmpfcHRzLCBsZWZ0X3B0cywgcmlnaHRfcHRzLFxuICAgIEsxLCBkMSwgSzIsIGQyLCBpbWdfc2l6ZSxcbiAgICBmbGFncz1jdjIuQ0FMSUJfRklYX0lOVFJJTlNJQ1xuKVxuIyBSLCBUOiByb3RhdGlvbiBhbmQgdHJhbnNsYXRpb24gZnJvbSBsZWZ0IHRvIHJpZ2h0IGNhbWVyYVxuIyBFOiBlc3NlbnRpYWwgbWF0cml4LCAgRjogZnVuZGFtZW50YWwgbWF0cml4XG4jIFVzZSBSLCBUIHdpdGggY3YyLnN0ZXJlb1JlY3RpZnkgdG8gY29tcHV0ZSByZWN0aWZpY2F0aW9uIG1hcHMifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IkxpREFSLXRvLWNhbWVyYSBleHRyaW5zaWMgY2FsaWJyYXRpb24gaXMgbW9yZSBjaGFsbGVuZ2luZyBiZWNhdXNlIHRoZSBzZW5zb3JzIGhhdmUgZnVuZGFtZW50YWxseSBkaWZmZXJlbnQgbWVhc3VyZW1lbnQgbW9kYWxpdGllcy4gVGFyZ2V0LWJhc2VkIG1ldGhvZHMgdXNlIHJlZmxlY3RpdmUgYm9hcmRzOyB0YXJnZXRsZXNzIGFwcHJvYWNoZXMgbWluaW1pemUgbXV0dWFsIGluZm9ybWF0aW9uIG9yIGVkZ2UgYWxpZ25tZW50IGFjcm9zcyBtYW55IGZyYW1lcy4gVGhlIG91dHB1dCBpcyBhIDYtRG9GIHJpZ2lkIHRyYW5zZm9ybSBmcm9tIExpREFSIGNvb3JkaW5hdGVzIGludG8gdGhlIGNhbWVyYSBjb29yZGluYXRlIGZyYW1lLiJ9LHsidHlwZSI6ImhlYWRpbmciLCJsZXZlbCI6MiwiY29udGVudCI6IktleSBUYWtlYXdheXMifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6IlRoZSBwaW5ob2xlIG1vZGVsIHdpdGggcmFkaWFsIGFuZCB0YW5nZW50aWFsIGRpc3RvcnRpb24gKE9wZW5DVlx1MDAyN3MgNS1wYXJhbWV0ZXIgbW9kZWw6IGsxLCBrMiwgcDEsIHAyLCBrMykgaXMgc3VmZmljaWVudCBmb3IgbW9zdCBjYW1lcmFzIHdpdGggZmllbGQtb2YtdmlldyB1bmRlciA5MCBkZWdyZWVzLiBVc2UgdGhlIGZpc2hleWUgbW9kZWwgZm9yIHdpZGUtYW5nbGUgbGVuc2VzLiBBbHdheXMgdmVyaWZ5IHF1YWxpdHkgYnkgY2hlY2tpbmcgcmVwcm9qZWN0aW9uIGVycm9yIGFuZCB2aXN1YWxseSBpbnNwZWN0aW5nIHVuZGlzdG9ydGVkIGltYWdlcyBmb3IgcmVzaWR1YWwgYm93LiJ9LHsidHlwZSI6InRleHQiLCJjb250ZW50IjoiSW50cmluc2ljIGNhbGlicmF0aW9uIGlzIHBlcmZvcm1lZCBvbmNlIHBlciBjYW1lcmEgdW5sZXNzIHRoZSBsZW5zIG9yIGZvY3VzIHNldHRpbmcgY2hhbmdlcy4gRXh0cmluc2ljIGNhbGlicmF0aW9uIGJldHdlZW4gYSBjYW1lcmEgcGFpciBtdXN0IGJlIHJlZG9uZSBpZiB0aGUgcGh5c2ljYWwgbW91bnRpbmcgY2hhbmdlcy4gRm9yIHByb2R1Y3Rpb24gc3lzdGVtcywgdmVyaWZ5IGNhbGlicmF0aW9uIHBlcmlvZGljYWxseSBieSBjaGVja2luZyB0aGUgZXBpcG9sYXIgZ2VvbWV0cnkgb2YgbGl2ZSByZWN0aWZpZWQgaW1hZ2UgcGFpcnMgYWdhaW5zdCBleHBlY3RlZCBob3Jpem9udGFsIGFsaWdubWVudC4ifSx7InR5cGUiOiJ0ZXh0IiwiY29udGVudCI6Ik1vZGVybiBjYWxpYnJhdGlvbiBwaXBlbGluZXMgbGlrZSBLYWxpYnIgYW5kIHRoZSBST1MgY2FtZXJhX2NhbGlicmF0aW9uIHBhY2thZ2UgaGFuZGxlIG11bHRpLWNhbWVyYSBhbmQgSU1VLWNhbWVyYSBjYWxpYnJhdGlvbiB1c2luZyBidW5kbGUgYWRqdXN0bWVudCB0byBqb2ludGx5IG9wdGltaXplIGFsbCBwYXJhbWV0ZXJzLCBzaWduaWZpY2FudGx5IHJlZHVjaW5nIHN5c3RlbWF0aWMgZXJyb3JzIHRoYXQgYXJpc2UgZnJvbSB0cmVhdGluZyBpbnRyaW5zaWMgYW5kIGV4dHJpbnNpYyBjYWxpYnJhdGlvbiBhcyBmdWxseSBpbmRlcGVuZGVudCBzZXF1ZW50aWFsIHN0ZXBzLiJ9XQ=="
+---
+# Camera Models and Calibration: Pinhole, Distortion, and Extrinsics
+
+## Overview
+
+Camera calibration determines the mathematical relationship between 3D world points and their 2D image projections. It involves estimating intrinsic parameters — focal length, principal point, and distortion coefficients — and extrinsic parameters, the rotation and translation relating the camera coordinate frame to the world frame.
+
+Accurate calibration is foundational for all 3D computer vision tasks. Even a 1% focal length error produces a 1% systematic depth error. Calibration is performed offline using known patterns such as checkerboards or ChArUco boards, which supply precise 3D-to-2D correspondences for parameter estimation via nonlinear least squares optimization.
+
+## Pinhole Camera Model
+
+The pinhole camera model approximates a lens as a single point through which all light rays pass. A 3D point X_world is first transformed to camera coordinates via the extrinsic R and t, then projected to the normalized image plane by dividing by depth, and finally scaled by focal length and shifted by the principal point to pixel coordinates.
+
+```
+# Extrinsic: world to camera coordinates
+X_cam = R @ X_world + t       # shape (3,)
+# Perspective division (project to normalized plane)
+x_n = X_cam[0] / X_cam[2]    # normalized x
+y_n = X_cam[1] / X_cam[2]    # normalized y
+# Intrinsic: scale and shift to pixel coordinates
+x_px = f_x * x_n + c_x       # pixel x
+y_px = f_y * y_n + c_y       # pixel y
+```
+
+The full projection is written compactly as p = K [R | t] X, where K is the 3x3 intrinsic matrix, [R|t] is the 3x4 extrinsic matrix, and X is the homogeneous 4D world point. This form is used throughout multi-view geometry for triangulation, bundle adjustment, and PnP-based camera pose estimation from 2D-3D correspondences.
+
+## Lens Distortion
+
+Real lenses deviate from the ideal pinhole model due to optical aberrations. Radial distortion causes straight lines to curve inward (barrel distortion, k1 < 0) or outward (pincushion distortion, k1 > 0). Tangential distortion arises from lens tilt relative to the image sensor plane and is typically much smaller than radial distortion.
+
+```
+r2 = x_n**2 + y_n**2
+r4 = r2**2
+# Radial distortion
+x_d = x_n * (1 + k1*r2 + k2*r4)
+y_d = y_n * (1 + k1*r2 + k2*r4)
+# Tangential distortion
+x_d += 2*p1*x_n*y_n + p2*(r2 + 2*x_n**2)
+y_d += p1*(r2 + 2*y_n**2) + 2*p2*x_n*y_n
+```
+
+For fisheye and wide-angle lenses with field-of-view above 120 degrees, the standard polynomial model breaks down. OpenCV provides a fisheye model using equidistant projection: theta_d = theta*(1 + k1*theta^2 + k2*theta^4 + k3*theta^6 + k4*theta^8), where theta is the angle of incidence, accurately handling extreme radial distortion in automotive cameras.
+
+> **tip**: Use a checkerboard with at least 20 different poses covering the image corners and center. Poor calibration (reprojection error > 1px) propagates into every downstream 3D task — depth estimation, SLAM, stereo matching. Recalibrate when the camera is physically disturbed.
+
+## Intrinsic Matrix
+
+The intrinsic matrix K encodes the camera's internal optical parameters in a 3x3 upper-triangular matrix: K = [[fx, s, cx], [0, fy, cy], [0, 0, 1]]. The skew s is nearly always zero for modern digital cameras. fx and fy may differ if pixels are non-square, though most sensors have square pixels so fx is approximately equal to fy.
+
+The principal point (cx, cy) is ideally at the image center but can be offset by a few percent of image dimensions due to sensor alignment tolerances. Even small principal point errors cause parallax artifacts in stereo rectification and incorrect 3D reconstruction. Accurate estimation requires calibration images that cover the image corners and edges thoroughly.
+
+| Parameter | Symbol | Typical Value | Effect of Error |
+| --- | --- | --- | --- |
+| Focal length | fx, fy | 400-4000 px | Depth scale error |
+| Principal point | cx, cy | ~image center | Parallax / rectification shift |
+| Radial distortion 1 | k1 | -0.3 to 0.3 | Barrel / pincushion bow |
+| Radial distortion 2 | k2 | -0.1 to 0.1 | Higher-order bow |
+| Tangential distortion | p1, p2 | ~0 to 0.005 | Image tilt artifacts |
+| Baseline (stereo) | b | 0.05-0.60 m | Depth range and accuracy |
+
+## Extrinsic Calibration
+
+Extrinsic calibration estimates the rigid-body transformation (R, t) between coordinate frames. For a single camera it is the pose relative to the world frame per calibration image. For a stereo pair it is the fixed relative pose between cameras. Multi-camera rigs require a calibration target simultaneously visible to all cameras.
+
+```
+ret, K, dist, rvecs, tvecs = cv2.calibrateCamera(
+    obj_pts,        # list of (N,3) world coordinates
+    img_pts,        # list of (N,2) image coordinates
+    img_size,
+    None, None      # no initial guess for K or dist
+)
+# ret = mean reprojection error in pixels
+# Good calibration: ret < 0.5 px
+```
+
+```
+ret, K1, d1, K2, d2, R, T, E, F = cv2.stereoCalibrate(
+    obj_pts, left_pts, right_pts,
+    K1, d1, K2, d2, img_size,
+    flags=cv2.CALIB_FIX_INTRINSIC
+)
+# R, T: rotation and translation from left to right camera
+# E: essential matrix,  F: fundamental matrix
+# Use R, T with cv2.stereoRectify to compute rectification maps
+```
+
+LiDAR-to-camera extrinsic calibration is more challenging because the sensors have fundamentally different measurement modalities. Target-based methods use reflective boards; targetless approaches minimize mutual information or edge alignment across many frames. The output is a 6-DoF rigid transform from LiDAR coordinates into the camera coordinate frame.
+
+## Key Takeaways
+
+The pinhole model with radial and tangential distortion (OpenCV's 5-parameter model: k1, k2, p1, p2, k3) is sufficient for most cameras with field-of-view under 90 degrees. Use the fisheye model for wide-angle lenses. Always verify quality by checking reprojection error and visually inspecting undistorted images for residual bow.
+
+Intrinsic calibration is performed once per camera unless the lens or focus setting changes. Extrinsic calibration between a camera pair must be redone if the physical mounting changes. For production systems, verify calibration periodically by checking the epipolar geometry of live rectified image pairs against expected horizontal alignment.
+
+Modern calibration pipelines like Kalibr and the ROS camera_calibration package handle multi-camera and IMU-camera calibration using bundle adjustment to jointly optimize all parameters, significantly reducing systematic errors that arise from treating intrinsic and extrinsic calibration as fully independent sequential steps.
+
