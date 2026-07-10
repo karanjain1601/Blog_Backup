@@ -29,6 +29,9 @@ class BuildSiteTests(unittest.TestCase):
             self.assertIn("Prompt Engineering Fundamentals", html_text)
             self.assertIn("Core Techniques", html_text)
 
+            index_html = (output_dir / "index.html").read_text(encoding="utf-8")
+            self.assertIn("<h2>ai-ml</h2>", index_html)
+
 
 if __name__ == "__main__":
     unittest.main()

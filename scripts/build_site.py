@@ -6,7 +6,7 @@ import html
 import os
 import re
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import markdown
 
@@ -88,14 +88,36 @@ def render_note_page(title: str, metadata: Dict[str, object], body: str, relativ
 """
 
 
-def render_index_page(entries: List[Dict[str, str]], output_dir: Path) -> str:
-    items = []
+def build_note_tree(entries: List[Dict[str, str]]) -> Dict[str, Any]:
+    root: Dict[str, Any] = {"folders": {}, "files": []}
     for entry in entries:
-        items.append(
-            f"<li><a href=\"{entry['href']}\">{html.escape(entry['title'])}</a> — {html.escape(entry['description'])}</li>"
-        )
+        relative_path = Path(entry["href"])
+        node = root
+        for part in relative_path.parts[:-1]:
+            node = node["folders"].setdefault(part, {"folders": {}, "files": []})
+        node["files"].append(entry)
+    return root
 
-    list_html = "\n".join(items) if items else "<li>No notes found.</li>"
+
+def render_tree(node: Dict[str, Any]) -> str:
+    items: List[str] = []
+    for folder_name in sorted(node["folders"].keys()):
+        child_html = render_tree(node["folders"][folder_name])
+        items.append(f"<li><h2>{html.escape(folder_name)}</h2><ul>{child_html}</ul></li>")
+
+    for entry in sorted(node["files"], key=lambda item: item["title"].lower()):
+        description = entry.get("description", "")
+        description_suffix = f" — {html.escape(description)}" if description else ""
+        items.append(f"<li><a href=\"{entry['href']}\">{html.escape(entry['title'])}</a>{description_suffix}</li>")
+
+    return "".join(items)
+
+
+def render_index_page(entries: List[Dict[str, str]], output_dir: Path) -> str:
+    tree = build_note_tree(entries)
+    tree_html = render_tree(tree)
+    list_html = f"<ul>{tree_html}</ul>" if tree_html else "<p>No notes found.</p>"
+
     return f"""<!DOCTYPE html>
 <html lang=\"en\">
 <head>
@@ -109,15 +131,17 @@ def render_index_page(entries: List[Dict[str, str]], output_dir: Path) -> str:
     main {{ max-width: 860px; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }}
     a {{ color: #7dd3fc; }}
     ul {{ line-height: 1.75; }}
+    .tree ul {{ list-style: none; padding-left: 1rem; }}
+    .tree h2 {{ font-size: 1.05rem; margin: 0.5rem 0 0.25rem; }}
   </style>
 </head>
 <body>
   <main>
     <h1>Notes Backup</h1>
     <p>This static site is generated from the markdown notes in the repository.</p>
-    <ul>
+    <div class=\"tree\">
       {list_html}
-    </ul>
+    </div>
   </main>
 </body>
 </html>
